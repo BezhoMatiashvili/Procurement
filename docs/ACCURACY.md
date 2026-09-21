@@ -85,7 +85,11 @@ ones, so a malformed code is an error. That rule is what surfaced `AAAGE22` in M
 
 The client asked for findings marked in the document itself. `report/docx_annotate.py` writes
 real Word comments, splitting runs so the comment marks the offending words rather than the
-whole paragraph. For the scanned PDFs (4172–4178) this is impossible; those inputs get the
+whole paragraph. Two details decide whether that works on real files: the acts lay their
+numbered sections out in **tables**, which `Document.paragraphs` does not reach, and a finding
+states a cleaned value (`შპს ნიმუში`) where the document writes `შპს „ნიმუში“`. With both
+handled, 18 of 20 findings across five acts are marked in place rather than appended as a
+general note. For the scanned PDFs (4172–4178) this is impossible; those inputs get the
 findings report plus the existing bbox-highlighted page images, and the API returns 415 rather
 than an empty document, so a scan is never silently served worse than a Word file.
 

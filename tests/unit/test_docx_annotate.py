@@ -138,3 +138,39 @@ def test_a_pdf_is_rejected_explicitly(tmp_path: Path) -> None:
 def test_comment_text_is_bilingual() -> None:
     text = comment_text(_finding(actual="ორასი", expected="100"))
     assert "ციფრი და სიტყვიერი" in text and "digits and words disagree" in text
+
+
+def test_findings_inside_tables_are_marked_in_place(tmp_path: Path) -> None:
+    """Acceptance acts lay their numbered sections out in tables, and Document.paragraphs does
+    not reach inside one - so the amount, the dates and the signatories, the fields most in
+    need of marking, all fell back to a document-level note."""
+    path = tmp_path / "table_act.docx"
+    doc = Document()
+    table = doc.add_table(rows=1, cols=1)
+    para = table.rows[0].cells[0].paragraphs[0]
+    para.add_run("საფასური შეადგენს 100 (ორასი) ლარს.")
+    doc.save(path)
+
+    out, unanchored = annotate_docx(
+        path, [_finding(actual="ორასი (200)", expected="100")], tmp_path / "o.docx"
+    )
+    assert unanchored == []
+    result = Document(str(out))
+    runs = [r.text for r in result.tables[0].rows[0].cells[0].paragraphs[0].runs]
+    assert "ორასი" in runs
+
+
+def test_quoting_differences_do_not_defeat_the_anchor(tmp_path: Path) -> None:
+    """A finding states the cleaned value 'შპს ნიმუში'; the document writes 'შპს „ნიმუში“'."""
+    path = tmp_path / "quoted.docx"
+    doc = Document()
+    doc.add_paragraph("მხარე: შპს „ნიმუში“ საიდენტიფიკაციო კოდი: 405123456")
+    doc.save(path)
+
+    out, unanchored = annotate_docx(
+        path,
+        [_finding("AOA.PARTY_NAME", actual="შპს ნიმუში", expected="შპს სხვა ნიმუში")],
+        tmp_path / "o.docx",
+    )
+    assert unanchored == []
+    assert "AOA.PARTY_NAME" in _comments_xml(out)

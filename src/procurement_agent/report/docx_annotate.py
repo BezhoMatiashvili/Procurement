@@ -17,7 +17,7 @@ called for them — a caller that mixes the two up gets an explicit error, not a
 from __future__ import annotations
 
 import copy
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 from docx import Document
@@ -26,7 +26,7 @@ from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
 from procurement_agent.checks.findings import Finding
-from procurement_agent.extraction.normalize import normalize_spaces
+from procurement_agent.extraction.normalize import QUOTE_CHARS, normalize_spaces
 
 AUTHOR = "Procurement Agent"
 INITIALS = "PA"
@@ -61,16 +61,57 @@ def _split_run(run: Run, offset: int) -> Run:
     return head_run
 
 
+def _normalised_index(text: str) -> tuple[str, list[int]]:
+    """Text with quotes dropped and runs of whitespace collapsed, plus a map back to offsets.
+
+    A finding's value is the cleaned reading of a field - "შპს დეველოპმენტ" - while the
+    document writes "შპს „დეველოპმენტ“". Searching the raw text finds nothing, and the comment
+    ends up on the document instead of on the words at fault.
+    """
+    out: list[str] = []
+    index: list[int] = []
+    prev_space = False
+    for i, ch in enumerate(text):
+        if ch in QUOTE_CHARS:
+            continue
+        if ch.isspace():
+            if prev_space or not out:
+                continue
+            out.append(" ")
+            index.append(i)
+            prev_space = True
+        else:
+            out.append(ch)
+            index.append(i)
+            prev_space = False
+    return "".join(out), index
+
+
+def _locate(text: str, needle: str) -> tuple[int, int] | None:
+    """Offsets of ``needle`` in ``text``, tolerating quoting and spacing differences."""
+    direct = text.find(needle)
+    if direct >= 0:
+        return direct, direct + len(needle)
+    flat, index = _normalised_index(text)
+    flat_needle, _ = _normalised_index(needle)
+    if not flat_needle:
+        return None
+    at = flat.find(flat_needle)
+    if at < 0:
+        return None
+    return index[at], index[at + len(flat_needle) - 1] + 1
+
+
 def _runs_covering(paragraph: Paragraph, needle: str) -> list[Run] | None:
     """Split runs as needed so ``needle`` is covered by a whole number of runs."""
     needle = needle.strip()
     if not needle:
         return None
     text = "".join(r.text for r in paragraph.runs)
-    start = text.find(needle)
-    if start < 0:
+    located = _locate(text, needle)
+    if located is None:
         return None
-    end = start + len(needle)
+    start, end = located
 
     # walk runs, splitting the one that contains the start and the one containing the end
     pos = 0
@@ -141,10 +182,25 @@ def _candidates(finding: Finding) -> list[str]:
     return out
 
 
+def all_paragraphs(container: object) -> Iterator[Paragraph]:
+    """Every paragraph in the document, including the ones inside tables.
+
+    ``Document.paragraphs`` yields only top-level paragraphs. The client's acceptance acts lay
+    their numbered sections out in tables, so without this the comments for the amount, the
+    dates and the signatories all fell back to a document-level note - the fields most in need
+    of being marked in place.
+    """
+    yield from container.paragraphs  # type: ignore[attr-defined]
+    for table in getattr(container, "tables", []):
+        for row in table.rows:
+            for cell in row.cells:
+                yield from all_paragraphs(cell)
+
+
 def _anchor_for(document: DocumentType, finding: Finding) -> list[Run] | None:
     """Find the runs a finding should be attached to, most specific candidate first."""
     for needle in _candidates(finding):
-        for paragraph in document.paragraphs:
+        for paragraph in all_paragraphs(document):
             runs = _runs_covering(paragraph, needle)
             if runs:
                 return runs
