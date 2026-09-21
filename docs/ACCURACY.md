@@ -34,6 +34,21 @@ Rules and anchors only, no LLM:
 | client, 7 Word documents | 100% | 100% | all matched, correct act clean | 0.7 s |
 | synthetic, 4 fixtures | 100% | 100% | all matched | < 0.1 s |
 
+These are **fitting** numbers. The anchors were designed by reading this client's documents and
+the rules were tuned while watching this score; the gold files were themselves corrected against
+extractor output where the document, not the expectation, turned out to be right. So the result
+says the system handles these documents, not that it generalises — and anchor hit rate, the
+measure meant to expose overfitting, is necessarily 100% on the corpus the anchors came from.
+It becomes informative on the next document family, which is when to look at it.
+
+Not yet scored: the scanned PDFs (OCR runs only inside the Docker image), and `AOA.FX_INVOICE`,
+which has no implementation and therefore no gold expectation.
+
+The harness prints a `fragile` list: fields scoring well with **no** anchor coverage, carried by
+keyword proximity alone. `total_amount` is on it — it is found by the nearness of `საფასურ` or
+`ღირებულებ`, so a document that says `ანაზღაურება` instead would drop a field that currently
+reads as perfect.
+
 ## The central design decision: read the label, do not ask the model
 
 Georgian procurement documents are rigidly templated. A company name is always inside `„…“`

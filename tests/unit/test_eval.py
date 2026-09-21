@@ -144,3 +144,32 @@ class TestGoldLoading:
         )
         with pytest.raises(ValueError, match="expected_finding"):
             load_gold_set(tmp_path, root=tmp_path)
+
+
+def test_a_field_carried_by_keyword_proximity_alone_is_flagged_as_fragile() -> None:
+    """A perfect score with no anchor coverage reads exactly like a robust one in the table,
+    but it rests on keyword proximity and breaks on a change of wording."""
+    from procurement_agent.eval.runner import RunConfig, RunReport, format_table
+
+    anchored = score_extraction(
+        _result([_fact(FactType.party_name, "შპს ალფა", source="anchor")]),
+        {FactType.party_name: ["შპს ალფა"]},
+        "d",
+    )
+    keyword_only = score_extraction(
+        _result([_fact(FactType.total_amount, "100", normalized=100.0)]),
+        {FactType.total_amount: ["100"]},
+        "d",
+    )
+    anchored.fields.update(keyword_only.fields)
+    report = RunReport(
+        set_name="s",
+        config=RunConfig(),
+        score=SetScore("s", [anchored]),
+        started_at="now",
+        seconds=0.0,
+    )
+    table = format_table(report)
+    assert "fragile" in table
+    assert "total_amount" in table.split("fragile")[1]
+    assert report.to_json()["fragile_fields"] == ["total_amount"]

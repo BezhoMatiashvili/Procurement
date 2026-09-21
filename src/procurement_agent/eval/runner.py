@@ -91,6 +91,11 @@ class RunReport:
                 for d in self.score.documents
             ],
             "fallback_fields": self.fallback_fields,
+            "fragile_fields": [
+                ft.value
+                for ft, fs in by_field.items()
+                if fs.expected and fs.f1 >= 0.9 and self.score.anchor_hit_rate(ft) == 0.0
+            ],
         }
 
 
@@ -219,6 +224,22 @@ def format_table(report: RunReport) -> str:
         prec = tp / (tp + fp) if tp + fp else 0.0
         rec = tp / total if total else 0.0
         lines += ["-" * 60, f"{'OVERALL':22s} {total:4d} {prec:7.2%} {rec:7.2%}"]
+
+    # A field with a high F1 and no anchor coverage is carried entirely by keyword proximity,
+    # which is the layer most sensitive to a change of wording. It reads exactly like a robust
+    # result in the table above, so say so explicitly.
+    fragile = [
+        ft
+        for ft, fs in by_field.items()
+        if fs.expected and fs.f1 >= 0.9 and report.score.anchor_hit_rate(ft) == 0.0
+    ]
+    if fragile:
+        lines += [
+            "",
+            "fragile: scoring well with no anchor coverage, i.e. carried by keyword proximity",
+            "         alone and liable to break on a change of wording:",
+            *(f"  {ft.value}" for ft in sorted(fragile, key=lambda t: t.value)),
+        ]
 
     problems = [d for d in report.score.documents if not d.findings_ok]
     lines.append("")

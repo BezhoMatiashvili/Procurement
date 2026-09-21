@@ -134,6 +134,14 @@ acts) and the 4 synthetic fixtures:
 | client (7 docs, rules + anchors only) | 100% | 100% | every document matched | 0.7 s |
 | synthetic (4 fixtures) | 100% | 100% | every document matched | < 0.1 s |
 
+**Read these as fitting numbers, not held-out ones.** The label anchors were designed by reading
+this client's documents and the rules were tuned while watching this score, so it says the
+system handles *these* documents, not that it generalises. Two things are worth knowing before
+quoting it: the scanned PDFs (4172–4178) are not scored yet, because OCR runs only inside the
+Docker image; and `total_amount` is the one field with no anchor coverage — it rests on keyword
+proximity, so the harness prints it under `fragile`. The honest test is the next document family,
+where the anchor hit rate is what will move first.
+
 "Rule findings matched" includes the constraint that matters most: the correct acceptance act
 produces **no** findings. All five errors the client planted are caught without the LLM,
 including the two the previous build missed — `100 (ორასი)`, where the digits and the Georgian
