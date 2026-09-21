@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Result · {{ doc.display_name }}{% endblock %}
+{% block content %}
+<p><a class="back" href="/ui/documents/{{ doc.id }}">&larr; {{ doc.display_name }}</a></p>
+<h1>Extraction {{ job.id[:8] }}
+  <span class="status {{ job.status.value }}" id="job-status">{{ job.status.value }}</span></h1>
+
+{% if job.status.value in ("queued", "running") %}
+<div class="card" data-poll-job="{{ job.id }}">
+  <progress id="job-progress" value="{{ job.progress }}" max="100"></progress>
+  <span id="job-message" class="muted">{{ job.message or "" }}</span>
+  <p class="muted small">On CPU an extraction with the LLM can take several minutes. This page refreshes automatically.</p>
+</div>
+{% elif job.status.value == "failed" %}
+<p class="error">{{ job.message }}</p>
+{% endif %}
+
+{% if result %}
+<div class="result-head">
+  <p class="muted small">{{ result.facts | length }} facts · model {{ result.model or "rules only" }} · {{ result.llm_calls }} LLM calls · {{ result.seconds }} s</p>
+  <a class="btn" href="/api/v1/jobs/{{ job.id }}/result?format=xlsx">Download Excel</a>
+</div>
+{% if result.question %}<p><strong>Question:</strong> {{ result.question }}</p>{% endif %}
+{% for w in result.warnings %}<p class="warn">{{ w }}</p>{% endfor %}
+<table class="list facts">
+  <thead><tr><th>Field</th><th>Value</th><th>Confidence</th><th>Source</th><th>Where</th><th>Quote</th></tr></thead>
+  <tbody>
+  {% for f in result.facts %}
+  <tr class="{% if f.conflict %}conflict{% endif %}">
+    <td class="primary">{{ f.label }}{% if f.conflict %} <span class="badge">conflict</span>{% endif %}</td>
+    <td data-label="Value"><strong>{{ f.value }}</strong>{% if f.normalized is not none and f.normalized|string != f.value %} <span class="muted small">({{ f.normalized }})</span>{% endif %}</td>
+    <td data-label="Confidence">{{ (f.confidence * 100) | round(0) | int }}%</td>
+    <td data-label="Source" class="muted">{{ f.source }}</td>
+    {# whitespace control keeps this cell truly empty, so the phone layout hides it instead of showing a bare "Where" label #}
+    <td data-label="Where">
+      {%- if f.provenance.page and doc.kind == "pdf" -%}
+        <a href="/api/v1/documents/{{ doc.id }}/pages/{{ f.provenance.page }}.png{% if f.provenance.bbox %}?bbox={{ f.provenance.bbox | join(',') }}{% endif %}" target="_blank">page {{ f.provenance.page }}</a>
+      {%- elif f.provenance.page -%}page {{ f.provenance.page }}
+      {%- elif f.provenance.sheet -%}{{ f.provenance.sheet }}!{{ f.provenance.cell }}
+      {%- endif -%}
+    </td>
+    <td data-label="Quote" class="quote">{{ f.raw_text }}</td>
+  </tr>
+  {% else %}<tr><td colspan="6" class="muted empty-state">Nothing found.</td></tr>{% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

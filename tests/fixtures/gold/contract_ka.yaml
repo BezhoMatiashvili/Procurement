@@ -1,0 +1,28 @@
+name: contract_ka
+document: tests/fixtures/contract_ka.docx
+fields:
+  contract_number:
+  - PR-2026/017
+  contract_date:
+  - '2026-03-15'
+  total_amount:
+  - '48750.00'
+  party_id_code:
+  - '204567890'
+  - '405123456'
+  party_name:
+  - სს "მაგნოლია ჰოლდინგი"
+  - შპს "სინთეზ ენერჯი"
+  party_director:
+  - გიორგი ბერიძე
+  - ნინო კაპანაძე
+  - ნინო კაპანიძე
+  delivery_deadline:
+  - '2026-04-30'
+  warranty_period:
+  - '24'
+notes: 'The generator plants one inconsistency on purpose: the signature block spells the second director
+  "ნინო კაპანიძე" while the preamble says "ნინო კაპანაძე". That is material for the phase-3 contract consistency
+  review, not an extraction error, so both spellings are accepted.
+
+  '

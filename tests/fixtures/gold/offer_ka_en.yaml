@@ -1,0 +1,10 @@
+# Ground truth for tests/fixtures/offer_ka_en.pdf (synthetic, bilingual).
+name: offer_ka_en
+document: tests/fixtures/offer_ka_en.pdf
+fields:
+  contract_number: ["OFF-2026/031"]
+  total_amount: ["48750.00"]
+  party_id_code: ["405123456"]
+  party_director: ["ნინო კაპანაძე"]
+  warranty_period: ["24"]
+  validity_period: ["2026-10-31"]

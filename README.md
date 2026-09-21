@@ -1,0 +1,172 @@
+# Procurement Agent
+
+Local, air-gapped document intelligence for a procurement department. Phase 1 extracts prices,
+totals, VAT, quantities, deadlines, payment/warranty/validity terms, penalties, contract numbers
+and dates, party names, ID codes and signatories from **PDF / DOCX / XLSX** documents in
+**Georgian and English**, each fact with a page/bbox (or sheet/cell) citation and a verbatim
+quote. Everything runs on-premise on CPU: [Docling](https://github.com/docling-project/docling)
+for parsing, Tesseract for OCR, a local LLM via Ollama (Gemma 3), FastAPI + a small web UI.
+
+Security and data handling: **[docs/SECURITY.md](docs/SECURITY.md)**.
+Accuracy, measurements and design decisions: **[docs/ACCURACY.md](docs/ACCURACY.md)**.
+What we need from the client to test: [docs/CLIENT_REQUEST_ka.md](docs/CLIENT_REQUEST_ka.md).
+
+## How extraction works
+
+```
+upload ─► validate (type, size, magic bytes, zip-bomb, macros)
+       ─► Docling (layout + TableFormer + Tesseract kat+eng)  |  openpyxl for XLSX
+       ─► chunks with provenance
+       ─► 1. anchors: read each field from the label in front of it — „…“ company names,
+             საიდენტიფიკაციო კოდი, იურიდიული მისამართი, დირექტორი, ს/კ, ა/ა  (no LLM)
+       ─► 2. rules: amounts, dates, %, durations, reference № (no LLM, all chunks)
+       ─► 3. LLM: only for targets 1 and 2 left empty; JSON-schema, quote must exist verbatim
+       ─► 4. merge: dedupe, cross-source confidence, conflict flags
+       ─► JSON / Excel / UI table with "show source" page images
+```
+
+Georgian procurement documents are rigidly templated, so step 1 reads most fields exactly and
+instantly. On the client's test set it fills every target and the LLM is never called at all —
+which is why a check that used to take about ten minutes now takes under a second.
+
+The LLM never sees the whole document and can never act — it only returns JSON that is
+validated and quote-checked against the text.
+
+## Checks
+
+```bash
+# acceptance act against its contract: 16 rules, fully deterministic, no LLM
+curl -s -H "$K" -X POST localhost:8000/api/v1/checks/aoa \
+     -H 'content-type: application/json' \
+     -d '{"aoa_document_id":"<act>","contract_document_id":"<contract>"}'
+# ?format=docx returns the act with one Word comment per finding
+# BOQ: all bidders merged into the template, stacked vertically, highest red / lowest green
+uv run python -m procurement_agent.checks.boq --template template.xlsx \
+    --bids Company-*.xlsx --out merged.xlsx
+```
+
+A rule that cannot run says so in `skipped` rather than passing quietly — the contractor type
+for the NET/VAT wording rules, or a business-registry snapshot that has not been loaded
+(`cli load-registry`). Findings carry a stable rule id, a bilingual message, the expected value
+and a character span, so the same object serves the API, the Excel export and the Word comments.
+
+## Development setup
+
+Requirements: Python 3.12 via [uv](https://docs.astral.sh/uv/), Docker (for Ollama),
+optionally Tesseract with `kat` + `eng` data for OCR on the host.
+
+```bash
+uv sync --all-groups                      # deps (CPU-only torch wheels)
+cp .env.example .env                      # set PA_DEV_API_KEY=pa_something for local use
+./scripts/prefetch_models.sh              # Docling models (once, online) + Ollama models
+docker run -d --name ollama -p 127.0.0.1:11434:11434 -v ollama:/root/.ollama ollama/ollama
+docker exec ollama ollama pull gemma3:12b && docker exec ollama ollama pull gemma3:4b
+
+PA_OLLAMA_BASE_URL=http://127.0.0.1:11434 PA_DOCLING_ARTIFACTS_PATH=./models/docling \
+  uv run uvicorn procurement_agent.main:app --reload
+```
+
+Open <http://127.0.0.1:8000/ui/> (sign in with the dev key) or <http://127.0.0.1:8000/docs>.
+
+### API in 30 seconds
+
+```bash
+K="X-API-Key: $PA_DEV_API_KEY"
+curl -s -H "$K" -F file=@tests/fixtures/contract_ka.docx localhost:8000/api/v1/documents
+# {"document":{"id":"<doc>","status":"uploaded",...},"parse_job_id":"<job>"}
+curl -s -H "$K" localhost:8000/api/v1/jobs/<job>                    # wait for "done"
+curl -s -H "$K" -X POST localhost:8000/api/v1/documents/<doc>/extract \
+     -H 'content-type: application/json' -d '{"fast": true}'         # or {"question": "..."}
+curl -s -H "$K" localhost:8000/api/v1/jobs/<job2>/result             # ?format=xlsx for Excel
+```
+
+`use_llm: false` gives an instant rules-only result; `fast: true` uses `gemma3:4b`.
+
+### Tests and checks
+
+```bash
+uv run pytest -q                                 # unit + integration (no LLM needed)
+uv run pytest -m e2e -q                          # against a live Ollama (slow, CPU)
+uv run ruff check src tests && uv run mypy && uv run bandit -q -c pyproject.toml -r src
+uv run python scripts/gen_synthetic_samples.py   # regenerate synthetic fixtures
+uv run python scripts/benchmark.py [--llm]       # timings on this machine
+uv run python scripts/evaluate.py --set all      # accuracy against the gold sets
+```
+
+### Measuring accuracy
+
+`scripts/evaluate.py` scores extraction and checks against hand-written ground truth and
+reports precision, recall and **anchor hit rate** per field — the last one separately, because
+label anchors designed around one family of documents can score well on it and be useless on
+the next, and only a hit-rate that drops makes that visible.
+
+```bash
+uv run python scripts/evaluate.py --set client --out eval_runs/baseline.json
+uv run python scripts/evaluate.py --set client --compare eval_runs/baseline.json
+```
+
+Gold files live in `tests/fixtures/gold/` (synthetic, committed) and `samples/gold/`
+(the client's documents, git-ignored — their expected values *are* the confidential data).
+
+All fixtures are synthetic. Real documents must never be committed (a pre-commit hook blocks
+them); keep client samples in `samples/` (git-ignored).
+
+## Production deployment
+
+```bash
+./scripts/prefetch_models.sh          # on a connected machine; copy ./models + ollama volume
+cp .env.example .env                  # PA_ENV=prod, retention, limits
+docker compose build && docker compose up -d
+docker compose exec app python -m procurement_agent.cli create-key alice
+```
+
+`docker-compose.yml` runs the app and Ollama on an `internal` network with no internet route,
+non-root, read-only filesystem, dropped capabilities. Put a TLS reverse proxy in front of
+`127.0.0.1:8000`; mount `/data` on an encrypted disk.
+
+## Accuracy and performance (this dev box: 18-core CPU, 30 GB RAM, no GPU)
+
+Measured with `scripts/evaluate.py` over the client's 7 Word documents (contract + 6 acceptance
+acts) and the 4 synthetic fixtures:
+
+| gold set | precision | recall | rule findings | time |
+|---|---|---|---|---|
+| client (7 docs, rules + anchors only) | 100% | 100% | every document matched | 0.7 s |
+| synthetic (4 fixtures) | 100% | 100% | every document matched | < 0.1 s |
+
+"Rule findings matched" includes the constraint that matters most: the correct acceptance act
+produces **no** findings. All five errors the client planted are caught without the LLM,
+including the two the previous build missed — `100 (ორასი)`, where the digits and the Georgian
+number words disagree, and the four typos in Mistake #5. The harness also surfaced an error the
+client's own notes do not mention: Mistake #3 carries bank code `AAAGE22`, a seven-character
+code naming a different bank than the contract's `AAAAGE22`.
+
+| step | measured |
+|---|---|
+| Docling, 1-page text PDF with a table | ~4 s |
+| Docling, DOCX contract | ~0.1 s |
+| anchors + rules extraction (any fixture) | < 0.1 s |
+| AOA check, act against contract | ~0.02 s |
+| BOQ: template + 4 bidders, 235 lines, merged workbook | ~2 s |
+| `gemma3:4b` (CPU, 16 threads), one ~1 250-token chunk | ~75 s (≈ 8.3 tok/s; 632 output tokens) |
+
+The LLM figures improved from ~280 s because `num_ctx` is now sized per request instead of
+being pinned at 8192, and the output is capped. But the bigger change is that on templated
+documents the LLM is not called at all: it is asked only for targets the anchors and rules left
+empty. Reproducibility (`temperature 0`, fixed seed) holds per machine configuration —
+llama.cpp results can shift with thread and batch count, so record `PA_LLM_NUM_THREAD` with any
+published number.
+
+## Roadmap
+
+Done: Phase 1 (document intelligence core), Phase 2a (BOQ comparison and merged workbook,
+`checks/boq.py`), Phase 4 (AOA verification against the contract, `checks/aoa.py`, with Word
+comment output and an optional business-registry snapshot).
+
+Next: Phase 2b multi-proposal PDF comparison; Phase 3 contract draft consistency review (the
+client's own draft is internally inconsistent — "შემკვეთი" and "დამკვეთი" used for the same
+party — which is the material for it); Phase 5 power-of-attorney register lookup. The NBG-rate
+invoice calculation for foreign-currency acts is specified but not yet implemented.
+
+How accuracy is measured, and which approaches were tried and rejected:
+**[docs/ACCURACY.md](docs/ACCURACY.md)**.

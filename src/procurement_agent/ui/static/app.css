@@ -1,0 +1,157 @@
+/* Mobile-first. No frameworks, no CDN — this file is the whole design system. */
+:root {
+  --fg:#1a1a1a; --muted:#6b6b6b; --bg:#fafafa; --card:#fff; --line:#e3e3e3;
+  --accent:#1f5fbf; --danger:#b3261e; --warn:#8a6d00;
+  --radius:8px; --tap:44px; --gutter:16px;
+  --header-h:65px;   /* keep in sync with header.top min-height; sticky thead offsets from it */
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin:0; font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color:var(--fg); background:var(--bg);
+  /* long Georgian words and verbatim quotes must never push the page sideways */
+  overflow-wrap: break-word;
+}
+
+/* --- shell ----------------------------------------------------------------------------------- */
+header.top {
+  display:flex; gap:12px; align-items:center; flex-wrap:wrap;
+  padding:10px var(--gutter); background:var(--card); border-bottom:1px solid var(--line);
+  position:sticky; top:0; z-index:10; min-height:var(--header-h);
+}
+.brand { display:inline-flex; align-items:center; min-height:var(--tap);
+         font-weight:600; color:var(--fg); text-decoration:none; margin-right:auto; }
+header.top .muted { max-width:40vw; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+main { max-width:1100px; margin:16px auto 0; padding:0 var(--gutter); }
+footer { text-align:center; padding:24px var(--gutter); }
+h1 { font-size:20px; margin:0 0 12px; line-height:1.25; }
+h2 { font-size:17px; margin:24px 0 8px; }
+a { color:var(--accent); }
+/* links inside prose or table cells need at least the WCAG 2.5.8 24px target */
+p a, td a { display:inline-block; padding:2px 0; }
+/* standalone navigation links get a full 44px.
+   Not inline-flex: that would make the text an anonymous flex item that cannot shrink
+   below its longest word, and document names are long, unbroken Georgian filenames. */
+.back { display:inline-block; padding:10px 0; max-width:100%; overflow-wrap:anywhere; }
+:focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-radius:2px; }
+
+/* --- surfaces -------------------------------------------------------------------------------- */
+.card { background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:16px; margin:12px 0; }
+.narrow { max-width:420px; }
+.muted { color:var(--muted); } .small { font-size:13px; }
+.error { color:var(--danger); } .warn { color:var(--warn); }
+
+/* --- forms ----------------------------------------------------------------------------------- */
+label { display:block; margin:10px 0; }
+/* font:inherit keeps controls at >=16px, which stops iOS Safari zooming the page on focus */
+input, button, select, textarea { font: inherit; }
+input[type=text], input[type=password], input[type=file] {
+  width:100%; padding:10px; border:1px solid var(--line); border-radius:6px;
+  margin-top:6px; min-height:var(--tap); background:var(--card); color:var(--fg);
+}
+input[type=file] { padding:9px; }
+input[type=checkbox] { width:20px; height:20px; accent-color:var(--accent); }
+button {
+  min-height:var(--tap); padding:10px 16px; border-radius:6px;
+  border:1px solid var(--accent); background:var(--accent); color:#fff; cursor:pointer;
+}
+button:hover { filter:brightness(1.08); }
+button.link { background:none; border:none; color:var(--accent); padding:0 4px; min-height:var(--tap); }
+button.danger { background:var(--danger); border-color:var(--danger); }
+/* a link that acts as a primary action */
+.btn {
+  display:inline-flex; align-items:center; justify-content:center; min-height:var(--tap);
+  padding:10px 16px; border-radius:6px; border:1px solid var(--accent);
+  background:var(--accent); color:#fff; text-decoration:none; font-weight:500;
+}
+.btn:hover { filter:brightness(1.08); }
+.result-head { display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between; margin:12px 0; }
+.result-head p { margin:0; }
+form.inline { display:inline; }
+fieldset { border:1px solid var(--line); border-radius:6px; margin:0; padding:12px; min-width:0; }
+legend { padding:0 6px; color:var(--muted); font-size:14px; }
+/* min() keeps the track from overflowing a 320px viewport */
+.grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(min(260px, 100%), 1fr)); gap:0 16px; }
+/* block, not flex: a flex item will not shrink below its content, so the long Georgian
+   field names pushed the page sideways at 320px. Block layout lets them wrap. */
+.check { display:block; margin:0; padding:11px 0; min-height:var(--tap); cursor:pointer; }
+.check input[type=checkbox] { vertical-align:-4px; margin-right:9px; }
+.row { display:flex; gap:8px 24px; flex-wrap:wrap; }
+progress { width:100%; height:14px; }
+.danger-zone { margin-top:32px; }
+
+/* --- status pills ---------------------------------------------------------------------------- */
+.status { display:inline-block; font-size:13px; padding:2px 10px; border-radius:10px; background:#eee; white-space:nowrap; }
+.status.ready, .status.done { background:#e3f3e6; color:#1d6b2f; }
+.status.failed { background:#fbe4e2; color:var(--danger); }
+.status.running, .status.parsing { background:#e7efff; color:var(--accent); }
+.badge { font-size:12px; background:var(--warn); color:#fff; padding:1px 7px; border-radius:8px; white-space:nowrap; }
+
+/* --- tables: shared -------------------------------------------------------------------------- */
+table.list {
+  width:100%; border-collapse:separate; border-spacing:0; background:var(--card);
+  border:1px solid var(--line); border-radius:var(--radius);
+  /* no overflow:hidden here — it would make this table the sticky thead's scroll container */
+}
+th, td { text-align:left; padding:10px 12px; border-bottom:1px solid var(--line); vertical-align:top;
+         overflow-wrap:anywhere; }
+th { font-weight:600; font-size:13px; color:var(--muted); }
+tr:last-child td { border-bottom:none; }
+tr.conflict td { background:#fff8e1; }
+/* the table is no longer clipped, so the last row keeps the card's rounded corners itself */
+table.list tbody tr:last-child td:first-child { border-bottom-left-radius:var(--radius); }
+table.list tbody tr:last-child td:last-child { border-bottom-right-radius:var(--radius); }
+td.quote { font-size:14px; color:var(--muted); }
+
+/* --- tables: phones — each row becomes a card, headers move into the cells ------------------- */
+@media (max-width: 700px) {
+  table.list, table.list tbody, table.list tr, table.list td { display:block; }
+  table.list thead { display:none; }
+  table.list tr { padding:12px 14px; border-bottom:1px solid var(--line); }
+  table.list tr:last-child { border-bottom:none; }
+  table.list td { border:none; padding:3px 0; }
+
+  table.list td[data-label]::before {
+    content: attr(data-label); color:var(--muted); font-size:13px;
+    flex:0 0 auto; margin-right:12px;
+  }
+  /* label left, value right */
+  table.list td[data-label] { display:flex; justify-content:space-between; gap:12px; align-items:baseline; }
+  /* a cell the template left empty must not show an orphan label. This has to outrank the
+     [data-label] rule above, hence the matching attribute selector. */
+  table.list td[data-label]:empty, table.list td:empty { display:none; }
+  table.list td[data-label] > * { text-align:right; }
+  /* the row's title: no label, full width, prominent */
+  table.list td.primary { font-size:17px; font-weight:600; padding:0 0 4px; }
+  table.list td.primary a { display:block; padding:10px 0; }
+  /* free text needs the full width, so its label sits above it */
+  table.list td.quote { display:block; margin-top:6px; padding-top:6px; border-top:1px dashed var(--line); }
+  table.list td.quote::before { display:block; margin-bottom:2px; }
+  table.list td.quote > *, table.list td.quote { text-align:left; }
+}
+
+/* --- tables: tablet and up ------------------------------------------------------------------- */
+@media (min-width: 701px) {
+  h1 { font-size:22px; }
+  main { margin:24px auto; }
+  td.quote { max-width:40ch; }
+  /* a text field spanning 1000px is hard to read and looks unfinished */
+  input[type=text], input[type=password], input[type=file] { max-width:560px; }
+  /* keep column headers visible while scrolling a long result table */
+  table.facts thead th { position:sticky; top:var(--header-h); background:var(--card); z-index:1; }
+}
+@media (min-width: 1000px) {
+  td.quote { max-width:52ch; }
+}
+
+/* --- small phones ---------------------------------------------------------------------------- */
+@media (max-width: 420px) {
+  :root { --gutter:12px; }
+  /* a full-width primary action is easier to hit one-handed */
+  form.card > button[type=submit], .danger-zone button { width:100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation:none !important; transition:none !important; }
+}

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Procurement Agent{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="/ui/documents">Procurement Agent</a>
+  {% if user is defined and user %}
+  <span class="muted">{{ user }}</span>
+  <form method="post" action="/ui/logout" class="inline"><button class="link">Log out</button></form>
+  {% endif %}
+</header>
+<main>
+{% block content %}{% endblock %}
+</main>
+<footer class="muted small">Local &amp; offline · documents are deleted automatically after the retention period</footer>
+<script src="/static/app.js"></script>
+</body>
+</html>

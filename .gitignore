@@ -1,0 +1,56 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# --- Secrets / config ---
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+
+# --- Runtime data (never commit documents or results) ---
+data/
+uploads/
+results/
+samples/
+models/
+*.db
+*.db-wal
+*.db-shm
+logs/
+
+# --- Real documents must never enter the repo (fixtures are generated synthetically) ---
+*.pdf
+*.docx
+*.doc
+*.xlsx
+*.xls
+*.zip
+*.rar
+*.7z
+!tests/fixtures/**/*.pdf
+!tests/fixtures/**/*.docx
+!tests/fixtures/**/*.xlsx
+
+# --- Evaluation artefacts ---
+# .eval_cache holds Docling's parse of whatever was evaluated, i.e. the full text of the
+# client's documents. eval_runs holds scores; keep them out of the repo so a published number
+# always comes from a fresh run against the gold set.
+.eval_cache/
+eval_runs/
+
+# --- Editors ---
+.idea/
+.vscode/
+*.swp

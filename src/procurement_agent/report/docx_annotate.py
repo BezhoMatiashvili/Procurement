@@ -1,0 +1,193 @@
+"""Write findings back into the document as Word comments.
+
+The client asked for exactly this: "გვსურს რომ ფაილშივე/დოკუმენტშივე, მოგვინიშნოს ის ველები
+რომელიც საჭიროებს კორექტირებას, და გაუწეროს სწორი ვარიანტი კომენტარის სახით" — mark the fields
+needing correction in the file itself and give the correct value as a comment.
+
+Word anchors a comment to whole runs, and Word splits a paragraph into runs wherever formatting
+changes, so the phrase we want to mark is usually part of a longer run or spread across several.
+The run containing it is therefore split so the comment lands on the words at fault and not on
+the whole paragraph.
+
+Scanned PDFs cannot carry comments. They are reported through the findings table and the
+existing page renders with the box highlighted instead, and ``annotate_docx`` is simply not
+called for them — a caller that mixes the two up gets an explicit error, not a silent no-op.
+"""
+
+from __future__ import annotations
+
+import copy
+from collections.abc import Sequence
+from pathlib import Path
+
+from docx import Document
+from docx.document import Document as DocumentType
+from docx.text.paragraph import Paragraph
+from docx.text.run import Run
+
+from procurement_agent.checks.findings import Finding
+from procurement_agent.extraction.normalize import normalize_spaces
+
+AUTHOR = "Procurement Agent"
+INITIALS = "PA"
+
+_SEVERITY_PREFIX = {
+    "error": "შეცდომა / Error",
+    "warning": "გაფრთხილება / Warning",
+    "info": "ინფორმაცია / Info",
+}
+
+
+class UnsupportedDocumentError(RuntimeError):
+    """Raised for inputs Word comments cannot be attached to, e.g. a scanned PDF."""
+
+
+def comment_text(finding: Finding) -> str:
+    """What the reviewer reads in the margin: what is wrong, and what it should say."""
+    lines = [f"[{_SEVERITY_PREFIX[finding.severity]}] {finding.rule_id}", finding.message_ka]
+    if finding.expected:
+        lines.append(f"სწორი ვარიანტი / should be: {finding.expected}")
+    lines.append(finding.message_en)
+    return "\n".join(lines)
+
+
+def _split_run(run: Run, offset: int) -> Run:
+    """Split a run in two at ``offset``, returning the new run holding the leading text."""
+    head = copy.deepcopy(run._r)
+    run._r.addprevious(head)
+    head_run = Run(head, run._parent)
+    head_run.text = run.text[:offset]
+    run.text = run.text[offset:]
+    return head_run
+
+
+def _runs_covering(paragraph: Paragraph, needle: str) -> list[Run] | None:
+    """Split runs as needed so ``needle`` is covered by a whole number of runs."""
+    needle = needle.strip()
+    if not needle:
+        return None
+    text = "".join(r.text for r in paragraph.runs)
+    start = text.find(needle)
+    if start < 0:
+        return None
+    end = start + len(needle)
+
+    # walk runs, splitting the one that contains the start and the one containing the end
+    pos = 0
+    for run in list(paragraph.runs):
+        length = len(run.text)
+        if pos < start < pos + length:
+            _split_run(run, start - pos)
+            break
+        pos += length
+
+    pos = 0
+    for run in list(paragraph.runs):
+        length = len(run.text)
+        if pos < end < pos + length:
+            _split_run(run, end - pos)
+            break
+        pos += length
+
+    covered: list[Run] = []
+    pos = 0
+    for run in paragraph.runs:
+        run_end = pos + len(run.text)
+        if pos >= start and run_end <= end and run.text:
+            covered.append(run)
+        pos = run_end
+    _drop_empty_runs(paragraph)
+    return covered or None
+
+
+#: Children a run may have and still count as "empty text with nothing else in it".
+_INERT_RUN_CHILDREN = frozenset({"rPr", "t"})
+
+
+def _drop_empty_runs(paragraph: Paragraph) -> None:
+    """Remove zero-length runs left behind by splitting.
+
+    A run holding a ``commentReference`` also has no text, and deleting it would detach a
+    comment that is already anchored in this paragraph - so a run is only removed when it
+    carries nothing but formatting and empty text.
+    """
+    for run in list(paragraph.runs):
+        if run.text:
+            continue
+        tags = {child.tag.split("}")[-1] for child in run._r}
+        if tags - _INERT_RUN_CHILDREN:
+            continue
+        parent = run._r.getparent()
+        if parent is not None:
+            parent.remove(run._r)
+
+
+def _candidates(finding: Finding) -> list[str]:
+    """Text to look for, most specific first.
+
+    A finding's ``actual`` is written for a human ("ორასი (200)"), so the parenthetical gloss
+    is stripped before searching: anchoring the comment on the offending word is the point.
+    ``expected`` is the last resort - marking the value that should have changed is still more
+    useful than marking nothing.
+    """
+    out: list[str] = []
+    for raw in (finding.actual, finding.expected):
+        if not raw:
+            continue
+        for candidate in (raw, raw.split(" (")[0], normalize_spaces(raw)):
+            candidate = candidate.strip()
+            if candidate and candidate not in out:
+                out.append(candidate)
+    return out
+
+
+def _anchor_for(document: DocumentType, finding: Finding) -> list[Run] | None:
+    """Find the runs a finding should be attached to, most specific candidate first."""
+    for needle in _candidates(finding):
+        for paragraph in document.paragraphs:
+            runs = _runs_covering(paragraph, needle)
+            if runs:
+                return runs
+    return None
+
+
+def annotate_docx(
+    source: Path,
+    findings: Sequence[Finding],
+    out_path: Path,
+    *,
+    author: str = AUTHOR,
+) -> tuple[Path, list[Finding]]:
+    """Write ``source`` to ``out_path`` with one Word comment per finding.
+
+    Returns the path and the findings that could not be anchored to any text — those belong in
+    the report so that nothing is silently dropped, which is the failure mode that would make
+    an annotated document quietly misleading.
+    """
+    if source.suffix.lower() not in {".docx", ".docm"}:
+        msg = (
+            f"Word comments can only be written into a .docx file, got {source.suffix!r}. "
+            "Scanned PDFs are reported through the findings table and highlighted page images."
+        )
+        raise UnsupportedDocumentError(msg)
+
+    document = Document(str(source))
+    unanchored: list[Finding] = []
+    for finding in findings:
+        runs = _anchor_for(document, finding)
+        if runs is None:
+            unanchored.append(finding)
+            continue
+        document.add_comment(runs, text=comment_text(finding), author=author, initials=INITIALS)
+
+    if unanchored:
+        para = document.add_paragraph()
+        run = para.add_run("—")
+        document.add_comment(
+            run,
+            text="\n\n".join(comment_text(f) for f in unanchored),
+            author=author,
+            initials=INITIALS,
+        )
+    document.save(str(out_path))
+    return out_path, unanchored

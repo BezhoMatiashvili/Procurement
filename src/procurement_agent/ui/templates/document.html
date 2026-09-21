@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}{{ doc.display_name }} · Procurement Agent{% endblock %}
+{% block content %}
+<h1>{{ doc.display_name }}</h1>
+<p class="muted">{{ doc.kind }} · {{ (doc.size_bytes / 1024) | round(0) | int }} KB
+  {% if doc.page_count %}· {{ doc.page_count }} pages{% endif %}
+  · status <span class="status {{ doc.status.value }}" id="doc-status">{{ doc.status.value }}</span>
+  {% if doc.error %}· <span class="error">{{ doc.error }}</span>{% endif %}
+</p>
+
+{% if doc.status.value == "ready" %}
+<form method="post" action="/ui/documents/{{ doc.id }}/extract" class="card">
+  <h2>Extract</h2>
+  <fieldset>
+    <legend>Fields</legend>
+    <div class="grid">
+    {% for value, en, ka in targets %}
+      <label class="check"><input type="checkbox" name="targets" value="{{ value }}" checked> {{ en }} <span class="muted">/ {{ ka }}</span></label>
+    {% endfor %}
+    </div>
+  </fieldset>
+  <label>…or ask a question <input type="text" name="question" maxlength="500" placeholder="e.g. რა არის საგარანტიო ვადა? / What is the warranty period?"></label>
+  <div class="row">
+    <label class="check"><input type="checkbox" name="fast" value="true"> fast model (less accurate)</label>
+    <label class="check"><input type="checkbox" name="use_llm" value="true" checked> use LLM (uncheck for rules only, instant)</label>
+  </div>
+  <button type="submit">Start extraction</button>
+</form>
+{% elif doc.status.value in ("uploaded", "parsing") %}
+<p class="card" data-poll-doc="{{ doc.id }}">Parsing… this page refreshes automatically.</p>
+{% endif %}
+
+<h2>Jobs</h2>
+<table class="list">
+  <thead><tr><th>Job</th><th>Kind</th><th>Status</th><th>Progress</th><th>Message</th></tr></thead>
+  <tbody>
+  {% for j in jobs %}
+  <tr>
+    <td class="primary">{% if j.kind == "extract" %}<a href="/ui/jobs/{{ j.id }}">{{ j.id[:8] }}</a>{% else %}{{ j.id[:8] }}{% endif %}</td>
+    <td data-label="Kind">{{ j.kind }}</td>
+    <td data-label="Status"><span class="status {{ j.status.value }}">{{ j.status.value }}</span></td>
+    <td data-label="Progress">{{ j.progress }}%</td>
+    <td data-label="Message" class="muted">{{ j.message or "" }}</td>
+  </tr>
+  {% else %}<tr><td colspan="5" class="muted empty-state">No jobs.</td></tr>{% endfor %}
+  </tbody>
+</table>
+
+<form method="post" action="/ui/documents/{{ doc.id }}/delete" class="danger-zone" data-confirm="Delete this document and all its results now?">
+  <button class="danger" type="submit">Delete document now</button>
+</form>
+{% endblock %}

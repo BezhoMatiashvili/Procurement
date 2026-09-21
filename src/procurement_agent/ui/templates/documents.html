@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Documents</h1>
+<form method="post" action="/ui/documents/upload" enctype="multipart/form-data" class="card">
+  <label>Upload PDF, DOCX or XLSX
+    <input type="file" name="file" accept=".pdf,.docx,.xlsx" required></label>
+  <button type="submit">Upload</button>
+</form>
+<table class="list">
+  <thead><tr><th>Name</th><th>Type</th><th>Pages</th><th>Status</th><th>Uploaded</th><th>Expires</th></tr></thead>
+  <tbody>
+  {% for d in documents %}
+  <tr>
+    <td class="primary"><a href="/ui/documents/{{ d.id }}">{{ d.display_name }}</a></td>
+    <td data-label="Type">{{ d.kind }}</td>
+    <td data-label="Pages">{{ d.page_count or "" }}</td>
+    <td data-label="Status"><span class="status {{ d.status.value }}">{{ d.status.value }}</span></td>
+    <td data-label="Uploaded">{{ d.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+    <td data-label="Expires">{{ d.expires_at.strftime("%Y-%m-%d") if d.expires_at else "never" }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="6" class="muted empty-state">No documents yet.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}
