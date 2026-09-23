@@ -14,6 +14,7 @@ right, is what makes that overfitting visible instead of silent.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from procurement_agent.extraction.normalize import (
@@ -30,22 +31,65 @@ _NUMERIC = frozenset({FactType.price, FactType.total_amount, FactType.amount, Fa
 _NAMES = frozenset({FactType.party_name, FactType.party_director, FactType.project_name})
 
 
+#: A value that is a date, and nothing else.
+_ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+#: Every number in a string, however it is grouped: "48 750,00", "0,1", "24".
+_NUMBER = re.compile(r"\d{1,3}(?:[ \u00a0,.]\d{3})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?")
+#: A free-text value counts as another one it is contained in only if it is at least this share
+#: of it. "სილქ თაუნი" inside "სილქ თაუნის პროექტი" is the same project; "თბილისი" inside a
+#: full street address is not the same address.
+_MIN_TEXT_RATIO = 0.5
+
+
+def _bare_number(s: str) -> float | None:
+    """The value of ``s`` if it is a single number or percentage and nothing else.
+
+    The shape is checked before parsing: ``parse_number`` strips separators generously, and
+    would read a cadastral code such as "01.02.03.456" as one large number.
+    """
+    core = s.strip().removesuffix("%").strip()
+    return parse_number(core) if _NUMBER.fullmatch(core) else None
+
+
 def values_match(fact_type: FactType, expected: str, actual: str) -> bool:
     """Whether an extracted value counts as the expected one.
 
     Deliberately the same notions of sameness the pipeline itself uses, so that the scorer and
     the deduplicator can never disagree about what "the same value" means.
+
+    Numbers, percentages and dates are compared as values and never as substrings: a substring
+    test credited "5%" for an expected "15%" and "2026-03-1" for "2026-03-15". Free text is
+    still allowed to match inside a longer value, but only when it is a substantial part of it.
     """
     if fact_type in _NUMERIC:
         want, got = parse_number(expected), parse_number(actual)
         if want is not None and got is not None:
             return amounts_equal(want, got)
+        if want is not None:
+            # a display form such as "48 750,00 GEL" is not a number; ``fact_matches`` scores
+            # the fact's canonical value next, which is where money is compared
+            return False
+    if _ISO_DATE.fullmatch(expected.strip()):
+        return set(_ISO_DATE.findall(actual)) == {expected.strip()}
+    want_number = _bare_number(expected)
+    if want_number is not None:
+        # "24" against "24 months" or "P24M": the one number the value states must be it
+        found = {parse_number(m) for m in _NUMBER.findall(actual)}
+        return len(found) == 1 and amounts_equal(want_number, found.pop())
     if fact_type in _NAMES and names_match(expected, actual):
         return True
     want_text, got_text = normalize_name(expected), normalize_name(actual)
     if not want_text or not got_text:
         return False
-    return want_text == got_text or want_text in got_text or got_text in want_text
+    if want_text == got_text:
+        return True
+    shorter, longer = sorted((want_text, got_text), key=len)
+    if len(shorter) < _MIN_TEXT_RATIO * len(longer):
+        return False
+    # From a word start, and never stopping inside a number: "2026 03 1" must not be found in
+    # "2026 03 15". A letter may follow, because Georgian inflects names by suffix -
+    # "სილქ თაუნი" is the same project as "სილქ თაუნის პროექტი".
+    return re.search(rf"(?<!\w){re.escape(shorter)}(?!\d)", longer) is not None
 
 
 def fact_matches(fact_type: FactType, expected: str, fact: ExtractedFact) -> bool:
@@ -96,6 +140,11 @@ class DocumentScore:
     missing_findings: list[str] = field(default_factory=list)
     unexpected_findings: list[str] = field(default_factory=list)
     llm_calls: int = 0
+    choice_calls: int = 0
+    #: How many chunks the selector sent, and how many earned it. The gap is what a semantic
+    #: gate would have to beat to be worth its own prefill per chunk.
+    chunks_selected: int = 0
+    chunks_with_facts: int = 0
     seconds: float = 0.0
 
     @property
@@ -106,7 +155,14 @@ class DocumentScore:
 def score_extraction(
     result: ExtractionResult, expected: dict[FactType, list[str]], name: str
 ) -> DocumentScore:
-    score = DocumentScore(name=name, llm_calls=result.llm_calls, seconds=result.seconds)
+    score = DocumentScore(
+        name=name,
+        llm_calls=result.llm_calls,
+        choice_calls=result.llm_choice_calls,
+        chunks_selected=result.chunks_selected,
+        chunks_with_facts=result.chunks_with_facts,
+        seconds=result.seconds,
+    )
     by_type: dict[FactType, list[ExtractedFact]] = {}
     for fact in result.facts:
         by_type.setdefault(fact.type, []).append(fact)

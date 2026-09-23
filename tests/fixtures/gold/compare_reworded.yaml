@@ -1,0 +1,8 @@
+check: compare
+document: tests/fixtures/compare/reworded.docx
+reference: tests/fixtures/compare/base.docx
+expected_findings: []
+forbidden_findings:
+- '*'
+notes: A clause reworded with no figure in it. The rules must name nothing here rather
+  than guess - it is the one case the optional model pass exists for.

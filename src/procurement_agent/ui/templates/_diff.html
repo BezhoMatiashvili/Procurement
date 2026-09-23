@@ -1,0 +1,84 @@
+{# The line-by-line view. One CSS grid renders both the side-by-side and the stacked layout, so
+   which one you get is a question of viewport width and never of JavaScript — the page is
+   correct before any script runs, and correct when it is printed.
+
+   Colour is never the only signal: every tinted row also carries a glyph and, for a screen
+   reader, a word.
+
+   Everything the macros need arrives in one `d` mapping, because a Jinja macro inherits nothing
+   from the page's context — passing seven positional arguments through three call sites is how
+   a forgotten one becomes a silent blank instead of an error. #}
+
+{% macro _side(h, ref, which) -%}
+  {%- if h and h.inline and h.kind == "changed" and "CMP.FORMULA" not in h.rules -%}
+    {%- for op in h.inline -%}
+      {%- if which == "left" -%}
+        {%- if op.tag == "equal" %}{{ op.left }}{% elif op.left %}<del>{{ op.left }}</del>{% endif -%}
+      {%- else -%}
+        {%- if op.tag == "equal" %}{{ op.right }}{% elif op.right %}<ins>{{ op.right }}</ins>{% endif -%}
+      {%- endif -%}
+    {%- endfor -%}
+  {%- else -%}
+    {{- ref.text -}}
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro row(r, d) %}
+{%- set h = d.hunks.get(r.hunk_id) -%}
+<div class="diff-row is-{{ r.tag }}
+            {%- if h and h.kind == 'moved' %} is-moved{% endif %}
+            {%- if h and h.materiality == 'critical' %} is-critical{% endif %}"
+     data-tag="{{ r.tag }}"{% if h %} data-m="{{ h.materiality }}"{% endif %}
+     {% if h and r.tag != 'insert' %}id="{{ h.id }}"{% endif %}>
+  <span class="ln ln-a">{% if r.left %}{{ r.left.path }}{% endif %}</span>
+  <span class="cell cell-a">{%- if r.left -%}
+    {%- if r.tag in ("delete", "replace") -%}
+      <span class="dm" aria-hidden="true">&minus;</span><span class="sr">{{ d.t("compare.removed") }}: </span>
+    {%- endif -%}
+    {{- _side(h, r.left, "left") -}}
+  {%- endif -%}</span>
+  <span class="ln ln-b">{% if r.right %}{{ r.right.path }}{% endif %}</span>
+  <span class="cell cell-b">{%- if r.right -%}
+    {%- if r.tag in ("insert", "replace") -%}
+      <span class="dm" aria-hidden="true">+</span><span class="sr">{{ d.t("compare.added") }}: </span>
+    {%- endif -%}
+    {{- _side(h, r.right, "right") -}}
+  {%- endif -%}</span>
+
+  {# Once per hunk. A move shows on two rows and repeating its note on both would read as two
+     separate findings. #}
+  {% if h and not (h.kind == "moved" and r.tag == "insert") %}
+  {% if h.explanation_en or h.kind == "moved" or h.deltas or (h.needs_explaining and d.can_explain) %}
+  <div class="hunk-note">
+    <span class="sev sev-{{ d.sev_of(h) }}">{{ d.t("compare.kind." ~ h.materiality) }}</span>
+    {% for rule in h.rules %}<code class="muted small">{{ rule }}</code>{% endfor %}
+    {% if h.kind == "moved" %}<span class="muted small">{{ h.moved_from }} &rarr; {{ h.moved_to }}</span>{% endif %}
+    {% for delta in h.deltas %}<span class="small">{{ d.delta_msg(delta) }}</span>{% endfor %}
+    {% if h.explanation_en %}
+      <span class="badge">{{ d.t("compare.explain.badge") }}</span>
+      <p class="small">{{ d.explanation(h) }}</p>
+    {% elif h.needs_explaining and d.can_explain %}
+      <p class="muted small">{{ d.t("compare.explain.lead") }}</p>
+    {% endif %}
+  </div>
+  {% endif %}
+  {% endif %}
+</div>
+{% endmacro %}
+
+{% macro diff(blocks, d) %}
+<div class="diff">
+  {% for block in blocks %}
+    {% if block.fold %}
+    <details class="diff-fold">
+      <summary>{{ d.t("compare.unchanged", n=block.rows | length) }}</summary>
+      {% for r in block.rows %}{{ row(r, d) }}{% endfor %}
+    </details>
+    {% else %}
+      {% for r in block.rows %}{{ row(r, d) }}{% endfor %}
+    {% endif %}
+  {% else %}
+    <p class="empty-state muted">{{ d.t("compare.nothing_here") }}</p>
+  {% endfor %}
+</div>
+{% endmacro %}

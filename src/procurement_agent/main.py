@@ -9,7 +9,7 @@ from urllib.parse import quote
 
 from fastapi import FastAPI, Request, Response
 from fastapi.exception_handlers import http_exception_handler
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -19,6 +19,8 @@ from procurement_agent.db import init_db
 from procurement_agent.jobs.worker import Worker
 from procurement_agent.llm.ollama_client import OllamaClient
 from procurement_agent.security.audit import configure_logging, log
+from procurement_agent.security.auth import COOKIE_NAME
+from procurement_agent.security.body_limit import BodySizeLimitMiddleware
 from procurement_agent.security.ratelimit import (
     RateLimitConfig,
     RateLimiter,
@@ -47,8 +49,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
-        worker.stop()
-        llm.close()
+        # The LLM client is closed only once the worker is known to be out of it. If the join
+        # timed out, a job is mid-call: closing the client under it would fail that job with a
+        # misleading transport error, and the process is exiting anyway - the OS closes the
+        # sockets, and the next start's recovery marks the job failed.
+        if worker.stop():
+            llm.close()
+        else:
+            log.warning(
+                "worker_still_running_at_shutdown", timeout_s=settings.worker_stop_timeout_s
+            )
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -92,10 +102,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def _security_headers(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
-        # Reject oversized bodies before reading them (multipart overhead allowance included)
-        cl = request.headers.get("content-length")
-        if cl and cl.isdigit() and int(cl) > settings.max_file_bytes + 1024 * 1024:
-            return JSONResponse({"detail": "request body too large"}, status_code=413)
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
@@ -104,7 +110,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
         if request.url.path.startswith("/api/"):
             response.headers["Cache-Control"] = response.headers.get("Cache-Control", "no-store")
+        elif request.url.path.startswith("/ui/"):
+            # Every UI page shows a document list, a report or extracted values, and every UI
+            # download is client data: none of it may outlive the session in a browser cache.
+            response.headers["Cache-Control"] = "no-store"
         return response
+
+    # Outermost, so it counts the raw bytes before any other layer reads the body.
+    app.add_middleware(
+        BodySizeLimitMiddleware, max_bytes=settings.max_request_bytes, session_cookie=COOKIE_NAME
+    )
 
     app.include_router(health.router)
     app.include_router(checks.router)

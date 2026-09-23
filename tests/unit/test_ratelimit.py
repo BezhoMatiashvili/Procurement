@@ -26,7 +26,9 @@ def test_limit_strings_parse(text: str, requests: int, window: int) -> None:
     assert (cfg.max_requests, cfg.window_s) == (requests, window)
 
 
-@pytest.mark.parametrize("text", ["", "120", "120/fortnight", "abc/minute", "-1/minute"])
+@pytest.mark.parametrize(
+    "text", ["", "120", "120/fortnight", "abc/minute", "-1/minute", "0/minute"]
+)
 def test_a_bad_limit_string_is_rejected_at_startup(text: str) -> None:
     with pytest.raises(ValueError, match="invalid rate limit"):
         RateLimitConfig(text)
@@ -64,17 +66,20 @@ def test_callers_are_limited_independently() -> None:
     assert limiter.check("a", now=1.0) is not None
 
 
-def test_the_api_key_identifies_the_caller_not_the_address() -> None:
-    """Behind a reverse proxy every request shares one source address, so a per-address limit
-    would throttle every user at once."""
+def test_the_address_identifies_the_caller_not_the_presented_key() -> None:
+    """Replaces "the API key identifies the caller": the limiter runs before authentication, so
+    the key it saw was whatever the client typed, and a fresh one per request was a fresh bucket
+    per request. Behind the proxy the address is the forwarded client address (uvicorn's
+    trusted proxy headers), which is what makes per-address limiting fair."""
     a = client_key(_request({"X-API-Key": "pa_aaaaaaaaaaaa_rest"}))
     b = client_key(_request({"X-API-Key": "pa_bbbbbbbbbbbb_rest"}))
-    assert a != b and a.startswith("key:")
+    assert a == b == "ip:10.0.0.1"
+    assert client_key(_request(host="10.0.0.2")) != a
 
 
-def test_only_the_non_secret_prefix_of_a_key_is_used() -> None:
+def test_no_part_of_a_key_is_used() -> None:
     secret = "pa_abcdefghijklmnopqrstuvwxyz"
-    assert secret not in client_key(_request({"X-API-Key": secret}))
+    assert "pa_" not in client_key(_request({"X-API-Key": secret}))
 
 
 def test_anonymous_callers_fall_back_to_the_address() -> None:

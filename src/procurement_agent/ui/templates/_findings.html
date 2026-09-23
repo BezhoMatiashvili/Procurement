@@ -1,0 +1,40 @@
+{# Severity-grouped findings and the honest "could not run" list. Shared by both reports.
+   Every non-primary cell carries data-label: under 700px the table becomes cards and
+   td[data-label]::before supplies the header from that attribute. #}
+
+{% macro severity_groups(groups, t, msg) %}
+{% for severity, items in groups %}
+<h2><span class="sev sev-{{ severity }}">{{ t("report.severity." ~ severity) }}</span>
+  <span class="muted">{{ items | length }}</span></h2>
+<table class="list findings">
+  <thead><tr>
+    <th>{{ t("report.rule") }}</th><th>{{ t("report.message") }}</th>
+    <th>{{ t("report.expected") }}</th><th>{{ t("report.actual") }}</th>
+  </tr></thead>
+  <tbody>
+  {% for f in items %}
+  <tr>
+    <td class="primary"><code>{{ f.rule_id }}</code></td>
+    <td data-label="{{ t('report.message') }}">{{ msg(f) }}</td>
+    {# whitespace control keeps an absent value truly empty, so the phone layout hides the
+       cell instead of printing a bare label #}
+    <td data-label="{{ t('report.expected') }}">{%- if f.expected -%}{{ f.expected }}{%- endif -%}</td>
+    <td data-label="{{ t('report.actual') }}">{%- if f.actual -%}{{ f.actual }}{%- endif -%}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endfor %}
+{% endmacro %}
+
+{% macro skipped(items, t, why) %}
+{% if items %}
+<h2>{{ t("report.skipped.title") }}</h2>
+<p class="muted small">{{ t("report.skipped.lead") }}</p>
+<ul class="skipped-list">
+  {% for s in items %}
+  <li><code>{{ s.rule_id }}</code> <span>{{ why(s) }}</span></li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% endmacro %}

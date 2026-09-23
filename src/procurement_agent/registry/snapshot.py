@@ -17,6 +17,7 @@ from __future__ import annotations
 import csv
 import sqlite3
 from collections.abc import Iterator
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -116,18 +117,51 @@ def _rows(csv_path: Path) -> Iterator[dict[str, str]]:
         yield from reader
 
 
+def parse_as_of(value: date | str | None) -> str:
+    """The export date as ISO text, or today. Anything that is not a real date is refused.
+
+    The date is shown next to every registry finding as "checked against the registry as of
+    ...", so a typo here would put a false date in front of the client rather than fail.
+    """
+    if value is None:
+        return date.today().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    try:
+        return date.fromisoformat(value.strip()).isoformat()
+    except ValueError:
+        msg = f"as-of date must be an ISO date such as 2026-09-01, got {value!r}"
+        raise ValueError(msg) from None
+
+
 def load_snapshot(csv_path: Path, db_path: Path, *, as_of: date | str | None = None) -> int:
     """Build a snapshot database from a CSV export. Returns the number of companies loaded.
 
     The database is written whole and then moved into place, so a failed or partial import can
-    never leave the checker consulting half a registry.
+    never leave the checker consulting half a registry - and a failed one leaves nothing behind.
+    The count is of distinct identification codes: an export that lists a company twice keeps
+    the last row, and counting rows reported more companies than the snapshot holds.
     """
+    stamp = parse_as_of(as_of)
     tmp_path = db_path.with_suffix(db_path.suffix + ".tmp")
     tmp_path.unlink(missing_ok=True)
+    try:
+        _write_snapshot(csv_path, tmp_path, stamp)
+        # private before it becomes visible under its real name, not after
+        tmp_path.chmod(0o600)
+        tmp_path.replace(db_path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    # sqlite3's own context manager commits but does not close; closing() does
+    with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as conn:
+        return int(conn.execute("SELECT COUNT(*) FROM registry_company").fetchone()[0])
+
+
+def _write_snapshot(csv_path: Path, tmp_path: Path, stamp: str) -> None:
     conn = sqlite3.connect(tmp_path)
     try:
         conn.executescript(_SCHEMA)
-        loaded = 0
         for row in _rows(csv_path):
             code = normalize_spaces(row.get("id_code") or "")
             name = normalize_spaces(row.get("name") or "")
@@ -145,17 +179,12 @@ def load_snapshot(csv_path: Path, db_path: Path, *, as_of: date | str | None = N
                     (row.get("as_of") or "").strip() or None,
                 ),
             )
-            loaded += 1
-        stamp = str(as_of) if as_of else date.today().isoformat()
         conn.execute(
             "INSERT OR REPLACE INTO registry_meta (key, value) VALUES ('as_of', ?)", (stamp,)
         )
         conn.commit()
     finally:
         conn.close()
-    tmp_path.replace(db_path)
-    db_path.chmod(0o600)
-    return loaded
 
 
 def open_snapshot(db_path: Path) -> RegistrySnapshot | None:

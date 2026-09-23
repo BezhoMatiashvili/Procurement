@@ -3,6 +3,20 @@
 One thread is deliberate — on a CPU-only box, Docling and the LLM would only fight each other.
 All state lives in the database so the API can report progress and a restart loses nothing but
 the currently running job (which is marked failed on startup).
+
+Deletion and the worker race by design: a user may delete a document while its job runs. The
+rule that keeps a deleted document deleted is an ordering on both sides:
+
+* DELETE (and the retention sweep) commit ``deleted`` + ``cancelled`` *first*, then remove files.
+* The worker writes its output *first*, then settles the job with a conditional
+  ``UPDATE ... WHERE status = 'running'`` that also re-reads the documents under the same write
+  lock. If the job was cancelled or a document deleted meanwhile, nothing is flipped and the
+  output is removed.
+
+Whichever side commits second cleans up after the first, so no interleaving leaves a result
+file, a ``done`` job or a ``ready``/``failed`` status behind a deleted document. Plain
+read-modify-write through the ORM is not enough on SQLite: pysqlite runs a SELECT outside any
+transaction, so the read and the write are two separate moments.
 """
 
 from __future__ import annotations
@@ -11,14 +25,19 @@ import queue
 import shutil
 import threading
 import time
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import delete, select, update
+from sqlalchemy.orm import Session
 
+from procurement_agent.checks.compare_llm import request_explanations
 from procurement_agent.config import Settings
 from procurement_agent.db import session_scope
 from procurement_agent.extraction.pipeline import (
+    StoredDocument,
+    compare_stored,
     load_chunks,
     result_dir,
     run_extraction,
@@ -27,11 +46,19 @@ from procurement_agent.extraction.pipeline import (
 from procurement_agent.extraction.schemas import FactType
 from procurement_agent.ingestion import docling_service
 from procurement_agent.llm.base import LLMClient
-from procurement_agent.models import Document, DocumentStatus, Job, JobStatus
+from procurement_agent.models import Document, DocumentStatus, Job, JobStatus, UiSession
 from procurement_agent.security.audit import audit, log
 
 _SWEEP_EVERY_S = 600
+#: How long the loop waits for work before it beats the heartbeat and checks the sweep timer.
+_IDLE_POLL_S = 30.0
+#: An idle worker beats at least every ``_IDLE_POLL_S``; four missed beats means it is stuck.
+IDLE_STALL_S = 120.0
+#: LLM calls that can happen for one chunk between two progress callbacks (see ``healthy``).
+_LLM_CALLS_PER_BEAT = 3
 _STOP = object()
+_ACTIVE = (JobStatus.queued, JobStatus.running)
+_DELETED_MESSAGE = "document was deleted while the job ran"
 
 
 class Worker:
@@ -41,16 +68,30 @@ class Worker:
         self._q: queue.Queue[object] = queue.Queue()
         self._thread = threading.Thread(target=self._run, name="pa-worker", daemon=True)
         self._last_sweep = 0.0
+        self._stopping = threading.Event()
+        self._heartbeat = time.monotonic()
+        self._busy_since: float | None = None
 
     # --- lifecycle -----------------------------------------------------------------------------
 
     def start(self) -> None:
         self._recover()
+        self._beat()
         self._thread.start()
 
-    def stop(self, timeout: float = 5.0) -> None:
+    def stop(self, timeout: float | None = None) -> bool:
+        """Ask the loop to exit and wait for it. Returns True once the thread has stopped.
+
+        The event is what makes this prompt: the ``_STOP`` sentinel alone queues behind every
+        pending job, so a busy queue used to outlive the join. Jobs still queued stay ``queued``
+        in the database and are picked up again by ``_recover`` on the next start. The job that
+        is running is allowed to finish, up to ``timeout``.
+        """
+        self._stopping.set()
         self._q.put(_STOP)
-        self._thread.join(timeout)
+        if self._thread.is_alive():
+            self._thread.join(self._s.worker_stop_timeout_s if timeout is None else timeout)
+        return not self._thread.is_alive()
 
     def submit(self, job_id: str) -> None:
         self._q.put(job_id)
@@ -59,33 +100,71 @@ class Worker:
     def queue_size(self) -> int:
         return self._q.qsize()
 
+    @property
+    def is_alive(self) -> bool:
+        return self._thread.is_alive()
+
+    @property
+    def heartbeat_age(self) -> float:
+        """Seconds since the loop (or the running job's progress callback) last showed life."""
+        return time.monotonic() - self._heartbeat
+
+    @property
+    def busy(self) -> bool:
+        return self._busy_since is not None
+
+    def healthy(self) -> bool:
+        """Alive and not stuck.
+
+        A Docling conversion may legitimately run for its whole timeout without a progress
+        callback, and so may the LLM work for one chunk - which is up to
+        ``_LLM_CALLS_PER_BEAT`` calls (the answer, one retry after invalid JSON, a verifier
+        question), each allowed the full LLM timeout. A busy worker gets the longer of the two
+        plus the idle allowance before it counts as stalled. Anything tighter would make
+        ``/ready`` flap during ordinary long jobs.
+        """
+        if not self.is_alive:
+            return False
+        limit = IDLE_STALL_S
+        if self.busy:
+            limit += max(_LLM_CALLS_PER_BEAT * self._s.llm_timeout_s, self._s.docling_timeout_s)
+        return self.heartbeat_age < limit
+
     # --- internals -----------------------------------------------------------------------------
 
+    def _beat(self) -> None:
+        self._heartbeat = time.monotonic()
+
     def _recover(self) -> None:
-        """Jobs left running by a previous process cannot finish: fail them, re-queue queued."""
+        """Jobs left running by a previous process cannot finish: fail them, re-queue queued.
+
+        A document the dead job was parsing would otherwise sit in ``parsing`` for ever, and
+        the UI polls a parsing document until it changes.
+        """
+        now = datetime.now(UTC)
         with session_scope() as s:
             for job in s.scalars(select(Job).where(Job.status == JobStatus.running)):
                 job.status = JobStatus.failed
                 job.message = "interrupted by restart"
-                job.finished_at = datetime.now(UTC)
+                job.finished_at = now
+            for doc in s.scalars(select(Document).where(Document.status == DocumentStatus.parsing)):
+                doc.status = DocumentStatus.failed
+                doc.error = "interrupted by restart"
             queued = [j.id for j in s.scalars(select(Job).where(Job.status == JobStatus.queued))]
         for jid in queued:
             self._q.put(jid)
 
     def _run(self) -> None:
         while True:
+            self._beat()
             try:
-                item = self._q.get(timeout=30)
+                item = self._q.get(timeout=_IDLE_POLL_S)
             except queue.Empty:
                 item = None
-            if item is _STOP:
+            if item is _STOP or self._stopping.is_set():
                 return
             if isinstance(item, str):
-                try:
-                    self._process(item)
-                except Exception as e:  # never let the worker die
-                    log.error("job_crashed", job_id=item, error=repr(e))
-                    self._finish(item, JobStatus.failed, f"internal error: {type(e).__name__}")
+                self._run_one(item)
             if time.monotonic() - self._last_sweep > _SWEEP_EVERY_S:
                 self._last_sweep = time.monotonic()
                 try:
@@ -93,45 +172,131 @@ class Worker:
                 except Exception as e:
                     log.error("sweep_failed", error=repr(e))
 
+    def _run_one(self, job_id: str) -> None:
+        """One job, and nothing it raises - including the failure bookkeeping - kills the loop."""
+        self._busy_since = time.monotonic()
+        self._beat()
+        try:
+            try:
+                self._process(job_id)
+            except Exception as e:
+                log.error("job_crashed", job_id=job_id, error=repr(e))
+                self._finish(job_id, JobStatus.failed, f"internal error: {type(e).__name__}")
+        except Exception as e:  # e.g. "database is locked" while recording the failure
+            log.error("job_finish_failed", job_id=job_id, error=repr(e))
+        finally:
+            self._busy_since = None
+            self._beat()
+
     def _set_progress(self, job_id: str, pct: int, msg: str) -> None:
+        self._beat()
         with session_scope() as s:
             job = s.get(Job, job_id)
             if job is not None and job.status == JobStatus.running:
                 job.progress = pct
                 job.message = msg
 
-    def _finish(self, job_id: str, status: JobStatus, msg: str | None) -> None:
+    def _settle(
+        self,
+        job_id: str,
+        status: JobStatus,
+        msg: str | None,
+        *,
+        documents: Sequence[str] = (),
+        apply: Callable[[Session], None] | None = None,
+    ) -> bool:
+        """Move an active job to its final state, atomically with its documents' state.
+
+        The conditional UPDATE is the claim: it refuses a job that is no longer active (so a
+        ``cancelled`` is never overwritten) and, once it has run, this transaction holds
+        SQLite's write lock - the documents read next cannot be deleted before we commit.
+        Returns False when the job had been cancelled or one of ``documents`` deleted; the
+        caller then owns removing whatever it wrote.
+        """
         with session_scope() as s:
+            claimed = s.execute(
+                update(Job)
+                .where(Job.id == job_id, Job.status.in_(_ACTIVE))
+                .values(status=status, message=msg, finished_at=datetime.now(UTC))
+            )
+            if getattr(claimed, "rowcount", 0) != 1:
+                return False
             job = s.get(Job, job_id)
-            if job is None:
-                return
-            job.status = status
-            job.message = msg
-            job.progress = 100 if status == JobStatus.done else job.progress
-            job.finished_at = datetime.now(UTC)
+            if job is None:  # pragma: no cover - the UPDATE just matched it
+                return False
+            docs = [s.get(Document, d) for d in documents]
+            live = all(d is not None and d.status != DocumentStatus.deleted for d in docs)
+            if not live:
+                job.status = JobStatus.cancelled
+                job.message = _DELETED_MESSAGE
+            else:
+                if status == JobStatus.done:
+                    job.progress = 100
+                if apply is not None:
+                    apply(s)
             audit(
                 s,
                 actor="worker",
                 action=f"job.{job.kind}",
-                outcome="ok" if status == JobStatus.done else "error",
+                outcome="ok" if job.status == JobStatus.done else "error",
                 document_id=job.document_id,
                 job_id=job.id,
-                detail=msg,
+                detail=job.message,
             )
+            return live
+
+    def _finish(self, job_id: str, status: JobStatus, msg: str | None) -> None:
+        self._settle(job_id, status, msg)
+
+    def _discard(self, documents: Sequence[tuple[str, str]], output: Path | None = None) -> None:
+        """Remove what a job wrote after it lost the race with a deletion.
+
+        A deleted document's files all go (its DELETE may have run before this job's write);
+        a live one only loses this job's own output file.
+        """
+        if output is not None:
+            output.unlink(missing_ok=True)
+        with session_scope() as s:
+            gone = [
+                (doc_id, kind)
+                for doc_id, kind in documents
+                if (d := s.get(Document, doc_id)) is None or d.status == DocumentStatus.deleted
+            ]
+        for doc_id, kind in gone:
+            delete_document_files(self._s, doc_id, kind)
+        log.info("job_output_discarded", documents=[d for d, _ in documents])
+
+    def _write_output(self, doc_id: str, job_id: str, payload: str) -> Path:
+        out_dir = result_dir(self._s, doc_id) / "jobs"
+        out_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        out = out_dir / f"{job_id}.json"
+        out.write_text(payload)
+        out.chmod(0o600)
+        return out
 
     def _process(self, job_id: str) -> None:
+        now = datetime.now(UTC)
         with session_scope() as s:
-            job = s.get(Job, job_id)
-            if job is None or job.status != JobStatus.queued:
+            # Claim first (see _settle): after this UPDATE the reads below cannot go stale.
+            claimed = s.execute(
+                update(Job)
+                .where(Job.id == job_id, Job.status == JobStatus.queued)
+                .values(status=JobStatus.running, started_at=now)
+            )
+            if getattr(claimed, "rowcount", 0) != 1:
                 return
-            job.status = JobStatus.running
-            job.started_at = datetime.now(UTC)
+            job = s.get(Job, job_id)
+            if job is None:  # pragma: no cover - the UPDATE just matched it
+                return
             kind, doc_id, params = job.kind, job.document_id, dict(job.params)
             doc = s.get(Document, doc_id)
             if doc is None or doc.status == DocumentStatus.deleted:
                 job.status = JobStatus.cancelled
                 job.message = "document no longer exists"
+                job.finished_at = now
                 return
+            if kind == "parse":
+                doc.status = DocumentStatus.parsing
             doc_kind = doc.kind
 
         log.info("job_start", job_id=job_id, kind=kind, document_id=doc_id)
@@ -139,14 +304,12 @@ class Worker:
             self._parse(job_id, doc_id, doc_kind)
         elif kind == "extract":
             self._extract(job_id, doc_id, doc_kind, params)
+        elif kind == "compare_explain":
+            self._compare_explain(job_id, doc_id, params)
         else:
             self._finish(job_id, JobStatus.failed, f"unknown job kind {kind!r}")
 
     def _parse(self, job_id: str, doc_id: str, doc_kind: str) -> None:
-        with session_scope() as s:
-            doc = s.get(Document, doc_id)
-            if doc is not None:
-                doc.status = DocumentStatus.parsing
         path = upload_path(self._s, doc_id, doc_kind)
         try:
             if doc_kind == "xlsx":
@@ -161,21 +324,30 @@ class Worker:
                 self._set_progress(job_id, 90, "saved")
         except Exception as e:
             log.warning("parse_failed", document_id=doc_id, error=repr(e))
-            with session_scope() as s:
+            error = str(e)
+
+            def mark_failed(s: Session) -> None:
                 doc = s.get(Document, doc_id)
                 if doc is not None:
                     doc.status = DocumentStatus.failed
-                    doc.error = str(e)[:500]
-            self._finish(job_id, JobStatus.failed, str(e)[:200])
+                    doc.error = error[:500]
+
+            if not self._settle(
+                job_id, JobStatus.failed, error[:200], documents=(doc_id,), apply=mark_failed
+            ):
+                self._discard([(doc_id, doc_kind)])
             return
-        with session_scope() as s:
+
+        def mark_ready(s: Session) -> None:
             doc = s.get(Document, doc_id)
             if doc is not None:
                 doc.status = DocumentStatus.ready
                 doc.parsed_at = datetime.now(UTC)
                 if page_count:
                     doc.page_count = page_count
-        self._finish(job_id, JobStatus.done, "ready")
+
+        if not self._settle(job_id, JobStatus.done, "ready", documents=(doc_id,), apply=mark_ready):
+            self._discard([(doc_id, doc_kind)])
 
     def _extract(self, job_id: str, doc_id: str, doc_kind: str, params: dict[str, object]) -> None:
         targets_raw = params.get("targets")
@@ -185,8 +357,9 @@ class Worker:
         fast = bool(params.get("fast", False))
         use_llm = bool(params.get("use_llm", True))
 
+        notes: list[str] = []
         try:
-            chunks = load_chunks(self._s, doc_id, doc_kind)
+            chunks = load_chunks(self._s, doc_id, doc_kind, notes=notes)
         except Exception as e:  # reported to the user, never swallowed
             log.warning("chunking_failed", job=job_id, document=doc_id, error=str(e)[:200])
             self._finish(job_id, JobStatus.failed, f"could not read the document: {e}"[:200])
@@ -201,18 +374,81 @@ class Worker:
             fast=fast,
             progress=lambda pct, msg: self._set_progress(job_id, pct, msg),
         )
-        out_dir = result_dir(self._s, doc_id) / "jobs"
-        out_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        out = out_dir / f"{job_id}.json"
-        out.write_text(result.model_dump_json())
-        out.chmod(0o600)
-        self._finish(
-            job_id, JobStatus.done, f"{len(result.facts)} facts, {result.llm_calls} LLM calls"
+        # What the workbook reader left out belongs in front of the user, not only in the log.
+        result.warnings[:0] = [f"not read (size limit): {n}" for n in notes]
+        out = self._write_output(doc_id, job_id, result.model_dump_json())
+        msg = f"{len(result.facts)} facts, {result.llm_calls} LLM calls"
+        if not self._settle(job_id, JobStatus.done, msg, documents=(doc_id,)):
+            self._discard([(doc_id, doc_kind)], out)
+
+    def _compare_explain(self, job_id: str, doc_id: str, params: dict[str, object]) -> None:
+        """Ask the model about the changes the rules could not classify in one comparison.
+
+        The job is keyed on the right-hand document because ``Job.document_id`` is a single
+        foreign key - the same reason a BOQ run has no job row at all - and the left-hand id
+        travels in ``params``. Only the model's answers are stored: the comparison itself is
+        recomputed whenever the page is opened, so a stored run can never pin the report to an
+        older version of the rules. Deleting the *left* document does not cancel this job (it
+        hangs off the right one), which is why both are re-checked when it settles.
+        """
+        left_id = params.get("left")
+        if not isinstance(left_id, str):
+            self._finish(job_id, JobStatus.failed, "no left document recorded on the job")
+            return
+        if self._llm is None:
+            self._finish(job_id, JobStatus.failed, "no LLM backend is configured")
+            return
+
+        with session_scope() as s:
+            left = s.get(Document, left_id)
+            right = s.get(Document, doc_id)
+            pair = (
+                None
+                if left is None
+                or right is None
+                or DocumentStatus.deleted in (left.status, right.status)
+                else [
+                    (left.id, left.kind, left.display_name),
+                    (right.id, right.kind, right.display_name),
+                ]
+            )
+        if pair is None:
+            self._finish(job_id, JobStatus.cancelled, "a document no longer exists")
+            return
+
+        self._set_progress(job_id, 10, "reading both documents")
+        try:
+            report = compare_stored(
+                self._s,
+                StoredDocument(id=pair[0][0], kind=pair[0][1], name=pair[0][2]),
+                StoredDocument(id=pair[1][0], kind=pair[1][1], name=pair[1][2]),
+            )
+        except Exception as e:
+            log.warning("compare_failed", job=job_id, error=str(e)[:200])
+            self._finish(job_id, JobStatus.failed, f"could not compare: {e}"[:200])
+            return
+
+        pending = len(report.unexplained)
+        self._set_progress(job_id, 30, f"asking the model about {pending} change(s)")
+        stored = request_explanations(
+            report,
+            self._llm,
+            model=self._s.llm_fast_model,
+            max_hunks=self._s.compare_llm_max_hunks,
         )
+        out = self._write_output(doc_id, job_id, stored.model_dump_json())
+        msg = f"{len(stored.items)} change(s) described"
+        if not self._settle(job_id, JobStatus.done, msg, documents=(pair[0][0], pair[1][0])):
+            self._discard([(pair[0][0], pair[0][1]), (pair[1][0], pair[1][1])], out)
 
     # --- retention -----------------------------------------------------------------------------
 
     def sweep_expired(self) -> int:
+        """Delete documents past retention, and forget expired sign-in sessions.
+
+        Status first, files second - the same order as DELETE, for the reason in the module
+        docstring.
+        """
         now = datetime.now(UTC)
         with session_scope() as s:
             expired = list(
@@ -225,20 +461,29 @@ class Worker:
                 )
             )
             ids = [(d.id, d.kind) for d in expired]
+            for d in expired:
+                mark_deleted(d)
+                audit(s, actor="worker", action="document.retention_delete", document_id=d.id)
+            s.execute(delete(UiSession).where(UiSession.expires_at < now))
         for doc_id, kind in ids:
+            # Zeroing a large file takes a while and the sweep runs outside a job, so beat per
+            # document: a big first sweep after downtime must not read as a stalled worker.
+            self._beat()
             delete_document_files(self._s, doc_id, kind)
-            with session_scope() as s:
-                d = s.get(Document, doc_id)
-                if d is not None:
-                    d.status = DocumentStatus.deleted
-                    d.display_name = "[deleted]"
-                    for j in d.jobs:
-                        if j.status in (JobStatus.queued, JobStatus.running):
-                            j.status = JobStatus.cancelled
-                audit(s, actor="worker", action="document.retention_delete", document_id=doc_id)
         if ids:
             log.info("retention_sweep", deleted=len(ids))
         return len(ids)
+
+
+def mark_deleted(doc: Document) -> None:
+    """The database half of a deletion; commit it before calling ``delete_document_files``."""
+    doc.status = DocumentStatus.deleted
+    doc.display_name = "[deleted]"
+    for j in doc.jobs:
+        if j.status in _ACTIVE:
+            j.status = JobStatus.cancelled
+            j.message = "document deleted"
+            j.finished_at = datetime.now(UTC)
 
 
 def delete_document_files(settings: Settings, doc_id: str, kind: str) -> None:

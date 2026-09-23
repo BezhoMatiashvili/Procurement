@@ -19,6 +19,10 @@ from pathlib import Path
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.worksheet import Worksheet
+
+from procurement_agent.extraction.normalize import parse_number
+from procurement_agent.report.xlsx_safe import cell_safe
 
 SKIP_SHEETS = {"COVER PAGE", "INSTRUCTION TO BIDDERS", "SUMMARY"}
 RED = PatternFill("solid", fgColor="F8CBAD")
@@ -35,13 +39,19 @@ class Line:
     row: int
 
 
+def _append(ws: Worksheet, row: list[object]) -> None:
+    """Append a row with every bidder-supplied string escaped (formula injection)."""
+    ws.append([cell_safe(v) for v in row])
+
+
 def _num(v: object) -> float | None:
+    """A cell as a number. Text goes through the project's one number parser: stripping every
+    comma, as this did, read the decimal comma in "1,5" as a thousands separator - 15."""
     if v is None or v == "":
         return None
-    try:
-        return float(str(v).replace(",", "").replace(" ", ""))
-    except ValueError:
-        return None
+    if isinstance(v, int | float):
+        return float(v)
+    return parse_number(str(v))
 
 
 def _header_cols(ws) -> dict[str, int]:  # type: ignore[no-untyped-def]
@@ -78,7 +88,9 @@ def read_lines(path: Path) -> dict[Key, Line]:
                 str(sub or no or "").strip(),
                 re.sub(r"\s+", " ", str(desc)).strip()[:80],
             )
-            out[key] = Line(_num(ws.cell(r, cols["qty"]).value), ws.cell(r, cols["unit"]).value, r)
+            # a sheet without a Unit column is still a BOQ; its lines just have no unit
+            unit = ws.cell(r, cols["unit"]).value if "unit" in cols else None
+            out[key] = Line(_num(ws.cell(r, cols["qty"]).value), unit, r)
     wb.close()
     return out
 
@@ -161,24 +173,24 @@ class WorkbookBuilder:
     ) -> None:  # type: ignore[no-untyped-def]
         self.sections[name] = summary
         for k, a, b, r in real:
-            self.diff.append([name, "quantity changed", k[0], k[1], r, a, b, k[2]])
+            _append(self.diff, [name, "quantity changed", k[0], k[1], r, a, b, k[2]])
         for k, a, b, r in fill_in:
-            self.diff.append([name, "filled (template blank)", k[0], k[1], r, a, b, k[2]])
+            _append(self.diff, [name, "filled (template blank)", k[0], k[1], r, a, b, k[2]])
         for k in missing:
-            self.diff.append([name, "missing line", k[0], k[1], None, None, None, k[2]])
+            _append(self.diff, [name, "missing line", k[0], k[1], None, None, None, k[2]])
         for k in added:
-            self.diff.append([name, "added line", k[0], k[1], None, None, None, k[2]])
+            _append(self.diff, [name, "added line", k[0], k[1], None, None, None, k[2]])
 
     def save(self, path: Path) -> None:
         ws = self.summary
         names = list(self.sections)
-        ws.append(["Section", *names])
+        _append(ws, ["Section", *names])
         for c in ws[1]:
             c.font = BOLD
         rows = list(dict.fromkeys(k for s in self.sections.values() for k in s))
         for label in rows:
             vals = [self.sections[n].get(label) for n in names]
-            ws.append([label, *vals])
+            _append(ws, [label, *vals])
             nums = [(v, i) for i, v in enumerate(vals) if v]
             if len(nums) >= 2 and ("TOTAL" in label.upper()):
                 hi, lo = max(nums)[1], min(nums)[1]

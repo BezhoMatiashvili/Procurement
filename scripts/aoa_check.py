@@ -42,6 +42,41 @@ def dates(fb: dict[str, list[dict]], *types: str) -> list[date]:
     return sorted(set(out))
 
 
+def add_months(start: date, months: int) -> date:
+    """``start`` moved by whole months, clamped to the last day of the target month.
+
+    ``date(year, month, start.day)`` raised ValueError for any term starting on the 29th-31st
+    whose end month is shorter - a contract signed on 31 January could not be checked at all.
+    """
+    index = start.month - 1 + months
+    year, month = start.year + index // 12, index % 12 + 1
+    return date(year, month, min(start.day, calendar.monthrange(year, month)[1]))
+
+
+def load_result(
+    ref: str,
+    *,
+    base: str | None,
+    key: str | None,
+    transport: httpx.BaseTransport | None = None,
+) -> dict:
+    """A job result from a local JSON file or from the running app's API.
+
+    The client is closed after the request, and an HTTP error is raised as such: the result
+    of a 404 used to be parsed as though it were a job and failed later as a KeyError.
+    """
+    if ref.endswith(".json"):
+        return json.loads(Path(ref).read_text(encoding="utf-8"))
+    if not base or not key:
+        raise SystemExit("--base and --key are required to fetch a job result from the API")
+    with httpx.Client(
+        base_url=base, headers={"X-API-Key": key}, timeout=30, transport=transport
+    ) as client:
+        response = client.get(f"/api/v1/jobs/{ref}/result")
+        response.raise_for_status()
+        return response.json()
+
+
 def check(contract: dict, aoa: dict) -> list[str]:
     c, a = facts_by_type(contract), facts_by_type(aoa)
     issues: list[str] = []
@@ -104,9 +139,7 @@ def check(contract: dict, aoa: dict) -> list[str]:
             if isinstance(f.get("normalized"), str) and f["normalized"].endswith("M")
         ]
         if months:
-            start = term[0]
-            end_month = start.month - 1 + max(months)
-            term.append(date(start.year + end_month // 12, end_month % 12 + 1, start.day))
+            term.append(add_months(term[0], max(months)))
     act_dates = [d for d in dates(a, "contract_date") if d not in term]  # act's own date(s)
     if len(period) < 2:
         issues.append("execution period (start and end) not found in the act")
@@ -158,16 +191,10 @@ def main() -> None:
     ap.add_argument("--aoa", action="append", required=True, help="name=<job id | json path>")
     args = ap.parse_args()
 
-    def load(ref: str) -> dict:
-        if ref.endswith(".json"):
-            return json.loads(Path(ref).read_text())
-        c = httpx.Client(base_url=args.base, headers={"X-API-Key": args.key}, timeout=30)
-        return c.get(f"/api/v1/jobs/{ref}/result").json()
-
-    contract = load(args.contract)
+    contract = load_result(args.contract, base=args.base, key=args.key)
     for spec in args.aoa:
         name, ref = spec.split("=", 1)
-        aoa = load(ref)
+        aoa = load_result(ref, base=args.base, key=args.key)
         issues = check(contract, aoa)
         print(f"\n== {name}: {'OK' if not issues else f'{len(issues)} issue(s)'}")
         for i in issues:

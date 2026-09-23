@@ -1,0 +1,9 @@
+check: compare
+document: tests/fixtures/compare/base.docx
+reference: tests/fixtures/compare/base.docx
+expected_findings: []
+forbidden_findings:
+- '*'
+notes: 'Synthetic pair from scripts/gen_synthetic_samples.py. ''base'' against itself
+  is the constraint that matters most: an identical revision must produce nothing
+  at all.'

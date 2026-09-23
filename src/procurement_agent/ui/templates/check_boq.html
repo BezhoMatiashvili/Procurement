@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+{% import "_findings.html" as f %}
+{% block title %}{{ t("boq.title") }} · {{ report.template_name }}{% endblock %}
+{% block content %}
+<p><a class="back" href="/ui/">&larr; {{ t("nav.home") }}</a></p>
+<h1>{{ t("boq.title") }}</h1>
+<p class="muted">{{ t("boq.template") }}: <strong>{{ report.template_name }}</strong></p>
+
+<div class="result-head">
+  <p class="muted small">{{ report.bidders | length }}</p>
+  <a class="btn" href="/ui/checks/boq/merged.xlsx?{{ query }}">{{ t("boq.download") }}</a>
+</div>
+
+<h2>{{ t("boq.leaderboard") }}</h2>
+{% if caveats %}
+{# "Everyone skipped MEP" is the single most useful thing on this page; it must not be buried
+   inside a per-bidder <details>. #}
+<div class="card caveat">
+  <p class="small"><strong>{{ t("boq.not_comparable") }}</strong> — {{ t("boq.not_comparable.why") }}</p>
+  <ul class="small">
+    {% for b in caveats %}
+    <li><strong>{{ b.bidder }}</strong>
+      {%- if b.unpriced_sheets %} · {{ t("boq.unpriced") }}: {{ b.unpriced_sheets | join(", ") }}{% endif %}
+      {%- if b.removed_sheets %} · {{ t("boq.removed_sheets") }}: {{ b.removed_sheets | join(", ") }}{% endif %}
+      {%- if b.added_sheets %} · {{ t("boq.added_sheets") }}: {{ b.added_sheets | join(", ") }}{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+<table class="list leaderboard">
+  <thead><tr>
+    <th>{{ t("boq.bidder") }}</th><th>{{ t("boq.stated") }}</th>
+    <th>{{ t("boq.stated.net") }}</th><th>{{ t("boq.recomputed") }}</th>
+  </tr></thead>
+  <tbody>
+  {% for b in report.leaderboard %}
+  <tr class="{% if b.bidder == lowest %}rank-low{% elif b.bidder == highest %}rank-high{% endif %}">
+    <td class="primary">{{ b.bidder }}
+      {%- if b.bidder == lowest %} <span class="rank-badge low">{{ t("boq.lowest") }}</span>
+      {%- elif b.bidder == highest %} <span class="rank-badge high">{{ t("boq.highest") }}</span>{% endif %}
+      {%- if not b.comparable %} <span class="badge" title="{{ t('boq.not_comparable.why') }}">{{ t("boq.not_comparable") }}</span>{% endif %}
+      {%- if b.rank_basis is none %} <span class="badge">{{ t("boq.no_total") }}</span>{% endif %}
+    </td>
+    {# an em dash, never an empty string: table.list td:empty is hidden on phones, which would
+       drop the figure on exactly the device where it is hardest to notice #}
+    <td data-label="{{ t('boq.stated') }}" class="num">{{ "%.2f"|format(b.total_stated_incl_vat) if b.total_stated_incl_vat is not none else "—" }}</td>
+    <td data-label="{{ t('boq.stated.net') }}" class="num">{{ "%.2f"|format(b.total_stated_excl_vat) if b.total_stated_excl_vat is not none else "—" }}</td>
+    <td data-label="{{ t('boq.recomputed') }}" class="num">{{ "%.2f"|format(b.total_recomputed) if b.total_recomputed is not none else "—" }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+{% set excluded = report.bidders | selectattr("added") | list
+                + report.bidders | selectattr("removed") | list %}
+{% if excluded %}
+<h2>{{ t("boq.excluded.title") }}</h2>
+<p class="muted small">{{ t("boq.excluded.lead") }}</p>
+{% for b in report.bidders %}{% if b.added or b.removed %}
+<div class="card excluded">
+  <h3>{{ b.bidder }}</h3>
+  {% for group, items in (("boq.added", b.added), ("boq.removed", b.removed)) %}{% if items %}
+  <p class="small">{{ t(group) }}</p>
+  <ul class="small">
+    {% for p in items %}
+    <li><code>{{ p.item_no or "" }}</code> {{ p.description }}
+      <span class="muted">· {{ p.sheet }} · {{ t("boq.row") }} {{ p.row }}</span></li>
+    {% endfor %}
+  </ul>
+  {% endif %}{% endfor %}
+</div>
+{% endif %}{% endfor %}
+{% endif %}
+
+{% set changed = report.bidders | selectattr("quantity_changed") | list %}
+{% set filled = report.bidders | selectattr("filled_blank") | list %}
+{% if changed or filled %}
+<h2>{{ t("boq.quantities.title") }}</h2>
+{% for title, attr, rows in (("boq.quantities.changed", "quantity_changed", changed),
+                             ("boq.quantities.filled", "filled_blank", filled)) %}
+{% if rows %}
+<h3 class="small">{{ t(title) }}</h3>
+<table class="list">
+  <thead><tr>
+    <th>{{ t("boq.bidder") }}</th><th>{{ t("boq.position") }}</th><th>{{ t("boq.sheet") }}</th>
+    <th>{{ t("boq.row") }}</th><th>{{ t("boq.template_qty") }}</th><th>{{ t("boq.bid_qty") }}</th>
+  </tr></thead>
+  <tbody>
+  {% for b in rows %}{% for d in b[attr] %}
+  <tr>
+    <td class="primary">{{ b.bidder }}</td>
+    <td data-label="{{ t('boq.position') }}">{{ d.description }}</td>
+    <td data-label="{{ t('boq.sheet') }}">{{ d.sheet }}</td>
+    <td data-label="{{ t('boq.row') }}" class="num">{{ d.row }}</td>
+    <td data-label="{{ t('boq.template_qty') }}" class="num">{{ d.template_qty if d.template_qty is not none else "—" }}</td>
+    <td data-label="{{ t('boq.bid_qty') }}" class="num">{{ d.bid_qty if d.bid_qty is not none else "—" }}</td>
+  </tr>
+  {% endfor %}{% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endfor %}
+{% endif %}
+
+<h2>{{ t("boq.outliers.title") }}</h2>
+{% if report.rate_outliers %}
+<table class="list findings">
+  <thead><tr>
+    <th>{{ t("report.rule") }}</th><th>{{ t("report.message") }}</th>
+    <th>{{ t("report.expected") }}</th><th>{{ t("report.actual") }}</th>
+  </tr></thead>
+  <tbody>
+  {% for o in report.rate_outliers %}
+  <tr>
+    <td class="primary"><code>{{ o.rule_id }}</code></td>
+    <td data-label="{{ t('report.message') }}">{{ msg(o) }}</td>
+    <td data-label="{{ t('report.expected') }}" class="num">{%- if o.expected -%}{{ o.expected }}{%- endif -%}</td>
+    <td data-label="{{ t('report.actual') }}" class="num">{%- if o.actual -%}{{ o.actual }}{%- endif -%}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted empty-state">{{ t("report.none") }}</p>
+{% endif %}
+
+{% for b in report.bidders %}{% if b.findings %}
+<details class="card">
+  <summary>{{ t("boq.findings", bidder=b.bidder) }} <span class="muted">{{ b.findings | length }}</span></summary>
+  {{ f.severity_groups(groups_for(b), t, msg) }}
+</details>
+{% endif %}{% endfor %}
+
+{{ f.skipped(report.skipped, t, why) }}
+{% endblock %}

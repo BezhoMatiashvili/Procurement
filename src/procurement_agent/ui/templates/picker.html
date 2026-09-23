@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ t("picker.title") }}</h1>
+<p class="muted lead">{{ t("picker.lead") }}</p>
+
+<ul class="picker">
+  <li class="picker-card">
+    <a href="/ui/start/aoa">
+      <h2>{{ t("task.aoa.title") }}</h2>
+      <p class="muted">{{ t("task.aoa.lead") }}</p>
+      <p class="needs small">{{ t("task.aoa.needs") }}</p>
+    </a>
+  </li>
+  <li class="picker-card">
+    <a href="/ui/start/boq">
+      <h2>{{ t("task.boq.title") }}</h2>
+      <p class="muted">{{ t("task.boq.lead") }}</p>
+      <p class="needs small">{{ t("task.boq.needs") }}</p>
+    </a>
+  </li>
+  <li class="picker-card">
+    <a href="/ui/start/compare">
+      <h2>{{ t("task.compare.title") }}</h2>
+      <p class="muted">{{ t("task.compare.lead") }}</p>
+      <p class="needs small">{{ t("task.compare.needs") }}</p>
+    </a>
+  </li>
+  <li class="picker-card secondary">
+    <a href="/ui/documents">
+      <h2>{{ t("task.extract.title") }}</h2>
+      <p class="muted">{{ t("task.extract.lead") }}</p>
+    </a>
+  </li>
+</ul>
+{% endblock %}

@@ -4,9 +4,12 @@ import shutil
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse
+from sqlalchemy import text
 
 from procurement_agent.api.deps import get_llm, get_worker
 from procurement_agent.config import Settings, get_settings
+from procurement_agent.db import get_engine
 from procurement_agent.jobs.worker import Worker
 from procurement_agent.llm.base import LLMClient
 from procurement_agent.security.auth import Principal, authenticate
@@ -18,6 +21,31 @@ router = APIRouter(tags=["health"])
 def health() -> dict[str, str]:
     """Liveness only. Deliberately reveals nothing about configuration."""
     return {"status": "ok"}
+
+
+@router.get("/ready", response_model=None)
+def ready(request: Request) -> dict[str, str] | JSONResponse:
+    """Readiness: the database answers and the worker thread is alive and not stuck.
+
+    Unauthenticated like ``/health``, so it says only *which* part is down, never how it is
+    configured. ``/health`` stays pure liveness: a restart cannot fix a slow disk, and an
+    orchestrator that restarts on readiness would kill the job the worker is busy with.
+    """
+    try:
+        with get_engine().connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except Exception:
+        return _unready("database")
+    worker = request.app.state.worker
+    if worker is None or not worker.is_alive:
+        return _unready("worker_down")
+    if not worker.healthy():
+        return _unready("worker_stalled")
+    return {"status": "ready"}
+
+
+def _unready(reason: str) -> JSONResponse:
+    return JSONResponse({"status": "unavailable", "reason": reason}, status_code=503)
 
 
 @router.get("/api/v1/status")

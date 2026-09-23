@@ -4,11 +4,17 @@
     uv run python scripts/evaluate.py --set synthetic
     uv run python scripts/evaluate.py --set client --out eval_runs/baseline.json
     uv run python scripts/evaluate.py --set client --compare eval_runs/baseline.json
-    uv run python scripts/evaluate.py --set fallback --model gemma3:4b-it-qat
+    uv run python scripts/evaluate.py --set client --llm --model gemma3:4b --choices
 
 ``--set client`` reads gold files from ``samples/gold/`` (git-ignored, because the expected
 values for the client's documents are the confidential data itself). ``--set synthetic`` reads
 the committed ones under ``tests/fixtures/gold/``.
+
+This docstring used to advertise ``--set fallback``, which argparse has always rejected: the
+only sets are the two gold directories above. The intent behind it — scoring just the fields no
+anchor or rule resolved, as the corpus for comparing models — is served by ``fallback_fields``
+in the report, and cannot become a set of its own until those fields have gold labels. Until
+then a fallback-only run would score an empty corpus and report a confident zero.
 """
 
 from __future__ import annotations
@@ -43,6 +49,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--set", dest="set_name", default="synthetic", choices=[*GOLD_DIRS, "all"])
     parser.add_argument("--model", default=None, help="override the LLM model to evaluate")
     parser.add_argument("--llm", action="store_true", help="enable the LLM pass (slow on CPU)")
+    parser.add_argument(
+        "--choices",
+        action="store_true",
+        help="also ask closed-answer-space questions (VAT, and a check on each generated value); "
+        "costs roughly one extra prefill per chunk, so compare seconds as well as F1",
+    )
     parser.add_argument("--out", type=Path, default=None, help="write the run as JSON")
     parser.add_argument("--compare", type=Path, default=None, help="diff against a previous run")
     parser.add_argument("--fail-under", type=float, default=None, help="minimum overall F1")
@@ -53,9 +65,10 @@ def main(argv: list[str] | None = None) -> int:
         docling_artifacts_path=Path("./models/docling"),
         llm_model=args.model or Settings().llm_model,
         llm_fast_model=args.model or Settings().llm_fast_model,
+        llm_choices=args.choices,
     )
     llm = OllamaClient(settings) if args.llm else None
-    config = RunConfig(model=args.model, use_llm=args.llm)
+    config = RunConfig(model=args.model, use_llm=args.llm, choices=args.choices)
 
     names = list(GOLD_DIRS) if args.set_name == "all" else [args.set_name]
     worst = 1.0

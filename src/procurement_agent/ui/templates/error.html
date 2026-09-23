@@ -1,6 +1,7 @@
 {% extends "base.html" %}
+{% block title %}{{ t("error.title") }}{% endblock %}
 {% block content %}
-<h1>Upload refused</h1>
-<p class="error">{{ message }}</p>
-<p><a href="/ui/documents">Back</a></p>
+<h1>{{ t("error.title") }}</h1>
+<p class="card error">{{ message }}</p>
+<p><a class="back" href="/ui/">&larr; {{ t("nav.home") }}</a></p>
 {% endblock %}

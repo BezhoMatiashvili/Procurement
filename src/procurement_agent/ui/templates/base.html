@@ -1,23 +1,32 @@
 <!doctype html>
-<html lang="en">
+<html lang="{{ lang }}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}Procurement Agent{% endblock %}</title>
+  <title>{% block title %}{{ t("app.name") }}{% endblock %}</title>
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
 <header class="top">
-  <a class="brand" href="/ui/documents">Procurement Agent</a>
+  <a class="brand" href="/ui/">{{ t("app.name") }}</a>
+  {# lang= on each button stops a screen reader saying "ქარ" in an English voice #}
+  <form method="post" action="/ui/lang" class="inline lang-switch">
+    <input type="hidden" name="next" value="{{ current_path }}">
+    <button type="submit" name="lang" value="ka" lang="ka"
+            aria-current="{{ 'true' if lang == 'ka' else 'false' }}">ქარ</button>
+    <button type="submit" name="lang" value="en" lang="en"
+            aria-current="{{ 'true' if lang == 'en' else 'false' }}">EN</button>
+  </form>
   {% if user is defined and user %}
-  <span class="muted">{{ user }}</span>
-  <form method="post" action="/ui/logout" class="inline"><button class="link">Log out</button></form>
+  <span class="muted who">{{ user }}</span>
+  <form method="post" action="/ui/logout" class="inline"><button class="link">{{ t("nav.logout") }}</button></form>
   {% endif %}
 </header>
 <main>
 {% block content %}{% endblock %}
 </main>
-<footer class="muted small">Local &amp; offline · documents are deleted automatically after the retention period</footer>
+<footer class="muted small">{{ t("footer.offline") }}</footer>
 <script src="/static/app.js"></script>
+{% block scripts %}{% endblock %}
 </body>
 </html>

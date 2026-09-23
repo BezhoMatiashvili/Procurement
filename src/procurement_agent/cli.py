@@ -22,6 +22,16 @@ from procurement_agent.models import ApiKey
 from procurement_agent.security.auth import create_api_key, revoke_api_key
 
 
+def _as_of(value: str) -> str:
+    """argparse type for --as-of: reject a non-date before anything is written."""
+    from procurement_agent.registry.snapshot import parse_as_of
+
+    try:
+        return parse_as_of(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="procurement-agent")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -36,7 +46,9 @@ def main(argv: list[str] | None = None) -> int:
         help="load a business-registry CSV export (id_code,name,address,directors,as_of)",
     )
     p_reg.add_argument("csv_path", type=Path)
-    p_reg.add_argument("--as-of", default=None, help="date the export was taken (ISO)")
+    p_reg.add_argument(
+        "--as-of", default=None, type=_as_of, help="date the export was taken (ISO, YYYY-MM-DD)"
+    )
     sub.add_parser("registry-status", help="show whether a registry snapshot is loaded")
     args = parser.parse_args(argv)
 

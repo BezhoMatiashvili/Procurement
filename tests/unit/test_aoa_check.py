@@ -132,16 +132,16 @@ class TestRulesThatCannotRun:
 
     def test_tax_wording_is_skipped_when_the_contractor_type_is_unknown(self) -> None:
         report = check_aoa(aoa_text=ACT, contract_text=CONTRACT)
-        assert any("AOA.TAX_WORDING" in s for s in report.skipped)
+        assert any(s.rule_id == "AOA.TAX_WORDING" for s in report.skipped)
         assert not any(f.rule_id == "AOA.TAX_WORDING" for f in report.findings)
 
     def test_registry_rules_are_skipped_without_a_snapshot(self) -> None:
         report = check_aoa(aoa_text=ACT, contract_text=CONTRACT)
-        assert any("AOA.REGISTRY" in s for s in report.skipped)
+        assert any(s.rule_id.startswith("AOA.REGISTRY") for s in report.skipped)
 
     def test_contract_rules_are_skipped_when_no_contract_is_supplied(self) -> None:
         report = check_aoa(aoa_text=ACT)
-        assert any("AOA.CONTRACT" in s for s in report.skipped)
+        assert any(s.rule_id.startswith("AOA.CONTRACT") for s in report.skipped)
         # intra-document rules still run
         assert report.summary["act_date"] == "2026-04-30"
 

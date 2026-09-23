@@ -7,7 +7,9 @@ needing correction in the file itself and give the correct value as a comment.
 Word anchors a comment to whole runs, and Word splits a paragraph into runs wherever formatting
 changes, so the phrase we want to mark is usually part of a longer run or spread across several.
 The run containing it is therefore split so the comment lands on the words at fault and not on
-the whole paragraph.
+the whole paragraph - unless the run holds more than text (a picture, a field, a footnote
+mark): python-docx rewrites a run's text by deleting everything else in it, so such a run is
+marked whole rather than split.
 
 Scanned PDFs cannot carry comments. They are reported through the findings table and the
 existing page renders with the box highlighted instead, and ``annotate_docx`` is simply not
@@ -17,11 +19,14 @@ called for them — a caller that mixes the two up gets an explicit error, not a
 from __future__ import annotations
 
 import copy
+import re
+import zipfile
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 from docx import Document
 from docx.document import Document as DocumentType
+from docx.opc.exceptions import PackageNotFoundError
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
@@ -42,13 +47,27 @@ class UnsupportedDocumentError(RuntimeError):
     """Raised for inputs Word comments cannot be attached to, e.g. a scanned PDF."""
 
 
+#: Characters XML 1.0 cannot carry. A finding quotes the checked document, and text that came
+#: through OCR or a PDF can hold a stray vertical tab; lxml refuses the whole comment for it.
+_XML_ILLEGAL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
 def comment_text(finding: Finding) -> str:
     """What the reviewer reads in the margin: what is wrong, and what it should say."""
     lines = [f"[{_SEVERITY_PREFIX[finding.severity]}] {finding.rule_id}", finding.message_ka]
     if finding.expected:
         lines.append(f"სწორი ვარიანტი / should be: {finding.expected}")
     lines.append(finding.message_en)
-    return "\n".join(lines)
+    return _XML_ILLEGAL.sub("", "\n".join(lines))
+
+
+#: Run children ``Run.text``'s setter recreates. Anything else in a run - ``w:drawing``,
+#: ``w:fldChar``, ``w:footnoteReference`` - is deleted by it, so only runs made of these split.
+_TEXT_RUN_CHILDREN = frozenset({"rPr", "t", "tab", "br", "cr"})
+
+
+def _splittable(run: Run) -> bool:
+    return {child.tag.split("}")[-1] for child in run._r} <= _TEXT_RUN_CHILDREN
 
 
 def _split_run(run: Run, offset: int) -> Run:
@@ -64,8 +83,8 @@ def _split_run(run: Run, offset: int) -> Run:
 def _normalised_index(text: str) -> tuple[str, list[int]]:
     """Text with quotes dropped and runs of whitespace collapsed, plus a map back to offsets.
 
-    A finding's value is the cleaned reading of a field - "შპს დეველოპმენტ" - while the
-    document writes "შპს „დეველოპმენტ“". Searching the raw text finds nothing, and the comment
+    A finding's value is the cleaned reading of a field - "შპს ნიმუში" - while the
+    document writes "შპს „ნიმუში“". Searching the raw text finds nothing, and the comment
     ends up on the document instead of on the words at fault.
     """
     out: list[str] = []
@@ -113,28 +132,23 @@ def _runs_covering(paragraph: Paragraph, needle: str) -> list[Run] | None:
         return None
     start, end = located
 
-    # walk runs, splitting the one that contains the start and the one containing the end
-    pos = 0
-    for run in list(paragraph.runs):
-        length = len(run.text)
-        if pos < start < pos + length:
-            _split_run(run, start - pos)
-            break
-        pos += length
-
-    pos = 0
-    for run in list(paragraph.runs):
-        length = len(run.text)
-        if pos < end < pos + length:
-            _split_run(run, end - pos)
-            break
-        pos += length
+    # walk runs, splitting the one that contains the start and the one containing the end;
+    # a run that is more than text is left whole and marked as a whole (see the module docs)
+    for boundary in (start, end):
+        pos = 0
+        for run in list(paragraph.runs):
+            length = len(run.text)
+            if pos < boundary < pos + length:
+                if _splittable(run):
+                    _split_run(run, boundary - pos)
+                break
+            pos += length
 
     covered: list[Run] = []
     pos = 0
     for run in paragraph.runs:
         run_end = pos + len(run.text)
-        if pos >= start and run_end <= end and run.text:
+        if pos < end and run_end > start and run.text:
             covered.append(run)
         pos = run_end
     _drop_empty_runs(paragraph)
@@ -163,8 +177,13 @@ def _drop_empty_runs(paragraph: Paragraph) -> None:
             parent.remove(run._r)
 
 
-def _candidates(finding: Finding) -> list[str]:
+def _candidates(finding: Finding, text: str | None = None) -> list[str]:
     """Text to look for, most specific first.
+
+    The checked text at the finding's ``span`` comes first when the caller supplies that text,
+    then ``quote`` - the document's own words, in full. Both matter because ``actual`` is often
+    normalised (an ISO date, "48750") or shortened for display with a trailing "…", and neither
+    form occurs in the Word file.
 
     A finding's ``actual`` is written for a human ("ორასი (200)"), so the parenthetical gloss
     is stripped before searching: anchoring the comment on the offending word is the point.
@@ -172,13 +191,22 @@ def _candidates(finding: Finding) -> list[str]:
     useful than marking nothing.
     """
     out: list[str] = []
+
+    def add(candidate: str | None) -> None:
+        candidate = (candidate or "").strip()
+        if candidate and candidate not in out:
+            out.append(candidate)
+
+    if text is not None and finding.span is not None:
+        start, end = finding.span
+        if 0 <= start < end <= len(text):
+            add(text[start:end])
+    add(finding.quote)
     for raw in (finding.actual, finding.expected):
         if not raw:
             continue
         for candidate in (raw, raw.split(" (")[0], normalize_spaces(raw)):
-            candidate = candidate.strip()
-            if candidate and candidate not in out:
-                out.append(candidate)
+            add(candidate.removesuffix("…"))
     return out
 
 
@@ -197,9 +225,11 @@ def all_paragraphs(container: object) -> Iterator[Paragraph]:
                 yield from all_paragraphs(cell)
 
 
-def _anchor_for(document: DocumentType, finding: Finding) -> list[Run] | None:
+def _anchor_for(
+    document: DocumentType, finding: Finding, text: str | None = None
+) -> list[Run] | None:
     """Find the runs a finding should be attached to, most specific candidate first."""
-    for needle in _candidates(finding):
+    for needle in _candidates(finding, text):
         for paragraph in all_paragraphs(document):
             runs = _runs_covering(paragraph, needle)
             if runs:
@@ -213,24 +243,34 @@ def annotate_docx(
     out_path: Path,
     *,
     author: str = AUTHOR,
+    text: str | None = None,
 ) -> tuple[Path, list[Finding]]:
     """Write ``source`` to ``out_path`` with one Word comment per finding.
+
+    ``text`` is the text the findings were computed over - the one their ``span`` offsets
+    index into. When it is given, the words at each span are searched for first.
 
     Returns the path and the findings that could not be anchored to any text — those belong in
     the report so that nothing is silently dropped, which is the failure mode that would make
     an annotated document quietly misleading.
     """
-    if source.suffix.lower() not in {".docx", ".docm"}:
+    # .docx only. A .docm is a macro-enabled package python-docx refuses with a bare
+    # ValueError, and a macro-carrying file is not one to hand back to a reviewer anyway.
+    if source.suffix.lower() != ".docx":
         msg = (
             f"Word comments can only be written into a .docx file, got {source.suffix!r}. "
             "Scanned PDFs are reported through the findings table and highlighted page images."
         )
         raise UnsupportedDocumentError(msg)
 
-    document = Document(str(source))
+    try:
+        document = Document(str(source))
+    except (ValueError, KeyError, PackageNotFoundError, zipfile.BadZipFile) as e:
+        msg = f"the file is not a Word document that comments can be written into: {e}"
+        raise UnsupportedDocumentError(msg) from e
     unanchored: list[Finding] = []
     for finding in findings:
-        runs = _anchor_for(document, finding)
+        runs = _anchor_for(document, finding, text)
         if runs is None:
             unanchored.append(finding)
             continue

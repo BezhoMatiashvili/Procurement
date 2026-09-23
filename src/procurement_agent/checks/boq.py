@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,9 +29,11 @@ from openpyxl.utils import get_column_letter
 
 from procurement_agent.checks.findings import CheckReport, Finding, Severity
 from procurement_agent.extraction.normalize import normalize_spaces, parse_number
+from procurement_agent.report.xlsx_safe import cell_safe
 
 #: Sheets that carry no priced lines.
 SKIP_SHEETS = frozenset({"COVER PAGE", "INSTRUCTION TO BIDDERS", "SUMMARY"})
+_SUMMARY = "SUMMARY"
 
 #: Header labels we understand, normalised. The prototype required the exact lowercase strings
 #: "quantity" and "unit" and silently skipped any sheet that spelled them differently.
@@ -43,8 +46,9 @@ _HEADER_SYNONYMS: dict[str, tuple[str, ...]] = {
     "sum_materials": ("materials sum", "material sum"),
     "rate_labor": ("labor", "labour"),
     "sum_labor": ("labor sum", "labour sum"),
-    "rate_delivery": ("delivery", "transportation", "delivery "),
-    "sum_delivery": ("delivery sum", "transportation sum", "delivery sum "),
+    # _norm_label strips surrounding whitespace, so "delivery " needs no entry of its own
+    "rate_delivery": ("delivery", "transportation"),
+    "sum_delivery": ("delivery sum", "transportation sum"),
     "rate_total": ("rate in us $", "rate in usd", "rate"),
     "amount": ("amount in us $", "amount in usd", "amount", "total"),
 }
@@ -64,11 +68,19 @@ def _norm_label(v: object) -> str:
 
 
 def _num(v: object) -> float | None:
-    if v is None or v == "":
+    if v is None or v == "" or isinstance(v, bool):  # TRUE in a quantity cell is not 1
         return None
     if isinstance(v, int | float):
         return float(v)
     return parse_number(str(v))
+
+
+def _same_quantity(a: float | None, b: float | None) -> bool:
+    """Quantities compared with a tolerance: ``0.1 * 3`` and ``0.3`` are the same measurement.
+
+    A blank and a zero are the same too - both mean "nothing quoted here".
+    """
+    return math.isclose(a or 0.0, b or 0.0, rel_tol=1e-9, abs_tol=1e-6)
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,13 +188,40 @@ def _column_number_row(ws: object, after: int) -> int:
     return after
 
 
+def _item_columns(cols: dict[str, int]) -> tuple[int, ...]:
+    """Where a line's item number is, most specific first.
+
+    The client's template heads a two-column block "No": section codes ("A", "A1") in the first
+    column and the item numbers ("1.1", "1.2") in the second, so the second is read first. That
+    guess is only safe when the second column is not itself a mapped column - on a sheet whose
+    description sits right beside "No", the description would otherwise become the item number.
+    """
+    no_col = cols.get("no", 1)
+    if no_col + 1 in cols.values():
+        return (no_col,)
+    return (no_col + 1, no_col)
+
+
 def read_boq(path: Path, *, name: str | None = None) -> BoqWorkbook:
     """Read a BOQ workbook twice: cached values, and formulas, so tampering is visible."""
     values = load_workbook(path, data_only=True)
-    formulas = load_workbook(path, data_only=False)
-    book = BoqWorkbook(name=name or path.stem, sheet_order=list(values.sheetnames))
+    try:
+        formulas = load_workbook(path, data_only=False)
+        try:
+            return _read_boq(values, formulas, name=name or path.stem)
+        finally:
+            formulas.close()
+    finally:
+        values.close()
+
+
+def _read_boq(values: Workbook, formulas: Workbook, *, name: str) -> BoqWorkbook:
+    book = BoqWorkbook(name=name, sheet_order=list(values.sheetnames))
+    summary_sheet: str | None = None
 
     for sheet_name in values.sheetnames:
+        if sheet_name.strip().upper() == _SUMMARY and summary_sheet is None:
+            summary_sheet = sheet_name
         if sheet_name.strip().upper() in SKIP_SHEETS:
             continue
         ws, wf = values[sheet_name], formulas[sheet_name]
@@ -190,6 +229,7 @@ def read_boq(path: Path, *, name: str | None = None) -> BoqWorkbook:
         if "desc" not in cols or "qty" not in cols:
             continue
         sheet = BoqSheet(name=sheet_name, columns=cols, header_row=header_row)
+        item_cols = _item_columns(cols)
 
         for r in range(header_row + 1, ws.max_row + 1):
             desc = ws.cell(r, cols["desc"]).value
@@ -206,12 +246,13 @@ def read_boq(path: Path, *, name: str | None = None) -> BoqWorkbook:
                 c = cols.get(key)
                 if not c:
                     continue
-                raw = wf.cell(r, c).value
-                if val(key) not in (None, 0) and not (isinstance(raw, str) and raw.startswith("=")):
+                # the cell's type, not its text: a *string* cell reading "=5" is typed-in text
+                if val(key) not in (None, 0) and wf.cell(r, c).data_type != "f":
                     hardcoded.append(key)
 
-            no_col = cols.get("no", 1)
-            item_no = ws.cell(r, no_col + 1).value or ws.cell(r, no_col).value
+            item_no = next(
+                (v for c in item_cols if (v := ws.cell(r, c).value) not in (None, "")), None
+            )
             sheet.lines.append(
                 BoqLine(
                     sheet=sheet_name,
@@ -237,10 +278,9 @@ def read_boq(path: Path, *, name: str | None = None) -> BoqWorkbook:
             )
         book.sheets[sheet_name] = sheet
 
-    if "SUMMARY" in values.sheetnames:
-        book.summary = _read_summary(values["SUMMARY"])
-    values.close()
-    formulas.close()
+    # Matched the way SKIP_SHEETS is: a bidder's "Summary" is still the Summary.
+    if summary_sheet is not None:
+        book.summary = _read_summary(values[summary_sheet])
     return book
 
 
@@ -422,7 +462,7 @@ def compare_bid(template: BoqWorkbook, bid: BoqWorkbook) -> BidComparison:
                         actual=b_line.unit,
                     )
                 )
-            if (t_line.quantity or 0) != (b_line.quantity or 0):
+            if not _same_quantity(t_line.quantity, b_line.quantity):
                 diff = LineDiff(
                     sheet=sheet_name,
                     key=t_line.key,
@@ -434,10 +474,22 @@ def compare_bid(template: BoqWorkbook, bid: BoqWorkbook) -> BidComparison:
                 # a blank template quantity means "bidder fills this in" (staffing, insurance)
                 (out.quantity_changed if t_line.quantity else out.filled_blank).append(diff)
             out.findings.extend(_arithmetic_findings(b_line))
+        # An added position is priced by the bidder like any other and counts toward their
+        # total, so its arithmetic is checked too. Keeping it "out of the general analysis"
+        # (the client's rule) means out of the quantity comparison - not out of cross-footing.
+        for b_line in added:
+            out.findings.extend(_arithmetic_findings(b_line))
 
         priced = [line for line in b_sheet.lines if line.is_priced]
         if not priced and any(line.quantity for line in t_sheet.lines):
             out.unpriced_sheets.append(sheet_name)
+
+    # Sheets only the bidder has: nothing to compare quantities against, but every line on
+    # them still adds into the bidder's total.
+    for sheet_name, b_sheet in bid.sheets.items():
+        if sheet_name not in template.sheets:
+            for b_line in b_sheet.lines:
+                out.findings.extend(_arithmetic_findings(b_line))
 
     for d in out.quantity_changed:
         out.findings.append(
@@ -507,11 +559,16 @@ def _arithmetic_findings(line: BoqLine) -> list[Finding]:
                 )
             )
 
+    def times(rate: float | None) -> float | None:
+        # No rate column, or an empty rate cell, means there is nothing to recompute from.
+        # Treating it as zero made every priced line of a sheet without a Rate column an error.
+        return rate * qty if rate is not None and qty is not None else None
+
     if qty:
-        check("materials sum", line.sum_materials, (line.rate_materials or 0) * qty)
-        check("labor sum", line.sum_labor, (line.rate_labor or 0) * qty)
-        check("delivery sum", line.sum_delivery, (line.rate_delivery or 0) * qty)
-        check("line amount", line.amount, (line.rate_total or 0) * qty)
+        check("materials sum", line.sum_materials, times(line.rate_materials))
+        check("labor sum", line.sum_labor, times(line.rate_labor))
+        check("delivery sum", line.sum_delivery, times(line.rate_delivery))
+        check("line amount", line.amount, times(line.rate_total))
     rates = [line.rate_materials or 0, line.rate_labor or 0, line.rate_delivery or 0]
     if line.rate_total is not None and any(rates):
         check("total rate", line.rate_total, sum(rates))
@@ -553,11 +610,14 @@ def rate_outliers(template: BoqWorkbook, comparisons: list[BidComparison]) -> li
     an order of magnitude differently; this is what makes the difference visible per position
     rather than only in the total.
     """
-    by_line: dict[str, list[tuple[str, BoqLine]]] = {}
+    # Keyed by the template position (sheet, row), which is unique. The item-and-description
+    # key is not: a template that repeats a position ("Excavation" under two sections) pooled
+    # both positions' rates into one median.
+    by_line: dict[tuple[str, int], list[tuple[str, BoqLine]]] = {}
     for comp in comparisons:
         for t_line, b_line in comp.matched:
             if b_line.rate_total:
-                by_line.setdefault(f"{t_line.sheet}|{t_line.key}", []).append((comp.bidder, b_line))
+                by_line.setdefault((t_line.sheet, t_line.row), []).append((comp.bidder, b_line))
 
     out: list[Finding] = []
     for entries in by_line.values():
@@ -612,6 +672,22 @@ _MERGED_HEADERS = (
 )
 
 
+def _put(ws: object, row: int, col: int, value: object) -> None:
+    """Write one cell of the merged workbook. Every value goes through here.
+
+    Descriptions, units, item numbers, sheet names, Summary labels and finding messages all
+    come from a workbook the bidder controls; see ``report/xlsx_safe`` for what an unescaped
+    ``=`` in one of them would do in the file the buyer opens.
+    """
+    ws.cell(row, col, cell_safe(value))  # type: ignore[attr-defined]
+
+
+def _sheet_title(name: str) -> str:
+    """A template sheet name as a worksheet title: control characters out, 31 characters."""
+    title = str(cell_safe(name)).removeprefix("'")[:31]
+    return title or "Sheet"
+
+
 def _style_header(ws: object, row: int = 1) -> None:
     for col, (title, width) in enumerate(_MERGED_HEADERS, start=1):
         cell = ws.cell(row, col, title)  # type: ignore[attr-defined]
@@ -637,6 +713,8 @@ def write_merged_workbook(
     bids: list[BoqWorkbook],
     comparisons: list[BidComparison],
     out_path: Path,
+    *,
+    outliers: list[Finding] | None = None,
 ) -> Path:
     """All bidders stacked vertically under every template line, plus Summary and reports.
 
@@ -651,43 +729,52 @@ def write_merged_workbook(
 
     _write_summary_sheet(wb, template, bids)
 
-    matched_by_bidder: dict[str, dict[str, BoqLine]] = {
-        c.bidder: {f"{t.sheet}|{t.key}": b for t, b in c.matched} for c in comparisons
-    }
+    # Keyed by the template position, not by item-and-description: a template that repeats a
+    # position collapsed both onto the last bidder line, and the first showed the second's price.
+    # ``comparisons`` is ``compare_all(template, bids)``: one per bid, in the same order, so they
+    # are paired by position - two uploads with the same file name are still two bidders.
+    matched_by_bidder: list[dict[tuple[str, int], BoqLine]] = [
+        {(t.sheet, t.row): b for t, b in c.matched} for c in comparisons
+    ]
+    if len(matched_by_bidder) != len(bids):
+        msg = (
+            f"{len(bids)} bids but {len(comparisons)} comparisons; pass compare_all(template, bids)"
+        )
+        raise ValueError(msg)
 
     for sheet_name, t_sheet in template.sheets.items():
-        ws = wb.create_sheet(sheet_name[:31])
+        ws = wb.create_sheet(_sheet_title(sheet_name))
         _style_header(ws)
         row = 2
         for t_line in t_sheet.lines:
-            ws.cell(row, 1, t_line.item_no)
-            ws.cell(row, 2, t_line.description[:250])
-            ws.cell(row, 3, t_line.unit)
-            ws.cell(row, 4, t_line.quantity)
-            ws.cell(row, 5, "— template —")
+            _put(ws, row, 1, t_line.item_no)
+            _put(ws, row, 2, t_line.description[:250])
+            _put(ws, row, 3, t_line.unit)
+            _put(ws, row, 4, t_line.quantity)
+            _put(ws, row, 5, "— template —")
             for col in range(1, len(_MERGED_HEADERS) + 1):
                 ws.cell(row, col).fill = _TEMPLATE_ROW
             row += 1
 
             bidder_rows: list[int] = []
-            for bid in bids:
-                line = matched_by_bidder.get(bid.name, {}).get(f"{sheet_name}|{t_line.key}")
-                ws.cell(row, 5, bid.name)
+            for bid, matched in zip(bids, matched_by_bidder, strict=True):
+                line = matched.get((t_line.sheet, t_line.row))
+                _put(ws, row, 5, bid.name)
                 if line is not None:
                     delta = None
                     if line.quantity is not None and t_line.quantity is not None:
                         delta = round(line.quantity - t_line.quantity, 6) or None
-                    ws.cell(row, 6, line.quantity)
-                    ws.cell(row, 7, delta)
-                    ws.cell(row, 8, line.rate_materials)
-                    ws.cell(row, 9, line.rate_labor)
-                    ws.cell(row, 10, line.rate_delivery)
-                    ws.cell(row, 11, line.rate_total)
-                    ws.cell(row, 12, line.amount)
+                    _put(ws, row, 6, line.quantity)
+                    _put(ws, row, 7, delta)
+                    _put(ws, row, 8, line.rate_materials)
+                    _put(ws, row, 9, line.rate_labor)
+                    _put(ws, row, 10, line.rate_delivery)
+                    _put(ws, row, 11, line.rate_total)
+                    _put(ws, row, 12, line.amount)
                     if delta:
                         ws.cell(row, 7).fill = _HIGH
                 else:
-                    ws.cell(row, 6, "— missing —")
+                    _put(ws, row, 6, "— missing —")
                     ws.cell(row, 6).fill = _HIGH
                 bidder_rows.append(row)
                 row += 1
@@ -698,7 +785,7 @@ def write_merged_workbook(
                 _colour_extremes(ws, bidder_rows, 11)
         row += 1
 
-    _write_report_sheets(wb, comparisons)
+    _write_report_sheets(wb, comparisons, outliers or [])
     wb.save(out_path)
     return out_path
 
@@ -724,9 +811,9 @@ def _write_summary_sheet(wb: Workbook, template: BoqWorkbook, bids: list[BoqWork
     for label in labels:
         rows: list[int] = []
         for bid in bids:
-            ws.cell(row, 1, label if not rows else None)
-            ws.cell(row, 2, bid.name)
-            ws.cell(row, 3, bid.summary.get(label))
+            _put(ws, row, 1, label if not rows else None)
+            _put(ws, row, 2, bid.name)
+            _put(ws, row, 3, bid.summary.get(label))
             rows.append(row)
             row += 1
         if "total" in label.lower():
@@ -739,14 +826,16 @@ def _write_summary_sheet(wb: Workbook, template: BoqWorkbook, bids: list[BoqWork
     row += 1
     rows = []
     for bid in bids:
-        ws.cell(row, 2, bid.name)
-        ws.cell(row, 3, round(bid.total, 2))
+        _put(ws, row, 2, bid.name)
+        _put(ws, row, 3, round(bid.total, 2))
         rows.append(row)
         row += 1
     _colour_extremes(ws, rows, 3)
 
 
-def _write_report_sheets(wb: Workbook, comparisons: list[BidComparison]) -> None:
+def _write_report_sheets(
+    wb: Workbook, comparisons: list[BidComparison], outliers: list[Finding]
+) -> None:
     ws = wb.create_sheet("Quantity differences")
     for col, title in enumerate(
         ("Bidder", "Sheet", "Row", "Description", "Template qty", "Bid qty", "Kind"), 1
@@ -773,7 +862,7 @@ def _write_report_sheets(wb: Workbook, comparisons: list[BidComparison]) -> None
                     ),
                     1,
                 ):
-                    ws.cell(row, col, value)
+                    _put(ws, row, col, value)
                 row += 1
 
     ws = wb.create_sheet("Added and removed")
@@ -785,11 +874,11 @@ def _write_report_sheets(wb: Workbook, comparisons: list[BidComparison]) -> None
     for comp in comparisons:
         for sheet in comp.added_sheets:
             for col, value in enumerate((comp.bidder, "added sheet", sheet, None, None), 1):
-                ws.cell(row, col, value)
+                _put(ws, row, col, value)
             row += 1
         for sheet in comp.removed_sheets:
             for col, value in enumerate((comp.bidder, "removed sheet", sheet, None, None), 1):
-                ws.cell(row, col, value)
+                _put(ws, row, col, value)
             row += 1
         for kind, lines in (("added line", comp.added), ("removed line", comp.removed)):
             for line in lines:
@@ -801,7 +890,7 @@ def _write_report_sheets(wb: Workbook, comparisons: list[BidComparison]) -> None
                     line.description[:200],
                 )
                 for col, value in enumerate(cells, 1):
-                    ws.cell(row, col, value)
+                    _put(ws, row, col, value)
                 row += 1
 
     ws = wb.create_sheet("Findings")
@@ -811,15 +900,16 @@ def _write_report_sheets(wb: Workbook, comparisons: list[BidComparison]) -> None
     for col, width in ((4, 80), (5, 80)):
         ws.column_dimensions[get_column_letter(col)].width = width
     row = 2
-    for comp in comparisons:
-        for f in comp.findings:
-            for col, value in enumerate(
-                (comp.bidder, f.severity, f.rule_id, f.message_en, f.message_ka), 1
-            ):
-                ws.cell(row, col, value)
-            if f.severity == "error":
-                ws.cell(row, 2).fill = _HIGH
-            row += 1
+    rows: list[tuple[str, Finding]] = [(c.bidder, f) for c in comparisons for f in c.findings]
+    # the outlier message names its bidder; the row is "all bidders" because the finding is
+    # about how the quotes compare, not about one workbook
+    rows.extend(("(all bidders)", f) for f in outliers)
+    for bidder, f in rows:
+        for col, value in enumerate((bidder, f.severity, f.rule_id, f.message_en, f.message_ka), 1):
+            _put(ws, row, col, value)
+        if f.severity == "error":
+            ws.cell(row, 2).fill = _HIGH
+        row += 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -832,14 +922,15 @@ def main(argv: list[str] | None = None) -> int:
     template = read_boq(args.template, name="TEMPLATE")
     bids = [read_boq(p) for p in args.bids]
     comparisons = compare_all(template, bids)
+    # Outliers compare the bidders with each other, so they belong to no one bidder. Filing
+    # them under the first one (as this once did) charged that bidder with everyone's prices.
     outliers = rate_outliers(template, comparisons)
-    if outliers and comparisons:
-        comparisons[0].findings.extend(outliers)
 
     for comp in comparisons:
         errors = sum(1 for f in comp.findings if f.severity == "error")
         print(f"{comp.bidder}: {len(comp.findings)} finding(s), {errors} error(s)")
-    path = write_merged_workbook(template, bids, comparisons, args.out)
+    print(f"unit-rate outliers across bidders: {len(outliers)}")
+    path = write_merged_workbook(template, bids, comparisons, args.out, outliers=outliers)
     print(f"wrote {path}")
     return 0
 

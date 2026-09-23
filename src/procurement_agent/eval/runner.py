@@ -5,7 +5,8 @@ acceptance criteria in ``docs/CLIENT_REQUEST_ka.md`` (>=90% on amounts and dates
 textual terms) had no measuring device: the only benchmark in the repository timed the
 pipeline without checking a single answer.
 
-Parsing is cached by content hash so that repeated runs measure extraction, not Docling.
+Parsing is cached by content hash - and by everything else that changes the parse, see
+``_parsed`` - so that repeated runs measure extraction, not Docling.
 """
 
 from __future__ import annotations
@@ -17,15 +18,29 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from docling.datamodel.base_models import ConversionStatus
+from docling_core.types.doc.document import DoclingDocument
+
 from procurement_agent.checks.aoa import check_aoa
+from procurement_agent.checks.compare import compare as compare_documents
 from procurement_agent.config import Settings
 from procurement_agent.eval.gold import GoldDocument, GoldSet
 from procurement_agent.eval.score import DocumentScore, SetScore, score_extraction, score_findings
 from procurement_agent.extraction.pipeline import run_extraction
 from procurement_agent.extraction.schemas import ExtractionResult
 from procurement_agent.ingestion.chunker import Chunk, chunk_docling_document
-from procurement_agent.ingestion.docling_service import convert, load_document, save_document
-from procurement_agent.ingestion.excel_reader import read_workbook, sheet_chunks
+from procurement_agent.ingestion.docling_service import (
+    conversion_fingerprint,
+    convert,
+    load_document,
+    save_document,
+)
+from procurement_agent.ingestion.excel_reader import read_formulas, read_workbook, sheet_chunks
+from procurement_agent.ingestion.segmenter import (
+    Segment,
+    segments_from_docling,
+    segments_from_workbook,
+)
 from procurement_agent.llm.base import LLMClient
 from procurement_agent.registry.snapshot import open_snapshot
 
@@ -39,11 +54,15 @@ class RunConfig:
     fast: bool = True
     prompt_version: str | None = None
     llm_options: dict[str, object] = field(default_factory=dict)
+    #: Whether the closed-answer-space pass ran. Recorded because it changes both the answers
+    #: and the cost, so two runs that differ only in this must not compare as the same config.
+    choices: bool = False
 
     def label(self) -> str:
         if not self.use_llm:
             return "rules-only"
-        return f"{self.model or 'default'}@{self.prompt_version or '?'}"
+        suffix = "+choices" if self.choices else ""
+        return f"{self.model or 'default'}@{self.prompt_version or '?'}{suffix}"
 
 
 @dataclass(slots=True)
@@ -66,6 +85,7 @@ class RunReport:
                 "use_llm": self.config.use_llm,
                 "prompt_version": self.config.prompt_version,
                 "llm_options": self.config.llm_options,
+                "choices": self.config.choices,
             },
             "started_at": self.started_at,
             "seconds": round(self.seconds, 2),
@@ -86,6 +106,9 @@ class RunReport:
                     "missing_findings": d.missing_findings,
                     "unexpected_findings": d.unexpected_findings,
                     "llm_calls": d.llm_calls,
+                    "choice_calls": d.choice_calls,
+                    "chunks_selected": d.chunks_selected,
+                    "chunks_with_facts": d.chunks_with_facts,
                     "seconds": d.seconds,
                 }
                 for d in self.score.documents
@@ -103,24 +126,69 @@ def _cache_key(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()[:32]
 
 
+def _parsed(path: Path, settings: Settings, cache_dir: Path) -> DoclingDocument:
+    """Docling's parse of ``path``, from the cache when an identical parse is already there.
+
+    The cache directory is named by the file's hash *and* by ``conversion_fingerprint``: the
+    Docling version, whether OCR could run, the OCR languages and the model artifacts. Keyed by
+    the file alone, a parse made on a machine without Tesseract was served to every later run
+    as though it were current, and the number a run reported depended on which run came first.
+    ``save_document`` writes atomically, so an interrupted run cannot leave a truncated entry.
+    """
+    cached_dir = cache_dir / f"{_cache_key(path)}-{conversion_fingerprint(settings)}"
+    # save_document() owns the file name inside the directory it is handed
+    cached = cached_dir / "docling.json"
+    if cached.exists():
+        return load_document(cached)
+    result = convert(path, settings)
+    if result.status == ConversionStatus.SUCCESS:
+        # A partial parse (a page that failed, a timeout) is used for this run but not kept:
+        # cached, it would be served to every later run as though it were the document.
+        save_document(result.document, cached_dir)
+    return result.document
+
+
 def load_chunks_for(path: Path, settings: Settings, cache_dir: Path) -> list[Chunk]:
     """Parse a document, caching Docling's output so a sweep measures extraction, not parsing."""
     doc_id = _cache_key(path)
     if path.suffix.lower() in {".xlsx", ".xlsm", ".xls"}:
         return sheet_chunks(read_workbook(path.read_bytes()), doc_id=doc_id)
-    # save_document() owns the file name inside the directory it is handed
-    cached_dir = cache_dir / doc_id
-    cached = cached_dir / "docling.json"
-    if cached.exists():
-        document = load_document(cached)
-    else:
-        document = convert(path, settings).document
-        save_document(document, cached_dir)
-    return chunk_docling_document(document, doc_id=doc_id)
+    return chunk_docling_document(_parsed(path, settings, cache_dir), doc_id=doc_id)
 
 
 def _text_of(chunks: list[Chunk]) -> str:
     return "\n".join(c.body or c.text for c in chunks)
+
+
+def _segments_for(path: Path, settings: Settings, cache_dir: Path) -> list[Segment]:
+    """Segments for a gold document, reusing the same Docling cache the chunks use."""
+    if path.suffix.lower() in {".xlsx", ".xlsm", ".xls"}:
+        data = path.read_bytes()
+        return segments_from_workbook(read_workbook(data), read_formulas(data))
+    return segments_from_docling(_parsed(path, settings, cache_dir))
+
+
+def _compare_rule_ids(gold: GoldDocument, settings: Settings, cache_dir: Path) -> list[str]:
+    """The CMP.* rules a comparison reports as errors, for scoring against the gold file.
+
+    ``gold.reference`` is the earlier version and ``gold.document`` the revision, matching the
+    direction the UI uses: the left-hand file is the original. No model is involved, so this
+    column of a run means the same thing whatever ``--llm`` was set to.
+    """
+    if gold.reference is None:  # GoldDocument's validator guarantees this; say so if it moves
+        msg = f"comparison gold file {gold.name!r} has no reference document"
+        raise ValueError(msg)
+    report = compare_documents(
+        _segments_for(gold.reference, settings, cache_dir),
+        _segments_for(gold.document, settings, cache_dir),
+        left_document_id=f"{gold.name}:before",
+        right_document_id=gold.name,
+        left_kind=gold.reference.suffix.lstrip("."),
+        right_kind=gold.document.suffix.lstrip("."),
+        min_similarity=settings.compare_min_similarity,
+        max_segments=settings.compare_max_segments,
+    )
+    return [f.rule_id for f in report.errors]
 
 
 def run_document(
@@ -142,24 +210,27 @@ def run_document(
     score = score_extraction(result, gold.fields, gold.name)
 
     if gold.expected_findings or gold.forbidden_findings:
-        reference = (
-            _text_of(load_chunks_for(gold.reference, settings, cache_dir))
-            if gold.reference
-            else None
-        )
-        registry = open_snapshot(settings.registry_db) if settings.registry_db else None
-        try:
-            report = check_aoa(
-                aoa_text=_text_of(chunks),
-                aoa_id=gold.name,
-                contract_text=reference,
-                registry=registry,
-                contractor_type=gold.contractor_type,
+        if gold.check == "compare":
+            reported = _compare_rule_ids(gold, settings, cache_dir)
+        else:
+            reference = (
+                _text_of(load_chunks_for(gold.reference, settings, cache_dir))
+                if gold.reference
+                else None
             )
-        finally:
-            if registry is not None:
-                registry.close()
-        reported = [f.rule_id for f in report.errors]
+            registry = open_snapshot(settings.registry_db) if settings.registry_db else None
+            try:
+                report = check_aoa(
+                    aoa_text=_text_of(chunks),
+                    aoa_id=gold.name,
+                    contract_text=reference,
+                    registry=registry,
+                    contractor_type=gold.contractor_type,
+                )
+            finally:
+                if registry is not None:
+                    registry.close()
+            reported = [f.rule_id for f in report.errors]
         score.missing_findings, score.unexpected_findings = score_findings(
             reported,
             gold.expected_findings,
@@ -258,9 +329,10 @@ def format_table(report: RunReport) -> str:
 def compare(baseline: dict[str, object], current: RunReport) -> str:
     """Field-level deltas against a previous run, so a change can be judged, not asserted."""
     old = baseline.get("fields", {})
-    assert isinstance(old, dict)
     new = current.to_json()["fields"]
-    assert isinstance(new, dict)
+    if not isinstance(old, dict) or not isinstance(new, dict):
+        msg = "a run report's 'fields' must be a mapping; is the baseline file a run report?"
+        raise TypeError(msg)
     lines = [f"{'field':22s} {'F1 before':>10s} {'F1 after':>10s} {'delta':>8s}", "-" * 54]
     for name in sorted(set(old) | set(new)):
         before = float(old.get(name, {}).get("f1", 0.0)) if name in old else 0.0

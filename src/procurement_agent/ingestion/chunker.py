@@ -7,6 +7,7 @@ over-estimates token counts for Georgian text (which tokenizes poorly in most LL
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -28,11 +29,25 @@ from docling_core.types.doc.labels import DocItemLabel
 from procurement_agent.extraction.schemas import Provenance
 from procurement_agent.tokens import estimate_tokens
 
-__all__ = ["Chunk", "chunk_docling_document", "estimate_tokens"]
+__all__ = [
+    "MAX_CHUNK_TOKENS",
+    "Chunk",
+    "chunk_docling_document",
+    "estimate_tokens",
+    "provenance_of",
+]
+
+#: Chunk size, in *estimated* tokens. The estimate deliberately over-counts (see ``tokens``),
+#: so this is not the real size: measured on gemma3:4b, a full chunk at 1550 estimated tokens
+#: is about 1130 real ones. That real size is the one to hold on to - it is what the chunks
+#: measured before the estimate was corrected, and it sits at the boundary above which the
+#: inference server was observed to reuse a prompt prefix (see ``llm.ollama_client``). When
+#: the estimate was corrected, a limit left at 1200 would have cut real chunks to about 880.
+MAX_CHUNK_TOKENS = 1550
 
 
 class HeuristicTokenizer(BaseTokenizer):
-    max_tokens: int = 1200
+    max_tokens: int = MAX_CHUNK_TOKENS
 
     def count_tokens(self, text: str) -> int:
         return estimate_tokens(text)
@@ -96,7 +111,7 @@ def _union(boxes: list[tuple[float, float, float, float]]) -> tuple[float, float
 
 
 def chunk_docling_document(
-    doc: DoclingDocument, *, doc_id: str, max_tokens: int = 1200
+    doc: DoclingDocument, *, doc_id: str, max_tokens: int = MAX_CHUNK_TOKENS
 ) -> list[Chunk]:
     chunker = HybridChunker(
         tokenizer=HeuristicTokenizer(max_tokens=max_tokens),
@@ -138,15 +153,15 @@ def _flush_orphans(
     _append(chunks, doc, doc_id, text, text, list(batch), [])
 
 
-def _append(
-    chunks: list[Chunk],
-    doc: DoclingDocument,
-    doc_id: str,
-    text: str,
-    body: str,
-    items: list[Any],
-    headings: list[str],
-) -> None:
+def provenance_of(
+    doc: DoclingDocument, items: Sequence[Any], *, chunk_id: str | None = None
+) -> Provenance:
+    """Page and bounding box covering ``items``, in top-left coordinates.
+
+    DOCX carries no provenance at all (docling emits an empty ``pages`` map and no ``prov``),
+    so this legitimately returns an empty ``Provenance`` for Word input. Shared with the
+    segmenter so a fact and a diff hunk cannot disagree about where they are.
+    """
     page: int | None = None
     boxes: list[tuple[float, float, float, float]] = []
     for item in items:
@@ -160,13 +175,25 @@ def _append(
             if pg is not None and pg.size is not None:
                 height = pg.size.height
             boxes.append(_to_top_left(prov.bbox, height))
+    return Provenance(page=page, bbox=_union(boxes) if boxes else None, chunk_id=chunk_id)
+
+
+def _append(
+    chunks: list[Chunk],
+    doc: DoclingDocument,
+    doc_id: str,
+    text: str,
+    body: str,
+    items: list[Any],
+    headings: list[str],
+) -> None:
     cid = f"{doc_id}:{len(chunks)}"
     chunks.append(
         Chunk(
             id=cid,
             text=text,
             body=body,
-            provenance=Provenance(page=page, bbox=_union(boxes) if boxes else None, chunk_id=cid),
+            provenance=provenance_of(doc, items, chunk_id=cid),
             headings=headings,
             token_estimate=estimate_tokens(text),
         )

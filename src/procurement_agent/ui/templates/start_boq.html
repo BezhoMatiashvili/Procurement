@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}{{ t("upload.boq.title") }} · {{ t("app.name") }}{% endblock %}
+{% block content %}
+<p><a class="back" href="/ui/">&larr; {{ t("nav.home") }}</a></p>
+<h1>{{ t("upload.boq.title") }}</h1>
+
+<form class="card" data-upload-flow="boq" data-next="/ui/checks/boq">
+  <div class="slot" data-slot="template" data-field="template">
+    <h2>{{ t("upload.template") }} <span class="slot-required">{{ t("upload.required") }}</span></h2>
+    <p class="muted small">{{ t("upload.template.hint") }}</p>
+    <label class="drop">
+      <span class="drop-hint">{{ t("upload.choose") }} <span class="muted">{{ t("upload.drop") }}</span></span>
+      <input type="file" name="template" accept=".xlsx" required>
+    </label>
+  </div>
+
+  <div class="slot" data-slot="bids" data-field="bids" data-multiple>
+    <h2>{{ t("upload.bids") }} <span class="slot-required">{{ t("upload.required") }}</span></h2>
+    <p class="muted small">{{ t("upload.bids.hint") }}</p>
+    <label class="drop">
+      <span class="drop-hint">{{ t("upload.choose.many") }} <span class="muted">{{ t("upload.drop.many") }}</span></span>
+      <input type="file" name="bids" accept=".xlsx" multiple required>
+    </label>
+  </div>
+
+  <ol class="upload-rows" data-upload-rows role="status" aria-live="polite"
+      data-s-waiting="{{ t('upload.status.waiting') }}"
+      data-s-uploading="{{ t('upload.status.uploading') }}"
+      data-s-parsing="{{ t('upload.status.parsing') }}"
+      data-s-ready="{{ t('upload.status.ready') }}"
+      data-s-failed="{{ t('upload.status.failed') }}"
+      data-s-busy="{{ t('upload.busy') }}"
+      data-s-opening="{{ t('upload.opening') }}"></ol>
+  <button type="submit" data-upload-submit>{{ t("upload.start.boq") }}</button>
+  <noscript><p class="warn">{{ t("upload.noscript") }}</p></noscript>
+</form>
+{% endblock %}
+{% block scripts %}<script src="/static/upload.js"></script>{% endblock %}

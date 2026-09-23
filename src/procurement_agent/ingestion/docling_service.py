@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
+import os
 import shutil
+import tempfile
 import threading
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from docling.datamodel.accelerator_options import AcceleratorDevice, AcceleratorOptions
@@ -26,7 +31,8 @@ class ConversionError(RuntimeError):
 
 
 _lock = threading.Lock()
-_converter: DocumentConverter | None = None
+#: One converter per distinct configuration; see ``get_converter``.
+_converters: dict[tuple[object, ...], DocumentConverter] = {}
 _ocr_available: bool | None = None
 
 
@@ -63,13 +69,51 @@ def _build(settings: Settings) -> DocumentConverter:
     )
 
 
+def _converter_key(settings: Settings) -> tuple[object, ...]:
+    """Every setting ``_build`` reads. Two settings objects that agree here convert alike."""
+    return (
+        str(settings.docling_artifacts_path),
+        tuple(settings.ocr_langs),
+        ocr_available(settings),
+        settings.docling_num_threads,
+        settings.docling_timeout_s,
+    )
+
+
 def get_converter(settings: Settings) -> DocumentConverter:
-    """Process-wide singleton; model loading is expensive and thread-safe once built."""
-    global _converter
+    """One converter per configuration; model loading is expensive and thread-safe once built.
+
+    This used to be a single process-wide instance built from whichever settings asked first,
+    so a later call with different OCR languages or a different timeout silently got the old
+    configuration. Keyed by the settings that shape the pipeline, a changed setting now gets
+    its own converter and an unchanged one still reuses the loaded models.
+    """
+    key = _converter_key(settings)
     with _lock:
-        if _converter is None:
-            _converter = _build(settings)
-        return _converter
+        converter = _converters.get(key)
+        if converter is None:
+            converter = _converters[key] = _build(settings)
+        return converter
+
+
+def conversion_fingerprint(settings: Settings) -> str:
+    """A short hash of everything besides the file itself that changes Docling's output.
+
+    Used to key caches of parsed documents: the Docling version, whether OCR can run at all,
+    the OCR languages and the model artifacts. A cache keyed by the file alone served a parse
+    made without OCR (or with other languages, or another Docling) as if it were current.
+    """
+    try:
+        docling_version = version("docling")
+    except PackageNotFoundError:  # pragma: no cover - docling is a hard dependency
+        docling_version = "unknown"
+    parts = [
+        docling_version,
+        str(ocr_available(settings)),
+        ",".join(settings.ocr_langs),
+        str(settings.docling_artifacts_path),
+    ]
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:12]
 
 
 def convert(path: Path, settings: Settings) -> ConversionResult:
@@ -92,10 +136,25 @@ def convert(path: Path, settings: Settings) -> ConversionResult:
 
 
 def save_document(doc: DoclingDocument, out_dir: Path) -> Path:
+    """Write ``docling.json`` atomically: a crash mid-write never leaves a truncated file.
+
+    Readers treat the file's existence as "this document is parsed", so a half-written one
+    would be loaded later and fail - or, in the evaluation cache, be trusted forever. The JSON
+    is written to a private temporary file in the same directory and renamed into place.
+    """
     out_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     target = out_dir / "docling.json"
-    doc.save_as_json(target)
-    target.chmod(0o600)
+    fd, tmp_name = tempfile.mkstemp(prefix=".docling.", suffix=".json.tmp", dir=out_dir)
+    os.close(fd)  # mkstemp creates the file 0600; docling reopens it by name
+    tmp = Path(tmp_name)
+    try:
+        doc.save_as_json(tmp)
+        tmp.chmod(0o600)
+        tmp.replace(target)  # atomic within one directory
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
     return target
 
 

@@ -104,3 +104,26 @@ class AuditLog(Base):
     ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
     outcome: Mapped[str] = mapped_column(String(16))  # ok | denied | error
     detail: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class UiSession(Base):
+    """A browser sign-in. The cookie carries a random token; only its SHA-256 is stored here.
+
+    The cookie used to *be* the API key, so a stolen cookie was a permanent credential and
+    "log out" only asked the browser to forget it. A row here expires on its own, is revoked by
+    logout, and dies with its API key. ``api_key_id`` is NULL only for the dev key, which has
+    no row of its own and is honoured only while the process runs in dev with that key set.
+    """
+
+    __tablename__ = "ui_sessions"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    api_key_id: Mapped[str | None] = mapped_column(
+        ForeignKey("api_keys.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    user: Mapped[str] = mapped_column(String(128), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

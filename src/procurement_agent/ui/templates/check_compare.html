@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% import "_findings.html" as f %}
+{% import "_diff.html" as dd %}
+{% block title %}{{ t("compare.title") }} · {{ right.display_name }}{% endblock %}
+{% block content %}
+<p><a class="back" href="/ui/">&larr; {{ t("nav.home") }}</a></p>
+<h1>{{ t("compare.title") }}</h1>
+
+<p class="muted">
+  {{ t("compare.original") }}: <strong>{{ left.display_name }}</strong> &rarr;
+  {{ t("compare.revised") }}: <strong>{{ right.display_name }}</strong>
+</p>
+
+<div class="result-head">
+  <p class="muted small num">
+    {{ t("compare.counts", critical=report.counts.critical, other=report.counts.substantive,
+          cosmetic=report.counts.cosmetic, moved=report.counts.moved) }}
+    · {{ t("compare.overlap", pct="%.0f%%"|format(report.similarity * 100)) }}
+  </p>
+  <span class="row">
+    {% if right.kind == "docx" %}
+    <a class="btn" href="/ui/checks/compare/annotated.docx?{{ query }}">{{ t("compare.download.docx") }}</a>
+    {% endif %}
+    <a class="btn" href="/ui/checks/compare/differences.xlsx?{{ query }}">{{ t("compare.download.xlsx") }}</a>
+    <button type="button" data-print>{{ t("compare.print") }}</button>
+  </span>
+</div>
+
+{# Disabled-with-a-reason, not hidden: a missing button reads as a bug. #}
+{% if right.kind != "docx" %}
+<p class="muted small">{{ t("compare.download.unavailable", kind=right.kind) }}</p>
+{% endif %}
+
+{% if report.alignment == "unrelated" %}
+<p class="card caveat">{{ t("compare.unrelated", pct="%.0f%%"|format(report.similarity * 100)) }}</p>
+{% endif %}
+
+{% if report.identical %}
+<p class="card ok-state">{{ t("compare.identical") }}</p>
+{% endif %}
+
+<h2>{{ t("compare.matters") }}</h2>
+{% if matters %}
+<table class="list deltas">
+  <thead><tr>
+    <th>{{ t("compare.field") }}</th>
+    <th>{{ t("compare.in_a") }}</th>
+    <th>{{ t("compare.in_b") }}</th>
+    <th>{{ t("compare.change") }}</th>
+    <th>{{ t("compare.where") }}</th>
+  </tr></thead>
+  <tbody>
+  {% for m in matters %}
+  <tr>
+    <td class="primary">{{ m.label }}
+      <span class="sev sev-{{ m.severity }}">{{ t("report.severity." ~ m.severity) }}</span></td>
+    <td data-label="{{ t('compare.in_a') }}" class="was">{%- if m.left -%}{{ m.left }}{%- endif -%}</td>
+    <td data-label="{{ t('compare.in_b') }}">{%- if m.right -%}{{ m.right }}{%- endif -%}</td>
+    <td data-label="{{ t('compare.change') }}" class="delta">{%- if m.change -%}{{ m.change }}{%- endif -%}</td>
+    <td data-label="{{ t('compare.where') }}">{%- if m.where -%}<a href="#{{ m.anchor }}">{{ m.where }}</a>{%- endif -%}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="card ok-state">{{ t("compare.matters.none") }}</p>
+{% endif %}
+
+{{ f.severity_groups(groups, t, msg) }}
+{{ f.skipped(report.skipped, t, why) }}
+
+{% if can_explain and unexplained %}
+<h2>{{ t("compare.explain.badge") }}</h2>
+<div class="card explain-box">
+  {% if explain_running %}
+  <p role="status" aria-live="polite">{{ t("compare.explain.running") }}</p>
+  {% else %}
+  <p class="muted small">{{ t("compare.explain.lead") }}<br>{{ t("compare.explain.slow") }}</p>
+  <form method="post" action="/ui/checks/compare/explain?{{ query }}">
+    <button type="submit">{{ t("compare.explain", n=unexplained) }}</button>
+  </form>
+  {% endif %}
+</div>
+{% endif %}
+
+<h2>{{ t("compare.diff") }}</h2>
+{# A GET form, so the filter works with JavaScript off and every view is a bookmarkable URL.
+   diff.js upgrades it to filter without a round trip. #}
+<form class="chips" method="get" action="/ui/checks/compare" data-diff-filter>
+  <input type="hidden" name="left" value="{{ left.id }}">
+  <input type="hidden" name="right" value="{{ right.id }}">
+  {% if explain_job %}<input type="hidden" name="job" value="{{ explain_job }}">{% endif %}
+  <span class="muted small">{{ t("compare.show") }}</span>
+  {% for value in ("all", "changes", "critical") %}
+  <a class="chip" href="/ui/checks/compare?{{ query }}&amp;show={{ value }}"
+     aria-current="{{ 'true' if show == value else 'false' }}"
+     data-show="{{ value }}">{{ t("compare.show." ~ value) }}</a>
+  {% endfor %}
+  <noscript><button type="submit" name="show" value="{{ show }}">{{ t("compare.apply") }}</button></noscript>
+</form>
+
+{{ dd.diff(blocks, d) }}
+{% endblock %}
+{% block scripts %}<script src="/static/diff.js"></script>{% endblock %}

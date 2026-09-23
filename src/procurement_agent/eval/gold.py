@@ -13,9 +13,10 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from procurement_agent.checks.aoa import ContractorType
 from procurement_agent.extraction.schemas import FactType
@@ -31,7 +32,12 @@ class GoldDocument(BaseModel):
 
     name: str
     document: Path
-    #: The contract an acceptance act is checked against, if any.
+    #: Which check to score. ``aoa`` reads the document against its contract; ``compare`` diffs
+    #: the two documents against each other and scores the CMP.* rules that fire. The model
+    #: forbids extra keys, so a new check has to be named here rather than smuggled in.
+    check: Literal["aoa", "compare"] = "aoa"
+    #: The other document: the contract an act is checked against, or the earlier version a
+    #: revision is compared with.
     reference: Path | None = None
     contractor_type: ContractorType | None = None
     #: Expected values per fact type. A type that is absent is not scored, so a partial gold
@@ -56,6 +62,13 @@ class GoldDocument(BaseModel):
     @property
     def must_be_clean(self) -> bool:
         return NO_FINDINGS in self.forbidden_findings
+
+    @model_validator(mode="after")
+    def _compare_needs_two_documents(self) -> GoldDocument:
+        if self.check == "compare" and self.reference is None:
+            msg = f"gold file {self.name!r} asks for a comparison but names only one document"
+            raise ValueError(msg)
+        return self
 
 
 class GoldSet(BaseModel):

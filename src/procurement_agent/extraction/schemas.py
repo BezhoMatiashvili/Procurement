@@ -104,6 +104,9 @@ class ExtractionResult(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     model: str | None = None
     llm_calls: int = 0
+    #: Closed-answer-space calls. Counted apart from ``llm_calls`` because the two are different
+    #: units of cost — a generation call decodes hundreds of tokens, a choice call decodes one.
+    llm_choice_calls: int = 0
     seconds: float = 0.0
     # Provenance of the configuration that produced this result, so an evaluation row can
     # be attributed to a prompt/sampling configuration rather than just to a model name.
@@ -112,6 +115,13 @@ class ExtractionResult(BaseModel):
     llm_fallback_fields: list[FactType] = Field(
         default_factory=list,
         description="targets no anchor or rule produced, i.e. left for the LLM to decide",
+    )
+    # Selector precision, recorded so it can be argued about with numbers. The lexical selector
+    # decides which chunks are worth an expensive call; nobody has measured how often it is
+    # right. These two counts are what that measurement needs.
+    chunks_selected: int = Field(default=0, description="chunks the selector sent to the LLM")
+    chunks_with_facts: int = Field(
+        default=0, description="of those, how many yielded at least one surviving fact"
     )
 
 
@@ -142,3 +152,60 @@ class LLMAnswer(BaseModel):
     found: bool
     answer: str = Field(description="short answer; empty if not found")
     raw_text: str = Field(description="exact quote supporting the answer; empty if not found")
+
+
+# --- closed answer spaces ----------------------------------------------------------------------
+#
+# A "choice" asks the model to pick from a fixed option set and reads the probability it put on
+# each option, instead of letting it write JSON. Two properties matter here:
+#
+#   * the model cannot invent a value — the answer space is fixed before the call, so this is
+#     structurally immune to the hallucination that ``quote_in_chunk`` exists to catch;
+#   * it decodes a single token, so on CPU it costs prefill plus one step rather than prefill
+#     plus a few hundred steps.
+#
+# Options must be single tokens in the target tokenizer, which in practice means short ASCII
+# words. They stay English even though the documents are Georgian: Georgian "tokenizes poorly in
+# most LLMs" (see ``ingestion.chunker``), and a multi-token option cannot be scored this way.
+
+
+class ChoiceResult(BaseModel):
+    """The distribution a model put over a fixed option set."""
+
+    model_config = ConfigDict(frozen=True)
+
+    choice: str = Field(description="the highest-probability allowed option")
+    probabilities: dict[str, float] = Field(
+        description="probability per allowed option, renormalised to sum to 1"
+    )
+    covered: float = Field(
+        ge=0.0,
+        le=1.0,
+        description=(
+            "probability mass the allowed options held BEFORE renormalisation. Low coverage "
+            "means the model wanted to say something else entirely and the renormalised "
+            "numbers are meaningless — treat it as an abstention, not as a confident answer."
+        ),
+    )
+
+    @property
+    def confidence(self) -> float:
+        """Probability of the chosen option after renormalisation."""
+        return self.probabilities.get(self.choice, 0.0)
+
+
+#: Minimum mass the allowed options must hold for a choice to be believed at all.
+#: Below this the model was answering a different question than the one we asked.
+MIN_COVERAGE: float = 0.5
+
+#: VAT treatment. A keyword rule already finds a percentage near VAT wording, but nothing
+#: deterministic decides which of these three cases applies.
+VAT_OPTIONS: tuple[str, ...] = ("incl", "excl", "none")
+VAT_MEANING: dict[str, str] = {
+    "incl": "amounts include VAT",
+    "excl": "amounts exclude VAT",
+    "none": "VAT treatment not stated",
+}
+
+#: Generic yes/no space, used by the post-generation verifier.
+YESNO_OPTIONS: tuple[str, ...] = ("yes", "no")

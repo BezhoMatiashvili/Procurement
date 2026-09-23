@@ -8,7 +8,13 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from procurement_agent.api.deps import client_ip, get_worker, owned_document
+from procurement_agent.api.deps import (
+    client_ip,
+    ensure_job_capacity,
+    get_worker,
+    owned_document,
+    owned_job,
+)
 from procurement_agent.config import Settings, get_settings
 from procurement_agent.db import get_session
 from procurement_agent.extraction.export import to_xlsx
@@ -55,13 +61,6 @@ def _job_out(j: Job) -> JobOut:
     )
 
 
-def _owned_job(session: Session, principal: Principal, job_id: str) -> Job:
-    job = session.get(Job, job_id)
-    if job is None or job.owner != principal.user:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "job not found")
-    return job
-
-
 @router.post(
     "/documents/{doc_id}/extract", status_code=status.HTTP_202_ACCEPTED, response_model=JobOut
 )
@@ -72,11 +71,13 @@ def start_extraction(
     principal: Annotated[Principal, Depends(authenticate)],
     session: Annotated[Session, Depends(get_session)],
     worker: Annotated[Worker, Depends(get_worker)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> JobOut:
     doc = owned_document(session, principal, doc_id)
     if doc.status != DocumentStatus.ready:
         msg = f"document is not ready (status: {doc.status.value})"
         raise HTTPException(status.HTTP_409_CONFLICT, msg)
+    ensure_job_capacity(session, settings, principal)
     params: dict[str, object] = {"fast": body.fast, "use_llm": body.use_llm}
     if body.targets:
         params["targets"] = [t.value for t in body.targets]
@@ -104,7 +105,7 @@ def get_job(
     principal: Annotated[Principal, Depends(authenticate)],
     session: Annotated[Session, Depends(get_session)],
 ) -> JobOut:
-    return _job_out(_owned_job(session, principal, job_id))
+    return _job_out(owned_job(session, principal, job_id))
 
 
 @router.get("/jobs/{job_id}/result")
@@ -116,7 +117,7 @@ def get_result(
     settings: Annotated[Settings, Depends(get_settings)],
     fmt: Annotated[Literal["json", "xlsx"], Query(alias="format")] = "json",
 ) -> Response:
-    job = _owned_job(session, principal, job_id)
+    job = owned_job(session, principal, job_id, live_document=True)
     if job.kind != "extract":
         raise HTTPException(status.HTTP_404_NOT_FOUND, "job has no result")
     if job.status != JobStatus.done:

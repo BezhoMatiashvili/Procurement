@@ -22,6 +22,9 @@ RULE_CLASSIFIED: Final = 0.7
 RULE_UNCLASSIFIED: Final = 0.5
 #: An LLM answer whose supporting quote was found verbatim in the chunk.
 LLM: Final = 0.75
+#: Ceiling for an LLM free-text value that cannot be found in the quote it cites. The quote is
+#: real, so the fact is kept, but nothing ties the value to it; it ranks below every rule.
+LLM_UNGROUNDED: Final = 0.5
 #: An LLM answer to a free-form question.
 LLM_ANSWER: Final = 0.7
 #: An unlabelled date in the document header, promoted to "document date".
@@ -36,3 +39,23 @@ SAME_SOURCE_CAP: Final = 0.95
 
 #: Order used when two sources disagree: the earlier wins.
 SOURCE_PRIORITY: Final = ("both", "anchor", "rules", "llm")
+
+# --- closed-answer-space calls ------------------------------------------------------------------
+#
+# A choice answer is evidence of a different kind from the ones above: the model could not invent
+# the value, because the answer space was fixed before the call. That makes it safe from
+# hallucination but says nothing about whether it read the document correctly, so it is placed
+# alongside a classified rule rather than above an anchor.
+#
+# The probability the model reports is NOT used as the confidence. Measured on gemma3:4b it is
+# saturated — p = 1.0 on questions with an obvious answer, even at temperature 1 — so treating it
+# as a calibrated probability would manufacture certainty. It is used only to *withhold* a fact
+# when the model was unsure, never to promote one.
+
+#: A value decided by picking from a fixed option set.
+CHOICE: Final = 0.7
+#: Below this renormalised probability the choice is treated as undecided and no fact is emitted.
+CHOICE_MIN_CONFIDENCE: Final = 0.75
+#: Subtracted from an LLM fact whose verifier answered "no" — the quote was real but the model
+#: would not stand behind what it means. The fact is kept, and demoted below a classified rule.
+VERIFIER_PENALTY: Final = 0.25

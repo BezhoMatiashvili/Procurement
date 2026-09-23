@@ -10,18 +10,12 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 from procurement_agent.extraction.schemas import ExtractionResult
+from procurement_agent.report.xlsx_safe import cell_safe
 
 _HEADERS = [
     "Type", "Label", "Value", "Normalized", "Unit", "Currency", "Confidence", "Conflict",
     "Source", "Page", "Sheet", "Cell", "Quote",
 ]  # fmt: skip
-
-
-def _cell_safe(v: object) -> object:
-    """Neutralise spreadsheet formula injection: values starting with = + - @ are prefixed."""
-    if isinstance(v, str) and v[:1] in ("=", "+", "-", "@", "\t", "\r"):
-        return "'" + v
-    return v
 
 
 def to_xlsx(result: ExtractionResult, document_name: str) -> bytes:
@@ -30,7 +24,7 @@ def to_xlsx(result: ExtractionResult, document_name: str) -> bytes:
     if not isinstance(ws, Worksheet):  # pragma: no cover - openpyxl always creates one
         raise TypeError("workbook has no active worksheet")
     ws.title = "Facts"
-    ws.append([_cell_safe(f"Document: {document_name}")])
+    ws.append([cell_safe(f"Document: {document_name}")])
     ws.append([f"Model: {result.model or 'rules only'}", f"LLM calls: {result.llm_calls}"])
     ws.append([])
     ws.append(_HEADERS)
@@ -42,8 +36,8 @@ def to_xlsx(result: ExtractionResult, document_name: str) -> bytes:
             [
                 f.type.value,
                 f.label,
-                _cell_safe(f.value),
-                _cell_safe(f.normalized),
+                cell_safe(f.value),
+                cell_safe(f.normalized),
                 f.unit,
                 f.currency,
                 round(f.confidence, 2),
@@ -52,7 +46,7 @@ def to_xlsx(result: ExtractionResult, document_name: str) -> bytes:
                 f.provenance.page,
                 f.provenance.sheet,
                 f.provenance.cell,
-                _cell_safe(f.raw_text),
+                cell_safe(f.raw_text),
             ]
         )
     for i, width in enumerate([18, 22, 30, 16, 8, 9, 11, 9, 8, 6, 12, 10, 60], 1):
@@ -60,7 +54,7 @@ def to_xlsx(result: ExtractionResult, document_name: str) -> bytes:
     if result.warnings:
         ws2 = wb.create_sheet("Warnings")
         for w in result.warnings:
-            ws2.append([_cell_safe(w)])
+            ws2.append([cell_safe(w)])
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()

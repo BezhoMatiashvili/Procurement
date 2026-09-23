@@ -27,6 +27,10 @@ class Finding(BaseModel):
     actual: str | None = None
     #: character span in the checked document's text, for in-document annotation
     span: tuple[int, int] | None = None
+    #: the document's own words for what was found, in full. ``expected``/``actual`` are for
+    #: reading: normalised (an ISO date, "48750"), and in the comparison shortened for display.
+    #: Neither can be found again in the Word file, so annotation looks for this first.
+    quote: str | None = None
     provenance: Provenance | None = None
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
 
@@ -35,12 +39,27 @@ class Finding(BaseModel):
         return self.severity == "error"
 
 
+class SkipNote(BaseModel):
+    """A rule that could not run, and why - in both languages, like a finding.
+
+    ``Finding`` has carried ``message_ka``/``message_en`` from the start; skips were plain English
+    strings, which meant a Georgian report explained its own gaps in English. Same contract now:
+    whatever the UI can show as a finding, it can show as a skip.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    rule_id: str
+    reason_ka: str
+    reason_en: str
+
+
 class CheckReport(BaseModel):
     document_id: str
     reference_document_id: str | None = None
     findings: list[Finding] = Field(default_factory=list)
     #: rules that could not run, and why - never silently skipped
-    skipped: list[str] = Field(default_factory=list)
+    skipped: list[SkipNote] = Field(default_factory=list)
     summary: dict[str, str] = Field(default_factory=dict)
 
     @property

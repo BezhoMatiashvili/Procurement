@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TypeVar
 
 from pydantic import BaseModel
 
 from procurement_agent.config import Settings
+from procurement_agent.extraction import weights
 from procurement_agent.extraction.llm_extractor import quote_in_chunk, run_llm_extraction
 from procurement_agent.extraction.merger import merge
 from procurement_agent.extraction.pipeline import run_extraction
 from procurement_agent.extraction.schemas import (
     DEFAULT_TARGETS,
+    ChoiceResult,
     ExtractedFact,
     FactType,
     LLMAnswer,
@@ -21,6 +24,7 @@ from procurement_agent.extraction.schemas import (
 )
 from procurement_agent.extraction.selector import score_chunks, select_chunks
 from procurement_agent.ingestion.chunker import Chunk, estimate_tokens
+from procurement_agent.llm.base import LLMError
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -38,10 +42,20 @@ def chunk(cid: str, text: str, page: int = 1) -> Chunk:
 class FakeLLM:
     """Returns canned facts; records what it was asked."""
 
-    def __init__(self, facts: list[LLMFact] | None = None, answer: LLMAnswer | None = None) -> None:
+    def __init__(
+        self,
+        facts: list[LLMFact] | None = None,
+        answer: LLMAnswer | None = None,
+        choices: dict[str, str] | None = None,
+        covered: float = 1.0,
+    ) -> None:
         self.facts = facts or []
         self.answer = answer
+        #: substring of the question (lowercased) -> option to return; first match wins
+        self.choices = choices or {}
+        self.covered = covered
         self.calls: list[str] = []
+        self.choice_calls: list[str] = []
 
     def generate_structured(
         self, *, system: str, user: str, schema: type[T], model: str | None = None
@@ -51,6 +65,19 @@ class FakeLLM:
         if schema is LLMAnswer:
             return self.answer or LLMAnswer(found=False, answer="", raw_text="")  # type: ignore[return-value]
         return LLMExtraction(facts=self.facts)  # type: ignore[return-value]
+
+    def generate_choice(
+        self,
+        *,
+        document: str,
+        question: str,
+        options: Sequence[str],
+        model: str | None = None,
+    ) -> ChoiceResult:
+        self.choice_calls.append(question)
+        picked = next((v for k, v in self.choices.items() if k in question.lower()), options[-1])
+        probs = {o: (0.9 if o == picked else 0.1 / (len(options) - 1)) for o in options}
+        return ChoiceResult(choice=picked, probabilities=probs, covered=self.covered)
 
     def health(self) -> dict[str, object]:
         return {"ok": True}
@@ -259,3 +286,108 @@ def test_pipeline_question_mode() -> None:
     )
     answers = [f for f in res.facts if f.type == FactType.other]
     assert answers and answers[0].value == "24 თვე"
+
+
+# --- closed-answer-space pass -------------------------------------------------------------------
+
+CHOICE_SETTINGS = Settings(
+    ollama_base_url="http://localhost:11434", llm_chunk_token_budget=600, llm_choices=True
+)
+
+#: One chunk whose text the generation pass will produce a fact from.
+VAT_DOC = [chunk("v:0", "ხელშეკრულების ღირებულება შეადგენს 125 400,00 ლარს დღგ-ს ჩათვლით.")]
+TOTAL_FACT = LLMFact(
+    type=FactType.total_amount, value="125 400,00 GEL", raw_text="125 400,00 ლარს", currency="gel"
+)
+
+
+def test_choice_pass_is_off_unless_asked_for() -> None:
+    """The default path must not pay for choice calls; it is opt-in while it is unmeasured."""
+    llm = FakeLLM(facts=[TOTAL_FACT])
+    res = run_extraction(document_id="d", chunks=VAT_DOC, settings=SETTINGS, llm=llm)
+    assert llm.choice_calls == []
+    assert res.llm_choice_calls == 0
+
+
+def test_vat_status_is_decided_by_picking_not_by_writing() -> None:
+    llm = FakeLLM(facts=[TOTAL_FACT], choices={"vat": "incl", "state that": "yes"})
+    res = run_extraction(document_id="d", chunks=VAT_DOC, settings=CHOICE_SETTINGS, llm=llm)
+    vat = [f for f in res.facts if f.type is FactType.vat_status]
+    assert len(vat) == 1
+    assert vat[0].normalized == "incl"
+    # A choice has no quote by construction, and says so rather than inventing one.
+    assert vat[0].raw_text == ""
+    assert "no verbatim quote" in (vat[0].note or "")
+    assert res.llm_choice_calls > 0
+
+
+def test_a_silent_document_produces_no_vat_fact() -> None:
+    """'not stated' is a real answer, and must not be recorded as a finding."""
+    llm = FakeLLM(facts=[TOTAL_FACT], choices={"vat": "none", "state that": "yes"})
+    res = run_extraction(document_id="d", chunks=VAT_DOC, settings=CHOICE_SETTINGS, llm=llm)
+    assert [f for f in res.facts if f.type is FactType.vat_status] == []
+
+
+def test_low_coverage_is_an_abstention_not_an_answer() -> None:
+    """If the model spent its mass outside the option set, nothing is recorded."""
+    llm = FakeLLM(facts=[TOTAL_FACT], choices={"vat": "incl"}, covered=0.1)
+    res = run_extraction(document_id="d", chunks=VAT_DOC, settings=CHOICE_SETTINGS, llm=llm)
+    assert [f for f in res.facts if f.type is FactType.vat_status] == []
+
+
+def test_a_value_the_model_will_not_confirm_is_demoted() -> None:
+    """The quote was verbatim, so quote_in_chunk passed; the verifier is the second opinion."""
+    llm = FakeLLM(facts=[TOTAL_FACT], choices={"state that": "no", "vat": "none"})
+    out = run_llm_extraction(
+        VAT_DOC, llm=llm, targets=list(DEFAULT_TARGETS), question=None, choices=True
+    )
+    total = next(f for f in out.facts if f.type is FactType.total_amount)
+    assert total.confidence == weights.LLM - weights.VERIFIER_PENALTY
+    assert "did not confirm" in (total.note or "")
+    assert out.demoted_unsupported == 1
+
+
+def test_a_confirmed_value_keeps_its_confidence() -> None:
+    llm = FakeLLM(facts=[TOTAL_FACT], choices={"state that": "yes", "vat": "none"})
+    out = run_llm_extraction(
+        VAT_DOC, llm=llm, targets=list(DEFAULT_TARGETS), question=None, choices=True
+    )
+    total = next(f for f in out.facts if f.type is FactType.total_amount)
+    assert total.confidence == weights.LLM
+    assert total.note is None
+    assert out.demoted_unsupported == 0
+
+
+def test_an_unconfirmed_value_keeps_its_warning_when_a_rule_agrees() -> None:
+    """Corroboration raises confidence, but it must not quietly erase the caveat with it."""
+    llm = FakeLLM(facts=[TOTAL_FACT], choices={"state that": "no", "vat": "none"})
+    res = run_extraction(document_id="d", chunks=VAT_DOC, settings=CHOICE_SETTINGS, llm=llm)
+    total = next(f for f in res.facts if f.type is FactType.total_amount)
+    assert total.source == "both"  # the regex found the same amount
+    assert "did not confirm" in (total.note or "")
+    assert any("would not confirm" in w for w in res.warnings)
+
+
+def test_question_mode_skips_the_choice_pass() -> None:
+    """A free-form answer has no fixed option set to check it against, so it only adds latency."""
+    llm = FakeLLM(answer=LLMAnswer(found=True, answer="125 400", raw_text="125 400,00 ლარს"))
+    res = run_extraction(
+        document_id="d", chunks=VAT_DOC, settings=CHOICE_SETTINGS, llm=llm, question="რა ღირს?"
+    )
+    assert llm.choice_calls == []
+    assert res.llm_choice_calls == 0
+
+
+def test_a_failing_choice_pass_does_not_lose_generated_facts() -> None:
+    """Turning on an optional second opinion must not become a reliability regression."""
+
+    class FlakyChoiceLLM(FakeLLM):
+        def generate_choice(self, **kwargs: object) -> ChoiceResult:
+            raise LLMError("choice endpoint unavailable")
+
+    llm = FlakyChoiceLLM(facts=[TOTAL_FACT])
+    out = run_llm_extraction(
+        VAT_DOC, llm=llm, targets=list(DEFAULT_TARGETS), question=None, choices=True
+    )
+    assert [f.value for f in out.facts] == ["125 400,00 GEL"]  # the generated fact survives
+    assert any("unverified" in e for e in out.errors)

@@ -1,0 +1,106 @@
+# Quality gate. scripts/check.sh runs the same steps locally; keep the two in step.
+#
+# Third-party actions are pinned to release tags. Before the first push to a real remote,
+# replace each tag with the commit SHA it points to (Dependabot or `gh api` can do it), so a
+# re-pointed tag cannot change what runs with repository access.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.12.8"          # the uv that wrote uv.lock; the Dockerfile uses the same one
+  PYTHONUNBUFFERED: "1"
+  # Tests must never reach Hugging Face or any model host; the app sets these too.
+  HF_HUB_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"
+
+jobs:
+  lint:
+    name: lint, types, static security
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      # --locked fails when pyproject.toml and uv.lock disagree; --frozen would silently use
+      # the stale lock.
+      - run: uv sync --locked --all-groups
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy
+      - run: uv run bandit -q -c pyproject.toml -r src
+
+  test:
+    name: unit + integration tests (coverage)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --locked --all-groups
+      # e2e needs a live Ollama and docling needs downloaded models; neither exists on a
+      # hosted runner. The coverage floor is [tool.coverage.report] fail_under in pyproject.toml.
+      - run: >
+          uv run pytest -q -m "not e2e and not docling"
+          --cov=procurement_agent --cov-report=term --cov-report=xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: ignore
+          retention-days: 14
+
+  audit:
+    name: dependency vulnerabilities (pip-audit)
+    # Required, not advisory. It needs network access to the vulnerability database, which is
+    # why scripts/check.sh can skip it with --offline; CI is where it must pass.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --locked --all-groups
+      # Audit exactly what uv.lock pins (not whatever pip would resolve). torch comes from
+      # the CPU wheel index but exports as its PyPI version, so it is audited like the rest.
+      - run: >
+          uv export --locked --all-groups --no-hashes --no-emit-project
+          --format requirements-txt -o "$RUNNER_TEMP/requirements-audit.txt"
+      - run: >
+          uv run pip-audit --strict --disable-pip --no-deps
+          -r "$RUNNER_TEMP/requirements-audit.txt"
+
+  secrets:
+    name: secret scan (gitleaks)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # scan the whole history, not only the last commit
+      # The container image is used instead of gitleaks-action, which needs a paid licence
+      # key on organisation accounts. Same version as .pre-commit-config.yaml.
+      - run: >
+          docker run --rm -v "$GITHUB_WORKSPACE:/repo" zricethezav/gitleaks:v8.21.2
+          git /repo --redact --verbose --exit-code 1

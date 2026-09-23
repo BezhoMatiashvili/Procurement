@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
+from procurement_agent.checks.compare import ComparisonReport, compare
+from procurement_agent.checks.findings import SkipNote
 from procurement_agent.config import Settings
 from procurement_agent.extraction import weights
 from procurement_agent.extraction.anchors import AnchorHit, find_anchors
@@ -22,7 +25,13 @@ from procurement_agent.extraction.schemas import (
 from procurement_agent.extraction.selector import score_chunks, select_chunks
 from procurement_agent.ingestion.chunker import Chunk, chunk_docling_document
 from procurement_agent.ingestion.docling_service import load_document
-from procurement_agent.ingestion.excel_reader import read_workbook, sheet_chunks
+from procurement_agent.ingestion.excel_reader import read_formulas, read_workbook, sheet_chunks
+from procurement_agent.ingestion.segmenter import (
+    Segment,
+    pdf_has_text_layer,
+    segments_from_docling,
+    segments_from_workbook,
+)
 from procurement_agent.llm.base import LLMClient
 
 ProgressFn = Callable[[int, str], None]
@@ -36,12 +45,86 @@ def result_dir(settings: Settings, doc_id: str) -> Path:
     return settings.results_dir / doc_id
 
 
-def load_chunks(settings: Settings, doc_id: str, kind: str) -> list[Chunk]:
+def load_chunks(
+    settings: Settings, doc_id: str, kind: str, *, notes: list[str] | None = None
+) -> list[Chunk]:
+    """The stored document cut into LLM-sized chunks.
+
+    ``notes`` collects what the workbook reader had to leave out (rows, columns or sheets past
+    its caps), so a caller can tell the user instead of extracting from a silently shortened
+    file.
+    """
     if kind == "xlsx":
         data = upload_path(settings, doc_id, kind).read_bytes()
-        return sheet_chunks(read_workbook(data), doc_id=doc_id)
+        return sheet_chunks(read_workbook(data, notes=notes), doc_id=doc_id)
     doc = load_document(result_dir(settings, doc_id) / "docling.json")
     return chunk_docling_document(doc, doc_id=doc_id)
+
+
+def load_segments(
+    settings: Settings, doc_id: str, kind: str, *, notes: list[str] | None = None
+) -> list[Segment]:
+    """The same parsed document as ``load_chunks``, cut into diff-sized pieces instead.
+
+    Chunks pack about 1100 real tokens and serialise a whole table onto one line, which is
+    right for an LLM prompt and wrong for a line-by-line comparison. Both read the same stored
+    artifact, so a fact and a diff hunk can never disagree about what the document says.
+    """
+    if kind == "xlsx":
+        data = upload_path(settings, doc_id, kind).read_bytes()
+        return segments_from_workbook(read_workbook(data, notes=notes), read_formulas(data))
+    return segments_from_docling(load_document(result_dir(settings, doc_id) / "docling.json"))
+
+
+def is_scanned_pdf(settings: Settings, doc_id: str, kind: str) -> bool:
+    """True for a PDF whose text had to come from OCR (it has no text layer of its own)."""
+    return kind == "pdf" and not pdf_has_text_layer(upload_path(settings, doc_id, kind))
+
+
+@dataclass(frozen=True, slots=True)
+class StoredDocument:
+    """What a comparison needs to know about one uploaded, parsed document."""
+
+    id: str
+    kind: str
+    name: str
+
+
+def compare_stored(
+    settings: Settings, left: StoredDocument, right: StoredDocument
+) -> ComparisonReport:
+    """Compare two stored documents: the one entry point for the API, the UI and the worker.
+
+    The API and the explain job used to build this call separately, and neither told
+    ``compare`` whether the input was OCR'd, so every PDF was treated as a scan and a letter
+    swapped for a lookalike in a born-digital PDF was reported as scanner noise. Workbook
+    truncation is surfaced as a skip note for the same reason: two files compared on their
+    first 20 000 rows must not read as "identical".
+    """
+    notes: list[str] = []
+    report = compare(
+        load_segments(settings, left.id, left.kind, notes=notes),
+        load_segments(settings, right.id, right.kind, notes=notes),
+        left_document_id=left.id,
+        right_document_id=right.id,
+        left_name=left.name,
+        right_name=right.name,
+        left_kind=left.kind,
+        right_kind=right.kind,
+        min_similarity=settings.compare_min_similarity,
+        max_segments=settings.compare_max_segments,
+        ocr=is_scanned_pdf(settings, left.id, left.kind)
+        or is_scanned_pdf(settings, right.id, right.kind),
+    )
+    report.skipped.extend(
+        SkipNote(
+            rule_id="CMP.TRUNCATED",
+            reason_ka=f"ფაილის ნაწილი ლიმიტის გამო არ შედარდა: {note}",
+            reason_en=f"part of the file was not compared (size limit): {note}",
+        )
+        for note in notes
+    )
+    return report
 
 
 def run_extraction(
@@ -99,6 +182,7 @@ def run_extraction(
     # 3. LLM pass
     llm_facts: list[ExtractedFact] = []
     calls = 0
+    choice_calls = 0
     model_used: str | None = None
     if llm is not None and selected:
         model_used = settings.llm_fast_model if fast else settings.llm_model
@@ -113,13 +197,19 @@ def run_extraction(
             question=question,
             model=model_used,
             progress=llm_progress,
+            # Question mode has one free-form answer and nothing to verify against a fixed
+            # option set, so the choice pass would only add latency there.
+            choices=settings.llm_choices and not question,
         )
         calls = out.calls
+        choice_calls = out.choice_calls
         llm_facts = out.facts
         if out.dropped_unverified:
             warnings.append(
-                f"{out.dropped_unverified} model answer(s) dropped: quote not found in document"
+                f"{out.dropped_unverified} model answer(s) dropped: quote not found in the "
+                "document, or the value is not in its quote"
             )
+        warnings.extend(out.choice_notes)
         warnings.extend(out.errors)
         for chunk, ans in out.answers:
             llm_facts.append(
@@ -153,6 +243,9 @@ def run_extraction(
         warnings=warnings,
         model=model_used,
         llm_calls=calls,
+        llm_choice_calls=choice_calls,
+        chunks_selected=len(selected),
+        chunks_with_facts=len({f.provenance.chunk_id for f in llm_facts if f.provenance.chunk_id}),
         seconds=round(time.perf_counter() - t0, 2),
         prompt_version=PROMPT_VERSION,
         llm_options=dict(llm.options()) if llm is not None and hasattr(llm, "options") else {},

@@ -92,4 +92,20 @@ def select_chunks(
         used += sc.chunk.token_estimate
     # keep document order for the LLM; it reads more naturally and merges better
     order = {id(c): i for i, c in enumerate(chosen)}
-    return sorted(chosen, key=lambda c: (c.provenance.page or 0, c.id, order[id(c)]))
+    return sorted(chosen, key=lambda c: (c.provenance.page or 0, _natural_key(c.id), order[id(c)]))
+
+
+_DIGIT_RUN = re.compile(r"(\d+)")
+
+
+def _natural_key(chunk_id: str) -> tuple[tuple[int, int | str], ...]:
+    """Sort key that orders "doc:2" before "doc:10".
+
+    Chunk ids end in a running index, and a plain string sort put the tenth chunk of a page
+    between the first and the second, handing the model the document out of order.
+    """
+    return tuple(
+        (0, int(part)) if part.isdigit() else (1, part)
+        for part in _DIGIT_RUN.split(chunk_id)
+        if part
+    )

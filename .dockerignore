@@ -1,15 +1,18 @@
-.venv
-.git
-data
-models
-samples
-tests
-docs
-scripts
+# Allowlist: ignore everything, then re-include only what the Dockerfile COPYs.
+#
+# The build context is sent to the Docker daemon (and cached by BuildKit) in full. The working
+# tree holds client documents ("AI Test/", samples/), Docling's parse of them (.eval_cache/),
+# evaluation scores (eval_runs/), .env with secrets, the SQLite database and uploads (data/),
+# and multi-GB models. A deny-list has to name every one of those and silently leaks the next
+# one somebody adds; an allowlist cannot. If the Dockerfile gains a COPY, add a line here.
+*
+
+!pyproject.toml
+!uv.lock
+!README.md
+!src/
+
+# Re-included directories can still carry build debris.
 **/__pycache__
-*.pyc
-.env
-.env.*
-.mypy_cache
-.ruff_cache
-.pytest_cache
+**/*.py[cod]
+**/.DS_Store

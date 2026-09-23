@@ -201,14 +201,102 @@ def make_boq_xlsx(path: Path) -> None:
     wb.save(path)
 
 
+# --- comparison pairs -------------------------------------------------------------------------
+#
+# The client's own corpus is six revisions of one acceptance act, and every one of them aligns as
+# a pure `replace`: not a single added, removed or moved paragraph anywhere in the set. So the
+# add / remove / move / formatting paths of the comparison have no coverage at all from real
+# material, and these pairs exist to give them some. One deviation each, named after it.
+
+COMPARE_BASE = CONTRACT_PARAS
+
+#: (name, how the revision differs from COMPARE_BASE)
+COMPARE_CASES: dict[str, str] = {
+    "added": "one clause inserted in the middle",
+    "removed": "one clause deleted",
+    "moved": "one clause relocated, its words untouched",
+    "formatting": "quotes, dashes and spacing only",
+    "homoglyph": "one Latin letter of a bank code swapped for its Cyrillic twin",
+    "amount": "the contract value changed, in digits and in Georgian words",
+    "date": "the delivery deadline moved",
+    "reworded": "one clause says something else, with no figure in it either version",
+}
+
+_NEW_CLAUSE = (
+    "8. კონფიდენციალურობა. მხარეები იღებენ ვალდებულებას არ გაამჟღავნონ ხელშეკრულების "
+    "პირობები მესამე პირებისთვის."
+)
+_BANK_LINE = "საბანკო რეკვიზიტები: ანგარიში GE29TB7777777777777777, ბანკის კოდი TBCAGE22."
+
+
+def _compare_variant(case: str) -> list[str]:
+    paras = [*COMPARE_BASE, _BANK_LINE]
+    if case == "base":
+        return paras
+    if case == "added":
+        return [*paras[:-2], _NEW_CLAUSE, *paras[-2:]]
+    if case == "removed":
+        return [p for p in paras if not p.startswith("5. საგარანტიო")]
+    if case == "moved":
+        moved = next(p for p in paras if p.startswith("5. საგარანტიო"))
+        rest = [p for p in paras if p is not moved]
+        return [rest[0], rest[1], moved, *rest[2:]]
+    if case == "formatting":
+        # Typographic only: curly quotes, an en dash, a doubled space. normalize_confusables
+        # folds every one of these, so the comparison must call it formatting and move on.
+        return [p.replace('"', "„", 1).replace("-", "\u2013").replace(". ", ".  ") for p in paras]
+    if case == "homoglyph":
+        # A Cyrillic lookalike (U+0415) in place of Latin E. The two render identically at any size,
+        # and normalize_confusables folds one onto the other - which is the entire reason the
+        # rule exists: the fold is what makes comparison work and what makes the swap invisible.
+        return [p.replace("TBCAGE22", "TBCAG\u041522") for p in paras]
+    if case == "amount":
+        return [
+            p.replace("48 750,00", "52 100,00").replace(
+                "ორმოცდარვა ათას შვიდას ორმოცდაათი", "ორმოცდათორმეტი ათას ასი"
+            )
+            for p in paras
+        ]
+    if case == "date":
+        return [p.replace("2026 წლის 30 აპრილისა", "2026 წლის 15 მაისისა") for p in paras]
+    if case == "reworded":
+        # No amount, date, period or code on either side: the rules have nothing to name, which
+        # is the only case the model pass is ever asked about.
+        return [
+            p.replace(
+                "მიმწოდებელი კისრულობს ვალდებულებას მიაწოდოს შემსყიდველს",
+                "მიმწოდებელი უზრუნველყოფს შემსყიდველისთვის მიწოდებას",
+            )
+            for p in paras
+        ]
+    raise ValueError(case)
+
+
+def make_compare_pairs(out: Path) -> None:
+    out.mkdir(parents=True, exist_ok=True)
+    _write_paras_docx(out / "base.docx", _compare_variant("base"))
+    for case in COMPARE_CASES:
+        _write_paras_docx(out / f"{case}.docx", _compare_variant(case))
+
+
+def _write_paras_docx(path: Path, paragraphs: list[str]) -> None:
+    d = DocxDocument()
+    d.add_heading(paragraphs[0], level=1)
+    for p in paragraphs[1:]:
+        d.add_paragraph(p)
+    d.save(path)
+
+
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     make_offer_pdf(OUT / "offer_ka_en.pdf")
     make_scanned_pdf(OUT / "offer_ka_en.pdf", OUT / "offer_ka_en_scanned.pdf")
     make_contract_docx(OUT / "contract_ka.docx")
     make_boq_xlsx(OUT / "boq_ka.xlsx")
-    for p in sorted(OUT.iterdir()):
-        print(f"{p.name:32} {p.stat().st_size // 1024:5} KB")
+    make_compare_pairs(OUT / "compare")
+    for p in sorted(OUT.rglob("*")):
+        if p.is_file():
+            print(f"{p.relative_to(OUT)!s:32} {p.stat().st_size // 1024:5} KB")
 
 
 if __name__ == "__main__":

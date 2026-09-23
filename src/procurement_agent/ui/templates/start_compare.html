@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}{{ t("upload.compare.title") }} · {{ t("app.name") }}{% endblock %}
+{% block content %}
+<p><a class="back" href="/ui/">&larr; {{ t("nav.home") }}</a></p>
+<h1>{{ t("upload.compare.title") }}</h1>
+
+{# Two required slots, and a plain form action so the step works with JavaScript off — the same
+   bargain start_aoa.html makes. BOQ cannot do this because it needs N files; two is fine. #}
+<form class="card" data-upload-flow="compare" data-next="/ui/checks/compare"
+      action="/ui/start/compare" method="post" enctype="multipart/form-data">
+  <div class="slot" data-slot="left" data-field="left">
+    <h2>{{ t("upload.left") }} <span class="slot-required">{{ t("upload.required") }}</span></h2>
+    <p class="muted small">{{ t("upload.left.hint") }}</p>
+    <label class="drop">
+      <span class="drop-hint">{{ t("upload.choose") }} <span class="muted">{{ t("upload.drop") }}</span></span>
+      <input type="file" name="left" accept=".pdf,.docx,.xlsx" required>
+    </label>
+  </div>
+
+  <div class="slot" data-slot="right" data-field="right">
+    <h2>{{ t("upload.right") }} <span class="slot-required">{{ t("upload.required") }}</span></h2>
+    <p class="muted small">{{ t("upload.right.hint") }}</p>
+    <label class="drop">
+      <span class="drop-hint">{{ t("upload.choose") }} <span class="muted">{{ t("upload.drop") }}</span></span>
+      <input type="file" name="right" accept=".pdf,.docx,.xlsx" required>
+    </label>
+  </div>
+
+  <ol class="upload-rows" data-upload-rows role="status" aria-live="polite"
+      data-s-waiting="{{ t('upload.status.waiting') }}"
+      data-s-uploading="{{ t('upload.status.uploading') }}"
+      data-s-parsing="{{ t('upload.status.parsing') }}"
+      data-s-ready="{{ t('upload.status.ready') }}"
+      data-s-failed="{{ t('upload.status.failed') }}"
+      data-s-busy="{{ t('upload.busy') }}"
+      data-s-opening="{{ t('upload.opening') }}"></ol>
+  <button type="submit" data-upload-submit>{{ t("upload.start") }}</button>
+</form>
+{% endblock %}
+{% block scripts %}<script src="/static/upload.js"></script>{% endblock %}

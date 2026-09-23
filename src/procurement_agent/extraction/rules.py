@@ -9,10 +9,17 @@ ambiguous stays generic (``amount``/``date``/...) and is left for the LLM to ref
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 
-from procurement_agent.extraction.normalize import edit_distance
+from procurement_agent.extraction.normalize import (
+    amounts_equal,
+    edit_distance,
+    iban_is_valid,
+    unlabelled_bic_plausible,
+)
+from procurement_agent.extraction.normalize import parse_number as _parse_number
 from procurement_agent.extraction.schemas import FactType
 
 # --- helpers -----------------------------------------------------------------------------------
@@ -166,19 +173,13 @@ def _classify(text: str, start: int, end: int, candidates: tuple[FactType, ...])
 
 
 def parse_number(s: str) -> float | None:
-    s = s.strip().replace("\u00a0", " ")
-    if not s:
-        return None
-    # decide decimal separator: a trailing [.,] followed by 1-2 digits
-    m = re.fullmatch(r"(.*?)([.,])(\d{1,2})", s)
-    if m and (len(m.group(1)) > 3 or not re.search(r"[ ,.]", m.group(1))):
-        integer, frac = m.group(1), m.group(3)
-    else:
-        integer, frac = s, ""
-    integer = re.sub(r"[ ,.]", "", integer)
-    if not integer.isdigit():
-        return None
-    return float(f"{integer}.{frac}" if frac else integer)
+    """Kept as a name for callers of this module; the one implementation is in ``normalize``.
+
+    This used to be a copy that had drifted: it did not know a minus sign, nor any space
+    character other than the no-break space, so the rules and the scorer could read the same
+    string as two different numbers.
+    """
+    return _parse_number(s)
 
 
 def _norm_currency(raw: str) -> str | None:
@@ -194,6 +195,18 @@ _AMOUNT_AFTER = re.compile(
 )
 _AMOUNT_BEFORE = re.compile(rf"({_CUR_RE})\s*({_NUM_RE})(?![\d])", re.IGNORECASE)
 
+# A number whose only separators are spaces and which has no decimal part: "5 100". Written
+# after a quantity keyword it is far more likely a count followed by a price ("რაოდენობა 5
+# 100 ლარი") than one amount of 5 100, so only the group next to the currency is the amount.
+# With a decimal part ("1 234 567,89") the grouping is unambiguous and is kept whole.
+_SPACE_GROUPED = re.compile(r"\d{1,3}(?:[ \u00a0]\d{3})+")
+_QUANTITY_BEFORE = re.compile(r"(?:რაოდენობ[ა-ჰ]*|quantity|qty)\.?\s*$", re.IGNORECASE)
+
+
+def _overlaps(a: tuple[int, int], b: tuple[int, int]) -> bool:
+    """Half-open interval overlap, including one span wholly containing the other."""
+    return a[0] < b[1] and b[0] < a[1]
+
 
 def find_amounts(text: str) -> list[RuleHit]:
     hits: list[RuleHit] = []
@@ -201,9 +214,18 @@ def find_amounts(text: str) -> list[RuleHit]:
     for pat, num_group, cur_group in ((_AMOUNT_AFTER, 1, 2), (_AMOUNT_BEFORE, 2, 1)):
         for m in pat.finditer(text):
             span = (m.start(), m.end())
-            if any(s <= span[0] < e or s < span[1] <= e for s, e in seen):
+            if any(_overlaps(span, other) for other in seen):
                 continue
-            value = parse_number(m.group(num_group))
+            number = m.group(num_group)
+            if (
+                pat is _AMOUNT_AFTER
+                and _SPACE_GROUPED.fullmatch(number)
+                and _QUANTITY_BEFORE.search(text[max(0, span[0] - 30) : span[0]])
+            ):
+                cut = max(number.rfind(" "), number.rfind("\u00a0")) + 1
+                number = number[cut:]
+                span = (m.start(num_group) + cut, span[1])
+            value = parse_number(number)
             if value is None:
                 continue
             cur = _norm_currency(m.group(cur_group))
@@ -213,7 +235,7 @@ def find_amounts(text: str) -> list[RuleHit]:
                 RuleHit(
                     type=ft or FactType.amount,
                     value=f"{value:,.2f} {cur}" if cur else f"{value:,.2f}",
-                    raw_text=m.group(0),
+                    raw_text=text[span[0] : span[1]],
                     start=span[0],
                     end=span[1],
                     normalized=value,
@@ -356,7 +378,9 @@ def find_dates(text: str) -> list[RuleHit]:
 
 _ID_CODE = re.compile(
     r"(?:ს\s*/\s*კ|ს\s*\.\s*კ\s*\.|საიდენტიფიკაციო\s*(?:კოდი|ნომერი|№)?|პირადი\s*ნომერი|"
-    r"ID\s*(?:code|no\.?|number|№)?|identification\s*(?:code|number|no\.?)|tax\s*id)"
+    # English labels start at a word boundary: "paid 204567890" is not "ID 204567890"
+    r"(?<![A-Za-z])(?:ID(?![A-Za-z])\s*(?:code|no\.?|number|№)?|"
+    r"identification\s*(?:code|number|no\.?)|tax\s*id(?![A-Za-z])))"
     r"\s*[:№#\-]?\s*(\d{9}|\d{11})(?!\d)",
     re.IGNORECASE,
 )
@@ -413,7 +437,8 @@ def find_percentages(text: str) -> list[RuleHit]:
 
 _DUR_KA = re.compile(
     r"(?<!\d)(\d{1,4})\s*(?:\(\s*[ა-ჰ ]+\s*\)\s*)?(კალენდარული|სამუშაო|საბანკო)?\s*"
-    r"(დღ|კვირ|თვ|წელ|წლ)[ა-ჰ]*",
+    # "დღ(?!გ)": დღგ is VAT, and "18 დღგ-ს ჩათვლით" is not eighteen days
+    r"(დღ(?!გ)|კვირ|თვ|წელ|წლ)[ა-ჰ]*",
     re.IGNORECASE,
 )
 _DUR_EN = re.compile(
@@ -435,7 +460,9 @@ def find_durations(text: str) -> list[RuleHit]:
             if is_ka and unit.startswith("წ") and n >= 1900:
                 continue  # "2026 წლის ..." is a date ("of the year 2026"), not a duration
             if is_ka:
-                unit = _UNIT_KA.get(unit[:2] if unit.startswith("წლ") else unit[:3], unit)
+                # group 3 is exactly one of the stems, so it is the key as it stands; slicing
+                # it to three letters turned "კვირ" into "კვი" and weeks into "2 კვირs"
+                unit = _UNIT_KA.get(unit, unit)
                 qual = _QUAL_KA.get(qual, qual) if qual else None
             ft = _classify(
                 text,
@@ -473,12 +500,16 @@ def find_durations(text: str) -> list[RuleHit]:
 # table is a row number far more often than a reference.
 _REFERENCED_DOC = (
     r"ხელშეკრულებ[ა-ჰ]*|შეთანხმებ[ა-ჰ]*|წინადადებ[ა-ჰ]*|შემოთავაზებ[ა-ჰ]*|განაცხად[ა-ჰ]*|"
-    r"ტენდერ[ა-ჰ]*|შესყიდვ[ა-ჰ]*|ინვოის[ა-ჰ]*|აქტ[ი-ჰ]*|"
+    r"ტენდერ[ა-ჰ]*|შესყიდვ[ა-ჰ]*|ინვოის[ა-ჰ]*|აქტ[ა-ჰ]*|"
     r"contract|agreement|offer|proposal|quotation|quote|tender|invoice|order|act"
 )
+# A number sign, or an "N" that stands alone as one: "N 12", "N12", "No.", "Nº", "N:". The
+# letter must not be the start of a word - the old "N[oº]?\.?" read the n of "number" as a
+# marker and returned "umber" - and the reference itself must contain a digit.
+_NUMBER_MARKER = r"(?:№|#|(?<![A-Za-z])N(?:[oº°]\.?|\.|:)?(?![A-Za-z]))"
 _CONTRACT_NO = re.compile(
-    rf"(?:{_REFERENCED_DOC})\s*(?:№|N[oº]?\.?|#)\s*"
-    r"([A-Za-z0-9][A-Za-z0-9\-/_.]{0,30}[A-Za-z0-9])",
+    rf"(?:{_REFERENCED_DOC})\s*{_NUMBER_MARKER}\s*"
+    r"((?=[A-Za-z0-9\-/_.]*\d)[A-Za-z0-9][A-Za-z0-9\-/_.]{0,30}[A-Za-z0-9])",
     re.IGNORECASE,
 )
 
@@ -495,43 +526,60 @@ def find_contract_numbers(text: str) -> list[RuleHit]:
             confidence=0.8,
         )
         for m in _CONTRACT_NO.finditer(text)
+        if any(ch.isdigit() for ch in m.group(1))
     ]
 
 
 # --- bank accounts & cadastral codes -----------------------------------------------------------
 
-_IBAN_GE = re.compile(r"\bGE\d{2}[A-Z]{2}\d{16}\b")
+# Georgian IBAN, compact or printed in groups of four ("GE29 NB00 0000 ...").
+_IBAN_GE = re.compile(r"\bGE\d{2}[ \u00a0]?[A-Z]{2}\d{2}(?:[ \u00a0]?\d{4}){3}[ \u00a0]?\d{2}\b")
 _SWIFT = re.compile(r"\b[A-Z]{4}GE[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b")
+_SPACE_CHARS = re.compile(r"[ \u00a0]")
 _CADASTRAL = re.compile(r"(?<![\d.])\d{2}\.\d{2}\.\d{2}\.\d{3}(?:\.\d{3})?(?![\d.])")
 
 
 def find_bank_accounts(text: str) -> list[RuleHit]:
-    hits = [
-        RuleHit(
-            type=FactType.bank_account,
-            value=m.group(0),
-            raw_text=m.group(0),
-            start=m.start(),
-            end=m.end(),
-            normalized=m.group(0),
-            unit="IBAN",
-            confidence=0.9,
+    """Georgian IBANs and bank codes.
+
+    An IBAN that fails its ISO 13616 checksum is kept, with a note and a lower confidence,
+    rather than dropped: a mistyped account number is precisely what the acceptance check
+    exists to report, and dropping it would turn "wrong account" into "no account". A bank code
+    is taken only where ``unlabelled_bic_plausible`` accepts it, because the pattern alone also
+    fits ordinary capitalised words.
+    """
+    hits: list[RuleHit] = []
+    for m in _IBAN_GE.finditer(text):
+        iban = _SPACE_CHARS.sub("", m.group(0))
+        valid = iban_is_valid(iban)
+        hits.append(
+            RuleHit(
+                type=FactType.bank_account,
+                value=iban,
+                raw_text=m.group(0),
+                start=m.start(),
+                end=m.end(),
+                normalized=iban,
+                unit="IBAN",
+                confidence=0.9 if valid else 0.6,
+                note=None if valid else "IBAN checksum does not validate (possible typo)",
+            )
         )
-        for m in _IBAN_GE.finditer(text)
-    ]
-    hits += [
-        RuleHit(
-            type=FactType.bank_account,
-            value=m.group(0),
-            raw_text=m.group(0),
-            start=m.start(),
-            end=m.end(),
-            normalized=m.group(0),
-            unit="SWIFT",
-            confidence=0.8,
+    for m in _SWIFT.finditer(text):
+        if not unlabelled_bic_plausible(text, m.start(), m.end()):
+            continue
+        hits.append(
+            RuleHit(
+                type=FactType.bank_account,
+                value=m.group(0),
+                raw_text=m.group(0),
+                start=m.start(),
+                end=m.end(),
+                normalized=m.group(0),
+                unit="SWIFT",
+                confidence=0.8,
+            )
         )
-        for m in _SWIFT.finditer(text)
-    ]
     return hits
 
 
@@ -566,3 +614,117 @@ def run_rules(text: str) -> list[RuleHit]:
         *find_cadastral_codes(text),
     ]
     return sorted(hits, key=lambda h: (h.start, h.end))
+
+
+# --- normalising a value that did not come from these rules -------------------------------------
+
+_MONEY_TYPES = frozenset({FactType.price, FactType.total_amount, FactType.amount})
+_TIME_TYPES = frozenset(
+    {
+        FactType.contract_date,
+        FactType.date,
+        FactType.delivery_deadline,
+        FactType.execution_period,
+        FactType.validity_period,
+        FactType.warranty_period,
+        FactType.duration,
+    }
+)
+_PERCENT_TYPES = frozenset({FactType.percentage, FactType.vat_status})
+_MIXED_TYPES = frozenset({FactType.penalty, FactType.payment_terms})
+_ID_DIGITS = re.compile(r"(?<!\d)(\d{9}|\d{11})(?!\d)")
+_BIC_SHAPE = re.compile(r"[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?")
+_IBAN_SHAPE = re.compile(r"[A-Z]{2}\d{2}[A-Z0-9]{11,30}")
+_REFERENCE_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9\-/_.]{0,30}[A-Za-z0-9]")
+_LEADING_MARKER = re.compile(r"^\s*(?:№|#|N[oº°]?\.?|N:)\s*", re.IGNORECASE)
+#: A hit has to cover this share of the value to stand for it. "24 months" is a duration;
+#: "30% advance, remainder within 10 days" is a summary that merely contains one.
+_MIN_COVER = 0.5
+
+
+def _only(hits: list[RuleHit], value: str) -> RuleHit | None:
+    distinct = {str(h.normalized) for h in hits}
+    if len(distinct) != 1:
+        return None
+    hit = hits[0]
+    return hit if len(hit.raw_text.strip()) >= _MIN_COVER * len(value) else None
+
+
+def normalize_fact_value(ft: FactType, value: str) -> str | float | None:
+    """The canonical form the rules would have given ``value`` for a fact of type ``ft``.
+
+    A fact from the LLM arrives as display text ("1000 GEL", "24 months"); the same fact from
+    a rule arrives with ``normalized`` set (1000.0, "P24M"). The merger keys facts on the
+    canonical form, so without this every LLM value was a different key from the matching
+    rule value, and a document where both sources agreed was reported as a conflict. Running
+    the value through the very functions that normalise rule hits is what guarantees the two
+    keys are computed the same way. Returns None when the value is not a single recognisable
+    entity - free text is then compared as text.
+    """
+    v = value.strip()
+    if not v:
+        return None
+    if ft in (FactType.party_id_code, FactType.id_code):
+        ids = {m.group(1) for m in _ID_DIGITS.finditer(v)}
+        return ids.pop() if len(ids) == 1 else None
+    if ft == FactType.bank_account:
+        compact = re.sub(r"\s", "", v).upper()
+        if _IBAN_SHAPE.fullmatch(compact) or _BIC_SHAPE.fullmatch(compact):
+            return compact
+        return None
+    if ft == FactType.cadastral_code:
+        m = _CADASTRAL.search(v)
+        return m.group(0) if m else None
+    if ft == FactType.contract_number:
+        m = _REFERENCE_TOKEN.fullmatch(_LEADING_MARKER.sub("", v))
+        return m.group(0) if m and any(ch.isdigit() for ch in m.group(0)) else None
+    if ft in _MONEY_TYPES:
+        hit = _only(find_amounts(v), v)
+        if hit is not None:
+            return hit.normalized
+        numbers = {parse_number(n) for n in re.findall(_NUM_RE, v)}
+        numbers.discard(None)
+        if len(numbers) == 1 and len(re.sub(r"[^\d]", "", v)) * 2 >= len(re.sub(r"\s", "", v)):
+            return numbers.pop()
+        return None
+    finders: list[Callable[[str], list[RuleHit]]] = []
+    if ft in _TIME_TYPES:
+        finders = [find_dates, find_durations]
+    elif ft in _PERCENT_TYPES:
+        finders = [find_percentages]
+    elif ft in _MIXED_TYPES:
+        finders = [find_percentages, find_amounts, find_durations]
+    for find in finders:
+        hit = _only(find(v), v)
+        if hit is not None:
+            return hit.normalized
+    return None
+
+
+def value_supported_by_quote(normalized: str | float, quote: str) -> bool:
+    """Whether a canonical value can be read back out of the quote that supposedly states it.
+
+    ``quote_in_chunk`` proves the quote is in the document; it says nothing about whether the
+    value the model wrote next to it came from that quote. A model can copy a real sentence and
+    attach a number it made up. This reads the quote with the same rules and asks whether any
+    value found there is the one claimed.
+    """
+    if isinstance(normalized, float):
+        for m in re.finditer(_NUM_RE, quote):
+            n = parse_number(m.group(0))
+            if n is not None and amounts_equal(n, normalized):
+                return True
+        return False
+    target = str(normalized)
+    compact_quote = re.sub(r"\s", "", quote).upper()
+    if re.sub(r"\s", "", target).upper() in compact_quote:
+        return True
+    found = {str(h.normalized) for h in [*find_dates(quote), *find_durations(quote)]}
+    if target in found:
+        return True
+    # "P30D" against "ოცდაათი (30) კალენდარული დღე": the duration pattern cannot read the
+    # count through the parenthesis, but the count is plainly in the quote.
+    duration = re.fullmatch(r"P(\d+)[DWMY]", target)
+    if duration:
+        return re.search(rf"(?<!\d){duration.group(1)}(?!\d)", quote) is not None
+    return False

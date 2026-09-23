@@ -51,6 +51,8 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
 
 
 H = {"X-API-Key": "pa_devkey_for_tests_only"}
+#: What a browser sends on a form post from our own page; sign-in is CSRF-guarded.
+SAME_ORIGIN = {"Sec-Fetch-Site": "same-origin"}
 
 
 def _wait(client: TestClient, job_id: str, timeout: float = 20.0) -> dict[str, object]:
@@ -151,7 +153,10 @@ def test_ui_login_cookie_and_csrf(client: TestClient) -> None:
     # an API-style request (no Accept: text/html) still gets a plain 401
     assert client.get("/ui/documents", headers={"Accept": "application/json"}).status_code == 401
     r = client.post(
-        "/ui/login", data={"api_key": "pa_devkey_for_tests_only"}, follow_redirects=False
+        "/ui/login",
+        data={"api_key": "pa_devkey_for_tests_only"},
+        headers=SAME_ORIGIN,
+        follow_redirects=False,
     )
     assert r.status_code == 303
     assert "pa_session" in r.cookies
@@ -175,16 +180,29 @@ def test_ui_unauthenticated_browser_is_sent_to_login(client: TestClient) -> None
 
     r = client.get("/ui/documents", headers=HTML)
     assert r.status_code == 200
-    assert "Sign in" in r.text
+    # the sign-in form itself, not its wording: the UI is Georgian by default
+    assert 'name="api_key"' in r.text
+    assert "შესვლა" in r.text
 
     # and signing in returns you to where you were headed
     r = client.post(
         "/ui/login",
         data={"api_key": "pa_devkey_for_tests_only", "next": "/ui/documents"},
+        headers=SAME_ORIGIN,
         follow_redirects=False,
     )
     assert r.status_code == 303
     assert r.headers["location"] == "/ui/documents"
+
+
+def test_signing_in_without_a_target_lands_on_the_task_picker(client: TestClient) -> None:
+    r = client.post(
+        "/ui/login",
+        data={"api_key": "pa_devkey_for_tests_only"},
+        headers=SAME_ORIGIN,
+        follow_redirects=False,
+    )
+    assert r.headers["location"] == "/ui/"
 
 
 @pytest.mark.parametrize(
@@ -195,7 +213,8 @@ def test_ui_login_next_cannot_be_an_open_redirect(client: TestClient, hostile: s
     r = client.post(
         "/ui/login",
         data={"api_key": "pa_devkey_for_tests_only", "next": hostile},
+        headers=SAME_ORIGIN,
         follow_redirects=False,
     )
     assert r.status_code == 303
-    assert r.headers["location"] == "/ui/documents"
+    assert r.headers["location"] == "/ui/"

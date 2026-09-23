@@ -1,0 +1,7 @@
+check: compare
+document: tests/fixtures/compare/date.docx
+reference: tests/fixtures/compare/base.docx
+expected_findings:
+- CMP.DURATION
+forbidden_findings: []
+notes: Synthetic pair from scripts/gen_synthetic_samples.py; one deviation from base.

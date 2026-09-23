@@ -1,9 +1,12 @@
+# Fast per-commit subset of scripts/check.sh (which CI runs in full). Formatting here rewrites
+# files; check.sh and CI only verify it (`ruff format --check`), so both agree on the result.
+# pytest and pip-audit are not hooks: one is slow and the other needs network access.
 repos:
   - repo: local
     hooks:
       - id: block-documents
-        name: block real documents (only tests/fixtures may contain pdf/docx/xlsx)
-        entry: bash -c 'bad=$(printf "%s\n" "$@" | grep -Ei "\.(pdf|docx?|xlsx?|xlsm|docm)$" | grep -v "^tests/fixtures/" || true); if [ -n "$bad" ]; then echo "refusing to commit documents:"; echo "$bad"; exit 1; fi' --
+        name: block real documents and archives (only tests/fixtures may contain pdf/docx/xlsx)
+        entry: bash -c 'bad=$(printf "%s\n" "$@" | grep -Ei "\.(pdf|docx?|docm|xlsx?|xlsm|xlsb|zip|rar|7z)$" | grep -v "^tests/fixtures/" || true); if [ -n "$bad" ]; then echo "refusing to commit documents:"; echo "$bad"; exit 1; fi' --
         language: system
         pass_filenames: true
       - id: ruff
@@ -16,6 +19,12 @@ repos:
         entry: uv run ruff format
         language: system
         types: [python]
+      - id: uv-lock
+        name: uv.lock matches pyproject.toml
+        entry: uv lock --check --offline
+        language: system
+        files: ^(pyproject\.toml|uv\.lock)$
+        pass_filenames: false
       - id: mypy
         name: mypy
         entry: uv run mypy

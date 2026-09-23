@@ -21,7 +21,8 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Literal
 
-from procurement_agent.checks.findings import CheckReport, Finding, Severity
+from procurement_agent.checks.amounts import digits_and_words, money_amounts
+from procurement_agent.checks.findings import CheckReport, Finding, Severity, SkipNote
 from procurement_agent.extraction.anchors import AnchorHit, Party, find_anchors, find_parties
 from procurement_agent.extraction.normalize import (
     amounts_equal,
@@ -29,10 +30,8 @@ from procurement_agent.extraction.normalize import (
     name_stem,
     names_match,
     normalize_confusables,
-    parse_georgian_number_words,
-    parse_number,
 )
-from procurement_agent.extraction.rules import find_dates, run_rules
+from procurement_agent.extraction.rules import RuleHit, find_dates, run_rules
 from procurement_agent.extraction.schemas import FactType
 from procurement_agent.extraction.spellcheck import best_match, classify_difference
 
@@ -40,10 +39,19 @@ ContractorType = Literal[
     "company", "natural_person", "individual_entrepreneur_vat", "small_business", "foreign"
 ]
 
-#: What the act must say about taxes, per contractor type (client rules 5-8).
+#: "NET" as a word of its own, or the start of one ("ნეტო", "NET-ით") - never the tail of
+#: another: "ინტერნეტ" and "internet" contain the letters and say nothing about taxes.
+_NET = r"(?<!\w)(?:net|ნეტ)"
+
+#: Roles that receive the payment an act releases, and roles that make it.
+_PAYEE_ROLES = frozenset({"შემსრულებელი", "გამყიდველი"})
+_PAYER_ROLES = frozenset({"დამკვეთი", "შემკვეთი", "მყიდველი"})
+
+#: What the act must say about taxes, per contractor type (client rules 5-8). The wording is a
+#: set of regular expressions matched against the lower-cased act.
 TAX_WORDING: dict[ContractorType, tuple[tuple[str, ...], str, str]] = {
     "natural_person": (
-        ("net", "ნეტ", "საშემოსავლო"),
+        (_NET, "საშემოსავლო"),
         "ფიზიკური პირისთვის ანაზღაურება უნდა იყოს NET "
         "(საშემოსავლო და საპენსიო გადასახადების გარეშე)",
         "for a natural person the fee must be stated NET of income and pension tax",
@@ -59,12 +67,14 @@ TAX_WORDING: dict[ContractorType, tuple[tuple[str, ...], str, str]] = {
         "for a small business the act must state that settlement includes taxes",
     ),
     "foreign": (
-        ("net", "ნეტ"),
+        (_NET,),
         "უცხოური ორგანიზაციისთვის უნდა ეწეროს NET თანხა, გადასახადები არ უნდა იყოს ნახსენები",
         "for a foreign organisation the amount must be NET with no mention of taxes",
     ),
     "company": ((), "", ""),
 }
+
+_NO_CONTRACT = "this rule compares the act against its contract, and none was supplied"
 
 #: Contractor types for which the client does *not* want an invoice calculation (rule 9).
 _FX_EXEMPT: frozenset[str] = frozenset({"small_business", "foreign"})
@@ -72,10 +82,6 @@ _FX_EXEMPT: frozenset[str] = frozenset({"small_business", "foreign"})
 _ACT_DATE_KEYS = ("გაფორმდა", "გაფორმების თარიღი")
 _PERIOD_KEYS = ("შესრულდა", "შესრულების თარიღი", "შესრულების პერიოდი")
 _TERM_KEYS = ("შეასრულოს", "მოქმედების ვადა", "ჩათვლით")
-# "100 (ასი) ლარს" - digits, then the same number written out
-_DIGITS_THEN_WORDS = re.compile(
-    r"(?<![\d.,])(\d[\d\u00a0 .,]{0,14}\d|\d)\s*\(\s*([ა-ჰ ]{2,60})\s*\)"
-)
 _TAX_FREE_MARKERS = ("გადასახად", "დღგ")
 
 
@@ -86,29 +92,39 @@ class DocumentView:
     doc_id: str
     text: str
     parties: list[Party] = field(default_factory=list)
+    _hits: list[AnchorHit] | None = field(default=None, init=False, repr=False, compare=False)
 
     @classmethod
     def build(cls, doc_id: str, text: str) -> DocumentView:
         text = normalize_confusables(text)
         return cls(doc_id=doc_id, text=text, parties=find_parties(text))
 
+    def hits(self) -> list[AnchorHit]:
+        """Every anchor in the document, computed once: the rules ask for them a dozen times."""
+        if self._hits is None:
+            self._hits = find_anchors(self.text)
+        return self._hits
+
     def anchors(self, ft: FactType) -> list[str]:
-        return [h.value for h in find_anchors(self.text) if h.type == ft]
+        return [h.value for h in self.hits() if h.type == ft]
+
+    def anchor_hits(self, ft: FactType) -> list[AnchorHit]:
+        return [h for h in self.hits() if h.type == ft]
 
     def bank(self, unit: str) -> set[str]:
         return {h.value for h in self.bank_hits(unit)}
 
     def bank_hits(self, unit: str) -> list[AnchorHit]:
-        return [
-            h for h in find_anchors(self.text) if h.type == FactType.bank_account and h.unit == unit
-        ]
+        return [h for h in self.hits() if h.type == FactType.bank_account and h.unit == unit]
 
     def id_codes(self) -> set[str]:
         return {p.id_code for p in self.parties if p.id_code}
 
 
-def _dates_near(text: str, keys: tuple[str, ...], window: int = 160) -> list[date]:
-    """Dates that follow one of the given keywords, in document order.
+def _date_hits_near(
+    text: str, keys: tuple[str, ...], window: int = 160
+) -> list[tuple[date, RuleHit]]:
+    """Dates that follow one of the given keywords, in document order, with where each was read.
 
     Anchoring on the section wording is far more reliable than the generic keyword-proximity
     classifier, because these documents put each date under its own numbered heading.
@@ -117,13 +133,17 @@ def _dates_near(text: str, keys: tuple[str, ...], window: int = 160) -> list[dat
     if not hits:
         return []
     starts = [m.start() for k in keys for m in re.finditer(re.escape(k), text)]
-    out: list[date] = []
+    out: list[tuple[date, RuleHit]] = []
     for h in hits:
         if any(s <= h.start <= s + window for s in starts):
             d = date.fromisoformat(str(h.normalized))
-            if d not in out:
-                out.append(d)
+            if all(d != seen for seen, _ in out):
+                out.append((d, h))
     return out
+
+
+def _dates_near(text: str, keys: tuple[str, ...], window: int = 160) -> list[date]:
+    return [d for d, _ in _date_hits_near(text, keys, window)]
 
 
 def _month_typos(text: str) -> list[tuple[str, int, int]]:
@@ -157,7 +177,7 @@ class AoaChecker:
         self.registry = registry
         self.contractor_type = contractor_type
         self.findings: list[Finding] = []
-        self.skipped: list[str] = []
+        self.skipped: list[SkipNote] = []
 
     # --- plumbing ------------------------------------------------------------------------
 
@@ -171,8 +191,11 @@ class AoaChecker:
         expected: str | None = None,
         actual: str | None = None,
         span: tuple[int, int] | None = None,
+        quote: str | None = None,
         confidence: float = 1.0,
     ) -> None:
+        if quote is None and span is not None:
+            quote = self.aoa.text[span[0] : span[1]] or None
         self.findings.append(
             Finding(
                 rule_id=rule_id,
@@ -182,12 +205,15 @@ class AoaChecker:
                 expected=expected,
                 actual=actual,
                 span=span,
+                quote=quote,
                 confidence=confidence,
             )
         )
 
-    def _skip(self, rule_id: str, why: str) -> None:
-        self.skipped.append(f"{rule_id}: {why}")
+    def _skip(self, rule_id: str, why_ka: str, why_en: str) -> None:
+        note = SkipNote(rule_id=rule_id, reason_ka=why_ka, reason_en=why_en)
+        if note not in self.skipped:  # one party with two unlisted directors is one gap
+            self.skipped.append(note)
 
     def _find_span(self, needle: str) -> tuple[int, int] | None:
         i = self.aoa.text.find(needle)
@@ -196,6 +222,9 @@ class AoaChecker:
     # --- rules ---------------------------------------------------------------------------
 
     def run(self) -> CheckReport:
+        # Every run starts clean, so running a checker twice reports each finding once.
+        self.findings = []
+        self.skipped = []
         self.rule_amount_words()
         self.rule_required_fields()
         self.rule_act_date()
@@ -204,7 +233,11 @@ class AoaChecker:
         self.rule_bank_code_format()
         self.rule_tax_wording()
         if self.contract is None:
-            self._skip("AOA.CONTRACT_*", "no contract supplied; act checked on its own")
+            self._skip(
+                "AOA.CONTRACT_*",
+                "ხელშეკრულება არ არის ატვირთული; აქტი შემოწმდა დამოუკიდებლად",
+                "no contract supplied; act checked on its own",
+            )
         else:
             self.rule_parties()
             self.rule_cadastral()
@@ -240,20 +273,17 @@ class AoaChecker:
         doubles as an OCR guard: a misread digit no longer matches its own spelled-out form.
         """
         checked = 0
-        for m in _DIGITS_THEN_WORDS.finditer(self.aoa.text):
-            digits, words = parse_number(m.group(1)), m.group(2).strip()
-            if digits is None:
-                continue
-            spelled = parse_georgian_number_words(words)
+        for pair in digits_and_words(self.aoa.text):
+            digits, words, spelled = pair.digits, pair.words, pair.spelled
             if spelled is None:
                 if len(words.split()) <= 3:
                     self._add(
                         "AOA.AMOUNT_WORDS",
                         "warning",
-                        f"თანხა სიტყვიერად ვერ წაიკითხა: {m.group(0).strip()}",
-                        f"could not read the amount in words: {m.group(0).strip()}",
+                        f"თანხა სიტყვიერად ვერ წაიკითხა: {pair.raw}",
+                        f"could not read the amount in words: {pair.raw}",
                         actual=words,
-                        span=m.span(),
+                        span=pair.span,
                         confidence=0.8,
                     )
                 continue
@@ -266,10 +296,14 @@ class AoaChecker:
                     f"digits and words disagree: {digits:g} vs '{words}' ({spelled})",
                     expected=f"{digits:g}",
                     actual=f"{words} ({spelled})",
-                    span=m.span(),
+                    span=pair.span,
                 )
         if not checked:
-            self._skip("AOA.AMOUNT_WORDS", "no 'digits (words)' amount found")
+            self._skip(
+                "AOA.AMOUNT_WORDS",
+                "აქტში ვერ მოიძებნა თანხა ფორმით „ციფრები (სიტყვიერად)“",
+                "no 'digits (words)' amount found",
+            )
 
     def rule_required_fields(self) -> None:
         """Client rule 3: the act must name the project and the cadastral code."""
@@ -289,11 +323,23 @@ class AoaChecker:
             )
 
     def rule_act_date(self) -> None:
-        """Client rule 4: when the service period is a period, the act is dated its last day."""
+        """Client rule 4: when the service period is a period, the act is dated month-end.
+
+        The instruction asks that the execution date and the act date match, and for a period
+        spells it out: "1 to 31 August inclusive" is signed on the last day of the month, the
+        31st. Its example is a whole month, where the period's end and the month's end are the
+        same day; for a partial month (1-15 August) this rule follows the instruction's wording
+        and expects the month's end. The messages say so, rather than "end of the period".
+        """
         period = _dates_near(self.aoa.text, _PERIOD_KEYS)
-        act_dates = _dates_near(self.aoa.text, _ACT_DATE_KEYS)
+        act_hits = _date_hits_near(self.aoa.text, _ACT_DATE_KEYS)
+        act_dates = [d for d, _ in act_hits]
         if not period:
-            self._skip("AOA.ACT_DATE", "execution period not found in the act")
+            self._skip(
+                "AOA.ACT_DATE",
+                "აქტში ვერ მოიძებნა მომსახურების შესრულების პერიოდი",
+                "execution period not found in the act",
+            )
             return
         if not act_dates:
             self._add(
@@ -311,11 +357,12 @@ class AoaChecker:
                 "AOA.ACT_DATE",
                 "error",
                 f"აქტი დათარიღებულია {shown}-ით, მომსახურების პერიოდი მთავრდება {end}-ს — "
-                f"აქტი უნდა გაფორმდეს პერიოდის ბოლო დღეს ({expected})",
-                f"act dated {shown} but the service period ends {end}; "
-                f"it should be dated the last day of the period ({expected})",
+                f"აქტი უნდა გაფორმდეს იმ თვის ბოლო დღეს, როდესაც პერიოდი მთავრდება ({expected})",
+                f"act dated {shown} but the service period ends {end}; it should be dated "
+                f"the last day of the month the period ends in ({expected})",
                 expected=str(expected),
                 actual=shown,
+                span=(act_hits[0][1].start, act_hits[0][1].end),
             )
 
     def rule_month_spelling(self) -> None:
@@ -377,6 +424,8 @@ class AoaChecker:
         if self.contractor_type is None:
             self._skip(
                 "AOA.TAX_WORDING",
+                "შემსრულებლის ტიპი მითითებული არ არის (ფიზიკური პირი / ინდ. მეწარმე / "
+                "მცირე მეწარმე / უცხოური ორგანიზაცია), ამიტომ NET/დღგ-ს ფორმულირება არ შემოწმებულა",
                 "contractor type not supplied (natural person / individual entrepreneur / "
                 "small business / foreign organisation), so NET/VAT wording was not checked",
             )
@@ -388,13 +437,15 @@ class AoaChecker:
             if offending:
                 self._add("AOA.TAX_WORDING", "error", ka, en, actual=", ".join(offending))
             return
-        if required and not any(w in low for w in required):
-            self._add("AOA.TAX_WORDING", "error", ka, en, expected=" / ".join(required))
+        if required and not any(re.search(w, low) for w in required):
+            shown = " / ".join("NET" if w == _NET else w for w in required)
+            self._add("AOA.TAX_WORDING", "error", ka, en, expected=shown)
 
     # --- rules that need the contract -----------------------------------------------------
 
     def _matched_parties(self) -> list[tuple[Party, Party | None]]:
-        assert self.contract is not None
+        if self.contract is None:  # run() calls the contract rules only with a contract
+            raise RuntimeError(_NO_CONTRACT)
         pairs: list[tuple[Party, Party | None]] = []
         for p in self.aoa.parties:
             match = None
@@ -410,7 +461,8 @@ class AoaChecker:
 
     def rule_parties(self) -> None:
         """Client rule 1 and the contract cross-check: identify by code, then verify the rest."""
-        assert self.contract is not None
+        if self.contract is None:  # run() calls the contract rules only with a contract
+            raise RuntimeError(_NO_CONTRACT)
         c_ids = self.contract.id_codes()
         a_ids = self.aoa.id_codes()
         if not a_ids:
@@ -456,7 +508,11 @@ class AoaChecker:
                 if any(names_match(d, cd) for cd in match.directors):
                     continue
                 if not match.directors:
-                    self._skip("AOA.DIRECTOR", f"contract names no director for {match.name}")
+                    self._skip(
+                        "AOA.DIRECTOR",
+                        f"ხელშეკრულებაში {match.name}-ის დირექტორი მითითებული არ არის",
+                        f"contract names no director for {match.name}",
+                    )
                     continue
                 guess = best_match(d, match.directors)
                 expected = guess[0] if guess else None
@@ -494,50 +550,75 @@ class AoaChecker:
         )
 
     def rule_cadastral(self) -> None:
-        assert self.contract is not None
+        """Every code the act names must be one the contract names.
+
+        A subset, not equality: a contract covering two plots may have an act for one of them,
+        which the equality test this replaced reported as an error.
+        """
+        if self.contract is None:  # run() calls the contract rules only with a contract
+            raise RuntimeError(_NO_CONTRACT)
         a = set(self.aoa.anchors(FactType.cadastral_code))
         c = set(self.contract.anchors(FactType.cadastral_code))
-        if a and c and a != c:
+        if a and c and not a <= c:
+            extra = sorted(a - c)
             self._add(
                 "AOA.CADASTRAL",
                 "error",
-                f"საკადასტრო კოდი განსხვავდება: {sorted(a)} vs ხელშეკრულება {sorted(c)}",
-                f"cadastral code differs: {sorted(a)} vs contract {sorted(c)}",
+                f"საკადასტრო კოდი განსხვავდება: {extra} vs ხელშეკრულება {sorted(c)}",
+                f"cadastral code differs: {extra} vs contract {sorted(c)}",
                 expected=", ".join(sorted(c)),
-                actual=", ".join(sorted(a)),
+                actual=", ".join(extra),
+                span=self._find_span(extra[0]),
             )
 
     def rule_project(self) -> None:
-        """Project names carry different case endings in the two documents, so compare stems."""
-        assert self.contract is not None
+        """Project names carry different case endings in the two documents, so compare stems,
+        word by word (``_project_names_match``)."""
+        if self.contract is None:  # run() calls the contract rules only with a contract
+            raise RuntimeError(_NO_CONTRACT)
         a = self.aoa.anchors(FactType.project_name)
         c = self.contract.anchors(FactType.project_name)
         if not a or not c:
-            self._skip("AOA.PROJECT_NAME", "project name not stated in both documents")
+            self._skip(
+                "AOA.PROJECT_NAME",
+                "პროექტის დასახელება ორივე დოკუმენტში მითითებული არ არის",
+                "project name not stated in both documents",
+            )
             return
-        c_stems = {name_stem(x).split()[0] for x in c if name_stem(x)}
         for name in a:
-            stem = name_stem(name)
-            if stem and stem.split()[0] not in c_stems:
-                self._add(
-                    "AOA.PROJECT_NAME",
-                    "error",
-                    f"პროექტის დასახელება არ ემთხვევა ხელშეკრულებას: „{name}“, "
-                    f"ხელშეკრულებაში — „{c[0]}“",
-                    f"project name does not match the contract: '{name}', contract says '{c[0]}'",
-                    expected=c[0],
-                    actual=name,
-                    span=self._find_span(name),
-                )
+            if not name_stem(name) or any(_project_names_match(name, x) for x in c):
+                continue
+            self._add(
+                "AOA.PROJECT_NAME",
+                "error",
+                f"პროექტის დასახელება არ ემთხვევა ხელშეკრულებას: „{name}“, "
+                f"ხელშეკრულებაში — „{c[0]}“",
+                f"project name does not match the contract: '{name}', contract says '{c[0]}'",
+                expected=c[0],
+                actual=name,
+                span=self._find_span(name),
+            )
 
     def rule_bank(self) -> None:
-        assert self.contract is not None
+        """Every account and bank code in the act must be in the contract, and belong together.
+
+        A subset, not equality: a contract lists both parties' bank details and the act only
+        the contractor's, which the equality test this replaced reported as an error on every
+        such act. A subset alone is too loose, though - the contractor's account with the
+        customer's bank code passes it - so accounts and codes are also checked as pairs
+        (``_bank_pairing``).
+        """
+        if self.contract is None:  # run() calls the contract rules only with a contract
+            raise RuntimeError(_NO_CONTRACT)
+        mismatched = False
         for unit, ka, en in (
             ("IBAN", "ანგარიშის ნომერი", "account number"),
             ("SWIFT", "ბანკის კოდი", "bank code"),
         ):
             a, c = self.aoa.bank(unit), self.contract.bank(unit)
-            if a and c and a != c:
+            if a and c and not a <= c:
+                mismatched = True
+                extra = sorted(a - c)
                 hint_ka = hint_en = ""
                 if (
                     unit == "IBAN"
@@ -554,8 +635,8 @@ class AoaChecker:
                     f"{ka} განსხვავდება: {sorted(a)} vs ხელშეკრულება {sorted(c)}{hint_ka}",
                     f"{en} differs: {sorted(a)} vs contract {sorted(c)}{hint_en}",
                     expected=", ".join(sorted(c)),
-                    actual=", ".join(sorted(a)),
-                    span=self._find_span(next(iter(a))),
+                    actual=", ".join(extra),
+                    span=self._find_span(extra[0]),
                 )
             elif not a and unit == "IBAN":
                 self._add(
@@ -564,32 +645,110 @@ class AoaChecker:
                     "აქტში საბანკო ანგარიში არ წერია",
                     "the act does not state a bank account",
                 )
+        if not mismatched:
+            self._bank_owner()
+            self._bank_pairing()
+
+    def _bank_owner(self) -> None:
+        """The act's account must be the contractor's, not the customer's.
+
+        The subset test cannot see this: the customer's account is in the contract too. Each
+        contract account is attributed to the party whose requisites block states it; the act
+        is flagged only when every account it states belongs to a paying party (დამკვეთი /
+        შემკვეთი / მყიდველი) and the contract does give the contractor an account. When any
+        account cannot be attributed, or a role was not read, nothing is claimed.
+        """
+        if self.contract is None:  # run() calls the contract rules only with a contract
+            raise RuntimeError(_NO_CONTRACT)
+        act_accounts = sorted(self.aoa.bank("IBAN"))
+        if not act_accounts:
+            return
+        # A party's block runs to the next party's name, so the last party's block also holds
+        # later clauses, and a side-by-side requisites table puts both accounts in one block.
+        # An account stated in more than one block has no reliable owner: claim nothing then.
+        holders: dict[str, list[Party]] = {}
+        for party in self.contract.parties:
+            for account in party.accounts:
+                holders.setdefault(account, []).append(party)
+        if any(len(ps) != 1 for ps in holders.values()):
+            return
+        owners = [holders[a][0] if a in holders else None for a in act_accounts]
+        if any(o is None or o.role is None for o in owners):
+            return
+        payee_accounts = sorted(
+            a for q in self.contract.parties if q.role in _PAYEE_ROLES for a in q.accounts
+        )
+        if payee_accounts and all(o is not None and o.role in _PAYER_ROLES for o in owners):
+            self._add(
+                "AOA.BANK",
+                "error",
+                f"აქტში მითითებული ანგარიში ხელშეკრულებით დამკვეთს ეკუთვნის: {act_accounts}; "
+                f"შემსრულებლის ანგარიშია {payee_accounts}",
+                f"the act's account belongs to the customer in the contract: {act_accounts}; "
+                f"the contractor's account is {payee_accounts}",
+                expected=", ".join(payee_accounts),
+                actual=", ".join(act_accounts),
+                span=self._find_span(act_accounts[0]),
+            )
+
+    def _bank_pairing(self) -> None:
+        """The bank code beside each account must be the one the contract gives that account.
+
+        Pairs are read only where a document lays its details out one party at a time - a
+        code immediately followed by its account, or the other way round, with no other bank
+        detail in between. A two-column requisites table serialises as "code A, code B,
+        account 1, account 2", where nearness pairs the wrong things and would call a correct
+        act wrong; such a layout is skipped and said so. Only needed when the contract has
+        more than one bank code: with one, the subset test above already decides.
+        """
+        if self.contract is None:  # run() calls the contract rules only with a contract
+            raise RuntimeError(_NO_CONTRACT)
+        if len(self.contract.bank("SWIFT")) < 2:
+            return
+        contract_pairs = _bank_pairs_with_hits(self.contract)
+        act_pairs = _bank_pairs_with_hits(self.aoa)
+        if contract_pairs is None or act_pairs is None:
+            self._skip(
+                "AOA.BANK_PAIRING",
+                "საბანკო რეკვიზიტები ცხრილის სახითაა, ამიტომ ვერ დადგინდა, რომელი ბანკის კოდი "
+                "რომელ ანგარიშს ეკუთვნის; შემოწმდა მხოლოდ, რომ ყველა მათგანი ხელშეკრულებაშია",
+                "bank details are laid out side by side, so which code belongs to which account "
+                "could not be read; only that each appears in the contract was checked",
+            )
+            return
+        c_pairs = {iban: code for iban, code, _ in contract_pairs}
+        for iban, code, hit in act_pairs:
+            want = c_pairs.get(iban)
+            if want is None or want == code:
+                continue
+            self._add(
+                "AOA.BANK",
+                "error",
+                f"ბანკის კოდი {code} ხელშეკრულებაში სხვა ანგარიშს ეკუთვნის; ანგარიშისთვის {iban} "
+                f"ხელშეკრულებაში მითითებულია {want}",
+                f"bank code {code} belongs to another account in the contract; for account "
+                f"{iban} the contract gives {want}",
+                expected=want,
+                actual=code,
+                span=(hit.start, hit.end),
+            )
 
     def _amounts(self, view: DocumentView) -> set[float]:
-        """Monetary amounts only.
-
-        A currency is required: without it the penalty clauses ("50%", "0.5% per day") come
-        back as amounts and the fee comparison reports them as candidate contract values.
-        """
-        out: set[float] = set()
-        for h in run_rules(view.text):
-            if h.type not in (FactType.price, FactType.total_amount, FactType.amount):
-                continue
-            if not h.currency:
-                continue
-            n = h.normalized if isinstance(h.normalized, float) else parse_number(h.value)
-            if n is not None:
-                out.add(n)
-        return out
+        return money_amounts(view.text)
 
     def rule_fee(self) -> None:
-        assert self.contract is not None
+        if self.contract is None:  # run() calls the contract rules only with a contract
+            raise RuntimeError(_NO_CONTRACT)
         a, c = self._amounts(self.aoa), self._amounts(self.contract)
         if not a:
             self._add("AOA.FEE", "error", "აქტში საფასური ვერ მოიძებნა", "no fee found in the act")
             return
         if not c:
-            self._skip("AOA.FEE", "no amount found in the contract to compare against")
+            self._skip(
+                "AOA.FEE",
+                "ხელშეკრულებაში ვერ მოიძებნა თანხა შესადარებლად",
+                "no amount found in the contract to compare against",
+            )
             return
         unmatched = [x for x in a if not any(amounts_equal(x, y) for y in c)]
         if unmatched:
@@ -601,11 +760,14 @@ class AoaChecker:
                 f"fee matches no amount in the contract: {sorted(unmatched)} vs {sorted(c)}",
                 expected=", ".join(f"{x:g}" for x in sorted(c)),
                 actual=", ".join(f"{x:g}" for x in sorted(unmatched)),
+                span=_amount_span(self.aoa.text, min(unmatched)),
             )
 
     def rule_period_in_term(self) -> None:
-        assert self.contract is not None
-        period = _dates_near(self.aoa.text, _PERIOD_KEYS)
+        if self.contract is None:  # run() calls the contract rules only with a contract
+            raise RuntimeError(_NO_CONTRACT)
+        period_hits = _date_hits_near(self.aoa.text, _PERIOD_KEYS)
+        period = [d for d, _ in period_hits]
         term = _dates_near(self.contract.text, _TERM_KEYS)
         if not term:
             all_dates = [
@@ -621,10 +783,16 @@ class AoaChecker:
             )
             return
         if not term:
-            self._skip("AOA.PERIOD_IN_TERM", "contract term could not be determined")
+            self._skip(
+                "AOA.PERIOD_IN_TERM",
+                "ხელშეკრულების მოქმედების ვადა ვერ დადგინდა",
+                "contract term could not be determined",
+            )
             return
         lo, hi = min(term), max(term)
         if min(period) < lo or max(period) > hi:
+            # anchor on the first date that lies outside, as the act writes it
+            outside = next(h for d, h in period_hits if d < lo or d > hi)
             self._add(
                 "AOA.PERIOD_IN_TERM",
                 "error",
@@ -634,6 +802,7 @@ class AoaChecker:
                 f"{lo}..{hi}",
                 expected=f"{lo}..{hi}",
                 actual=f"{min(period)}..{max(period)}",
+                span=(outside.start, outside.end),
             )
 
     def rule_registry(self) -> None:
@@ -641,6 +810,8 @@ class AoaChecker:
         if self.registry is None:
             self._skip(
                 "AOA.REGISTRY",
+                "სამეწარმეო რეესტრის ამონაწერი ჩატვირთული არ არის; მხარეების მონაცემები "
+                "შედარდა მხოლოდ ხელშეკრულებას",
                 "no business-registry snapshot loaded; party details were compared against the "
                 "contract only",
             )
@@ -680,6 +851,66 @@ class AoaChecker:
                         expected=", ".join(entry.directors),
                         actual=d,
                     )
+
+
+#: How far apart an account and its bank code may be and still be read as one block.
+_PAIR_WINDOW = 400
+
+
+def _bank_pairs_with_hits(view: DocumentView) -> list[tuple[str, str, AnchorHit]] | None:
+    """(account, its bank code, the code's hit) per party block, or None when not block-shaped.
+
+    Block-shaped means the bank details, in document order, fall into adjacent code/account
+    couples - "code, account, code, account" or "account, code, ...". Anything else (two codes
+    in a row, an odd one out, a couple too far apart to be one block) is None: pairing it by
+    distance is a guess, and a guess must not produce an error.
+    """
+    hits = sorted(view.bank_hits("SWIFT") + view.bank_hits("IBAN"), key=lambda h: h.start)
+    if len(hits) % 2:
+        return None
+    out: list[tuple[str, str, AnchorHit]] = []
+    for first, second in zip(hits[::2], hits[1::2], strict=True):
+        if first.unit == second.unit or second.start - first.end > _PAIR_WINDOW:
+            return None
+        code, account = (first, second) if first.unit == "SWIFT" else (second, first)
+        out.append((account.value, code.value, code))
+    return out
+
+
+def _word_stems_match(a: str, b: str) -> bool:
+    """One word of a name against another, allowing a case ending or postposition on either.
+
+    ``name_stem`` removes the genitive and the nominative vowel, but a project name also turns
+    up with "-ისთვის", "-ში" and the like attached. The shorter stem being a prefix of the
+    longer one - and long enough to mean something - covers those without letting
+    "სკოლა" match "სასტუმრო".
+    """
+    if a == b:
+        return True
+    short, long_ = sorted((a, b), key=len)
+    return len(short) >= 4 and long_.startswith(short)
+
+
+def _project_names_match(a: str, b: str) -> bool:
+    """Two project names are the same when every word of the shorter one matches, in order.
+
+    The check this replaced compared only the first word, so "ბათუმის სკოლა" and
+    "ბათუმის სასტუმრო" were the same project.
+    """
+    wa, wb = name_stem(a).split(), name_stem(b).split()
+    if not wa or not wb:
+        return False
+    short, long_ = sorted((wa, wb), key=len)
+    it = iter(long_)
+    return all(any(_word_stems_match(w, x) for x in it) for w in short)
+
+
+def _amount_span(text: str, value: float) -> tuple[int, int] | None:
+    """Where in ``text`` a monetary amount of ``value`` is written, for a finding's anchor."""
+    for h in run_rules(text):
+        if h.currency and isinstance(h.normalized, float) and amounts_equal(h.normalized, value):
+            return (h.start, h.end)
+    return None
 
 
 def check_aoa(

@@ -7,7 +7,7 @@ import re
 from procurement_agent.extraction import weights
 from procurement_agent.extraction.anchors import AnchorHit
 from procurement_agent.extraction.labels import LABELS
-from procurement_agent.extraction.normalize import names_match
+from procurement_agent.extraction.normalize import names_match, normalize_name
 from procurement_agent.extraction.rules import RuleHit
 from procurement_agent.extraction.schemas import DEFAULT_TARGETS, ExtractedFact, FactType
 from procurement_agent.ingestion.chunker import Chunk
@@ -71,8 +71,20 @@ _NAME_TYPES: frozenset[FactType] = frozenset(
 )
 
 
+#: Appended to every fact of a single-valued type that has more than one value.
+CONFLICT_NOTE = "multiple different values found for this field"
+
+
 def _same_fact(a: ExtractedFact, b: ExtractedFact) -> bool:
-    """Two facts describe the same thing if keys, shown values, or supporting quotes coincide."""
+    """Two facts describe the same thing if their keys or shown values coincide.
+
+    Overlapping quotes are supporting evidence only, never enough on their own. Merging on the
+    quote alone collapsed two different parties named in one preamble into a single fact, and
+    let a wrong total whose quote happened to contain the right one disappear into it - hiding
+    the very conflict this module exists to report. So two facts with canonical values merge
+    only when those values are equal, and two free-text facts with overlapping quotes merge only
+    when one value contains the other ("თბილისი, რუსთაველის 1" and "ქ. თბილისი, რუსთაველის 1").
+    """
     if a.type != b.type:
         return False
     if _key(a) == _key(b) or _norm(a.value) == _norm(b.value):
@@ -81,8 +93,21 @@ def _same_fact(a: ExtractedFact, b: ExtractedFact) -> bool:
         # "ნინო კაპანაძის" in the preamble and "ნინო კაპანაძე" in the signature
         # block are one signatory; two facts would be a false extra name on every document
         return True
+    if a.normalized is not None and b.normalized is not None:
+        return False  # both canonical and different: two values, perhaps a conflict
     qa, qb = _norm(a.raw_text), _norm(b.raw_text)
-    return bool(qa and qb) and (qa in qb or qb in qa)
+    if not (qa and qb and (qa in qb or qb in qa)):
+        return False
+    va, vb = normalize_name(a.value), normalize_name(b.value)
+    return bool(va and vb) and (va in vb or vb in va)
+
+
+def _add_note(fact: ExtractedFact, note: str) -> None:
+    """Add a caveat without dropping the ones already there."""
+    if not fact.note:
+        fact.note = note
+    elif note not in fact.note:
+        fact.note = f"{fact.note}; {note}"
 
 
 def rule_hits_to_facts(hits: dict[str, list[RuleHit]], chunks: list[Chunk]) -> list[ExtractedFact]:
@@ -177,6 +202,11 @@ def merge(
             )
         if f.normalized is not None and existing.normalized is None:
             existing.normalized = f.normalized
+        if f.note:
+            # A note is a caveat about the value, not a property of the source that won. Losing
+            # it here would silently discard warnings — "date found in document header", or a
+            # value the verifier would not confirm — whenever some other source agreed.
+            _add_note(existing, f.note)
 
     # anchors first: when two sources describe the same fact the first one keeps its value,
     # and a value read from its own label is the best evidence available
@@ -195,7 +225,7 @@ def merge(
         if t in SINGLE_VALUED and len({_key(f) for f in fs}) > 1:
             for f in fs:
                 f.conflict = True
-                f.note = "multiple different values found for this field"
+                _add_note(f, CONFLICT_NOTE)
 
     return sorted(
         merged,

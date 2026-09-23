@@ -8,6 +8,7 @@ quote. Everything runs on-premise on CPU: [Docling](https://github.com/docling-p
 for parsing, Tesseract for OCR, a local LLM via Ollama (Gemma 3), FastAPI + a small web UI.
 
 Security and data handling: **[docs/SECURITY.md](docs/SECURITY.md)**.
+Deploying and operating it: **[docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md)**.
 Accuracy, measurements and design decisions: **[docs/ACCURACY.md](docs/ACCURACY.md)**.
 What we need from the client to test: [docs/CLIENT_REQUEST_ka.md](docs/CLIENT_REQUEST_ka.md).
 
@@ -26,26 +27,90 @@ upload ─► validate (type, size, magic bytes, zip-bomb, macros)
 ```
 
 Georgian procurement documents are rigidly templated, so step 1 reads most fields exactly and
-instantly. On the client's test set it fills every target and the LLM is never called at all —
-which is why a check that used to take about ten minutes now takes under a second.
+instantly. On the client's test set it reads the seven label-anchored fields (parties, codes,
+directors, accounts, project, total) exactly, and the acceptance-act check never calls the LLM —
+which is why a check that used to take about ten minutes now takes under a second. Free-text
+fields such as payment terms or the subject are left to the model (see docs/ACCURACY.md).
 
 The LLM never sees the whole document and can never act — it only returns JSON that is
 validated and quote-checked against the text.
 
+## The interface
+
+The UI asks what you want to do, then collects the files that task needs. It is
+**Georgian by default** with a ka/EN toggle in the header — the findings have carried
+`message_ka`/`message_en` from the start, and so now do the "could not run" notes.
+
+```
+/ui/  ─►  Check an acceptance act   ─►  act + contract      ─►  findings, skips, act with comments
+      ─►  Compare BOQ bids          ─►  template + bidders  ─►  leaderboard, diffs, merged workbook
+      ─►  Compare two documents     ─►  two versions        ─►  changed values first, then the diff
+      ─►  Extract fields            ─►  one document        ─►  facts with citations  (phase 1)
+```
+
+Uploads happen from the task screen (drag and drop, one request per file, a progress row each),
+and the report URL carries the document ids — so a result is bookmarkable and re-runnable, with
+no run table and no migration. When retention has swept the documents the page says so instead
+of rendering a raw 404.
+
 ## Checks
 
 ```bash
-# acceptance act against its contract: 16 rules, fully deterministic, no LLM
+# acceptance act against its contract: 22 rule ids, fully deterministic, no LLM
 curl -s -H "$K" -X POST localhost:8000/api/v1/checks/aoa \
      -H 'content-type: application/json' \
      -d '{"aoa_document_id":"<act>","contract_document_id":"<contract>"}'
 # ?format=docx returns the act with one Word comment per finding
 # BOQ: all bidders merged into the template, stacked vertically, highest red / lowest green
+curl -s -H "$K" -X POST localhost:8000/api/v1/checks/boq \
+     -H 'content-type: application/json' \
+     -d '{"template_document_id":"<tpl>","bid_document_ids":["<a>","<b>"]}'
+# ?format=xlsx returns the merged workbook; the CLI does the same thing offline
 uv run python -m procurement_agent.checks.boq --template template.xlsx \
     --bids Company-*.xlsx --out merged.xlsx
+# two versions of one document: a line-by-line diff plus the values that changed
+curl -s -H "$K" -X POST localhost:8000/api/v1/checks/compare \
+     -H 'content-type: application/json' \
+     -d '{"left_document_id":"<old>","right_document_id":"<new>"}'
+# ?format=docx returns the newer file with a Word comment per difference; ?format=xlsx a table
 ```
 
-A rule that cannot run says so in `skipped` rather than passing quietly — the contractor type
+## Comparing two documents
+
+```
+segment both files (paragraphs, list items, table cells, spreadsheet cells)
+  ─► align  (difflib over normalised keys — the same primitive checks/boq.py uses on BOQ lines)
+  ─► 1. positional diff: added / removed / changed / moved, word-level inside a changed line
+  ─► 2. entity diff:     run_rules + find_anchors on EACH SIDE of a change, paired by fact type
+  ─► 3. field diff:      the whole document, keyed by fact type, independent of alignment
+  ─► 4. optional: ask the model about the changes the rules could not name a value for
+```
+
+Classification is per **entity**, never per hunk. A prototype that judged whole paragraphs filed
+a bank code naming a different bank as "text changed", because the digits in that paragraph were
+untouched; reading the typed values out of both sides is what makes it a banking difference.
+That is also why a paragraph holding two amounts reports only the one that moved.
+
+**The positional diff is not always the answer, and the page says so.** Two revisions of one
+acceptance act align at 0.81–0.98; an act against its own contract draft aligns at 0.08. Below
+`PA_COMPARE_MIN_SIMILARITY` the report leads with the field differences and states that these
+are not two versions of one document, instead of drawing a diff that is pure noise.
+
+Three differences a reader cannot see are reported on their own: a Cyrillic lookalike inside a
+bank code (`info` rather than `warning` on scanned input, where Tesseract is the likelier
+author), zero-width and bidirectional control characters, and a spreadsheet formula that changed
+behind an unchanged cached value. Quotes, dashes, spacing and `1 000,00` against `1000.00` are
+reported as formatting and never as a change.
+
+**The model is off unless asked.** The deterministic report renders in milliseconds; an
+"explain with the model" button queues one batched call about the rewritten passages that carry
+no price, date, period or bank detail — the only thing the rules cannot name. It may explain a
+change and mark it immaterial; it can never introduce one, and every quote it returns is checked
+against the passage it claims to come from. Set `PA_COMPARE_LLM_ENABLED=false` to remove the
+button.
+
+A rule that cannot run says so in `skipped` — bilingually, and in its own "could not run, and
+why" section of the report, never styled as a pass — rather than passing quietly — the contractor type
 for the NET/VAT wording rules, or a business-registry snapshot that has not been loaded
 (`cli load-registry`). Findings carry a stable rule id, a bilingual message, the expected value
 and a character span, so the same object serves the API, the Excel export and the Word comments.
@@ -59,7 +124,7 @@ optionally Tesseract with `kat` + `eng` data for OCR on the host.
 uv sync --all-groups                      # deps (CPU-only torch wheels)
 cp .env.example .env                      # set PA_DEV_API_KEY=pa_something for local use
 ./scripts/prefetch_models.sh              # Docling models (once, online) + Ollama models
-docker run -d --name ollama -p 127.0.0.1:11434:11434 -v ollama:/root/.ollama ollama/ollama
+docker run -d --name ollama -p 127.0.0.1:11434:11434 -v ollama:/root/.ollama ollama/ollama:0.34.2
 docker exec ollama ollama pull gemma3:12b && docker exec ollama ollama pull gemma3:4b
 
 PA_OLLAMA_BASE_URL=http://127.0.0.1:11434 PA_DOCLING_ARTIFACTS_PATH=./models/docling \
@@ -85,9 +150,11 @@ curl -s -H "$K" localhost:8000/api/v1/jobs/<job2>/result             # ?format=x
 ### Tests and checks
 
 ```bash
-uv run pytest -q                                 # unit + integration (no LLM needed)
-uv run pytest -m e2e -q                          # against a live Ollama (slow, CPU)
-uv run ruff check src tests && uv run mypy && uv run bandit -q -c pyproject.toml -r src
+scripts/check.sh --offline                       # the CI gate locally: lock, ruff, format,
+                                                 # mypy, bandit, tests + coverage floor
+scripts/check.sh                                 # same, plus pip-audit (needs network)
+PA_OLLAMA_BASE_URL=http://127.0.0.1:11434 scripts/check.sh --e2e   # plus e2e (slow, CPU)
+uv run pytest -q -m "not e2e"                    # just the tests (no LLM needed)
 uv run python scripts/gen_synthetic_samples.py   # regenerate synthetic fixtures
 uv run python scripts/benchmark.py [--llm]       # timings on this machine
 uv run python scripts/evaluate.py --set all      # accuracy against the gold sets
@@ -117,12 +184,21 @@ them); keep client samples in `samples/` (git-ignored).
 ./scripts/prefetch_models.sh          # on a connected machine; copy ./models + ollama volume
 cp .env.example .env                  # PA_ENV=prod, retention, limits
 docker compose build && docker compose up -d
+docker compose ps                     # app, ollama and proxy should all turn "healthy"
 docker compose exec app python -m procurement_agent.cli create-key alice
 ```
 
 `docker-compose.yml` runs the app and Ollama on an `internal` network with no internet route,
-non-root, read-only filesystem, dropped capabilities. Put a TLS reverse proxy in front of
-`127.0.0.1:8000`; mount `/data` on an encrypted disk.
+non-root, read-only filesystem, dropped capabilities. Docker will not publish a port from an
+internal-only network, so a stateless relay (`proxy`) is the one container listening on the
+host, at `127.0.0.1:8000`. Put the TLS reverse proxy in front of that, have it set
+`X-Forwarded-For` (audit IPs and rate limiting depend on it), and mount `/data` on an
+encrypted disk. `/health` is liveness, `/ready` readiness (database + job worker). The full
+checklist — proxy duties, backups, key rotation, upgrades — is in
+[docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md).
+
+CI (`.github/workflows/ci.yml`) runs the same gate as `scripts/check.sh` plus pip-audit and a
+gitleaks scan of the full history.
 
 ## Accuracy and performance (this dev box: 18-core CPU, 30 GB RAM, no GPU)
 
@@ -131,16 +207,29 @@ acts) and the 4 synthetic fixtures:
 
 | gold set | precision | recall | rule findings | time |
 |---|---|---|---|---|
-| client (7 docs, rules + anchors only) | 100% | 100% | every document matched | 0.7 s |
+| client (7 docs, rules + anchors), 7 anchor-friendly fields | 100% | 100% | every document matched | 0.7 s |
+| client (7 docs, rules + anchors), **all labelled fields** | 84.4% | 74.3% | every document matched | 0.8 s |
 | synthetic (4 fixtures) | 100% | 100% | every document matched | < 0.1 s |
 
 **Read these as fitting numbers, not held-out ones.** The label anchors were designed by reading
 this client's documents and the rules were tuned while watching this score, so it says the
-system handles *these* documents, not that it generalises. Two things are worth knowing before
-quoting it: the scanned PDFs (4172–4178) are not scored yet, because OCR runs only inside the
-Docker image; and `total_amount` is the one field with no anchor coverage — it rests on keyword
-proximity, so the harness prints it under `fragile`. The honest test is the next document family,
-where the anchor hit rate is what will move first.
+system handles *these* documents, not that it generalises.
+
+The two client rows are one run scored over different fields, and the gap is the point. The
+first covers the seven fields the anchors were built for. The second adds fields that had no
+gold labels until now — `vat_status`, `payment_terms`, `subject`, `execution_period`,
+`contract_date`, `penalty` — on which the deterministic layer scores **0%**, because it was
+never built to read them. They were not failing before; they were invisible, since
+`eval/gold.py` does not score a type nobody has labelled. That gap is the corpus for judging
+whether an LLM pass earns its cost.
+
+Three caveats before quoting any of it: the scanned PDFs (4172–4178) are not scored yet, because
+OCR runs only inside the Docker image; `total_amount` is the one originally-scored field with no
+anchor coverage, resting on keyword proximity, so the harness prints it under `fragile`; and
+eight of the twenty target fields — among them `price`, `quantity`, `delivery_deadline`,
+`warranty_period`, `validity_period`, `contract_number` — do not occur in these seven documents
+at all, so this corpus cannot measure them however it is scored. The honest test is the next
+document family, where the anchor hit rate is what will move first.
 
 "Rule findings matched" includes the constraint that matters most: the correct acceptance act
 produces **no** findings. All five errors the client planted are caught without the LLM,
@@ -156,6 +245,8 @@ code naming a different bank than the contract's `AAAAGE22`.
 | anchors + rules extraction (any fixture) | < 0.1 s |
 | AOA check, act against contract | ~0.02 s |
 | BOQ: template + 4 bidders, 235 lines, merged workbook | ~2 s |
+| compare two Word revisions (59 segments each) | ~0.01 s |
+| compare two 13-sheet bid workbooks (2600 cells each) | ~0.8 s incl. reading both files |
 | `gemma3:4b` (CPU, 16 threads), one ~1 250-token chunk | ~75 s (≈ 8.3 tok/s; 632 output tokens) |
 
 The LLM figures improved from ~280 s because `num_ctx` is now sized per request instead of
@@ -168,13 +259,24 @@ published number.
 ## Roadmap
 
 Done: Phase 1 (document intelligence core), Phase 2a (BOQ comparison and merged workbook,
-`checks/boq.py`), Phase 4 (AOA verification against the contract, `checks/aoa.py`, with Word
-comment output and an optional business-registry snapshot).
+`checks/boq.py`), Phase 2b/3 (comparing two documents, `checks/compare.py`, with an optional
+model pass in `checks/compare_llm.py`), Phase 4 (AOA verification against the contract,
+`checks/aoa.py`, with Word comment output and an optional business-registry snapshot).
 
-Next: Phase 2b multi-proposal PDF comparison; Phase 3 contract draft consistency review (the
-client's own draft is internally inconsistent — "შემკვეთი" and "დამკვეთი" used for the same
-party — which is the material for it); Phase 5 power-of-attorney register lookup. The NBG-rate
-invoice calculation for foreign-currency acts is specified but not yet implemented.
+The BOQ leaderboard ranks on the total each bidder states on their own Summary sheet, shows the
+recomputed line-item total beside it, and carries a badge wherever the two are not comparable —
+on the client's own set every bidder left `5. MEP` unpriced, which is the kind of fact a colour
+alone would hide.
+
+On the client's six acceptance acts the comparison finds every planted error against the correct
+version, including the two a value-blind diff would miss: `100 (ორასი)`, where only the Georgian
+number words changed and every digit stayed put, and the bank code naming a different bank.
+
+Next: Phase 3 proper — a contract draft reviewed against *itself* for internal inconsistency
+(the client's own draft uses "შემკვეთი" and "დამკვეთი" for the same party), which the
+comparison's entity layer does not cover because it compares two files rather than one; Phase 5
+power-of-attorney register lookup. The NBG-rate invoice calculation for foreign-currency acts is
+specified but not yet implemented.
 
 How accuracy is measured, and which approaches were tried and rejected:
 **[docs/ACCURACY.md](docs/ACCURACY.md)**.

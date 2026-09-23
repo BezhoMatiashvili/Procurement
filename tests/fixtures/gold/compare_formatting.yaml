@@ -1,0 +1,7 @@
+check: compare
+document: tests/fixtures/compare/formatting.docx
+reference: tests/fixtures/compare/base.docx
+expected_findings: []
+forbidden_findings:
+- '*'
+notes: Synthetic pair from scripts/gen_synthetic_samples.py; one deviation from base.

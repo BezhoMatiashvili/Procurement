@@ -67,6 +67,21 @@ def normalize_confusables(s: str) -> str:
     return normalize_spaces(s)
 
 
+def confusable_chars(s: str) -> str:
+    """The homoglyph codepoints present in ``s``, in order, deduplicated.
+
+    ``normalize_confusables`` folds Cyrillic lookalikes away, which is what makes comparison
+    work — and which also makes a swapped character invisible. Two strings that fold equal but
+    are not equal differ in exactly these characters, and in a procurement document that is
+    worth saying out loud rather than filing under "whitespace".
+    """
+    out: list[str] = []
+    for ch in unicodedata.normalize("NFC", s):
+        if ord(ch) in _CYRILLIC_TO_LATIN and ch not in out:
+            out.append(ch)
+    return "".join(out)
+
+
 def strip_quotes(s: str) -> str:
     """Quotes act as separators, not characters: „შპს „ნიმუში““ == 'შპს ნიმუში'."""
     for ch in QUOTE_CHARS:
@@ -116,15 +131,33 @@ def parse_number(s: str) -> float | None:
     Handles both '1,250.50' and '1.250,50' -> 1250.5. A trailing [.,] plus one or two digits is
     a decimal separator only when the integer part is long enough, or has no separator of its
     own, to rule out a thousands group ('12,500' is twelve and a half thousand, not 12.5).
+
+    A separator after a lone zero is always decimal: no one writes a thousands group after 0,
+    so '0.125' is an eighth, not 125. Any other single separator followed by exactly three
+    digits stays a thousands group — '1.125' reads as 1125 — because that is how Georgian and
+    most European documents write thousands, and the text alone cannot tell the two apart.
+    Callers that know better from context (a percentage, a unit price in a table) must not
+    rely on this function to guess.
+
+    This is the only implementation in the project; ``rules.parse_number`` delegates here, so
+    a rule hit and the scorer can never disagree about what a number is.
     """
     s = normalize_spaces(str(s))
     if not s:
         return None
     neg = s.startswith("-")
     s = s.lstrip("+-").strip()
+    if zero := re.fullmatch(r"0[.,](\d+)", s):
+        out = float(f"0.{zero.group(1)}")
+        return -out if neg else out
     m = re.fullmatch(r"(.*?)([.,])(\d{1,2})", s)
+    # A thousands group is exactly three digits, so a separator followed by four or more can
+    # only be the decimal point: '12.3450' and '1,234.5678' are not 123450 and 12345678.
+    long_tail = re.fullmatch(r"(.*?)([.,])(\d{4,})", s)
     if m and (len(m.group(1)) > 3 or not re.search(r"[ ,.]", m.group(1))):
         integer, frac = m.group(1), m.group(3)
+    elif long_tail:
+        integer, frac = long_tail.group(1), long_tail.group(3)
     else:
         integer, frac = s, ""
     integer = re.sub(r"[ ,.]", "", integer)
@@ -274,6 +307,71 @@ def iban_is_valid(iban: str) -> bool:
         else:
             return False
     return total == 1
+
+
+# --- BIC / SWIFT -----------------------------------------------------------------------------
+
+#: ISO 3166-1 alpha-2 country codes, plus XK (Kosovo), which SWIFT assigns although ISO does not.
+#: Positions 5-6 of a BIC are a country code, which is the one structural property that tells
+#: a real bank code from an ordinary capitalised word of the same length.
+_ISO_COUNTRY_TEXT = """
+AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ
+BR BS BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM
+DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS
+GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN
+KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ
+MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM
+PN PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV
+SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI
+VN VU WF WS YE YT ZA ZM ZW XK
+"""
+ISO_COUNTRY_CODES: frozenset[str] = frozenset(_ISO_COUNTRY_TEXT.split())
+
+#: Words that put a bank code in context. "ანგარიშ" (account) also covers "ანგარიშსწორება"
+#: (settlement), which in these documents is exactly the clause that carries bank details.
+_BANK_CONTEXT = re.compile(r"ბანკ|ანგარიშ|swift|\bbic\b|iban|\bbank|account", re.IGNORECASE)
+
+
+def bic_has_country(code: str) -> bool:
+    """True when positions 5-6 of a candidate BIC are a real country code."""
+    return len(code) >= 6 and code[4:6].upper() in ISO_COUNTRY_CODES
+
+
+def has_bank_context(text: str, start: int, end: int, *, window: int = 120) -> bool:
+    """Whether a bank word sits within ``window`` characters either side of ``text[start:end]``.
+
+    An unlabelled 8- or 11-letter capital word is a bank code only in a payment clause. Without
+    this, a heading such as "SUPPLIER" or "DELIVERY" was read as a BIC — and because the
+    pipeline stops asking the LLM for a field an anchor has filled, it also blocked extraction
+    of the real one.
+    """
+    return _BANK_CONTEXT.search(text[max(0, start - window) : end + window]) is not None
+
+
+_BIC_LABEL = re.compile(r"swift|\bbic\b|ბანკის\s*კოდ", re.IGNORECASE)
+_BIC_SHAPED = re.compile(r"\b[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b")
+#: How far before an unlabelled code a SWIFT/BIC label may sit and still name it.
+_BIC_LABEL_WINDOW = 40
+
+
+def unlabelled_bic_plausible(text: str, start: int, end: int) -> bool:
+    """Whether a BIC-shaped token that no label introduced is really a bank code.
+
+    Three things have to hold. Positions 5-6 must be a country code - but that alone passes
+    "SUPPLIER" (LI), "DELIVERY" (VE) and "BENEFICIARY" (FI). A bank word must be nearby - but
+    those words sit in exactly the payment blocks that carry bank words. So, third, the code
+    must either have a digit in its location code (every Georgian bank's does: "...GE22"), or
+    follow a SWIFT/BIC label closely with no other code-shaped token in between. An all-letter
+    foreign code nobody labelled is missed; a capitalised heading is never taken for a bank.
+    """
+    code = text[start:end]
+    if not bic_has_country(code) or not has_bank_context(text, start, end):
+        return False
+    if any(ch.isdigit() for ch in code[6:8]):
+        return True
+    before = text[max(0, start - _BIC_LABEL_WINDOW) : start]
+    labels = list(_BIC_LABEL.finditer(before))
+    return bool(labels) and _BIC_SHAPED.search(before[labels[-1].end() :]) is None
 
 
 # --- approximate string matching ------------------------------------------------------------

@@ -1,7 +1,9 @@
-"""Document checks: acceptance act (AOA) against its contract.
+"""Document checks: acceptance act against its contract, BOQ bids, and two documents compared.
 
-Synchronous on purpose. The whole check is deterministic and runs in milliseconds — unlike
-extraction, which queues a background job because it may call the LLM.
+Synchronous on purpose. Every check here is deterministic and runs in milliseconds — unlike
+extraction, which queues a background job because it may call the LLM. The comparison keeps
+that property: its optional model pass is a separate job, and this endpoint only ever *reads*
+what that job stored.
 """
 
 from __future__ import annotations
@@ -12,17 +14,37 @@ from typing import Annotated, Literal, get_args
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from procurement_agent.api.deps import client_ip, owned_document
 from procurement_agent.checks.aoa import ContractorType, check_aoa
-from procurement_agent.checks.findings import CheckReport
+from procurement_agent.checks.boq import (
+    BidComparison,
+    BoqLine,
+    BoqWorkbook,
+    LineDiff,
+    compare_all,
+    grand_total,
+    rate_outliers,
+    read_boq,
+    write_merged_workbook,
+)
+from procurement_agent.checks.compare import ComparisonReport, DocumentTooLargeError
+from procurement_agent.checks.compare_llm import ExplanationSet, apply_explanations
+from procurement_agent.checks.findings import CheckReport, Finding, SkipNote
 from procurement_agent.config import Settings, get_settings
 from procurement_agent.db import get_session
-from procurement_agent.extraction.pipeline import load_chunks, upload_path
-from procurement_agent.models import Document, DocumentStatus
+from procurement_agent.extraction.pipeline import (
+    StoredDocument,
+    compare_stored,
+    load_chunks,
+    result_dir,
+    upload_path,
+)
+from procurement_agent.models import Document, DocumentStatus, Job
 from procurement_agent.registry.snapshot import open_snapshot
+from procurement_agent.report.compare_xlsx import to_xlsx as compare_to_xlsx
 from procurement_agent.report.docx_annotate import UnsupportedDocumentError, annotate_docx
 from procurement_agent.security.audit import audit
 from procurement_agent.security.auth import Principal, authenticate
@@ -30,6 +52,7 @@ from procurement_agent.security.auth import Principal, authenticate
 router = APIRouter(prefix="/api/v1/checks", tags=["checks"])
 
 _DOCX_MEDIA = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+_XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 class AoaCheckRequest(BaseModel):
@@ -48,6 +71,29 @@ def _document_text(settings: Settings, doc: Document) -> str:
     return "\n".join(c.body or c.text for c in chunks)
 
 
+def run_aoa(
+    settings: Settings,
+    aoa: Document,
+    contract: Document | None,
+    contractor_type: ContractorType | None,
+) -> CheckReport:
+    """The whole act check. Shared by the JSON API, the DOCX download and the UI page, so the
+    registry snapshot is opened and closed in exactly one place."""
+    registry = open_snapshot(settings.registry_db) if settings.registry_db else None
+    try:
+        return check_aoa(
+            aoa_text=_document_text(settings, aoa),
+            aoa_id=aoa.id,
+            contract_text=_document_text(settings, contract) if contract else None,
+            contract_id=contract.id if contract else "contract",
+            registry=registry,
+            contractor_type=contractor_type,
+        )
+    finally:
+        if registry is not None:
+            registry.close()
+
+
 @router.post("/aoa")
 def check_acceptance_act(
     request: Request,
@@ -63,19 +109,7 @@ def check_acceptance_act(
         if body.contract_document_id
         else None
     )
-    registry = open_snapshot(settings.registry_db) if settings.registry_db else None
-    try:
-        report = check_aoa(
-            aoa_text=_document_text(settings, aoa),
-            aoa_id=aoa.id,
-            contract_text=_document_text(settings, contract) if contract else None,
-            contract_id=contract.id if contract else "contract",
-            registry=registry,
-            contractor_type=body.contractor_type,
-        )
-    finally:
-        if registry is not None:
-            registry.close()
+    report = run_aoa(settings, aoa, contract, body.contractor_type)
 
     audit(
         session,
@@ -87,10 +121,10 @@ def check_acceptance_act(
     )
     if fmt == "json":
         return Response(report.model_dump_json(), media_type="application/json")
-    return _annotated_docx(settings, aoa, report)
+    return annotated_docx(settings, aoa, report)
 
 
-def _annotated_docx(settings: Settings, aoa: Document, report: CheckReport) -> Response:
+def annotated_docx(settings: Settings, aoa: Document, report: CheckReport) -> Response:
     """A copy of the act with one Word comment per finding, which is what the client asked for."""
     source = upload_path(settings, aoa.id, aoa.kind)
     with tempfile.TemporaryDirectory() as tmp:
@@ -117,3 +151,419 @@ def contractor_types(
 ) -> dict[str, list[str]]:
     """The values ``contractor_type`` accepts, so a client need not hard-code them."""
     return {"contractor_types": list(get_args(ContractorType))}
+
+
+# --- compare: two documents against each other ---------------------------------------------
+
+
+class CompareRequest(BaseModel):
+    left_document_id: str = Field(max_length=64, description="the earlier version")
+    right_document_id: str = Field(max_length=64, description="the later version")
+    #: A finished ``compare_explain`` job whose model answers should be merged in. The
+    #: comparison itself never calls the model.
+    explain_job_id: str | None = Field(default=None, max_length=64)
+
+
+def owned_explain_job(
+    session: Session,
+    principal: Principal,
+    job_id: str | None,
+    left: Document,
+    right: Document,
+) -> Job | None:
+    """The caller's explain job for exactly this pair, or None - never an error.
+
+    The id arrives in a URL and is joined into a file path, so it is checked for shape before
+    anything touches the disk, and for owner, kind and pair before its file is read: without
+    this, ``../../<someone else's document>/jobs/<their job>`` read another user's stored
+    answers. An id that fails any check is ignored rather than refused, exactly like an id
+    whose job never finished - the deterministic report stands on its own.
+    """
+    if not job_id or len(job_id) > 64 or not (job_id.isascii() and job_id.isalnum()):
+        return None
+    job = session.get(Job, job_id)
+    if (
+        job is None
+        or job.owner != principal.user
+        or job.kind != "compare_explain"
+        or job.document_id != right.id
+        or job.params.get("left") != left.id
+    ):
+        return None
+    return job
+
+
+def load_explanations(settings: Settings, doc_id: str, job_id: str) -> ExplanationSet | None:
+    """A stored explain run, or None when there is nothing readable there.
+
+    Callers resolve ``job_id`` through ``owned_explain_job`` first; the shape check here is
+    only a second lock on the path join.
+    """
+    if not (job_id.isascii() and job_id.isalnum()):
+        return None
+    path = result_dir(settings, doc_id) / "jobs" / f"{job_id}.json"
+    if not path.is_file():
+        return None
+    try:
+        return ExplanationSet.model_validate_json(path.read_text())
+    except ValueError:
+        return None  # a job of another kind wrote here; not an explanation set
+
+
+def _ready(doc: Document) -> StoredDocument:
+    if doc.status != DocumentStatus.ready:
+        msg = f"document {doc.id} is {doc.status.value}, not ready"
+        raise HTTPException(status.HTTP_409_CONFLICT, msg)
+    return StoredDocument(id=doc.id, kind=doc.kind, name=doc.display_name)
+
+
+def run_compare(
+    settings: Settings,
+    left: Document,
+    right: Document,
+    *,
+    explain_job_id: str | None = None,
+) -> ComparisonReport:
+    """The whole comparison. Shared by the JSON API, both downloads and the UI page.
+
+    Deterministic and recomputed on every call — it costs milliseconds on Word documents and a
+    quarter of a second on a thirteen-sheet workbook. Only the model's answers are stored, and
+    they are re-validated against this fresh comparison as they are merged.
+    """
+    if left.id == right.id:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "the two documents are the same; a document compared with itself has no differences",
+        )
+    try:
+        report = compare_stored(settings, _ready(left), _ready(right))
+    except DocumentTooLargeError as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(e)) from e
+    if explain_job_id:
+        stored = load_explanations(settings, right.id, explain_job_id)
+        if stored is not None:
+            report = apply_explanations(report, stored)
+    return report
+
+
+@router.post("/compare")
+def compare_documents(
+    request: Request,
+    body: CompareRequest,
+    principal: Annotated[Principal, Depends(authenticate)],
+    session: Annotated[Session, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    fmt: Annotated[Literal["json", "docx", "xlsx"], Query(alias="format")] = "json",
+) -> Response:
+    left = owned_document(session, principal, body.left_document_id)
+    right = owned_document(session, principal, body.right_document_id)
+    explain = owned_explain_job(session, principal, body.explain_job_id, left, right)
+    report = run_compare(settings, left, right, explain_job_id=explain.id if explain else None)
+
+    audit(
+        session,
+        actor=principal.user,
+        action=f"check.compare.{fmt}",
+        document_id=right.id,
+        ip=client_ip(request),
+        detail=f"{report.counts.total_changes} change(s), {len(report.errors)} critical",
+    )
+    if fmt == "json":
+        return Response(report.model_dump_json(), media_type="application/json")
+    if fmt == "xlsx":
+        return compare_xlsx(report)
+    return compare_annotated_docx(settings, right, report)
+
+
+def compare_xlsx(report: ComparisonReport) -> Response:
+    name = f"differences-{report.left_document_id[:8]}-{report.right_document_id[:8]}.xlsx"
+    return Response(
+        compare_to_xlsx(report),
+        media_type=_XLSX_MEDIA,
+        headers={
+            "Content-Disposition": f'attachment; filename="{name}"',
+            "X-Change-Count": str(report.counts.total_changes),
+            "X-Error-Count": str(len(report.errors)),
+        },
+    )
+
+
+def compare_annotated_docx(
+    settings: Settings, right: Document, report: ComparisonReport
+) -> Response:
+    """The later version with a Word comment on each difference, saying what it said before.
+
+    The comments go on the *right-hand* document because that is the one someone will correct.
+    """
+    source = upload_path(settings, right.id, right.kind)
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "compared.docx"
+        try:
+            annotate_docx(source, report.findings, out)
+        except UnsupportedDocumentError as e:
+            raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, str(e)) from e
+        data = out.read_bytes()
+    return Response(
+        data,
+        media_type=_DOCX_MEDIA,
+        headers={
+            "Content-Disposition": f'attachment; filename="compared-{right.id[:8]}.docx"',
+            "X-Change-Count": str(report.counts.total_changes),
+            "X-Error-Count": str(len(report.errors)),
+        },
+    )
+
+
+# --- BOQ: bidder workbooks against the tender template ------------------------------------
+
+
+class BoqCheckRequest(BaseModel):
+    template_document_id: str = Field(max_length=64)
+    #: One upload per bidder. Capped because ``read_boq`` opens each workbook twice, and eleven
+    #: of those on one threadpool thread is a self-inflicted stall.
+    bid_document_ids: list[str] = Field(min_length=1, max_length=10)
+
+
+class BoqLineRef(BaseModel):
+    """One position, flattened for the wire.
+
+    ``BidComparison`` carries ``matched: list[tuple[BoqLine, BoqLine]]`` - a large internal join
+    that is never report data and never leaves the process.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    sheet: str
+    row: int
+    description: str
+    item_no: str | None = None
+    unit: str | None = None
+    quantity: float | None = None
+    template_qty: float | None = None
+    bid_qty: float | None = None
+
+
+class BoqBidder(BaseModel):
+    bidder: str
+    document_id: str
+    #: The bidder's own bottom line, read off their Summary sheet - what the leaderboard ranks on.
+    total_stated_incl_vat: float | None = None
+    total_stated_excl_vat: float | None = None
+    #: What the line items actually add up to. The gap between the two is the point.
+    total_recomputed: float | None = None
+    #: ``total_stated_incl_vat``, or None when the bidder stated no total. A bidder who states
+    #: nothing must never be ranked cheapest, so None sorts last and is never coloured.
+    rank_basis: float | None = None
+    #: False when a section was left unpriced or a template sheet removed: the total exists but
+    #: is not like-for-like, so it gets a badge instead of a rank colour.
+    comparable: bool = True
+    quantity_changed: list[BoqLineRef] = Field(default_factory=list)
+    filled_blank: list[BoqLineRef] = Field(default_factory=list)
+    added: list[BoqLineRef] = Field(default_factory=list)
+    removed: list[BoqLineRef] = Field(default_factory=list)
+    added_sheets: list[str] = Field(default_factory=list)
+    removed_sheets: list[str] = Field(default_factory=list)
+    unpriced_sheets: list[str] = Field(default_factory=list)
+    findings: list[Finding] = Field(default_factory=list)
+
+
+class BoqCheckReport(BaseModel):
+    template_document_id: str
+    template_name: str
+    bidders: list[BoqBidder]
+    #: Ascending by ``rank_basis``; unranked bidders last.
+    leaderboard: list[BoqBidder]
+    #: Top level on purpose. ``checks.boq.main`` appends these to ``comparisons[0]``, which
+    #: attributes every bidder's outlier to whoever was listed first - a CLI wart, not a contract.
+    rate_outliers: list[Finding] = Field(default_factory=list)
+    skipped: list[SkipNote] = Field(default_factory=list)
+
+
+def _ref_from_diff(d: LineDiff) -> BoqLineRef:
+    item_no, _, _ = d.key.partition("|")
+    return BoqLineRef(
+        sheet=d.sheet,
+        row=d.row,
+        description=d.description,
+        item_no=item_no or None,
+        template_qty=d.template_qty,
+        bid_qty=d.bid_qty,
+    )
+
+
+def _ref_from_line(line: BoqLine) -> BoqLineRef:
+    return BoqLineRef(
+        sheet=line.sheet,
+        row=line.row,
+        description=line.description,
+        item_no=line.item_no or None,
+        unit=line.unit,
+        quantity=line.quantity,
+    )
+
+
+def boq_documents(
+    session: Session, principal: Principal, body: BoqCheckRequest
+) -> tuple[Document, list[Document]]:
+    """Resolve and validate the template plus every bid, before any workbook is opened."""
+    if body.template_document_id in body.bid_document_ids:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "the template cannot also be a bid"
+        )
+    if len(set(body.bid_document_ids)) != len(body.bid_document_ids):
+        # A repeated bidder doubles its own vote in the rate-outlier median.
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "duplicate bid document ids")
+
+    docs = [owned_document(session, principal, i) for i in body.bid_document_ids]
+    template = owned_document(session, principal, body.template_document_id)
+    for doc in (template, *docs):
+        if doc.kind != "xlsx":
+            msg = f"BOQ comparison needs .xlsx workbooks; {doc.display_name} is a {doc.kind}"
+            raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, msg)
+        if doc.status != DocumentStatus.ready:
+            msg = f"document {doc.id} is {doc.status.value}, not ready"
+            raise HTTPException(status.HTTP_409_CONFLICT, msg)
+    return template, docs
+
+
+def _read_book(settings: Settings, doc: Document) -> BoqWorkbook:
+    """Always name the workbook after the upload.
+
+    ``upload_path`` is ``{uuid}.xlsx``, so without ``name=`` the bidder is a 32-character hex id -
+    which then appears inside every bilingual finding message and every cell of the merged
+    workbook the client opens.
+    """
+    return read_boq(upload_path(settings, doc.id, doc.kind), name=Path(doc.display_name).stem[:31])
+
+
+def run_boq(
+    settings: Settings, template_doc: Document, bid_docs: list[Document]
+) -> tuple[BoqCheckReport, BoqWorkbook, list[BoqWorkbook], list[BidComparison]]:
+    """The whole comparison. Shared by the JSON API, the xlsx download and the UI page."""
+    template = _read_book(settings, template_doc)
+    books = [_read_book(settings, d) for d in bid_docs]
+    comparisons = compare_all(template, books)
+    outliers = rate_outliers(template, comparisons)
+
+    skipped: list[SkipNote] = []
+    if len(books) < 3:
+        # rate_outliers needs three quotes on a line before a median means anything. Silence
+        # here would read as "no outliers found" rather than "not enough bids to look".
+        skipped.append(
+            SkipNote(
+                rule_id="BOQ.RATE_OUTLIER",
+                reason_ka=(
+                    "ერთეულის ფასების შედარებას სჭირდება მინიმუმ 3 კომპანია; "
+                    f"მოწოდებულია {len(books)}"
+                ),
+                reason_en=(f"unit-rate comparison needs at least 3 bidders; {len(books)} supplied"),
+            )
+        )
+
+    bidders: list[BoqBidder] = []
+    for doc, book, comp in zip(bid_docs, books, comparisons, strict=True):
+        stated = grand_total(book, incl_vat=True)
+        if stated is None:
+            skipped.append(
+                SkipNote(
+                    rule_id="BOQ.TOTALS",
+                    reason_ka=(
+                        f"{comp.bidder}: Summary გვერდზე ჯამური ფასი მითითებული არ არის, "
+                        "ამიტომ რანჟირებაში არ მონაწილეობს"
+                    ),
+                    reason_en=(
+                        f"{comp.bidder}: states no grand total on its Summary sheet, "
+                        "so it is not ranked"
+                    ),
+                )
+            )
+        bidders.append(
+            BoqBidder(
+                bidder=comp.bidder,
+                document_id=doc.id,
+                total_stated_incl_vat=stated,
+                total_stated_excl_vat=grand_total(book, incl_vat=False),
+                total_recomputed=round(book.total, 2),
+                rank_basis=stated,
+                comparable=not (comp.unpriced_sheets or comp.removed_sheets),
+                quantity_changed=[_ref_from_diff(d) for d in comp.quantity_changed],
+                filled_blank=[_ref_from_diff(d) for d in comp.filled_blank],
+                added=[_ref_from_line(line) for line in comp.added],
+                removed=[_ref_from_line(line) for line in comp.removed],
+                added_sheets=comp.added_sheets,
+                removed_sheets=comp.removed_sheets,
+                unpriced_sheets=comp.unpriced_sheets,
+                findings=comp.findings,
+            )
+        )
+
+    report = BoqCheckReport(
+        template_document_id=template_doc.id,
+        template_name=template.name,
+        bidders=bidders,
+        leaderboard=sorted(bidders, key=lambda b: (b.rank_basis is None, b.rank_basis or 0.0)),
+        rate_outliers=outliers,
+        skipped=skipped,
+    )
+    return report, template, books, comparisons
+
+
+def merged_xlsx(
+    template: BoqWorkbook,
+    books: list[BoqWorkbook],
+    comparisons: list[BidComparison],
+    template_doc: Document,
+    report: BoqCheckReport,
+) -> Response:
+    """The merged workbook, streamed from a tempdir rather than persisted.
+
+    A stored copy would be derived client data with no retention owner - ``sweep_expired`` only
+    knows about ``Document`` rows - and regenerating it costs about two seconds.
+    """
+    errors = sum(1 for b in report.bidders for f in b.findings if f.severity == "error")
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "boq_merged.xlsx"
+        write_merged_workbook(template, books, comparisons, out, outliers=report.rate_outliers)
+        data = out.read_bytes()
+    return Response(
+        data,
+        media_type=_XLSX_MEDIA,
+        headers={
+            "Content-Disposition": f'attachment; filename="boq-merged-{template_doc.id[:8]}.xlsx"',
+            "X-Bidder-Count": str(len(books)),
+            "X-Error-Count": str(errors),
+        },
+    )
+
+
+@router.post("/boq")
+def check_boq(
+    request: Request,
+    body: BoqCheckRequest,
+    principal: Annotated[Principal, Depends(authenticate)],
+    session: Annotated[Session, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    fmt: Annotated[Literal["json", "xlsx"], Query(alias="format")] = "json",
+) -> Response:
+    """Compare bidder workbooks against the tender template.
+
+    Synchronous, and deliberately a plain ``def``: ``read_boq`` is two ``load_workbook`` passes
+    per file, so this is seconds of blocking CPU that belongs on the threadpool, not on the
+    event loop. It creates no job - a BOQ run spans N+1 documents, and ``Job.document_id`` is a
+    single FK, so a job would have to pick one arbitrarily.
+    """
+    template_doc, bid_docs = boq_documents(session, principal, body)
+    report, template, books, comparisons = run_boq(settings, template_doc, bid_docs)
+    errors = sum(1 for b in report.bidders for f in b.findings if f.severity == "error")
+
+    audit(
+        session,
+        actor=principal.user,
+        action=f"check.boq.{fmt}",
+        document_id=template_doc.id,
+        ip=client_ip(request),
+        detail=f"{len(books)} bidder(s), {errors} error(s)",
+    )
+    if fmt == "json":
+        return Response(report.model_dump_json(), media_type="application/json")
+    return merged_xlsx(template, books, comparisons, template_doc, report)

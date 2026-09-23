@@ -17,10 +17,12 @@ from typing import Any
 import structlog
 from sqlalchemy.orm import Session
 
+from procurement_agent.db import session_scope
 from procurement_agent.models import AuditLog
 
 _SECRET_KEYS = {"api_key", "x-api-key", "authorization", "key", "password", "token", "secret"}
-_KEY_PATTERN = re.compile(r"pa_[A-Za-z0-9_\-]{20,}")
+#: API keys (``pa_``) and UI session tokens (``ps_``) - neither may ever reach a log line.
+_KEY_PATTERN = re.compile(r"p[as]_[A-Za-z0-9_\-]{20,}")
 
 
 def _redact(_: Any, __: str, event_dict: dict[str, Any]) -> dict[str, Any]:
@@ -29,7 +31,7 @@ def _redact(_: Any, __: str, event_dict: dict[str, Any]) -> dict[str, Any]:
             event_dict[k] = "[redacted]"
     for k, v in event_dict.items():
         if isinstance(v, str) and _KEY_PATTERN.search(v):
-            event_dict[k] = _KEY_PATTERN.sub("pa_[redacted]", v)
+            event_dict[k] = _KEY_PATTERN.sub("[redacted]", v)
     return event_dict
 
 
@@ -88,3 +90,33 @@ def audit(
         ip=ip,
         detail=detail,
     )
+
+
+def audit_now(
+    *,
+    actor: str,
+    action: str,
+    outcome: str = "ok",
+    document_id: str | None = None,
+    job_id: str | None = None,
+    ip: str | None = None,
+    detail: str | None = None,
+) -> None:
+    """Write one audit row in its own transaction, committed before this returns.
+
+    For denials: the request's session is rolled back when the ``HTTPException`` that follows
+    propagates, and an ``audit()`` added to it goes down with it - which is how refused uploads
+    used to leave no trace. The caller must not hold an uncommitted write on another session
+    (SQLite allows one writer; this would wait on it).
+    """
+    with session_scope() as s:
+        audit(
+            s,
+            actor=actor,
+            action=action,
+            outcome=outcome,
+            document_id=document_id,
+            job_id=job_id,
+            ip=ip,
+            detail=detail,
+        )

@@ -129,7 +129,7 @@ def test_the_check_runs_against_the_contract(client: TestClient) -> None:
 def test_rules_needing_a_contract_are_reported_as_skipped(client: TestClient) -> None:
     act = _upload(client, "act.xlsx", ACT_LINES)
     report = client.post("/api/v1/checks/aoa", headers=H, json={"aoa_document_id": act}).json()
-    assert any("AOA.CONTRACT" in s for s in report["skipped"])
+    assert any(s["rule_id"].startswith("AOA.CONTRACT") for s in report["skipped"])
 
 
 def test_findings_are_bilingual(client: TestClient) -> None:

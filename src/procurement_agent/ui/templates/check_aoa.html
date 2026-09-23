@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% import "_findings.html" as f %}
+{% block title %}{{ t("aoa.title") }} · {{ act.display_name }}{% endblock %}
+{% block content %}
+<p><a class="back" href="/ui/">&larr; {{ t("nav.home") }}</a></p>
+<h1>{{ t("aoa.title") }}</h1>
+
+<p class="muted">
+  {{ t("aoa.act") }}: <strong>{{ act.display_name }}</strong> ·
+  {{ t("aoa.contract") }}:
+  {%- if contract %} <strong>{{ contract.display_name }}</strong>
+  {%- else %} <em>{{ t("aoa.contract.none") }}</em>{% endif %} ·
+  {{ t("upload.contractor_type") }}:
+  {%- if contractor_type %} {{ t("contractor." ~ contractor_type) }}
+  {%- else %} <em>{{ t("upload.contractor_type.unset") }}</em>{% endif %}
+</p>
+
+<div class="result-head">
+  <p class="muted small num">{{ t("report.counts",
+      e=report.findings | selectattr("severity", "equalto", "error") | list | length,
+      w=report.findings | selectattr("severity", "equalto", "warning") | list | length,
+      i=report.findings | selectattr("severity", "equalto", "info") | list | length) }}</p>
+  {% if act.kind == "docx" %}
+  <a class="btn" href="/ui/checks/aoa/annotated.docx?{{ query }}">{{ t("aoa.download") }}</a>
+  {% endif %}
+</div>
+
+{# Disabled-with-a-reason, not hidden: a missing button reads as a bug. annotate_docx refuses
+   spreadsheets as well as scans, so the test is "is it a .docx", not "is it not a PDF". #}
+{% if act.kind != "docx" %}
+<p class="muted small">{{ t("aoa.download.unavailable", kind=act.kind) }}</p>
+{% endif %}
+
+{# "Clean" means nothing to act on, not an empty list. The client's own correct act still
+   raises AOA.IBAN_CHECKSUM as info, because their sample IBANs are anonymised - see
+   docs/ACCURACY.md. Treating that as a finding would make the good document look bad. #}
+{% set actionable = report.findings | rejectattr("severity", "equalto", "info") | list %}
+{% if not actionable %}
+<p class="card ok-state">{{ t("report.none") }}
+  {%- if report.findings %} <span class="muted small">{{ t("report.info_only") }}</span>{% endif %}</p>
+{% endif %}
+
+{{ f.severity_groups(groups, t, msg) }}
+{{ f.skipped(report.skipped, t, why) }}
+
+{% if not contractor_type %}
+<form class="card rerun" method="get" action="/ui/checks/aoa">
+  <input type="hidden" name="act" value="{{ act.id }}">
+  {% if contract %}<input type="hidden" name="contract" value="{{ contract.id }}">{% endif %}
+  <label for="rerun-type">{{ t("upload.contractor_type") }}</label>
+  <select id="rerun-type" name="contractor_type">
+    {% for value in contractor_types %}
+    <option value="{{ value }}">{{ t("contractor." ~ value) }}</option>
+    {% endfor %}
+  </select>
+  <button type="submit">{{ t("aoa.rerun") }}</button>
+</form>
+{% endif %}
+{% endblock %}

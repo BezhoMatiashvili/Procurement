@@ -1,25 +1,26 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>Documents</h1>
+<p><a class="back" href="/ui/">&larr; {{ t("nav.home") }}</a></p>
+<h1>{{ t("nav.documents") }}</h1>
 <form method="post" action="/ui/documents/upload" enctype="multipart/form-data" class="card">
-  <label>Upload PDF, DOCX or XLSX
-    <input type="file" name="file" accept=".pdf,.docx,.xlsx" required></label>
-  <button type="submit">Upload</button>
+  <label for="file">{{ t("upload.choose") }} <span class="muted small">PDF · DOCX · XLSX</span></label>
+  <input id="file" type="file" name="file" accept=".pdf,.docx,.xlsx" required>
+  <button type="submit">{{ t("upload.choose") }}</button>
 </form>
 <table class="list">
-  <thead><tr><th>Name</th><th>Type</th><th>Pages</th><th>Status</th><th>Uploaded</th><th>Expires</th></tr></thead>
+  <thead><tr><th>{{ t('doc.name') }}</th><th>{{ t("doc.kind") }}</th><th>{{ t("doc.pages") }}</th><th>{{ t("doc.status") }}</th><th>{{ t("doc.uploaded") }}</th><th>{{ t("doc.expires") }}</th></tr></thead>
   <tbody>
   {% for d in documents %}
   <tr>
     <td class="primary"><a href="/ui/documents/{{ d.id }}">{{ d.display_name }}</a></td>
-    <td data-label="Type">{{ d.kind }}</td>
-    <td data-label="Pages">{{ d.page_count or "" }}</td>
-    <td data-label="Status"><span class="status {{ d.status.value }}">{{ d.status.value }}</span></td>
-    <td data-label="Uploaded">{{ d.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
-    <td data-label="Expires">{{ d.expires_at.strftime("%Y-%m-%d") if d.expires_at else "never" }}</td>
+    <td data-label="{{ t('doc.kind') }}">{{ d.kind }}</td>
+    <td data-label="{{ t('doc.pages') }}">{{ d.page_count or "" }}</td>
+    <td data-label="{{ t('doc.status') }}"><span class="status {{ d.status.value }}">{{ d.status.value }}</span></td>
+    <td data-label="{{ t('doc.uploaded') }}">{{ d.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+    <td data-label="{{ t('doc.expires') }}">{{ d.expires_at.strftime("%Y-%m-%d") if d.expires_at else t("doc.never") }}</td>
   </tr>
   {% else %}
-  <tr><td colspan="6" class="muted empty-state">No documents yet.</td></tr>
+  <tr><td colspan="6" class="muted empty-state">{{ t("doc.none") }}</td></tr>
   {% endfor %}
   </tbody>
 </table>

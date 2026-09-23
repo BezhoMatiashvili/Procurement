@@ -19,11 +19,13 @@ from dataclasses import dataclass, field
 
 from procurement_agent.extraction.normalize import (
     QUOTE_CHARS,
+    iban_is_valid,
     name_stem,
     names_match,
     normalize_confusables,
     normalize_name,
     normalize_spaces,
+    unlabelled_bic_plausible,
 )
 from procurement_agent.extraction.schemas import FactType
 
@@ -39,8 +41,24 @@ _ID_CODE = re.compile(
     r"(?:ს\s*/\s*კ|საიდენტიფიკაციო\s*(?:კოდი|ნომერი)?|პირადი\s*ნომერი)\s*[:№#-]?\s*(\d{9}|\d{11})(?!\d)",
     re.IGNORECASE,
 )
+# An address ends at ";", "(" or ")", at the end of the text, or where the next field starts.
+# The next field is recognised three ways, because the address has to stop in text that still
+# has its line breaks (the pipeline) and in text that has been flattened to one line (the AOA
+# checker hands the anchors normalised text):
+#   * a line break followed by a label ("ტელ: ...", "ელ-ფოსტა: ..."), a numbered clause
+#     ("4.1. ...") or a new party ("შპს „...“") - a plain line break is a wrapped address line;
+#   * an inline contact label, "ტელ:" / "ელ. ფოსტა:" / "e-mail:", written on the same line.
+# "ტელ" needs its colon or full stop: "ქ. ტელავი" is a city, not a telephone number.
+_CONTACT_LABEL = r"(?:ტელ(?:ეფონი)?|ელ\.?\s?-?\s?ფოსტა|მობ(?:ილური)?|ფაქსი|e-?mail|tel|phone|fax)"
+_NEXT_LINE_FIELD = (
+    # a clause number needs its full stop ("4.2. "): a bare "12 " is a wrapped house number
+    r"\n\s*(?:\d+(?:\.\d+)*\.\s|(?:[^\s:;]{1,25}\s?){1,3}[:\uff1a]|"
+    rf"(?:{_LEGAL_FORM})\s*[{_Q}])"
+)
 _ADDRESS = re.compile(
-    r"(?:იურიდიული\s*)?მისამართი\s*[:\uff1a]\s*([^;()\n]{4,140}?)\s*(?=[;()\n]|$)", re.IGNORECASE
+    r"(?:იურიდიული\s*)?მისამართი\s*[:\uff1a]\s*([^;()]{4,140}?)\s*"
+    rf"(?=[;()]|{_NEXT_LINE_FIELD}|[\s,]+{_CONTACT_LABEL}\s*[.:\uff1a]|\s*$)",
+    re.IGNORECASE,
 )
 # "დირექტორი ნინო კაპანაძე", "დირექტორი: დავით მელაძე",
 # "წარმოდგენილი გენერალური დირექტორის, დავით მელაძის სახით"
@@ -53,6 +71,12 @@ _PROJECT = re.compile(rf"{_PROJECT_WORD}\s*{_QUOTED}")
 _PROJECT_REV = re.compile(rf"{_QUOTED}\s*{_PROJECT_WORD}")
 _CADASTRAL = re.compile(r"(?<![\d.])\d{2}\.\d{2}\.\d{2}\.\d{3}(?:\.\d{3})?(?![\d.])")
 _IBAN = re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b")
+# An IBAN is also printed in groups of four ("GE29 NB00 0000 ..."). The grouped form can run
+# on into a following capitalised word, so it is accepted only at a length whose checksum
+# validates - see ``_ibans``.
+_IBAN_GROUPED = re.compile(r"\b[A-Z]{2}\d{2}(?: [A-Z0-9]{4}){2,7}(?: [A-Z0-9]{1,3})?\b")
+# Unlabelled BIC. The shape alone fits any 8- or 11-letter capitalised word ("SUPPLIER",
+# "DESCRIPTION"), so a match is kept only when ``unlabelled_bic_plausible`` says so.
 _SWIFT = re.compile(r"\b[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b")
 # A bank code read from its own label, so a malformed one is still captured. The pattern
 # above only matches a well-formed BIC, which means a wrong code like "AAAGE22" (seven
@@ -114,6 +138,8 @@ class Party:
     directors: list[str] = field(default_factory=list)
     role: str | None = None
     is_bank: bool = False
+    #: IBANs stated inside this party's block of requisites, in document order
+    accounts: list[str] = field(default_factory=list)
 
     @property
     def key(self) -> str:
@@ -135,6 +161,37 @@ def _clean(s: str) -> str:
     return normalize_spaces(s).strip(" ,;:.-")
 
 
+def _prepare(text: str) -> str:
+    """Normalise each line on its own, so that line breaks survive.
+
+    ``normalize_confusables`` folds every whitespace run, newlines included, into one space.
+    Applied to the whole text, it erased the line break that ends an address, and the address
+    swallowed the telephone and e-mail lines under it. Text that arrives already flattened
+    passes through unchanged.
+    """
+    return "\n".join(normalize_confusables(line) for line in text.split("\n"))
+
+
+def _ibans(text: str) -> list[tuple[str, int, int]]:
+    """(IBAN, start, end) for compact and grouped IBANs, compact ones never overlapped twice."""
+    out: list[tuple[str, int, int]] = []
+    for m in _IBAN.finditer(text):
+        out.append((m.group(0), m.start(), m.end()))
+    for m in _IBAN_GROUPED.finditer(text):
+        if any(s < m.end() and m.start() < e for _, s, e in out):
+            continue
+        groups = m.group(0).split(" ")
+        # drop trailing groups until the checksum holds: "GE29 NB00 ... 17 BANK" must not
+        # take the next word with it
+        while len(groups) > 3:
+            candidate = "".join(groups)
+            if iban_is_valid(candidate):
+                out.append((candidate, m.start(), m.start() + len(" ".join(groups))))
+                break
+            groups.pop()
+    return out
+
+
 def _same_party(a: Party, b: Party) -> bool:
     if a.id_code and b.id_code:
         return a.id_code == b.id_code
@@ -149,7 +206,7 @@ def find_parties(text: str) -> list[Party]:
     identification code (or by name when there is none), so that the requisites block at the
     top and the signature block at the bottom contribute to one record.
     """
-    text = normalize_confusables(text)
+    text = _prepare(text)
     matches = list(_PARTY_NAME.finditer(text))
     if not matches:
         return []
@@ -190,29 +247,38 @@ def find_parties(text: str) -> list[Party]:
             cand = _clean(rm.group(1))
             if cand in ROLE_WORDS:
                 party.role = cand
+        party.accounts = list(dict.fromkeys(iban for iban, _, _ in _ibans(window)))
         parties.append(party)
 
     merged: list[Party] = []
+    last: Party | None = None  # the record the previous real party went into
     for p in parties:
         if p.is_bank:
+            # "ბანკი: სს „…ბანკი“, ა/ა GE…" sits inside the preceding party's requisites, so the
+            # account after the bank's name is that party's account.
+            if last is not None:
+                last.accounts.extend(a for a in p.accounts if a not in last.accounts)
             continue
         existing = next((q for q in merged if _same_party(p, q)), None)
         if existing is None:
             merged.append(p)
+            last = p
             continue
         existing.name = existing.name or p.name
         existing.id_code = existing.id_code or p.id_code
         existing.address = existing.address or p.address
         existing.role = existing.role or p.role
+        existing.accounts.extend(a for a in p.accounts if a not in existing.accounts)
         for d in p.directors:
             if not any(names_match(d, e) for e in existing.directors):
                 existing.directors.append(d)
+        last = existing
     return merged
 
 
 def find_anchors(text: str) -> list[AnchorHit]:
     """Anchor hits as flat facts, for the extraction pipeline."""
-    text = normalize_confusables(text)
+    text = _prepare(text)
     hits: list[AnchorHit] = []
 
     def emit(
@@ -268,9 +334,21 @@ def find_anchors(text: str) -> list[AnchorHit]:
         add(FactType.project_name, m.group(1), m)
     for m in _CADASTRAL.finditer(text):
         add(FactType.cadastral_code, m.group(0), m, normalized=m.group(0))
-    for m in _IBAN.finditer(text):
-        add(FactType.bank_account, m.group(0), m, unit="IBAN", normalized=m.group(0))
+    for iban, start, end in _ibans(text):
+        emit(
+            FactType.bank_account,
+            iban,
+            text[start:end],
+            start,
+            end,
+            unit="IBAN",
+            normalized=iban,
+            # kept, not dropped: a mistyped account is what the acceptance check must report
+            note=None if iban_is_valid(iban) else "IBAN checksum does not validate",
+        )
     for m in _SWIFT.finditer(text):
+        if not unlabelled_bic_plausible(text, m.start(), m.end()):
+            continue
         add(FactType.bank_account, m.group(0), m, unit="SWIFT")
     for m in _SWIFT_LABELLED.finditer(text):
         code = m.group(1).upper()

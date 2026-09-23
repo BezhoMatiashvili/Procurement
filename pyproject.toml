@@ -15,6 +15,9 @@ dependencies = [
     "pydantic-settings>=2.5",
     # --- documents ---
     "docling>=2.129",
+    # report/docx_annotate.py imports this at module level in src/, so it is a runtime
+    # dependency and not a test one. It worked only because docling happens to pull it in.
+    "python-docx>=1.1",
     "openpyxl>=3.1",
     "pandas>=2.2",
     "pypdfium2>=4.30",
@@ -41,7 +44,6 @@ dev = [
     "pip-audit>=2.7",
     "pre-commit>=3.8",
     "reportlab>=4.2",
-    "python-docx>=1.1",
     "types-openpyxl",
     "pandas-stubs",
     "types-pyyaml>=6.0.12.20260906",
@@ -71,7 +73,10 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "S", "A", "C4", "SIM", "PTH", "RUF", "ASYNC", "T20"]
-ignore = ["S101", "B008"]  # S101: assert in tests; B008: FastAPI Depends() idiom
+# B008: FastAPI Depends() idiom. S101 (assert) is NOT ignored here: it used to be, "for tests",
+# which also let asserts into src/ where `python -O` strips them and bandit fails the gate on
+# them. tests/** ignores all of "S" below.
+ignore = ["B008"]
 
 [tool.ruff.lint.per-file-ignores]
 # RUF001/RUF003: these files exist to handle visually ambiguous characters, so they have
@@ -98,11 +103,47 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# --strict-markers: a typo in a marker name would otherwise silently select nothing, and a
+# CI job filtering on "not e2e" would quietly start running the slow tests (or skip real ones).
+addopts = ["--strict-markers"]
 markers = [
     "e2e: full pipeline against a live Ollama (slow)",
     "docling: requires docling models downloaded",
 ]
-filterwarnings = ["ignore::DeprecationWarning"]
+# Warnings are errors when our own code raises them, so a deprecation in procurement_agent
+# fails the build the day it appears instead of the day the API is removed. Third-party
+# warnings we cannot fix are ignored one message at a time; a blanket
+# "ignore::DeprecationWarning" (what this used to be) also hid every warning about OUR calls.
+filterwarnings = [
+    "error:::procurement_agent",
+    # starlette.testclient prefers httpx2. Not added as a dev dependency: the only httpx2 in
+    # the offline cache (2.11.0) carries PYSEC-2026-3846, which would fail pip-audit. Adopt it
+    # at >=2.12 with network access and delete this line.
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning",
+    # starlette.testclient itself still references the deprecated anyio alias.
+    "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning",
+    # Docling serialises its own deprecated pipeline-option defaults; we set neither option.
+    "ignore:`force_full_page_ocr` is deprecated:DeprecationWarning",
+    "ignore:This field is deprecated. Use `generate_page_images=True`:DeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["procurement_agent"]
+branch = true
+
+[tool.coverage.report]
+# Measured at 87-88% (branch coverage, -m "not e2e and not docling", no Docling models). The
+# floor sits a little below so that a new, reasonably tested module does not fail the gate,
+# while losing the tests of an existing one does. Raise it as coverage rises; never lower it
+# to make a build pass.
+fail_under = 85
+show_missing = false
+skip_covered = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]
 
 [tool.bandit]
 exclude_dirs = ["tests", ".venv"]
