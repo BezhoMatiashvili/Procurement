@@ -1,38 +1,24 @@
 {% extends "base.html" %}
+{% import "_upload.html" as up with context %}
 {% block title %}{{ t("upload.boq.title") }} · {{ t("app.name") }}{% endblock %}
 {% block content %}
-<p><a class="back" href="/ui/">&larr; {{ t("nav.home") }}</a></p>
-<h1>{{ t("upload.boq.title") }}</h1>
+<a class="back" href="/ui/">{{ icon("arrow-left") }}{{ t("nav.home") }}</a>
+<div class="page-head">
+  <h1>{{ t("upload.boq.title") }}</h1>
+  <p class="muted lead">{{ t("task.boq.lead") }}</p>
+  {{ up.steps() }}
+</div>
 
-<form class="card" data-upload-flow="boq" data-next="/ui/checks/boq">
-  <div class="slot" data-slot="template" data-field="template">
-    <h2>{{ t("upload.template") }} <span class="slot-required">{{ t("upload.required") }}</span></h2>
-    <p class="muted small">{{ t("upload.template.hint") }}</p>
-    <label class="drop">
-      <span class="drop-hint">{{ t("upload.choose") }} <span class="muted">{{ t("upload.drop") }}</span></span>
-      <input type="file" name="template" accept=".xlsx" required>
-    </label>
+<form class="card upload-card" data-upload-flow="boq" data-next="/ui/checks/boq">
+  {{ up.slot(1, "template", t("upload.template"), t("upload.template.hint"), ".xlsx", "XLSX") }}
+  {{ up.slot(2, "bids", t("upload.bids"), t("upload.bids.hint"), ".xlsx", "XLSX", multiple=True) }}
+
+  {{ up.progress() }}
+  <div class="form-foot">
+    <button type="submit" data-upload-submit>{{ icon("table") }}{{ t("upload.start.boq") }}</button>
+    <span class="muted">{{ t("upload.timing") }}</span>
   </div>
-
-  <div class="slot" data-slot="bids" data-field="bids" data-multiple>
-    <h2>{{ t("upload.bids") }} <span class="slot-required">{{ t("upload.required") }}</span></h2>
-    <p class="muted small">{{ t("upload.bids.hint") }}</p>
-    <label class="drop">
-      <span class="drop-hint">{{ t("upload.choose.many") }} <span class="muted">{{ t("upload.drop.many") }}</span></span>
-      <input type="file" name="bids" accept=".xlsx" multiple required>
-    </label>
-  </div>
-
-  <ol class="upload-rows" data-upload-rows role="status" aria-live="polite"
-      data-s-waiting="{{ t('upload.status.waiting') }}"
-      data-s-uploading="{{ t('upload.status.uploading') }}"
-      data-s-parsing="{{ t('upload.status.parsing') }}"
-      data-s-ready="{{ t('upload.status.ready') }}"
-      data-s-failed="{{ t('upload.status.failed') }}"
-      data-s-busy="{{ t('upload.busy') }}"
-      data-s-opening="{{ t('upload.opening') }}"></ol>
-  <button type="submit" data-upload-submit>{{ t("upload.start.boq") }}</button>
   <noscript><p class="warn">{{ t("upload.noscript") }}</p></noscript>
 </form>
 {% endblock %}
-{% block scripts %}<script src="/static/upload.js"></script>{% endblock %}
+{% block scripts %}<script src="/static/upload.js?v={{ asset_v }}"></script>{% endblock %}

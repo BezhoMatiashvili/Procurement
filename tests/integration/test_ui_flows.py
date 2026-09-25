@@ -133,6 +133,7 @@ def test_every_new_template_renders_under_strict_undefined(name: str) -> None:
         groups=[("error", [finding])],
         groups_for=lambda b: [],
         report=reports.get(name),
+        recent=[],
         act=_stub_doc(),
         contract=_stub_doc(),
         contractor_type=None,
@@ -243,8 +244,9 @@ def test_the_act_report_separates_skipped_rules_from_findings(client: TestClient
     assert "ვერ შესრულდა და რატომ" in body  # "could not run, and why"
     assert "AOA.CONTRACT_*" in skipped_section
     # the skipped rule is listed as a skip, never inside a findings table
-    findings_tables = re.findall(r'<table class="list findings">.*?</table>', body, re.S)
-    assert not any("AOA.CONTRACT_*" in tbl for tbl in findings_tables)
+    findings_lists = re.findall(r'<ol class="findings">.*?</ol>', body, re.S)
+    assert findings_lists, "the act report lists its findings"
+    assert not any("AOA.CONTRACT_*" in block for block in findings_lists)
 
 
 def test_the_annotated_download_is_offered_only_for_a_word_act(client: TestClient) -> None:
@@ -511,3 +513,138 @@ def test_the_comparison_is_not_stored_in_the_browser_cache(client: TestClient) -
     left, right = _compare_run(client, "amount")
     r = client.get(f"/ui/checks/compare?left={left}&right={right}")
     assert r.headers["cache-control"] == "no-store"
+
+
+# --- the redesign: verdicts, labels, money and the front door --------------------------------
+
+
+def test_money_has_thousands_separators_and_a_dash_for_nothing() -> None:
+    """The on-screen format the check messages already use; the workbook keeps real numbers."""
+    from procurement_agent.ui.routes import _money
+
+    assert _money(218927.861) == "218,927.86"
+    assert _money(0.0) == "0.00"
+    assert _money(None) == "—"
+
+
+def test_the_boq_totals_are_grouped_by_thousands(client: TestClient) -> None:
+    template, bids = _boq_run(client)
+    body = client.get(f"/ui/checks/boq?template={template}&bids={','.join(bids)}").text
+    board = re.search(r'<table class="list leaderboard">.*?</table>', body, re.S)
+    assert board and "1,001.00" in board.group(0)
+
+
+def test_the_front_door_lists_recent_uploads(client: TestClient) -> None:
+    doc = _act(client)
+    body = client.get("/ui/").text
+    assert f"/ui/documents/{doc}" in body
+    assert "ბოლოს ატვირთული" in body  # "recent uploads"
+
+
+def test_status_pills_are_translated_but_keep_the_enum_as_the_class(client: TestClient) -> None:
+    _act(client)
+    body = client.get("/ui/documents").text
+    assert 'class="status ready"' in body
+    assert ">მზადაა<" in body  # "ready", in Georgian
+    assert ">ready<" not in body
+
+
+def test_an_act_with_errors_opens_with_a_verdict(client: TestClient) -> None:
+    body = client.get(f"/ui/checks/aoa?act={_act(client)}").text
+    assert "verdict" in body
+    # the verdict comes before the detail it summarises
+    assert body.index("verdict") < body.index('<ol class="findings">')
+
+
+def test_every_asset_url_carries_the_content_version(client: TestClient) -> None:
+    """/static is cacheable and the pages are not; without the version an upgrade would pair
+    new markup with an old stylesheet."""
+    from procurement_agent.ui.routes import _ASSET_V
+
+    body = client.get("/ui/").text
+    for asset in ("app.css", "app.js", "boot.js", "icons.svg"):
+        assert f"/static/{asset}?v={_ASSET_V}" in body
+
+
+def test_the_icon_sprite_and_scripts_are_served(client: TestClient) -> None:
+    for path in ("/static/icons.svg", "/static/boot.js", "/static/favicon.svg"):
+        assert client.get(path).status_code == 200
+
+
+def test_a_signed_in_page_marks_where_you_are(client: TestClient) -> None:
+    assert 'href="/ui/documents" aria-current="page"' in client.get("/ui/documents").text
+    assert 'href="/ui/" aria-current="page"' in client.get("/ui/start/boq").text
+
+
+@needs_pairs
+def test_a_pair_the_line_diff_cannot_read_gets_no_confident_headline(client: TestClient) -> None:
+    """The verdict is built from line-diff counts; where those are noise (a contract against
+    a workbook) the page must say so in the verdict's place, not open with "N critical"."""
+    left = _upload(client, "base.docx", (COMPARE_PAIRS / "base.docx").read_bytes(), DOCX)
+    template, _ = _boq_run(client, n=1)
+    body = client.get(f"/ui/checks/compare?left={left}&right={template}").text
+    verdict = re.search(r'<div class="verdict[^"]*">.*?</div></div>', body, re.S)
+    assert verdict and "is-bad" not in verdict.group(0)
+    assert "#skipped" in body  # and the rules that could not run are one click away
+
+
+def test_a_bidder_with_no_total_gets_no_rank_number(client: TestClient) -> None:
+    """The model's own rule: a bidder who states no bottom line is never ranked."""
+    template = _upload(client, "Template.xlsx", build_boq(LINES, stated_total=None), XLSX)
+    ranked = _upload(client, "Company-1.xlsx", build_boq(LINES, stated_total=1000.0), XLSX)
+    silent = _upload(client, "Company-2.xlsx", build_boq(LINES, stated_total=None), XLSX)
+    body = client.get(f"/ui/checks/boq?template={template}&bids={ranked},{silent}").text
+    rows = re.findall(r"<tr[^>]*>\s*<td class=\"primary\">(.*?)</td>", body, re.S)
+    by_name = {
+        ("Company-2" if "Company-2" in r else "Company-1"): r for r in rows if "Company-" in r
+    }
+    assert 'class="rank"' in by_name["Company-1"]
+    assert 'class="rank"' not in by_name["Company-2"]
+
+
+def test_the_upload_progress_keeps_list_semantics_inside_a_live_region(
+    client: TestClient,
+) -> None:
+    body = client.get("/ui/start/boq").text
+    assert '<div class="upload-status" role="status" aria-live="polite">' in body
+    assert not re.search(r"<ol[^>]*role=", body)
+
+
+def test_the_headline_tiles_carry_the_not_comparable_caveat(client: TestClient) -> None:
+    """On the client's own set every bidder left a section unpriced; the "lowest" tile must say
+    so, and a spread between two not-comparable totals is not shown at all."""
+    template = _upload(client, "Template.xlsx", build_boq(LINES, stated_total=None), XLSX)
+    unpriced = _upload(
+        client, "Company-1.xlsx", build_boq(LINES, priced=False, stated_total=500.0), XLSX
+    )
+    priced = _upload(client, "Company-2.xlsx", build_boq(LINES, stated_total=2000.0), XLSX)
+    body = client.get(f"/ui/checks/boq?template={template}&bids={unpriced},{priced}").text
+    assert 'class="card caveat"' in body  # the precondition: Company-1 is not comparable
+    stats = re.search(r'<ul class="stats">.*?</ul>', body, re.S)
+    assert stats
+    low_tile = re.search(r'<li class="stat ok">.*?</li>', stats.group(0), re.S)
+    assert low_tile and "Company-1" in low_tile.group(0) and "badge" in low_tile.group(0)
+    assert "სხვაობა უმაღლესსა" not in stats.group(0)  # no spread between unlike totals
+
+
+def test_an_extraction_result_names_its_fields_in_georgian(client: TestClient) -> None:
+    """The stored label is English; a Georgian reader should not meet "Total amount"."""
+    doc = _act(client)
+    r = client.post(
+        f"/ui/documents/{doc}/extract",
+        data={"targets": ["total_amount", "party_name"]},
+        headers=SAME_ORIGIN,
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    job_url = r.headers["location"]
+    deadline = time.time() + 30
+    body = ""
+    while time.time() < deadline:
+        body = client.get(job_url).text
+        if "Excel" in body and "facts" in body:
+            break
+        time.sleep(0.2)
+    assert '<table class="list facts">' in body
+    assert "მხარის დასახელება" in body  # "Party name", in Georgian
+    assert ">Party name<" not in body

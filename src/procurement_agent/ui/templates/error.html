@@ -1,7 +1,12 @@
 {% extends "base.html" %}
 {% block title %}{{ t("error.title") }}{% endblock %}
 {% block content %}
-<h1>{{ t("error.title") }}</h1>
-<p class="card error">{{ message }}</p>
-<p><a class="back" href="/ui/">&larr; {{ t("nav.home") }}</a></p>
+<div class="card notice is-error">{{ icon("alert") }}<div>
+  <h1>{{ t("error.title") }}</h1>
+  <p>{{ message }}</p>
+  <div class="actions">
+    <a class="btn secondary" href="/ui/">{{ icon("arrow-left") }}{{ t("nav.home") }}</a>
+    <a class="btn ghost" href="/ui/documents">{{ icon("files") }}{{ t("nav.documents") }}</a>
+  </div>
+</div></div>
 {% endblock %}

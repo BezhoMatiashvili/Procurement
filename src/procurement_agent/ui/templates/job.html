@@ -1,48 +1,60 @@
 {% extends "base.html" %}
 {% block title %}{{ t("extract.title") }} · {{ doc.display_name }}{% endblock %}
 {% block content %}
-<p><a class="back" href="/ui/documents/{{ doc.id }}">&larr; {{ doc.display_name }}</a></p>
-<h1>{{ t("extract.title") }} {{ job.id[:8] }}
-  <span class="status {{ job.status.value }}" id="job-status">{{ job.status.value }}</span></h1>
+<a class="back" href="/ui/documents/{{ doc.id }}">{{ icon("arrow-left") }}{{ doc.display_name }}</a>
+<div class="page-head">
+  <h1>{{ t("extract.title") }} <code class="muted small">{{ job.id[:8] }}</code>
+    <span class="status {{ job.status.value }}" id="job-status">{{ t("status." ~ job.status.value) }}</span></h1>
+</div>
 
 {% if job.status.value in ("queued", "running") %}
 <div class="card" data-poll-job="{{ job.id }}" role="status" aria-live="polite">
+  <div class="row"><span id="job-message">{{ job.message or t("status." ~ job.status.value) }}</span>
+    <span class="num muted" id="job-pct">{{ job.progress }}%</span></div>
   <progress id="job-progress" value="{{ job.progress }}" max="100"></progress>
-  <span id="job-message" class="muted">{{ job.message or "" }}</span>
-  <p class="muted small">{{ t("extract.slow") }}</p>
+  <p class="muted small">{{ icon("clock") }} {{ t("extract.slow") }}</p>
 </div>
 {% elif job.status.value == "failed" %}
-<p class="error">{{ job.message }}</p>
+<div class="card notice is-error">{{ icon("alert") }}<div>
+  <p><strong>{{ t("extract.failed") }}</strong></p>
+  {% if job.message %}<p>{{ job.message }}</p>{% endif %}
+  <div class="actions"><a class="btn secondary" href="/ui/documents/{{ doc.id }}">{{ icon("refresh") }}{{ t("extract.again") }}</a></div>
+</div></div>
 {% endif %}
 
 {% if result %}
 <div class="result-head">
-  <p class="muted small"><span class="num">{{ result.facts | length }}</span> · {{ result.model or t("extract.rules_only") }} · <span class="num">{{ result.llm_calls }}</span> LLM · <span class="num">{{ result.seconds }}</span> s</p>
-  <a class="btn" href="/api/v1/jobs/{{ job.id }}/result?format=xlsx">{{ t("extract.download") }}</a>
+  <p class="muted small">{{ t("extract.meta", n=result.facts | length, model=result.model or t("extract.rules_only"), calls=result.llm_calls, s=result.seconds) }}</p>
+  <a class="btn" href="/api/v1/jobs/{{ job.id }}/result?format=xlsx">{{ icon("download") }}{{ t("extract.download") }}</a>
 </div>
-{% if result.question %}<p><strong>{{ t("extract.question") }}</strong> {{ result.question }}</p>{% endif %}
-{% for w in result.warnings %}<p class="warn">{{ w }}</p>{% endfor %}
+{% if result.question %}<p class="card"><strong>{{ t("extract.question") }}</strong> {{ result.question }}</p>{% endif %}
+{% for w in result.warnings %}<p class="card caveat caveat-title">{{ icon("alert") }}<span>{{ w }}</span></p>{% endfor %}
+{% if result.facts %}
 <table class="list facts">
-  <thead><tr><th>{{ t("fact.field") }}</th><th>{{ t("fact.value") }}</th><th>{{ t("fact.confidence") }}</th><th>{{ t("fact.source") }}</th><th>{{ t("fact.where") }}</th><th>{{ t("fact.quote") }}</th></tr></thead>
+  <thead><tr><th>{{ t("fact.field") }}</th><th>{{ t("fact.value") }}</th><th class="num">{{ t("fact.confidence") }}</th><th>{{ t("fact.source") }}</th><th>{{ t("fact.where") }}</th><th>{{ t("fact.quote") }}</th></tr></thead>
   <tbody>
   {% for f in result.facts %}
+  {% set pct = (f.confidence * 100) | round(0) | int %}
   <tr class="{% if f.conflict %}conflict{% endif %}">
-    <td class="primary">{{ f.label }}{% if f.conflict %} <span class="badge">{{ t("fact.conflict") }}</span>{% endif %}</td>
+    <td class="primary">{% if lang == "ka" and f.type in labels %}{{ labels[f.type][1] }}{% else %}{{ f.label }}{% endif %}{% if f.conflict %} <span class="badge">{{ t("fact.conflict") }}</span>{% endif %}</td>
     <td data-label="{{ t('fact.value') }}"><strong>{{ f.value }}</strong>{% if f.normalized is not none and f.normalized|string != f.value %} <span class="muted small">({{ f.normalized }})</span>{% endif %}</td>
-    <td data-label="{{ t('fact.confidence') }}" class="num">{{ (f.confidence * 100) | round(0) | int }}%</td>
+    <td data-label="{{ t('fact.confidence') }}" class="num"><span class="conf {{ 'hi' if pct >= 80 else ('mid' if pct >= 50 else 'lo') }}">{{ pct }}%</span></td>
     <td data-label="{{ t('fact.source') }}" class="muted">{{ f.source }}</td>
     {# whitespace control keeps this cell truly empty, so the phone layout hides it instead of showing a bare "Where" label #}
     <td data-label="{{ t('fact.where') }}">
       {%- if f.provenance.page and doc.kind == "pdf" -%}
-        <a href="/api/v1/documents/{{ doc.id }}/pages/{{ f.provenance.page }}.png{% if f.provenance.bbox %}?bbox={{ f.provenance.bbox | join(',') }}{% endif %}" target="_blank">{{ t("fact.page") }} {{ f.provenance.page }}</a>
+        <a href="/api/v1/documents/{{ doc.id }}/pages/{{ f.provenance.page }}.png{% if f.provenance.bbox %}?bbox={{ f.provenance.bbox | join(',') }}{% endif %}" target="_blank" rel="noopener">{{ t("fact.page") }} {{ f.provenance.page }}</a>
       {%- elif f.provenance.page -%}{{ t("fact.page") }} {{ f.provenance.page }}
       {%- elif f.provenance.sheet -%}{{ f.provenance.sheet }}!{{ f.provenance.cell }}
       {%- endif -%}
     </td>
     <td data-label="{{ t('fact.quote') }}" class="quote">{{ f.raw_text }}</td>
   </tr>
-  {% else %}<tr><td colspan="6" class="muted empty-state">{{ t("extract.none") }}</td></tr>{% endfor %}
+  {% endfor %}
   </tbody>
 </table>
+{% else %}
+<div class="card empty">{{ icon("file-search") }}<p>{{ t("extract.none") }}</p></div>
+{% endif %}
 {% endif %}
 {% endblock %}

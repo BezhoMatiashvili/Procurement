@@ -1,19 +1,28 @@
 {% extends "base.html" %}
 {% block title %}{{ doc.display_name }} · {{ t("app.name") }}{% endblock %}
 {% block content %}
-<p><a class="back" href="/ui/documents">&larr; {{ t("nav.documents") }}</a></p>
-<h1>{{ doc.display_name }}</h1>
-<p class="muted">{{ doc.kind }} · <span class="num">{{ (doc.size_bytes / 1024) | round(0) | int }}</span> KB
-  {% if doc.page_count %}· <span class="num">{{ doc.page_count }}</span> {{ t("doc.pages") }}{% endif %}
-  · <span class="status {{ doc.status.value }}" id="doc-status">{{ doc.status.value }}</span>
-  {% if doc.error %}· <span class="error">{{ doc.error }}</span>{% endif %}
-</p>
+<a class="back" href="/ui/documents">{{ icon("arrow-left") }}{{ t("nav.documents") }}</a>
+<div class="page-head">
+  <h1>{{ doc.display_name }}</h1>
+  <p class="docs-line">
+    <span class="kind">{{ doc.kind }}</span>
+    <span class="num">{{ (doc.size_bytes / 1024) | round(0) | int }} KB</span>
+    {% if doc.page_count %}<span>· <span class="num">{{ doc.page_count }}</span> {{ t("doc.pages") }}</span>{% endif %}
+    <span class="status {{ doc.status.value }}" id="doc-status">{{ t("status." ~ doc.status.value) }}</span>
+    {% if doc.expires_at %}<span>{{ icon("clock") }} {{ t("doc.expires") }}: <span class="num">{{ doc.expires_at.strftime("%Y-%m-%d") }}</span></span>{% endif %}
+  </p>
+</div>
+{% if doc.error %}<div class="card notice is-error">{{ icon("alert") }}<div><p>{{ doc.error }}</p></div></div>{% endif %}
 
 {% if doc.status.value == "ready" %}
 <form method="post" action="/ui/documents/{{ doc.id }}/extract" class="card">
-  <h2>{{ t("extract.title") }}</h2>
+  <h2>{{ icon("file-search") }} {{ t("extract.title") }}</h2>
   <fieldset>
     <legend>{{ t("extract.fields") }}</legend>
+    <div class="actions js-only">
+      <button type="button" class="ghost" data-check-all="on">{{ t("extract.all") }}</button>
+      <button type="button" class="ghost" data-check-all="off">{{ t("extract.none_selected") }}</button>
+    </div>
     <div class="grid">
     {% for value, en, ka in targets %}
       <label class="check"><input type="checkbox" name="targets" value="{{ value }}" checked>
@@ -29,31 +38,41 @@
     <label class="check"><input type="checkbox" name="fast" value="true"> {{ t("extract.fast") }}</label>
     <label class="check"><input type="checkbox" name="use_llm" value="true" checked> {{ t("extract.use_llm") }}</label>
   </div>
-  <button type="submit">{{ t("extract.start") }}</button>
+  <div class="form-foot">
+    <button type="submit">{{ icon("file-search") }}{{ t("extract.start") }}</button>
+  </div>
 </form>
 {% elif doc.status.value in ("uploaded", "parsing") %}
-<p class="card" data-poll-doc="{{ doc.id }}" role="status" aria-live="polite">{{ t("extract.parsing") }}</p>
+<div class="card" data-poll-doc="{{ doc.id }}" role="status" aria-live="polite">
+  <p><span class="status parsing">{{ t("status.parsing") }}</span> {{ t("extract.parsing") }}</p>
+  <progress></progress>
+</div>
 {% endif %}
 
 <h2>{{ t("job.title") }}</h2>
+{% if jobs %}
 <table class="list">
   <thead><tr><th>{{ t("job.one") }}</th><th>{{ t("doc.kind") }}</th><th>{{ t("doc.status") }}</th>
-    <th>{{ t("job.progress") }}</th><th>{{ t("job.message") }}</th></tr></thead>
+    <th class="num">{{ t("job.progress") }}</th><th>{{ t("job.message") }}</th></tr></thead>
   <tbody>
   {% for j in jobs %}
   <tr>
-    <td class="primary">{% if j.kind == "extract" %}<a href="/ui/jobs/{{ j.id }}">{{ j.id[:8] }}</a>{% else %}{{ j.id[:8] }}{% endif %}</td>
-    <td data-label="{{ t('doc.kind') }}">{{ j.kind }}</td>
-    <td data-label="{{ t('doc.status') }}"><span class="status {{ j.status.value }}">{{ j.status.value }}</span></td>
+    <td class="primary">{% if j.kind == "extract" %}<a href="/ui/jobs/{{ j.id }}"><code>{{ j.id[:8] }}</code></a>{% else %}<code>{{ j.id[:8] }}</code>{% endif %}</td>
+    <td data-label="{{ t('doc.kind') }}">{{ t("jobkind." ~ j.kind) }}</td>
+    <td data-label="{{ t('doc.status') }}"><span class="status {{ j.status.value }}">{{ t("status." ~ j.status.value) }}</span></td>
     <td data-label="{{ t('job.progress') }}" class="num">{{ j.progress }}%</td>
     <td data-label="{{ t('job.message') }}" class="muted">{%- if j.message -%}{{ j.message }}{%- endif -%}</td>
   </tr>
-  {% else %}<tr><td colspan="5" class="muted empty-state">{{ t("job.none") }}</td></tr>{% endfor %}
+  {% endfor %}
   </tbody>
 </table>
+{% else %}
+<p class="muted empty-state">{{ t("job.none") }}</p>
+{% endif %}
 
 <form method="post" action="/ui/documents/{{ doc.id }}/delete" class="danger-zone"
       data-confirm="{{ t('doc.delete.confirm') }}">
-  <button class="danger" type="submit">{{ t("doc.delete") }}</button>
+  <p class="muted small">{{ t("doc.delete.lead") }}</p>
+  <button class="danger" type="submit">{{ icon("trash") }}{{ t("doc.delete") }}</button>
 </form>
 {% endblock %}

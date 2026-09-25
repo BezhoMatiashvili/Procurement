@@ -10,11 +10,20 @@ from pathlib import Path
 import pytest
 
 from procurement_agent.checks.aoa import ContractorType
+from procurement_agent.models import DocumentStatus, JobStatus
 from procurement_agent.ui.i18n import DEFAULT_LANG, STRINGS, lang_of, t
 
 TEMPLATES = Path(__file__).resolve().parents[2] / "src" / "procurement_agent" / "ui" / "templates"
 #: keys the templates build with `~`, so a source scan cannot see them whole
-DYNAMIC_PREFIXES = ("contractor.", "report.severity.", "compare.kind.", "compare.show.")
+DYNAMIC_PREFIXES = (
+    "contractor.",
+    "report.severity.",
+    "compare.kind.",
+    "compare.show.",
+    "task.",
+    "status.",
+    "jobkind.",
+)
 
 
 def _keys_used() -> set[str]:
@@ -65,3 +74,28 @@ def test_the_placeholder_survives_translation() -> None:
     """upload.busy is formatted in JavaScript, so {n} must be in both languages."""
     en, ka = STRINGS["upload.busy"]
     assert "{n}" in en and "{n}" in ka
+
+
+@pytest.mark.parametrize("value", [s.value for s in (*DocumentStatus, *JobStatus)])
+def test_every_status_has_a_label(value: str) -> None:
+    """Status pills are built as t("status." ~ value); a raw English enum in a Georgian page
+    is exactly what this replaced."""
+    assert f"status.{value}" in STRINGS
+
+
+@pytest.mark.parametrize("kind", ["parse", "extract", "compare_explain"])
+def test_every_job_kind_has_a_label(kind: str) -> None:
+    assert f"jobkind.{kind}" in STRINGS
+
+
+@pytest.mark.parametrize("task", ["aoa", "boq", "compare"])
+def test_every_picker_task_has_its_three_strings(task: str) -> None:
+    for part in ("title", "lead", "needs"):
+        assert f"task.{task}.{part}" in STRINGS
+
+
+def test_the_upload_placeholders_survive_translation() -> None:
+    """upload.wrong_type is formatted in JavaScript as well."""
+    en, ka = STRINGS["upload.wrong_type"]
+    for token in ("{name}", "{types}"):
+        assert token in en and token in ka

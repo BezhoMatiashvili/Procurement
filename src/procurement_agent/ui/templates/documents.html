@@ -1,27 +1,39 @@
 {% extends "base.html" %}
+{% block title %}{{ t("nav.documents") }} · {{ t("app.name") }}{% endblock %}
 {% block content %}
-<p><a class="back" href="/ui/">&larr; {{ t("nav.home") }}</a></p>
-<h1>{{ t("nav.documents") }}</h1>
-<form method="post" action="/ui/documents/upload" enctype="multipart/form-data" class="card">
-  <label for="file">{{ t("upload.choose") }} <span class="muted small">PDF · DOCX · XLSX</span></label>
-  <input id="file" type="file" name="file" accept=".pdf,.docx,.xlsx" required>
-  <button type="submit">{{ t("upload.choose") }}</button>
+<div class="page-head">
+  <h1>{{ t("nav.documents") }}</h1>
+  <p class="muted lead">{{ t("docs.lead") }}</p>
+</div>
+{# A plain form post, so it works with JavaScript off. With it, choosing or dropping a file
+   submits straight away - one step instead of two. #}
+<form method="post" action="/ui/documents/upload" enctype="multipart/form-data" class="card" data-autosubmit>
+  <label class="drop">
+    <span class="drop-icon">{{ icon("upload") }}</span>
+    <span class="drop-hint" data-busy="{{ t('upload.status.uploading') }}">{{ t("upload.choose") }} <span class="muted">{{ t("upload.drop") }}</span></span>
+    <span class="drop-types">PDF · DOCX · XLSX</span>
+    <input id="file" type="file" name="file" accept=".pdf,.docx,.xlsx" required>
+  </label>
+  <noscript><button type="submit">{{ icon("upload") }}{{ t("docs.upload") }}</button></noscript>
 </form>
+
+{% if documents %}
 <table class="list">
-  <thead><tr><th>{{ t('doc.name') }}</th><th>{{ t("doc.kind") }}</th><th>{{ t("doc.pages") }}</th><th>{{ t("doc.status") }}</th><th>{{ t("doc.uploaded") }}</th><th>{{ t("doc.expires") }}</th></tr></thead>
+  <thead><tr><th>{{ t('doc.name') }}</th><th>{{ t("doc.kind") }}</th><th class="num">{{ t("doc.pages") }}</th><th>{{ t("doc.status") }}</th><th>{{ t("doc.uploaded") }}</th><th>{{ t("doc.expires") }}</th></tr></thead>
   <tbody>
   {% for d in documents %}
   <tr>
     <td class="primary"><a href="/ui/documents/{{ d.id }}">{{ d.display_name }}</a></td>
-    <td data-label="{{ t('doc.kind') }}">{{ d.kind }}</td>
-    <td data-label="{{ t('doc.pages') }}">{{ d.page_count or "" }}</td>
-    <td data-label="{{ t('doc.status') }}"><span class="status {{ d.status.value }}">{{ d.status.value }}</span></td>
-    <td data-label="{{ t('doc.uploaded') }}">{{ d.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
-    <td data-label="{{ t('doc.expires') }}">{{ d.expires_at.strftime("%Y-%m-%d") if d.expires_at else t("doc.never") }}</td>
+    <td data-label="{{ t('doc.kind') }}"><span class="kind">{{ d.kind }}</span></td>
+    <td data-label="{{ t('doc.pages') }}" class="num">{{ d.page_count or "" }}</td>
+    <td data-label="{{ t('doc.status') }}"><span class="status {{ d.status.value }}">{{ t("status." ~ d.status.value) }}</span></td>
+    <td data-label="{{ t('doc.uploaded') }}" class="num">{{ d.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+    <td data-label="{{ t('doc.expires') }}" class="num">{{ d.expires_at.strftime("%Y-%m-%d") if d.expires_at else t("doc.never") }}</td>
   </tr>
-  {% else %}
-  <tr><td colspan="6" class="muted empty-state">{{ t("doc.none") }}</td></tr>
   {% endfor %}
   </tbody>
 </table>
+{% else %}
+<div class="card empty">{{ icon("files") }}<p>{{ t("doc.none") }}</p></div>
+{% endif %}
 {% endblock %}

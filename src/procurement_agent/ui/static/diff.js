@@ -9,13 +9,6 @@
 
   var diff = document.querySelector(".diff");
 
-  // --- print ------------------------------------------------------------------------------
-  // A link cannot open the print dialog, and the dialog is the only thing standing between the
-  // report and a PDF, so this is a button whose whole job is one call.
-  document.querySelectorAll("[data-print]").forEach(function (b) {
-    b.addEventListener("click", function () { window.print(); });
-  });
-
   if (!diff) return;
 
   // --- filtering --------------------------------------------------------------------------
@@ -74,7 +67,10 @@
     row.focus({ preventScroll: true });
   }
 
-  document.addEventListener("keydown", function (e) {
+  // Scoped to the diff itself, never the whole page: single-letter shortcuts that fire
+  // anywhere collide with speech input and type-ahead find (WCAG 2.1.4). The diff is
+  // focusable, so a click or a Tab into it is all it takes.
+  diff.addEventListener("keydown", function (e) {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     var el = document.activeElement;
     if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT")) return;

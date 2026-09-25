@@ -375,6 +375,161 @@ STRINGS: dict[str, tuple[str, str]] = {
         "Delete this document and all its results now?",
         "წავშალოთ ეს დოკუმენტი და ყველა შედეგი ახლავე?",
     ),
+    # --- the redesigned shell, verdicts and helpers ---
+    "nav.skip": ("Skip to content", "მთავარ შინაარსზე გადასვლა"),
+    "nav.main": ("Main", "მთავარი ნავიგაცია"),
+    "login.lead": (
+        "Enter the access key your administrator gave you.",
+        "შეიყვანეთ წვდომის გასაღები, რომელიც ადმინისტრატორმა მოგცათ.",
+    ),
+    "login.submit": ("Sign in", "შესვლა"),
+    "login.show": ("Show key", "გასაღების ჩვენება"),
+    "login.hide": ("Hide key", "გასაღების დამალვა"),
+    "login.help": (
+        "The key is checked once; the browser keeps only a session that expires on its own. "
+        "Documents never leave this server.",
+        "გასაღები მხოლოდ ერთხელ მოწმდება; ბრაუზერი ინახავს მხოლოდ სესიას, რომელსაც ვადა "
+        "თავისით გასდის. დოკუმენტები ამ სერვერს არ ტოვებს.",
+    ),
+    "picker.start": ("Start", "დაწყება"),
+    "picker.recent": ("Recent uploads", "ბოლოს ატვირთული"),
+    "picker.recent.all": ("All documents", "ყველა დოკუმენტი"),
+    "steps.label": ("Progress", "ეტაპები"),
+    "steps.upload": ("Choose files", "ფაილების არჩევა"),
+    "steps.read": ("Reading", "წაკითხვა"),
+    "steps.report": ("Report", "ანგარიში"),
+    "upload.chosen": ("Chosen files", "არჩეული ფაილები"),
+    "upload.remove": ("Remove", "ამოღება"),
+    "upload.missing": ("Choose a file here first.", "ჯერ აქ აირჩიეთ ფაილი."),
+    "upload.wrong_type": (
+        "Not accepted: {name}. This slot takes {types}.",
+        "არ მიიღება: {name}. აქ შეიძლება მხოლოდ {types}.",
+    ),
+    "upload.retry": (
+        "Fix or replace the file marked above, then try again.",
+        "შეასწორეთ ან შეცვალეთ ზემოთ მონიშნული ფაილი და სცადეთ ხელახლა.",
+    ),
+    "upload.replace": ("Choose a different file", "სხვა ფაილის არჩევა"),
+    "upload.add_more": ("Add more files", "ფაილების დამატება"),
+    "upload.start.compare": ("Upload and compare", "ატვირთვა და შედარება"),
+    "upload.timing": (
+        "Word and Excel take seconds; scanned PDFs can take a few minutes.",
+        "Word-ს და Excel-ს რამდენიმე წამი სჭირდება; დასკანერებულ PDF-ს — შესაძლოა რამდენიმე წუთი.",
+    ),
+    "report.sections": ("Sections", "განყოფილებები"),
+    "report.stat.errors": ("Errors", "შეცდომა"),
+    "report.stat.warnings": ("Warnings", "გაფრთხილება"),
+    "report.stat.notes": ("Notes", "შენიშვნა"),
+    "report.stat.skipped": ("Could not run", "ვერ შესრულდა"),
+    "report.verdict.skipped": (
+        "{n} check(s) could not run — see why",
+        "{n} შემოწმება ვერ შესრულდა — იხილეთ მიზეზი",
+    ),
+    "aoa.verdict.bad": (
+        "{n} issue(s) to fix before this act is signed",
+        "ხელმოწერამდე გასასწორებელია: {n}",
+    ),
+    "aoa.verdict.bad.lead": (
+        "Each one is listed below with the value that was expected and what the act says.",
+        "ქვემოთ თითოეულს ახლავს მოსალოდნელი მნიშვნელობა და ის, რაც აქტშია მითითებული.",
+    ),
+    "aoa.verdict.warn": (
+        "No errors, {n} warning(s) to review",
+        "შეცდომა არ არის, გადასახედია {n} გაფრთხილება",
+    ),
+    "aoa.verdict.warn.lead": (
+        "Warnings are worth a look but may be acceptable.",
+        "გაფრთხილებები ყურადსაღებია, მაგრამ შესაძლოა მისაღები იყოს.",
+    ),
+    "aoa.again": ("Check another act", "სხვა აქტის შემოწმება"),
+    "aoa.rerun.lead": (
+        "Tell us the contractor type and the NET/VAT wording rule runs too.",
+        "მიუთითეთ შემსრულებლის ტიპი და NET/დღგ-ს ფორმულირების წესიც შესრულდება.",
+    ),
+    "boq.again": ("New comparison", "ახალი შედარება"),
+    "boq.bidders_n": ("{n} bidders", "{n} კომპანია"),
+    "boq.stat.bidders": ("Bidders", "კომპანია"),
+    "boq.stat.spread": ("Highest over lowest", "სხვაობა უმაღლესსა და უდაბლესს შორის"),
+    "boq.change": ("Change", "ცვლილება"),
+    "boq.quantities.lead": (
+        "Positions where a bidder's quantity differs from the template. Open a bidder to see them.",
+        "პოზიციები, სადაც კომპანიის მოცულობა შაბლონისგან განსხვავდება. სანახავად გახსენით "
+        "კომპანია.",
+    ),
+    "boq.quantities.changed.short": ("changed", "შეცვლილი"),
+    "boq.quantities.filled.short": ("filled in", "შევსებული"),
+    "boq.outliers.lead": (
+        "Unit rates far from the median of all bidders for the same position.",
+        "ერთეულის ფასები, რომლებიც იმავე პოზიციაზე ყველა კომპანიის მედიანას მნიშვნელოვნად სცდება.",
+    ),
+    "boq.per_bidder": ("Findings per bidder", "დასკვნები კომპანიების მიხედვით"),
+    "compare.verdict.bad": ("{n} critical change(s)", "{n} კრიტიკული ცვლილება"),
+    "compare.verdict.bad.lead": (
+        "The values that changed are listed first below, each linked to its line.",
+        "შეცვლილი მნიშვნელობები ქვემოთ პირველ რიგშია ჩამოთვლილი, თითოეული — თავისი "
+        "სტრიქონის ბმულით.",
+    ),
+    "compare.verdict.unrelated": (
+        "These are not two versions of one document",
+        "ეს ერთი დოკუმენტის ორი ვერსია არ არის",
+    ),
+    "compare.verdict.noline": (
+        "The line-by-line comparison could not run for this pair",
+        "ამ წყვილისთვის სტრიქონობრივი შედარება ვერ შესრულდა",
+    ),
+    "compare.verdict.noline.lead": (
+        "The field differences below are the result; the reason is listed further down.",
+        "შედეგი ქვემოთ, ველების სხვაობებშია; მიზეზი უფრო ქვემოთაა მითითებული.",
+    ),
+    "compare.verdict.warn": (
+        "{n} change(s), none of them critical",
+        "{n} ცვლილება, კრიტიკული არცერთი",
+    ),
+    "compare.verdict.warn.lead": (
+        "None of the changes is classed as critical. Read them below.",
+        "არცერთი ცვლილება კრიტიკულად არ არის შეფასებული. იხილეთ ისინი ქვემოთ.",
+    ),
+    "compare.verdict.cosmetic": ("Only formatting changed", "შეიცვალა მხოლოდ ფორმატირება"),
+    "compare.stat.other": ("Other changes", "სხვა ცვლილება"),
+    "compare.stat.overlap": ("Text in common", "საერთო ტექსტი"),
+    "compare.findings": ("Findings", "დასკვნები"),
+    "compare.keys": (
+        "In the line-by-line view, jump between changes:",
+        "სტრიქონობრივ ხედში ცვლილებებს შორის გადასვლა:",
+    ),
+    "compare.explain.title": ("Explain with the model", "ახსნა მოდელით"),
+    "docs.lead": (
+        "Everything you have uploaded. Open a document to extract fields from it.",
+        "ყველა ატვირთული ფაილი. ველების ამოსაღებად გახსენით დოკუმენტი.",
+    ),
+    "docs.upload": ("Upload", "ატვირთვა"),
+    "doc.delete.lead": (
+        "Documents are deleted automatically when the retention period ends. You can delete "
+        "this one now.",
+        "დოკუმენტები შენახვის ვადის გასვლისას ავტომატურად იშლება. ამ დოკუმენტის წაშლა ახლავე "
+        "შეგიძლიათ.",
+    ),
+    "extract.all": ("Select all", "ყველას მონიშვნა"),
+    "extract.none_selected": ("Clear", "გასუფთავება"),
+    "extract.failed": ("The extraction did not finish.", "ამოღება ვერ დასრულდა."),
+    "extract.again": ("Try again", "ხელახლა ცდა"),
+    "extract.meta": (
+        "{n} fields · {model} · {calls} model calls · {s} s",
+        "{n} ველი · {model} · მოდელის {calls} გამოძახება · {s} წმ",
+    ),
+    # --- statuses: the enum value stays the CSS class, only the label is translated ---
+    "status.uploaded": ("uploaded", "ატვირთულია"),
+    "status.parsing": ("reading", "იკითხება"),
+    "status.ready": ("ready", "მზადაა"),
+    "status.failed": ("failed", "ვერ მოხერხდა"),
+    "status.deleted": ("deleted", "წაშლილია"),
+    "status.queued": ("queued", "რიგშია"),
+    "status.running": ("running", "მიმდინარეობს"),
+    "status.done": ("done", "დასრულდა"),
+    "status.cancelled": ("cancelled", "გაუქმდა"),
+    "jobkind.parse": ("Reading", "წაკითხვა"),
+    "jobkind.extract": ("Extraction", "ამოღება"),
+    "jobkind.compare_explain": ("Model explanation", "მოდელით ახსნა"),
 }
 
 

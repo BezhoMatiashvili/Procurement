@@ -3,43 +3,78 @@
 {% import "_diff.html" as dd %}
 {% block title %}{{ t("compare.title") }} · {{ right.display_name }}{% endblock %}
 {% block content %}
-<p><a class="back" href="/ui/">&larr; {{ t("nav.home") }}</a></p>
-<h1>{{ t("compare.title") }}</h1>
-
-<p class="muted">
-  {{ t("compare.original") }}: <strong>{{ left.display_name }}</strong> &rarr;
-  {{ t("compare.revised") }}: <strong>{{ right.display_name }}</strong>
-</p>
-
+{% set c = report.counts %}
+<a class="back" href="/ui/">{{ icon("arrow-left") }}{{ t("nav.home") }}</a>
 <div class="result-head">
-  <p class="muted small num">
-    {{ t("compare.counts", critical=report.counts.critical, other=report.counts.substantive,
-          cosmetic=report.counts.cosmetic, moved=report.counts.moved) }}
-    · {{ t("compare.overlap", pct="%.0f%%"|format(report.similarity * 100)) }}
-  </p>
-  <span class="row">
+  <div>
+    <h1>{{ t("compare.title") }}</h1>
+    <p class="docs-line">
+      <span class="doc-chip">{{ icon("file") }}<span class="k">{{ t("compare.original") }}</span><strong>{{ left.display_name }}</strong></span>
+      <span class="arrow" aria-hidden="true">{{ icon("arrow-right") }}</span>
+      <span class="doc-chip">{{ icon("file") }}<span class="k">{{ t("compare.revised") }}</span><strong>{{ right.display_name }}</strong></span>
+    </p>
+  </div>
+  {# One primary action: the Word file when there is one, else the workbook. #}
+  <div class="actions">
     {% if right.kind == "docx" %}
-    <a class="btn" href="/ui/checks/compare/annotated.docx?{{ query }}">{{ t("compare.download.docx") }}</a>
+    <a class="btn" href="/ui/checks/compare/annotated.docx?{{ query }}">{{ icon("download") }}{{ t("compare.download.docx") }}</a>
     {% endif %}
-    <a class="btn" href="/ui/checks/compare/differences.xlsx?{{ query }}">{{ t("compare.download.xlsx") }}</a>
-    <button type="button" data-print>{{ t("compare.print") }}</button>
-  </span>
+    <a class="btn{% if right.kind == 'docx' %} secondary{% endif %}" href="/ui/checks/compare/differences.xlsx?{{ query }}">{{ icon("download") }}{{ t("compare.download.xlsx") }}</a>
+    <button type="button" class="secondary js-only" data-print>{{ icon("print") }}{{ t("compare.print") }}</button>
+  </div>
 </div>
 
 {# Disabled-with-a-reason, not hidden: a missing button reads as a bug. #}
 {% if right.kind != "docx" %}
-<p class="muted small">{{ t("compare.download.unavailable", kind=right.kind) }}</p>
+<p class="muted small">{{ icon("info") }} {{ t("compare.download.unavailable", kind=right.kind) }}</p>
 {% endif %}
 
-{% if report.alignment == "unrelated" %}
-<p class="card caveat">{{ t("compare.unrelated", pct="%.0f%%"|format(report.similarity * 100)) }}</p>
-{% endif %}
-
+{# The verdict speaks from the line-by-line counts, so it only speaks when those counts mean
+   something: two unrelated documents, or a pair the line diff could not run on, get the
+   caveat in the verdict's place instead of a confident red headline built on noise. #}
+{% set line_skipped = report.skipped | selectattr("rule_id", "equalto", "CMP.LINE_DIFF") | list %}
 {% if report.identical %}
-<p class="card ok-state">{{ t("compare.identical") }}</p>
+<div class="verdict is-ok ok-state">{{ icon("check-circle") }}<div><h2>{{ t("compare.identical") }}</h2></div></div>
+{% elif report.alignment == "unrelated" %}
+<div class="verdict is-warn caveat">{{ icon("alert") }}<div>
+  <h2>{{ t("compare.verdict.unrelated") }}</h2>
+  <p>{{ t("compare.unrelated", pct="%.0f%%"|format(report.similarity * 100)) }}</p></div></div>
+{% elif line_skipped %}
+<div class="verdict is-warn">{{ icon("info") }}<div>
+  <h2>{{ t("compare.verdict.noline") }}</h2>
+  <p>{{ t("compare.verdict.noline.lead") }}</p></div></div>
+{% elif c.critical %}
+<div class="verdict is-bad">{{ icon("alert") }}<div>
+  <h2>{{ t("compare.verdict.bad", n=c.critical) }}</h2>
+  <p>{{ t("compare.verdict.bad.lead") }}</p></div></div>
+{% elif c.substantive or c.moved %}
+<div class="verdict is-warn">{{ icon("info") }}<div>
+  <h2>{{ t("compare.verdict.warn", n=c.substantive + c.moved) }}</h2>
+  <p>{{ t("compare.verdict.warn.lead") }}</p></div></div>
+{% else %}
+<div class="verdict is-ok">{{ icon("check-circle") }}<div>
+  <h2>{{ t("compare.verdict.cosmetic") }}</h2></div></div>
 {% endif %}
 
-<h2>{{ t("compare.matters") }}</h2>
+{% if report.skipped %}
+<p class="small">{{ icon("minus-circle") }} <a href="#skipped">{{ t("report.verdict.skipped", n=report.skipped | length) }}</a></p>
+{% endif %}
+
+<ul class="stats">
+  <li class="stat error{% if not c.critical %} zero{% endif %}"><span class="v">{{ c.critical }}</span><span class="l">{{ t("compare.kind.critical") }}</span></li>
+  <li class="stat warning{% if not c.substantive %} zero{% endif %}"><span class="v">{{ c.substantive }}</span><span class="l">{{ t("compare.stat.other") }}</span></li>
+  <li class="stat{% if not c.cosmetic %} zero{% endif %}"><span class="v">{{ c.cosmetic }}</span><span class="l">{{ t("compare.kind.cosmetic") }}</span></li>
+  <li class="stat{% if not c.moved %} zero{% endif %}"><span class="v">{{ c.moved }}</span><span class="l">{{ t("compare.moved") }}</span></li>
+  <li class="stat"><span class="v">{{ "%.0f%%" | format(report.similarity * 100) }}</span><span class="l">{{ t("compare.stat.overlap") }}</span></li>
+</ul>
+
+<ul class="toc" aria-label="{{ t('report.sections') }}">
+  <li><a href="#matters">{{ t("compare.matters") }}</a></li>
+  {% if groups %}<li><a href="#findings">{{ t("compare.findings") }}</a></li>{% endif %}
+  <li><a href="#diff">{{ t("compare.diff") }}</a></li>
+</ul>
+
+<h2 id="matters">{{ t("compare.matters") }}</h2>
 {% if matters %}
 <table class="list deltas">
   <thead><tr>
@@ -54,8 +89,8 @@
   <tr>
     <td class="primary">{{ m.label }}
       <span class="sev sev-{{ m.severity }}">{{ t("report.severity." ~ m.severity) }}</span></td>
-    <td data-label="{{ t('compare.in_a') }}" class="was">{%- if m.left -%}{{ m.left }}{%- endif -%}</td>
-    <td data-label="{{ t('compare.in_b') }}">{%- if m.right -%}{{ m.right }}{%- endif -%}</td>
+    <td data-label="{{ t('compare.in_a') }}" class="was">{%- if m.left -%}<span class="was-v">{{ m.left }}</span>{%- endif -%}</td>
+    <td data-label="{{ t('compare.in_b') }}"><strong>{%- if m.right -%}{{ m.right }}{%- endif -%}</strong></td>
     <td data-label="{{ t('compare.change') }}" class="delta">{%- if m.change -%}{{ m.change }}{%- endif -%}</td>
     <td data-label="{{ t('compare.where') }}">{%- if m.where -%}<a href="#{{ m.anchor }}">{{ m.where }}</a>{%- endif -%}</td>
   </tr>
@@ -66,24 +101,26 @@
 <p class="card ok-state">{{ t("compare.matters.none") }}</p>
 {% endif %}
 
-{{ f.severity_groups(groups, t, msg) }}
+{% if groups %}<div id="findings">{{ f.severity_groups(groups, t, msg) }}</div>{% endif %}
 {{ f.skipped(report.skipped, t, why) }}
 
 {% if can_explain and unexplained %}
-<h2>{{ t("compare.explain.badge") }}</h2>
+<section class="explain">
+<h2>{{ icon("sparkle") }} {{ t("compare.explain.title") }}</h2>
 <div class="card explain-box">
   {% if explain_running %}
-  <p role="status" aria-live="polite">{{ t("compare.explain.running") }}</p>
+  <p role="status" aria-live="polite"><span class="status running">{{ t("compare.explain.running") }}</span></p>
   {% else %}
   <p class="muted small">{{ t("compare.explain.lead") }}<br>{{ t("compare.explain.slow") }}</p>
   <form method="post" action="/ui/checks/compare/explain?{{ query }}">
-    <button type="submit">{{ t("compare.explain", n=unexplained) }}</button>
+    <button type="submit" class="secondary">{{ icon("sparkle") }}{{ t("compare.explain", n=unexplained) }}</button>
   </form>
   {% endif %}
 </div>
+</section>
 {% endif %}
 
-<h2>{{ t("compare.diff") }}</h2>
+<h2 id="diff">{{ t("compare.diff") }}</h2>
 {# A GET form, so the filter works with JavaScript off and every view is a bookmarkable URL.
    diff.js upgrades it to filter without a round trip. #}
 <form class="chips" method="get" action="/ui/checks/compare" data-diff-filter>
@@ -97,8 +134,14 @@
      data-show="{{ value }}">{{ t("compare.show." ~ value) }}</a>
   {% endfor %}
   <noscript><button type="submit" name="show" value="{{ show }}">{{ t("compare.apply") }}</button></noscript>
+  <span class="hint js-only">{{ t("compare.keys") }} <kbd>j</kbd> <kbd>k</kbd></span>
 </form>
+<ul class="diff-legend" aria-hidden="true">
+  <li><span class="sw sw-del"></span>{{ t("compare.removed") }}</li>
+  <li><span class="sw sw-add"></span>{{ t("compare.added") }}</li>
+  <li><span class="sw sw-mov"></span>{{ t("compare.moved") }}</li>
+</ul>
 
 {{ dd.diff(blocks, d) }}
 {% endblock %}
-{% block scripts %}<script src="/static/diff.js"></script>{% endblock %}
+{% block scripts %}<script src="/static/diff.js?v={{ asset_v }}"></script>{% endblock %}

@@ -1,0 +1,55 @@
+{# The upload step's building blocks, shared by the three task screens. Imported `with context`,
+   so `t` and `icon` come along from the page.
+
+   Every slot works without JavaScript: the <input type=file> inside the drop zone is the real
+   control and shows as itself until boot.js marks the page scripted. upload.js then hides the
+   browser's own chrome, lists the chosen files as chips with a remove button, and checks the
+   required slots itself so the error lands beside the slot instead of in a browser bubble. #}
+
+{% macro steps() %}
+<ol class="steps" data-steps aria-label="{{ t('steps.label') }}">
+  <li aria-current="step">{{ t("steps.upload") }}</li>
+  <li>{{ t("steps.read") }}</li>
+  <li>{{ t("steps.report") }}</li>
+</ol>
+{% endmacro %}
+
+{% macro slot(n, field, title, hint, accept, types, required=True, multiple=False) %}
+<div class="slot" data-slot="{{ field }}" data-field="{{ field }}"
+     {%- if multiple %} data-multiple{% endif %}{% if required %} data-required{% endif %}>
+  <h2><span class="slot-no" aria-hidden="true">{{ n }}</span>{{ title }}
+    {% if required %}<span class="slot-required">{{ t("upload.required") }}</span>
+    {%- else %}<span class="slot-optional">{{ t("upload.optional") }}</span>{% endif %}</h2>
+  <p class="muted small" id="hint-{{ field }}">{{ hint }}</p>
+  <label class="drop">
+    <span class="drop-icon">{{ icon("upload") }}</span>
+    <span class="drop-hint">{{ t("upload.choose.many") if multiple else t("upload.choose") }}
+      <span class="muted">{{ t("upload.drop.many") if multiple else t("upload.drop") }}</span></span>
+    <span class="drop-types">{{ types }}</span>
+    <input type="file" name="{{ field }}" accept="{{ accept }}"
+           aria-describedby="hint-{{ field }} error-{{ field }}"
+           {%- if multiple %} multiple{% endif %}{% if required %} required{% endif %}>
+  </label>
+  <ul class="files" data-files aria-label="{{ t('upload.chosen') }}"></ul>
+  <p class="slot-error" id="error-{{ field }}" data-error role="alert"></p>
+</div>
+{% endmacro %}
+
+{% macro progress() %}
+<div class="upload-status" role="status" aria-live="polite">
+<ol class="upload-rows" data-upload-rows
+    data-s-waiting="{{ t('upload.status.waiting') }}"
+    data-s-uploading="{{ t('upload.status.uploading') }}"
+    data-s-parsing="{{ t('upload.status.parsing') }}"
+    data-s-ready="{{ t('upload.status.ready') }}"
+    data-s-failed="{{ t('upload.status.failed') }}"
+    data-s-busy="{{ t('upload.busy') }}"
+    data-s-opening="{{ t('upload.opening') }}"
+    data-s-remove="{{ t('upload.remove') }}"
+    data-s-required="{{ t('upload.missing') }}"
+    data-s-type="{{ t('upload.wrong_type') }}"
+    data-s-retry="{{ t('upload.retry') }}"
+    data-s-replace="{{ t('upload.replace') }}"
+    data-s-add="{{ t('upload.add_more') }}"></ol>
+</div>
+{% endmacro %}

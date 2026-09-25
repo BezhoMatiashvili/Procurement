@@ -1,13 +1,26 @@
 {% extends "base.html" %}
 {% block title %}{{ t("login.title") }} · {{ t("app.name") }}{% endblock %}
 {% block content %}
-<h1>{{ t("login.title") }}</h1>
-<form method="post" action="/ui/login" class="card narrow">
-  <input type="hidden" name="next" value="{{ next }}">
-  <label for="api_key">{{ t("login.key") }}</label>
-  <input id="api_key" type="password" name="api_key" autocomplete="off" required autofocus
-         {% if error %}aria-invalid="true" aria-describedby="key-error"{% endif %}>
-  {% if error %}<p id="key-error" class="error" role="alert">{{ error }}</p>{% endif %}
-  <button type="submit">{{ t("login.title") }}</button>
-</form>
+<div class="auth">
+  <div class="card">
+    <span class="auth-mark">{{ icon("key") }}</span>
+    <h1>{{ t("login.title") }}</h1>
+    <p class="muted">{{ t("login.lead") }}</p>
+    <form method="post" action="/ui/login">
+      <input type="hidden" name="next" value="{{ next }}">
+      <label for="api_key">{{ t("login.key") }}</label>
+      <div class="pw">
+        <input id="api_key" type="password" name="api_key" autocomplete="off" required autofocus
+               spellcheck="false" autocapitalize="off"
+               {% if error %}aria-invalid="true" aria-describedby="key-error"{% endif %}>
+        <button type="button" class="ghost reveal js-only" data-reveal="api_key"
+                aria-label="{{ t('login.show') }}" data-show-label="{{ t('login.show') }}"
+                data-hide-label="{{ t('login.hide') }}">{{ icon("eye") }}</button>
+      </div>
+      {% if error %}<p id="key-error" class="alert" role="alert">{{ icon("alert") }}<span>{{ error }}</span></p>{% endif %}
+      <button type="submit">{{ t("login.submit") }}</button>
+    </form>
+  </div>
+  <p class="auth-foot muted small">{{ icon("info") }}<span>{{ t("login.help") }}</span></p>
+</div>
 {% endblock %}

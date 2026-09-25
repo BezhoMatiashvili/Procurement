@@ -67,7 +67,7 @@
 {% endmacro %}
 
 {% macro diff(blocks, d) %}
-<div class="diff">
+<div class="diff" role="region" tabindex="0" aria-label="{{ d.t('compare.diff') }}">
   {% for block in blocks %}
     {% if block.fold %}
     <details class="diff-fold">

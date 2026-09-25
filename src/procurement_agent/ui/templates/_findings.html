@@ -1,39 +1,41 @@
-{# Severity-grouped findings and the honest "could not run" list. Shared by both reports.
-   Every non-primary cell carries data-label: under 700px the table becomes cards and
-   td[data-label]::before supplies the header from that attribute. #}
+{# Severity-grouped findings and the honest "could not run" list. Shared by all three reports.
+
+   A finding is a card, not a table row: the sentence a reader acts on comes first, the two
+   values it compares sit side by side and labelled, and the rule id - which is how a reader
+   matches this screen to the comment in the Word file - stays, but last and quiet. #}
+
+{% macro finding_list(items, t, msg) %}
+<ol class="findings">
+  {% for f in items %}
+  <li class="finding is-{{ f.severity }}">
+    <p class="finding-msg">{{ msg(f) }}</p>
+    <code class="rule" title="{{ t('report.rule') }}">{{ f.rule_id }}</code>
+    {% if f.expected or f.actual %}
+    <dl class="vals">
+      {% if f.expected %}<div class="is-expected"><dt>{{ t("report.expected") }}</dt><dd>{{ f.expected }}</dd></div>{% endif %}
+      {% if f.actual %}<div class="is-actual"><dt>{{ t("report.actual") }}</dt><dd>{{ f.actual }}</dd></div>{% endif %}
+    </dl>
+    {% endif %}
+  </li>
+  {% endfor %}
+</ol>
+{% endmacro %}
 
 {% macro severity_groups(groups, t, msg) %}
 {% for severity, items in groups %}
-<h2><span class="sev sev-{{ severity }}">{{ t("report.severity." ~ severity) }}</span>
-  <span class="muted">{{ items | length }}</span></h2>
-<table class="list findings">
-  <thead><tr>
-    <th>{{ t("report.rule") }}</th><th>{{ t("report.message") }}</th>
-    <th>{{ t("report.expected") }}</th><th>{{ t("report.actual") }}</th>
-  </tr></thead>
-  <tbody>
-  {% for f in items %}
-  <tr>
-    <td class="primary"><code>{{ f.rule_id }}</code></td>
-    <td data-label="{{ t('report.message') }}">{{ msg(f) }}</td>
-    {# whitespace control keeps an absent value truly empty, so the phone layout hides the
-       cell instead of printing a bare label #}
-    <td data-label="{{ t('report.expected') }}">{%- if f.expected -%}{{ f.expected }}{%- endif -%}</td>
-    <td data-label="{{ t('report.actual') }}">{%- if f.actual -%}{{ f.actual }}{%- endif -%}</td>
-  </tr>
-  {% endfor %}
-  </tbody>
-</table>
+<h2 class="sev-head"><span class="sev sev-{{ severity }}">{{ t("report.severity." ~ severity) }}</span>
+  <span class="count">{{ items | length }}</span></h2>
+{{ finding_list(items, t, msg) }}
 {% endfor %}
 {% endmacro %}
 
 {% macro skipped(items, t, why) %}
 {% if items %}
-<h2>{{ t("report.skipped.title") }}</h2>
+<h2 id="skipped">{{ t("report.skipped.title") }} <span class="count">{{ items | length }}</span></h2>
 <p class="muted small">{{ t("report.skipped.lead") }}</p>
 <ul class="skipped-list">
   {% for s in items %}
-  <li><code>{{ s.rule_id }}</code> <span>{{ why(s) }}</span></li>
+  <li>{{ icon("minus-circle") }}<div><code>{{ s.rule_id }}</code> <span>{{ why(s) }}</span></div></li>
   {% endfor %}
 </ul>
 {% endif %}

@@ -1,47 +1,36 @@
 {% extends "base.html" %}
+{% import "_upload.html" as up with context %}
 {% block title %}{{ t("upload.aoa.title") }} · {{ t("app.name") }}{% endblock %}
 {% block content %}
-<p><a class="back" href="/ui/">&larr; {{ t("nav.home") }}</a></p>
-<h1>{{ t("upload.aoa.title") }}</h1>
+<a class="back" href="/ui/">{{ icon("arrow-left") }}{{ t("nav.home") }}</a>
+<div class="page-head">
+  <h1>{{ t("upload.aoa.title") }}</h1>
+  <p class="muted lead">{{ t("task.aoa.lead") }}</p>
+  {{ up.steps() }}
+</div>
 
-<form class="card" data-upload-flow="aoa" data-next="/ui/checks/aoa" action="/ui/start/aoa"
+<form class="card upload-card" data-upload-flow="aoa" data-next="/ui/checks/aoa" action="/ui/start/aoa"
       method="post" enctype="multipart/form-data">
-  <div class="slot" data-slot="act" data-field="act">
-    <h2>{{ t("upload.act") }} <span class="slot-required">{{ t("upload.required") }}</span></h2>
-    <p class="muted small">{{ t("upload.act.hint") }}</p>
-    <label class="drop">
-      <span class="drop-hint">{{ t("upload.choose") }} <span class="muted">{{ t("upload.drop") }}</span></span>
-      <input type="file" name="act" accept=".pdf,.docx" required>
-    </label>
+  {{ up.slot(1, "act", t("upload.act"), t("upload.act.hint"), ".pdf,.docx", "PDF · DOCX") }}
+  {{ up.slot(2, "contract", t("upload.contract"), t("upload.contract.hint"), ".pdf,.docx", "PDF · DOCX", required=False) }}
+
+  <div class="options">
+    <label for="contractor_type">{{ t("upload.contractor_type") }}
+      <span class="slot-optional">{{ t("upload.optional") }}</span></label>
+    <select id="contractor_type" name="contractor_type" aria-describedby="ct-hint">
+      <option value="">{{ t("upload.contractor_type.unset") }}</option>
+      {% for value in contractor_types %}
+      <option value="{{ value }}">{{ t("contractor." ~ value) }}</option>
+      {% endfor %}
+    </select>
+    <p id="ct-hint" class="muted small">{{ t("upload.contractor_type.hint") }}</p>
   </div>
 
-  <div class="slot" data-slot="contract" data-field="contract">
-    <h2>{{ t("upload.contract") }} <span class="slot-optional">{{ t("upload.optional") }}</span></h2>
-    <p class="muted small">{{ t("upload.contract.hint") }}</p>
-    <label class="drop">
-      <span class="drop-hint">{{ t("upload.choose") }} <span class="muted">{{ t("upload.drop") }}</span></span>
-      <input type="file" name="contract" accept=".pdf,.docx">
-    </label>
+  {{ up.progress() }}
+  <div class="form-foot">
+    <button type="submit" data-upload-submit>{{ icon("file-check") }}{{ t("upload.start") }}</button>
+    <span class="muted">{{ t("upload.timing") }}</span>
   </div>
-
-  <label for="contractor_type">{{ t("upload.contractor_type") }}</label>
-  <select id="contractor_type" name="contractor_type" aria-describedby="ct-hint">
-    <option value="">{{ t("upload.contractor_type.unset") }}</option>
-    {% for value in contractor_types %}
-    <option value="{{ value }}">{{ t("contractor." ~ value) }}</option>
-    {% endfor %}
-  </select>
-  <p id="ct-hint" class="muted small">{{ t("upload.contractor_type.hint") }}</p>
-
-  <ol class="upload-rows" data-upload-rows role="status" aria-live="polite"
-      data-s-waiting="{{ t('upload.status.waiting') }}"
-      data-s-uploading="{{ t('upload.status.uploading') }}"
-      data-s-parsing="{{ t('upload.status.parsing') }}"
-      data-s-ready="{{ t('upload.status.ready') }}"
-      data-s-failed="{{ t('upload.status.failed') }}"
-      data-s-busy="{{ t('upload.busy') }}"
-      data-s-opening="{{ t('upload.opening') }}"></ol>
-  <button type="submit" data-upload-submit>{{ t("upload.start") }}</button>
 </form>
 {% endblock %}
-{% block scripts %}<script src="/static/upload.js"></script>{% endblock %}
+{% block scripts %}<script src="/static/upload.js?v={{ asset_v }}"></script>{% endblock %}

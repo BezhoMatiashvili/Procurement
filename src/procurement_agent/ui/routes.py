@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Annotated, cast, get_args
 from urllib.parse import urlencode
@@ -10,6 +11,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Upl
 from fastapi.responses import RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
+from markupsafe import Markup
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
@@ -66,6 +68,45 @@ _env = Environment(
     undefined=StrictUndefined,
 )
 templates = Jinja2Templates(env=_env)
+_STATIC = Path(__file__).parent / "static"
+
+
+def _asset_version() -> str:
+    """A content hash of the static files, appended to every asset URL.
+
+    The pages are no-store but /static is not, so without it an upgrade would pair new markup
+    with last week's stylesheet until someone thought to hard-reload.
+    """
+    digest = hashlib.sha256()
+    for path in sorted(_STATIC.iterdir()):
+        if path.is_file():
+            digest.update(path.name.encode())
+            digest.update(path.read_bytes())
+    return digest.hexdigest()[:10]
+
+
+_ASSET_V = _asset_version()
+
+
+def _icon(name: str) -> Markup:
+    """An icon from the sprite. Decorative by construction: every icon sits beside a word."""
+    return Markup(
+        '<svg class="i" aria-hidden="true" focusable="false">'
+        '<use href="/static/icons.svg?v={}#{}"></use></svg>'
+    ).format(_ASSET_V, name)
+
+
+def _money(value: float | None) -> str:
+    """Thousands separators, the format the check messages already use (``2,800.00``).
+
+    On screen only: the merged workbook keeps real numbers so Excel can still sum them.
+    """
+    return "—" if value is None else f"{value:,.2f}"
+
+
+_env.globals["icon"] = _icon
+_env.globals["asset_v"] = _ASSET_V
+_env.filters["money"] = _money
 
 
 def _render(request: Request, name: str, **ctx: object) -> Response:
@@ -94,10 +135,13 @@ def _current_path(request: Request) -> str:
 def root(
     request: Request,
     principal: Annotated[Principal, Depends(authenticate)],
+    session: Annotated[Session, Depends(get_session)],
 ) -> Response:
     """The task picker is the front door: the question is what you want to do, not what files
-    you happen to have uploaded."""
-    return _render(request, "picker.html", user=principal.user)
+    you happen to have uploaded. The last few uploads sit underneath it, so coming back to
+    yesterday's work is one click rather than a trip through the documents list."""
+    recent = owned_documents(session, principal, limit=5)
+    return _render(request, "picker.html", user=principal.user, recent=recent)
 
 
 @router.post("/lang")
@@ -329,7 +373,14 @@ def job_page(
         if path.exists():
             result = ExtractionResult.model_validate_json(path.read_text())
     return _render(
-        request, "job.html", user=principal.user, job=job, doc=job.document, result=result
+        request,
+        "job.html",
+        user=principal.user,
+        job=job,
+        doc=job.document,
+        result=result,
+        # the stored label is English; the Georgian page names each field in Georgian
+        labels=LABELS,
     )
 
 

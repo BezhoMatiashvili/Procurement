@@ -1,9 +1,12 @@
 {% extends "base.html" %}
 {% block title %}{{ t("expired.title") }}{% endblock %}
 {% block content %}
-<h1>{{ t("expired.title") }}</h1>
-<div class="card">
+<div class="card notice is-info">{{ icon("clock") }}<div>
+  <h1>{{ t("expired.title") }}</h1>
   <p>{{ t("expired.lead") }}</p>
-  <p><a class="btn" href="{{ again }}">{{ t("expired.again") }}</a></p>
-</div>
+  <div class="actions">
+    <a class="btn" href="{{ again }}">{{ icon("upload") }}{{ t("expired.again") }}</a>
+    <a class="btn ghost" href="/ui/">{{ t("nav.home") }}</a>
+  </div>
+</div></div>
 {% endblock %}

@@ -1,35 +1,51 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>{{ t("picker.title") }}</h1>
-<p class="muted lead">{{ t("picker.lead") }}</p>
+<div class="page-head">
+  <h1>{{ t("picker.title") }}</h1>
+  <p class="muted lead">{{ t("picker.lead") }}</p>
+</div>
 
 <ul class="picker">
-  <li class="picker-card">
-    <a href="/ui/start/aoa">
-      <h2>{{ t("task.aoa.title") }}</h2>
-      <p class="muted">{{ t("task.aoa.lead") }}</p>
-      <p class="needs small">{{ t("task.aoa.needs") }}</p>
+  {% for key, href, glyph in (("aoa", "/ui/start/aoa", "file-check"),
+                              ("boq", "/ui/start/boq", "table"),
+                              ("compare", "/ui/start/compare", "compare")) %}
+  <li class="picker-card task-{{ key }}">
+    <a href="{{ href }}">
+      <span class="task-icon">{{ icon(glyph) }}</span>
+      <h2>{{ t("task." ~ key ~ ".title") }}</h2>
+      <p class="muted">{{ t("task." ~ key ~ ".lead") }}</p>
+      <p class="needs">{{ icon("upload") }}<span>{{ t("task." ~ key ~ ".needs") }}</span>
+        <span class="go">{{ t("picker.start") }} {{ icon("arrow-right") }}</span></p>
     </a>
   </li>
-  <li class="picker-card">
-    <a href="/ui/start/boq">
-      <h2>{{ t("task.boq.title") }}</h2>
-      <p class="muted">{{ t("task.boq.lead") }}</p>
-      <p class="needs small">{{ t("task.boq.needs") }}</p>
-    </a>
-  </li>
-  <li class="picker-card">
-    <a href="/ui/start/compare">
-      <h2>{{ t("task.compare.title") }}</h2>
-      <p class="muted">{{ t("task.compare.lead") }}</p>
-      <p class="needs small">{{ t("task.compare.needs") }}</p>
-    </a>
-  </li>
-  <li class="picker-card secondary">
+  {% endfor %}
+  <li class="picker-card secondary task-extract">
     <a href="/ui/documents">
-      <h2>{{ t("task.extract.title") }}</h2>
-      <p class="muted">{{ t("task.extract.lead") }}</p>
+      <span class="task-icon">{{ icon("file-search") }}</span>
+      <div class="task-text">
+        <h2>{{ t("task.extract.title") }}</h2>
+        <p class="muted">{{ t("task.extract.lead") }}</p>
+      </div>
+      <span class="go">{{ icon("arrow-right") }}</span>
     </a>
   </li>
 </ul>
+
+{% if recent %}
+<div class="section-head">
+  <h2>{{ t("picker.recent") }}</h2>
+  <a href="/ui/documents">{{ t("picker.recent.all") }}</a>
+</div>
+<ul class="recent">
+  {% for d in recent %}
+  <li><a href="/ui/documents/{{ d.id }}">
+    {{ icon("file") }}
+    <span class="name">{{ d.display_name }}</span>
+    <span class="kind">{{ d.kind }}</span>
+    <span class="status {{ d.status.value }}">{{ t("status." ~ d.status.value) }}</span>
+    <span class="when">{{ d.created_at.strftime("%Y-%m-%d %H:%M") }}</span>
+  </a></li>
+  {% endfor %}
+</ul>
+{% endif %}
 {% endblock %}

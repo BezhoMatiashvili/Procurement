@@ -3,30 +3,45 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
   <title>{% block title %}{{ t("app.name") }}{% endblock %}</title>
-  <link rel="stylesheet" href="/static/app.css">
+  <link rel="icon" href="/static/favicon.svg?v={{ asset_v }}" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/app.css?v={{ asset_v }}">
+  <script src="/static/boot.js?v={{ asset_v }}"></script>
 </head>
 <body>
+<a class="skip" href="#main">{{ t("nav.skip") }}</a>
+{# Which top-level section a page belongs to, for aria-current. Derived from the path so no
+   route has to remember to pass it. #}
+{% set section = "documents" if current_path.startswith("/ui/documents") or current_path.startswith("/ui/jobs") else "tasks" %}
 <header class="top">
-  <a class="brand" href="/ui/">{{ t("app.name") }}</a>
-  {# lang= on each button stops a screen reader saying "ქარ" in an English voice #}
-  <form method="post" action="/ui/lang" class="inline lang-switch">
-    <input type="hidden" name="next" value="{{ current_path }}">
-    <button type="submit" name="lang" value="ka" lang="ka"
-            aria-current="{{ 'true' if lang == 'ka' else 'false' }}">ქარ</button>
-    <button type="submit" name="lang" value="en" lang="en"
-            aria-current="{{ 'true' if lang == 'en' else 'false' }}">EN</button>
-  </form>
+  <a class="brand" href="/ui/">{{ icon("logo") }}<span>{{ t("app.name") }}</span></a>
   {% if user is defined and user %}
-  <span class="muted who">{{ user }}</span>
-  <form method="post" action="/ui/logout" class="inline"><button class="link">{{ t("nav.logout") }}</button></form>
+  <nav class="nav" aria-label="{{ t('nav.main') }}">
+    <a href="/ui/"{% if section == "tasks" %} aria-current="page"{% endif %}>{{ icon("grid") }}<span>{{ t("nav.home") }}</span></a>
+    <a href="/ui/documents"{% if section == "documents" %} aria-current="page"{% endif %}>{{ icon("files") }}<span>{{ t("nav.documents") }}</span></a>
+  </nav>
   {% endif %}
+  <div class="top-end">
+    {# lang= on each button stops a screen reader saying "ქარ" in an English voice #}
+    <form method="post" action="/ui/lang" class="inline lang-switch" aria-label="{{ t('nav.lang') }}">
+      <input type="hidden" name="next" value="{{ current_path }}">
+      <button type="submit" name="lang" value="ka" lang="ka"
+              aria-current="{{ 'true' if lang == 'ka' else 'false' }}">ქარ</button>
+      <button type="submit" name="lang" value="en" lang="en"
+              aria-current="{{ 'true' if lang == 'en' else 'false' }}">EN</button>
+    </form>
+    {% if user is defined and user %}
+    <span class="who" title="{{ user }}"><span class="avatar" aria-hidden="true">{{ user[:1] }}</span><span class="name">{{ user }}</span></span>
+    <form method="post" action="/ui/logout" class="inline"><button class="link logout" title="{{ t('nav.logout') }}">{{ icon("logout") }}<span>{{ t("nav.logout") }}</span></button></form>
+    {% endif %}
+  </div>
 </header>
-<main>
+<main id="main" tabindex="-1">
 {% block content %}{% endblock %}
 </main>
-<footer class="muted small">{{ t("footer.offline") }}</footer>
-<script src="/static/app.js"></script>
+<footer class="muted small">{{ icon("shield") }}<span>{{ t("footer.offline") }}</span></footer>
+<script src="/static/app.js?v={{ asset_v }}"></script>
 {% block scripts %}{% endblock %}
 </body>
 </html>
