@@ -8,7 +8,7 @@
 <ol class="findings">
   {% for f in items %}
   <li class="finding is-{{ f.severity }}">
-    <p class="finding-msg">{{ msg(f) }}</p>
+    <p class="finding-msg">{% if f.needs_review %}<span class="badge">{{ t("report.needs_review") }}</span> {% endif %}{% if f.reviewed_by %}<span class="badge model">{{ t("report.reviewed_by") }}</span> {% endif %}{{ msg(f) }}</p>
     <code class="rule" title="{{ t('report.rule') }}">{{ f.rule_id }}</code>
     {% if f.expected or f.actual %}
     <dl class="vals">

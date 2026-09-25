@@ -9,6 +9,7 @@
    raises AOA.IBAN_CHECKSUM as info, because their sample IBANs are anonymised - see
    docs/ACCURACY.md. Treating that as a finding would make the good document look bad. #}
 {% set actionable = errors + warnings %}
+{% set currency = report.summary["currency"] if "currency" in report.summary else "" %}
 
 <a class="back" href="/ui/">{{ icon("arrow-left") }}{{ t("nav.home") }}</a>
 <div class="result-head">
@@ -24,6 +25,9 @@
       <span class="doc-chip{% if not contractor_type %} is-missing{% endif %}"><span class="k">{{ t("upload.contractor_type") }}</span>
         {%- if contractor_type %} <strong>{{ t("contractor." ~ contractor_type) }}</strong>
         {%- else %} <em>{{ t("upload.contractor_type.unset") }}</em>{% endif %}</span>
+      {% if currency %}
+      <span class="doc-chip"><span class="k">{{ t("aoa.currency") }}</span><strong>{{ currency }}</strong></span>
+      {% endif %}
     </p>
   </div>
   <div class="actions">
@@ -58,6 +62,16 @@
 {# never let "no discrepancies" stand alone when part of the act was not looked at #}
 <p class="small">{{ icon("minus-circle") }} <a href="#skipped">{{ t("report.verdict.skipped", n=report.skipped | length) }}</a></p>
 {% endif %}
+{# Rules the client's instructions exempt this contractor type from. Not a gap, so not under
+   "could not run" - but said, so their absence is not mistaken for a pass. #}
+{% set not_applicable = report.summary["not_applicable"] if "not_applicable" in report.summary else "" %}
+{% set not_applicable_labels = [
+     t("aoa.not_applicable.tax") if "AOA.TAX_WORDING" in not_applicable else "",
+     t("aoa.not_applicable.fx") if "AOA.FX_INVOICE" in not_applicable else "",
+   ] | select | list %}
+{% if not_applicable_labels %}
+<p class="small muted">{{ icon("info") }} {{ t("aoa.not_applicable", rules=not_applicable_labels | join("; ")) }}</p>
+{% endif %}
 
 <ul class="stats">
   <li class="stat error{% if not errors %} zero{% endif %}"><span class="v">{{ errors | length }}</span><span class="l">{{ t("report.stat.errors") }}</span></li>
@@ -69,17 +83,69 @@
 {{ f.severity_groups(groups, t, msg) }}
 {{ f.skipped(report.skipped, t, why) }}
 
-{% if not contractor_type %}
+{# The model review of the notes the rules could not decide - the subject and the services. A
+   separate job the user asks for: the report above is the rules' and never waits on the model.
+   While it runs, the card polls the job and the page reloads itself when it ends. A review that
+   answered other notes is offered again; one that is done or failed is not, since asking the
+   same thing again returns the same result (api/checks.queue_aoa_review). A review of notes
+   that are no longer open, with none open now, leaves nothing to show. #}
+{% if can_review and (review_items or (review_job and review_state != "stale")) %}
+<section class="explain">
+<h2>{{ icon("sparkle") }} {{ t("aoa.review.title") }}</h2>
+{% if review_running %}
+<div class="card explain-box" data-poll-job="{{ review_job }}">
+  <p role="status" aria-live="polite"><span class="status running">{{ t("aoa.review.running") }}</span></p>
+  <p class="muted small">{{ t("aoa.review.slow") }}</p>
+</div>
+{% elif review_job and review_state == "current" %}
+{# "current" means the review belongs here, not that any answer passed its checks #}
+<div class="card explain-box"><p class="muted small">{% if review_marked %}{{ t("aoa.review.done") }}{% else %}{{ t("aoa.review.unused") }}{% endif %}</p></div>
+{% elif review_job and review_state != "stale" %}
+<div class="card explain-box"><p class="muted small">{{ t("aoa.review.failed") }}</p></div>
+{% elif review_items %}
+<div class="card explain-box">
+  <p class="muted small">{% if review_state == "stale" %}{{ t("aoa.review.stale") }}{% else %}{{ t("aoa.review.lead") }}{% endif %}<br>{{ t("aoa.review.slow") }}</p>
+  <form method="post" action="/ui/checks/aoa/review?{{ query }}"{% if review_auto and not review_job %} data-submit-once{% endif %}>
+    <button type="submit" class="secondary">{{ icon("sparkle") }}{{ t("aoa.review.run", n=review_items) }}</button>
+  </form>
+</div>
+{% endif %}
+</section>
+{% endif %}
+
+{# One form for what the act cannot say: the contractor type, and for an act in a foreign
+   currency the advance (rule 9). The advance comes back as the check read it - from the act, or
+   as entered - so submitting the form is the confirmation, and a 0 stays a 0. #}
+{% set fx = currency and currency != "GEL" and "," not in currency and "AOA.FX_INVOICE" not in not_applicable %}
+{% if not contractor_type or fx %}
 <form class="card rerun" method="get" action="/ui/checks/aoa">
   <p class="muted small">{{ t("aoa.rerun.lead") }}</p>
   <input type="hidden" name="act" value="{{ act.id }}">
   {% if contract %}<input type="hidden" name="contract" value="{{ contract.id }}">{% endif %}
+  {# the contractor type and the advance change nothing the model was asked, so its review stays #}
+  {% if review_job %}<input type="hidden" name="review" value="{{ review_job }}">{% endif %}
   <label for="rerun-type">{{ t("upload.contractor_type") }}
+    {# a blank first choice, so a re-run never submits whichever type happens to be listed
+       first. Not required: left blank, the check runs as before with the wording rule skipped #}
     <select id="rerun-type" name="contractor_type">
+      <option value="">{{ t("aoa.rerun.choose") }}</option>
       {% for value in contractor_types %}
-      <option value="{{ value }}">{{ t("contractor." ~ value) }}</option>
+      <option value="{{ value }}"{% if value == contractor_type %} selected{% endif %}>{{ t("contractor." ~ value) }}</option>
       {% endfor %}
     </select></label>
+  {% if fx %}
+  {% set advance_amount = report.summary["advance_amount"] if "advance_amount" in report.summary else "" %}
+  {% set advance_date = report.summary["advance_date"] if "advance_date" in report.summary else "" %}
+  <label for="rerun-advance-amount">{{ t("upload.advance.amount") }}
+    <input type="text" inputmode="decimal" id="rerun-advance-amount" name="advance_amount"
+           value="{{ advance_amount }}" autocomplete="off" maxlength="32"></label>
+  <label for="rerun-advance-date">{{ t("upload.advance.date") }}
+    <input type="date" id="rerun-advance-date" name="advance_date"
+           value="{{ advance_date }}" min="1990-01-01" max="2100-12-31"></label>
+  {% if "advance_source" in report.summary and report.summary["advance_source"] == "act" %}
+  <p class="small">{{ icon("info") }} {{ t("aoa.advance.auto.act") }}</p>
+  {% endif %}
+  {% endif %}
   <button type="submit" class="secondary">{{ icon("refresh") }}{{ t("aoa.rerun") }}</button>
 </form>
 {% endif %}

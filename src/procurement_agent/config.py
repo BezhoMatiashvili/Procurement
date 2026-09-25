@@ -140,6 +140,22 @@ class Settings(BaseSettings):
     #: why serial calls would not be cheaper.
     compare_llm_max_hunks: int = Field(default=8, ge=1, le=40)
 
+    # --- acceptance act: the model review of the subject and the services ---
+    #: Whether the act report offers "review with the model" for the notes the rules could not
+    #: decide (``checks/aoa_llm.py``). The operator's switch: the check itself never calls the
+    #: model, and the review only ever marks a note - it cannot clear one or make it an error.
+    aoa_llm_enabled: bool = True
+    #: Queue the review by itself when a report has notes to review. Off: the worker is a
+    #: single thread, and one review is about a minute and a half of CPU that every report view
+    #: would otherwise put ahead of other users' uploads.
+    aoa_llm_auto: bool = False
+    #: Notes sent to the model in one review. Each answer carries two quotes and two sentences,
+    #: so the output grows with this; eight fit the default context window with room to spare.
+    aoa_llm_max_items: int = Field(default=8, ge=1, le=40)
+    #: Characters of document text one review prompt may hold; notes past it are not sent, and
+    #: a note in the report says how many.
+    aoa_llm_max_chars: int = Field(default=6000, ge=500, le=60_000)
+
     # --- Docling / OCR ---
     docling_artifacts_path: Path | None = None
     docling_num_threads: int = Field(default=12, ge=1, le=256)
@@ -149,6 +165,12 @@ class Settings(BaseSettings):
 
     # --- business registry snapshot (optional; absent means registry rules are skipped) ---
     registry_db: Path | None = None
+
+    # --- exchange rates for the foreign-currency invoice (client rule 9) ---
+    #: Where the NBG rates come from (``fx/provider.py``). Only "none" exists: with no source the
+    #: check writes out the invoice formula and the days whose rates to look up, and says the
+    #: total in lari was not calculated. A connector adds its name here.
+    fx_rate_source: Literal["none"] = "none"
 
     # --- auth ---
     dev_api_key: str | None = None

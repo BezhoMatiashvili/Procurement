@@ -174,3 +174,80 @@ def test_quoting_differences_do_not_defeat_the_anchor(tmp_path: Path) -> None:
     )
     assert unanchored == []
     assert "AOA.PARTY_NAME" in _comments_xml(out)
+
+
+def test_a_month_typo_is_marked_on_the_word_with_its_correction(tmp_path: Path) -> None:
+    """The comment marks the misspelled word, not the whole date, and says how to write it."""
+    from procurement_agent.checks.aoa import check_aoa
+    from tests.unit.test_aoa_check import ACT, CONTRACT
+
+    act = ACT.replace("1 აპრილიდან", "1 აპრლიდან")
+    report = check_aoa(aoa_text=act, contract_text=CONTRACT)
+    [finding] = [f for f in report.findings if f.rule_id == "AOA.SPELLING"]
+    path = tmp_path / "act.docx"
+    doc = Document()
+    for line in act.splitlines():
+        doc.add_paragraph(line)
+    doc.save(path)
+
+    out, unanchored = annotate_docx(path, [finding], tmp_path / "o.docx")
+    assert unanchored == []
+    assert "should be: აპრილიდან" in _comments_xml(out)
+    assert "აპრლიდან" in [r.text for p in Document(str(out)).paragraphs for r in p.runs]
+
+
+def test_the_invoice_note_is_marked_on_the_acts_total(tmp_path: Path) -> None:
+    """Rule 9's note says how to invoice the act; it goes on the amount, and says nothing is
+    wrong there - no "should be"."""
+    from procurement_agent.checks.aoa import check_aoa
+    from tests.unit.test_fx_invoice import USD_ACT, USD_CONTRACT
+
+    report = check_aoa(aoa_text=USD_ACT, contract_text=USD_CONTRACT)
+    [note] = [f for f in report.findings if f.rule_id == "AOA.FX_INVOICE"]
+    path = tmp_path / "act.docx"
+    doc = Document()
+    for line in USD_ACT.splitlines():
+        doc.add_paragraph(line)
+    doc.save(path)
+
+    out, unanchored = annotate_docx(path, [note], tmp_path / "o.docx")
+    assert unanchored == []
+    xml = _comments_xml(out)
+    assert "AOA.FX_INVOICE" in xml
+    assert "should be" not in xml
+    runs = [r.text for p in Document(str(out)).paragraphs for r in p.runs]
+    assert "11 000 (თერთმეტი ათასი) აშშ დოლარს" in runs
+
+
+def test_a_note_for_review_says_so_before_its_message() -> None:
+    """A note the rules could not decide asks for a reading, not a correction."""
+    note = _finding("AOA.SERVICES", severity="info", needs_review=True)
+    lines = comment_text(note).split("\n")
+    assert lines[0] == "[ინფორმაცია / Info] AOA.SERVICES"
+    assert lines[1] == "გადასამოწმებელი / Needs review: ციფრი და სიტყვიერი ჩანაწერი არ ემთხვევა"
+    assert "გადასამოწმებელი" not in comment_text(_finding())
+
+
+def test_a_service_for_review_is_marked_on_the_acts_own_line(tmp_path: Path) -> None:
+    """The act lists a service the contract never did: the note goes on that line of the annex,
+    with no "should be" - there is nothing to correct it to."""
+    from procurement_agent.checks.aoa import check_aoa
+    from tests.unit.test_aoa_scope import ACT, CONTRACT
+
+    extra = "- 10 სერვისის გვერდის შექმნა და ლოგოს დიზაინი"
+    act = ACT.replace("- საკონტაქტო ფორმის აწყობა\n", f"- საკონტაქტო ფორმის აწყობა\n{extra}\n")
+    report = check_aoa(aoa_text=act, contract_text=CONTRACT)
+    [note] = [f for f in report.findings if f.rule_id == "AOA.SERVICES"]
+    path = tmp_path / "act.docx"
+    doc = Document()
+    for line in act.splitlines():
+        doc.add_paragraph(line)
+    doc.save(path)
+
+    out, unanchored = annotate_docx(path, [note], tmp_path / "o.docx")
+    assert unanchored == []
+    xml = _comments_xml(out)
+    assert "გადასამოწმებელი / Needs review:" in xml
+    assert "should be" not in xml
+    runs = [r.text for p in Document(str(out)).paragraphs for r in p.runs]
+    assert extra[2:] in runs  # the comment covers the item itself

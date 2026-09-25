@@ -11,6 +11,8 @@ from procurement_agent.extraction.rules import (
     find_durations,
     find_id_codes,
     find_percentages,
+    month_ka_correction,
+    nearest_keyword_group,
     parse_number,
     run_rules,
 )
@@ -73,6 +75,58 @@ def test_amounts_penalty_context() -> None:
 
 def test_amounts_no_currency_ignored() -> None:
     assert find_amounts("see page 12 of 40") == []
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("100 აშშ დოლარი", (100.0, "USD")),
+        ("100 აშშ დოლარის", (100.0, "USD")),
+        ("100 აშშ დოლარს", (100.0, "USD")),
+        ("100 დოლარით", (100.0, "USD")),
+        ("100 დოლარად", (100.0, "USD")),
+        ("100 ა.შ.შ. დოლარი", (100.0, "USD")),
+        ("11 000 (თერთმეტი ათასი) აშშ დოლარს", (11000.0, "USD")),
+        ("100 US dollars", (100.0, "USD")),
+        ("US$1,000", (1000.0, "USD")),
+        ("100 ევროს", (100.0, "EUR")),
+        ("100 ევროთი", (100.0, "EUR")),
+        ("100 euros", (100.0, "EUR")),
+        ("100 ფუნტი სტერლინგი", (100.0, "GBP")),
+        ("100 pounds sterling", (100.0, "GBP")),
+    ],
+)
+def test_amounts_in_every_case_a_currency_name_takes(
+    text: str, expected: tuple[float, str]
+) -> None:
+    assert [(h.normalized, h.currency) for h in find_amounts(text)] == [expected]
+
+
+def test_a_dollar_amount_is_never_read_as_lari() -> None:
+    """ "დოლარ" (dollar) contains "ლარ" (lari), so the lari name must be tested last."""
+    assert [(h.normalized, h.currency) for h in find_amounts("100 დოლარს")] == [(100.0, "USD")]
+
+
+def test_the_year_after_a_dollar_amount_is_not_an_amount() -> None:
+    text = "ავანსი 1 000 აშშ დოლარს 2026 წლის 10 სექტემბერს"
+    assert [(h.normalized, h.currency) for h in find_amounts(text)] == [(1000.0, "USD")]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # the lari pattern found "ლარს" inside "დოლარს" and read the year as 2,026 lari
+        "აშშ დოლარს 2026 წლის",
+        # before a figure only a code or a sign is a currency, never a name
+        "თანხა დოლარს 100",
+        # "ლარ" inside an ordinary word
+        "იდენტიურ ეგზემპლარად",
+        # a weight: sterling is money only as "pound sterling"
+        "100 pounds",
+    ],
+)
+def test_no_amount_where_a_currency_name_is_not_written_after_a_figure(text: str) -> None:
+    assert find_amounts(text) == []
 
 
 @pytest.mark.parametrize(
@@ -181,6 +235,31 @@ def test_a_unit_price_is_still_a_unit_price() -> None:
     assert [(h.normalized, h.type) for h in hits] == [(12.5, FactType.price)]
 
 
+def _around(text: str, needle: str) -> tuple[int, int]:
+    start = text.index(needle)
+    return start, start + len(needle)
+
+
+def test_nearest_keyword_group_takes_any_labels() -> None:
+    """The classifier's weighing, lifted out so a check can give an amount its own role."""
+    text = "ავანსი შეადგენს 300 ლარს, ხოლო ღირებულება შეადგენს 1000 ლარს."
+    groups = {"advance": ("ავანს",), "price": ("ღირებულებ",)}
+    assert nearest_keyword_group(text, *_around(text, "300"), groups) == "advance"
+    assert nearest_keyword_group(text, *_around(text, "1000"), groups) == "price"
+
+
+def test_nearest_keyword_group_stays_inside_the_sentence() -> None:
+    text = "ავანსი არ გაიცემა. თანხა შეადგენს 100 ლარს."
+    assert nearest_keyword_group(text, *_around(text, "100"), {"advance": ("ავანს",)}) is None
+
+
+def test_nearest_keyword_group_breaks_a_tie_by_group_order() -> None:
+    text = "თანხა 100"
+    span = _around(text, "100")
+    assert nearest_keyword_group(text, *span, {"a": ("თანხა",), "b": ("თანხა",)}) == "a"
+    assert nearest_keyword_group(text, *span, {"b": ("თანხა",), "a": ("თანხა",)}) == "b"
+
+
 def test_dates_do_not_double_count_overlapping_matches() -> None:
     hits = find_dates("შესრულდა 2026 წლის 1 აგვისტოდან 2026 წლის 31 აგვისტოს ჩათვლით")
     assert [h.normalized for h in hits] == ["2026-08-01", "2026-08-31"]
@@ -205,6 +284,56 @@ def test_cadastral_codes() -> None:
     hits = find_cadastral_codes("პროექტისთვის (ს/კ: 01.02.03.456) და ნაკვეთი 01.10.14.006.021")
     assert [h.value for h in hits] == ["01.02.03.456", "01.10.14.006.021"]
     assert find_cadastral_codes("version 1.2.3.456") == []
+
+
+@pytest.mark.parametrize(
+    ("text", "codes"),
+    [
+        # the full stop that ends the sentence is not part of the code, and does not hide it
+        ("საკადასტრო კოდი: 01.02.03.456.", ["01.02.03.456"]),
+        ("კოდი 01.10.14.006.021. შემდეგი", ["01.10.14.006.021"]),
+        # six and seven groups: a building or a unit inside the parcel, read whole
+        (
+            "ბინა 01.19.21.004.024.01 და 01.19.21.004.024.01.513.",
+            ["01.19.21.004.024.01", "01.19.21.004.024.01.513"],
+        ),
+        # a group too long, a date, or more digits after a dot: no code
+        ("01.02.03.4567", []),
+        ("01.02.2026", []),
+        ("01.02.03.456.7", []),
+    ],
+)
+def test_cadastral_codes_of_four_to_seven_groups(text: str, codes: list[str]) -> None:
+    assert [h.value for h in find_cadastral_codes(text)] == codes
+
+
+@pytest.mark.parametrize(
+    ("word", "correction"),
+    [
+        ("აგვუისტას", "აგვისტოს"),
+        ("აგისტოდან", "აგვისტოდან"),
+        ("აპრლიდან", "აპრილიდან"),
+        ("სეტემბრის", "სექტემბრის"),
+        ("თებრვლის", "თებერვლის"),
+        ("ნოებმერი", "ნოემბერი"),
+        ("დეკმბრიდან", "დეკემბრიდან"),
+    ],
+)
+def test_a_misspelled_month_is_corrected_in_the_case_it_was_written(
+    word: str, correction: str
+) -> None:
+    assert month_ka_correction(word) == correction
+
+
+def test_a_word_that_is_no_month_has_no_correction() -> None:
+    assert month_ka_correction("ხელშეკრულება") is None
+
+
+@pytest.mark.parametrize("word", ["აგისტოსთვის", "სექტემრისთვის", "აგისტოშივე"])
+def test_a_month_with_an_ending_the_forms_do_not_list_gets_no_correction(word: str) -> None:
+    """The nearest listed form would drop the ending or change the case ("აგვისტოთი" for
+    "აგისტოსთვის"): a wrong correction is worse than none."""
+    assert month_ka_correction(word) is None
 
 
 def test_run_rules_sorted_and_spans_valid() -> None:

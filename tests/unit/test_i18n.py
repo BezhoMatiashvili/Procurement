@@ -83,7 +83,7 @@ def test_every_status_has_a_label(value: str) -> None:
     assert f"status.{value}" in STRINGS
 
 
-@pytest.mark.parametrize("kind", ["parse", "extract", "compare_explain"])
+@pytest.mark.parametrize("kind", ["parse", "extract", "compare_explain", "aoa_review"])
 def test_every_job_kind_has_a_label(kind: str) -> None:
     assert f"jobkind.{kind}" in STRINGS
 
@@ -92,6 +92,12 @@ def test_every_job_kind_has_a_label(kind: str) -> None:
 def test_every_picker_task_has_its_three_strings(task: str) -> None:
     for part in ("title", "lead", "needs"):
         assert f"task.{task}.{part}" in STRINGS
+
+
+def test_the_not_applicable_placeholder_survives_translation() -> None:
+    """The act report fills {rules} with the exempt rules' names, in either language."""
+    en, ka = STRINGS["aoa.not_applicable"]
+    assert "{rules}" in en and "{rules}" in ka
 
 
 def test_the_upload_placeholders_survive_translation() -> None:

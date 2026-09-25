@@ -22,8 +22,17 @@ class LLMUnavailableError(LLMError):
 
 class LLMClient(Protocol):
     def generate_structured(
-        self, *, system: str, user: str, schema: type[T], model: str | None = None
-    ) -> T: ...
+        self,
+        *,
+        system: str,
+        user: str,
+        schema: type[T],
+        model: str | None = None,
+        max_output_tokens: int | None = None,
+    ) -> T:
+        """``max_output_tokens`` caps this call's answer; None keeps the client's own cap. A
+        caller whose answer grows with its input - one item per question asked - sizes it."""
+        ...
 
     def generate_choice(
         self,

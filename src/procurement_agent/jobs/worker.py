@@ -32,6 +32,8 @@ from pathlib import Path
 from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
+from procurement_agent.checks.aoa import scope_review_items
+from procurement_agent.checks.aoa_llm import request_review
 from procurement_agent.checks.compare_llm import request_explanations
 from procurement_agent.config import Settings
 from procurement_agent.db import session_scope
@@ -39,6 +41,7 @@ from procurement_agent.extraction.pipeline import (
     StoredDocument,
     compare_stored,
     load_chunks,
+    load_document_text,
     result_dir,
     run_extraction,
     upload_path,
@@ -306,6 +309,8 @@ class Worker:
             self._extract(job_id, doc_id, doc_kind, params)
         elif kind == "compare_explain":
             self._compare_explain(job_id, doc_id, params)
+        elif kind == "aoa_review":
+            self._aoa_review(job_id, doc_id, params)
         else:
             self._finish(job_id, JobStatus.failed, f"unknown job kind {kind!r}")
 
@@ -440,6 +445,63 @@ class Worker:
         msg = f"{len(stored.items)} change(s) described"
         if not self._settle(job_id, JobStatus.done, msg, documents=(pair[0][0], pair[1][0])):
             self._discard([(pair[0][0], pair[0][1]), (pair[1][0], pair[1][1])], out)
+
+    def _aoa_review(self, job_id: str, doc_id: str, params: dict[str, object]) -> None:
+        """Ask the model about the notes an act check's scope rules could not decide.
+
+        Keyed on the act, with the contract in ``params``, for the reason ``_compare_explain``
+        gives - so deleting the contract does not cancel this job, and both documents are
+        re-checked when it settles. The notes are read here exactly as the report reads them
+        (``aoa.scope_review_items``); only the model's answers are stored, and the report
+        applies them to the rules it recomputes on every view.
+        """
+        contract_id = params.get("contract")
+        if not isinstance(contract_id, str):
+            self._finish(job_id, JobStatus.failed, "no contract recorded on the job")
+            return
+        if self._llm is None:
+            self._finish(job_id, JobStatus.failed, "no LLM backend is configured")
+            return
+
+        with session_scope() as s:
+            act = s.get(Document, doc_id)
+            contract = s.get(Document, contract_id)
+            pair = (
+                None
+                if act is None
+                or contract is None
+                or DocumentStatus.deleted in (act.status, contract.status)
+                else [(act.id, act.kind), (contract.id, contract.kind)]
+            )
+        if pair is None:
+            self._finish(job_id, JobStatus.cancelled, "a document no longer exists")
+            return
+
+        self._set_progress(job_id, 10, "reading both documents")
+        try:
+            items = scope_review_items(
+                aoa_text=load_document_text(self._s, *pair[0]),
+                contract_text=load_document_text(self._s, *pair[1]),
+            )
+        except Exception as e:
+            log.warning("aoa_review_read_failed", job=job_id, error=str(e)[:200])
+            self._finish(job_id, JobStatus.failed, f"could not read the documents: {e}"[:200])
+            return
+
+        self._set_progress(job_id, 30, f"asking the model about {len(items)} note(s)")
+        stored = request_review(
+            items,
+            self._llm,
+            aoa_document_id=pair[0][0],
+            contract_document_id=pair[1][0],
+            model=self._s.llm_fast_model,
+            max_items=self._s.aoa_llm_max_items,
+            max_chars=self._s.aoa_llm_max_chars,
+        )
+        out = self._write_output(doc_id, job_id, stored.model_dump_json())
+        msg = f"{len(stored.items)} answer(s) about {len(stored.asked)} note(s)"
+        if not self._settle(job_id, JobStatus.done, msg, documents=(pair[0][0], pair[1][0])):
+            self._discard(pair, out)
 
     # --- retention -----------------------------------------------------------------------------
 

@@ -51,8 +51,14 @@ says the system handles these documents, not that it generalises — and anchor 
 measure meant to expose overfitting, is necessarily 100% on the corpus the anchors came from.
 It becomes informative on the next document family, which is when to look at it.
 
-Not yet scored: the scanned PDFs (OCR runs only inside the Docker image), and `AOA.FX_INVOICE`,
-which has no implementation and therefore no gold expectation.
+Not yet scored: the scanned PDFs (OCR runs only inside the Docker image); `AOA.FX_INVOICE`,
+because neither client set has an act in a foreign currency, so no gold file expects it; and the
+contract-term, payment-term, party and scope rules (`AOA.ACT_DATE_IN_TERM`,
+`AOA.PAYMENT_DEADLINE`, `AOA.PAYMENT_METHOD`, `AOA.PAYMENT_ADVANCE`, `AOA.ID_CODE_PARTY`,
+`AOA.PARTY_ROLE`, `AOA.PARTY_MISSING`, `AOA.SUBJECT`, `AOA.SERVICES`), which fire on none of the
+client's acts — their planted mistakes exist only as synthetic unit tests. Nor is the model
+review of the subject and services: the figures above are rules-only, and so is every run of the
+evaluation (see "The act review" below).
 
 The harness prints a `fragile` list: fields scoring well with **no** anchor coverage, carried by
 keyword proximity alone. `total_amount` is on it — it is found by the nearness of `საფასურ` or
@@ -402,11 +408,95 @@ about, and certainly not whether the model's explanations are any good — that 
 judgements this corpus does not have. The client pairs are not in the committed set for the
 usual reason: their expected values are the confidential data.
 
+## The act review: the model reads the notes the rules leave open
+
+`AOA.SUBJECT` and `AOA.SERVICES` compare words (stage 1, `checks/aoa_scope.py`). What they
+cannot match - the act's subject in other words, a service the contract's list may or may not
+hold - is an `info` note flagged `needs_review`. A user can then ask the local model to read those
+notes (stage 2, `checks/aoa_llm.py`), and plain code combines the two answers (stage 3,
+`decide`).
+
+**What is asked.** Only notes whose words the contract does not clearly hold. A number that
+replaces the contract's is the rules' evidence and final; a number the act only adds, in the
+contract's own words, is a question about a number, which the rules already compared. Neither is
+sent. It is one batched call to `PA_LLM_FAST_MODEL`, behind a button (`PA_AOA_LLM_ENABLED`); it
+does not run by itself unless `PA_AOA_LLM_AUTO` is set, because the worker is a single thread.
+
+**What an answer can do.** "Likely the same" marks the note and leaves it `info`; "likely
+different" raises it to a warning. The model never clears a note and never makes an error: this
+model measured as a precision regression on this corpus whenever it was allowed to assert, and
+the act is the contractor's own text, so an instruction hidden in it can move a note one step at
+most. An answer counts only if its id is one the model was given, both quotes are in the text it
+was shown for that item (at least eight characters, or a whole line), both sentences are there
+and are its own, and its confidence is from one half to 1. "Same" also does not count where the
+act states a number its closest contract text does not: that may be the same work with another
+count, and only the rules compare numbers. A stored review is tied to both documents
+and to a digest of the notes, the prompt's version and the model; one that no longer matches is
+set aside, and a review of the same notes is reused rather than asked again - a failed one too.
+
+**Measured, 2026-09-25** - gemma3:4b (Q4_K_M) on this CPU box, synthetic items only. One
+observation, not a score:
+
+| items asked | wall clock | prompt tokens | completion tokens |
+|---|---|---|---|
+| 1 service, through the app (upload, queue, worker, report) | 19.8 s | 727 | 125 |
+| the same prompt again, the server holding it in its cache | 10.1 s | 727 | 123 |
+| 1 subject | 21.2 - 21.4 s | 787 - 794 | 210 |
+| 2 services | 29.9 - 32.2 s | 820 | 237 - 302 |
+| 3 services | 38.0 s | 904 | 379 |
+
+All with the prompt as shipped; the context window was 4096 tokens each time. Output, not the
+prompt, is what grows with the number of notes, which is why one review asks at most
+`PA_AOA_LLM_MAX_ITEMS` (8).
+
+* **Asked for the verdict first, the model once committed to one and then explained the
+  opposite:** a service the contract never lists came back "same", with a reason describing other
+  work. The schema now has it quote, then explain, then decide - its raw output follows the
+  schema's order - and in the runs after that change the verdicts agreed with their reasons.
+* Per item, with the prompt as shipped:
+  * the contact form in other words ("უკუკავშირის ფორმის შექმნა" against "საკონტაქტო ფორმის
+    აწყობა", creating against assembling): "same" in four runs - one of them refused by the quote
+    check - and "different" in one;
+  * a service the contract never lists (a logo and a brand book): "different" in two runs - one
+    refused by the quote check; in a third it copied the previous item's reason and verdict
+    ("same"), which is now refused;
+  * a service written in Latin letters, construction work in place of web design, and a subject
+    in other words: as expected, one run each.
+* **In a batch of two, the model once gave the second item the first item's reason word for word,
+  and a verdict to match.** Such a copy is now refused. In another run it corrupted a Georgian
+  quote with characters of another script; the quote check refused both answers, and the rules'
+  notes stood.
+* **The same prompt did not give the same answer twice.** Temperature 0 and a fixed seed do not
+  make CPU inference repeatable here once the server's prompt cache holds a shared prefix.
+
+**Rules-only against rules plus review.** The evaluation and the findings harness run the rules
+alone. On the client's six acts and the twelve of Test Set 2 the rules leave no subject or service
+open, so the review would never be asked, and the two columns are identical by construction. A
+real number needs labelled paraphrases and substitutions, which this corpus does not have.
+
 ## Known gaps
 
 * The scanned PDFs are not yet in the gold set; OCR only runs inside the Docker image, so they
   must be scored there.
-* `AOA.FX_INVOICE` (NBG-rate invoice calculation) is specified but not implemented; the rates
-  table format is `data/fx/nbg_rates.csv` with `date,currency,rate`.
+* `AOA.FX_INVOICE` (the invoice in lari for a foreign-currency act) works out the formula — the
+  advance at the NBG rate of its payment day, the rest at the rate of the act's date — but no rate
+  source is connected (`PA_FX_RATE_SOURCE=none`), so the note names the days whose rates to look
+  up and an `AOA.FX_RATE` skip says the total in lari was not calculated. A connector implements
+  `fx/provider.RateProvider`; an offline table the operator loads (`date,currency,rate`) needs no
+  egress. Open with the client: their no-advance example writes 2,610.04 for 1,000 x 2.6104, which
+  is 2,610.40 (the tests hold the arithmetic); whether the act states the full value or only the
+  remainder (the check assumes the full value); and whether each term or only the sum is rounded
+  (the check rounds each term).
+* `AOA.SUBJECT` and `AOA.SERVICES` compare words, with rules only: stems, and the share of the
+  act's words the contract's clause or item holds. A match needs all of them: the items of one
+  list share most of their words ("… სერვისის გვერდის აღწერა GEO/ENG"), and the one that differs
+  names the service. Only a number that replaces the contract's, in an item three words in four
+  the same, is an error; a number only the act adds (the period, a share done) is not, and a
+  month and year are not read as numbers. Wording the rules cannot match is an `info` note
+  flagged `needs_review`, which the evaluation does not score — it scores errors only — so how
+  often a paraphrase is flagged is not measured, nor how often the model review, when asked,
+  reads such a note rightly (see "The act review"). The shares and the stemmer are fitted to the
+  client's one template. A list of services is read from list lines (`- `, `•`, `ა)`) under a
+  lead-in; a spreadsheet, or a table holding the list, has none, and the rule says it did not run.
 * The registry rules run only against a snapshot the client exports (`cli load-registry`); with
   no snapshot they are reported as skipped, never as passed.

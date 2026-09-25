@@ -41,6 +41,9 @@ _SEVERITY_PREFIX = {
     "warning": "გაფრთხილება / Warning",
     "info": "ინფორმაცია / Info",
 }
+#: Opens the message of a note the rules could not decide (``Finding.needs_review``): the
+#: reviewer is to read the marked words, not to correct them.
+NEEDS_REVIEW_PREFIX = "გადასამოწმებელი / Needs review:"
 
 
 class UnsupportedDocumentError(RuntimeError):
@@ -54,7 +57,10 @@ _XML_ILLEGAL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 def comment_text(finding: Finding) -> str:
     """What the reviewer reads in the margin: what is wrong, and what it should say."""
-    lines = [f"[{_SEVERITY_PREFIX[finding.severity]}] {finding.rule_id}", finding.message_ka]
+    message = finding.message_ka
+    if finding.needs_review:
+        message = f"{NEEDS_REVIEW_PREFIX} {message}"
+    lines = [f"[{_SEVERITY_PREFIX[finding.severity]}] {finding.rule_id}", message]
     if finding.expected:
         lines.append(f"სწორი ვარიანტი / should be: {finding.expected}")
     lines.append(finding.message_en)

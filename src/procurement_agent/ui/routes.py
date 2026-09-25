@@ -24,6 +24,8 @@ from procurement_agent.api.checks import (
     compare_xlsx,
     merged_xlsx,
     owned_explain_job,
+    owned_review_job,
+    queue_aoa_review,
     run_aoa,
     run_boq,
     run_compare,
@@ -31,6 +33,7 @@ from procurement_agent.api.checks import (
 from procurement_agent.api.deps import (
     client_ip,
     ensure_job_capacity,
+    get_llm,
     get_worker,
     owned_document,
     owned_documents,
@@ -40,6 +43,7 @@ from procurement_agent.api.extraction import ExtractRequest, start_extraction
 from procurement_agent.checks.aoa import ContractorType
 from procurement_agent.checks.compare import ComparisonReport, Hunk, ValueDelta
 from procurement_agent.checks.findings import Finding
+from procurement_agent.checks.fx_invoice import parse_advance
 from procurement_agent.config import Settings, get_settings
 from procurement_agent.db import get_session
 from procurement_agent.extraction.labels import LABELS
@@ -415,6 +419,8 @@ async def start_aoa_without_js(
     act: UploadFile,
     contract: UploadFile | None = None,
     contractor_type: Annotated[str | None, Form()] = None,
+    advance_amount: Annotated[str | None, Form()] = None,
+    advance_date: Annotated[str | None, Form()] = None,
 ) -> Response:
     """The same flow without JavaScript: two uploads server-side, then the result URL.
 
@@ -437,6 +443,10 @@ async def start_aoa_without_js(
         params["contract"] = contract_id
     if contractor_type:
         params["contractor_type"] = contractor_type
+    # passed on as typed: the report reads them, and leaves out what does not read
+    for name, value in (("advance_amount", advance_amount), ("advance_date", advance_date)):
+        if value and value.strip():
+            params[name] = value.strip()
     return RedirectResponse(
         f"/ui/checks/aoa?{urlencode(params)}", status_code=status.HTTP_303_SEE_OTHER
     )
@@ -464,12 +474,27 @@ def aoa_report(
     act: str,
     contract: str | None = None,
     contractor_type: str | None = None,
+    advance_amount: str | None = None,
+    advance_date: str | None = None,
+    review: str | None = None,
 ) -> Response:
+    """The rules' report, recomputed on every view. A finished model review rides in
+    ``review`` and is applied to the notes the rules could not decide; its absence means
+    nobody asked the model."""
     try:
         aoa_doc, contract_doc, ctype = _aoa_inputs(
             session, principal, act, contract, contractor_type
         )
-        report = run_aoa(settings, aoa_doc, contract_doc, ctype)
+        advance = parse_advance(advance_amount, advance_date)
+        review_row = owned_review_job(session, principal, review, aoa_doc, contract_doc)
+        report = run_aoa(
+            settings,
+            aoa_doc,
+            contract_doc,
+            ctype,
+            advance,
+            review_job_id=review_row.id if review_row is not None else None,
+        )
     except HTTPException as e:
         return _http_error(request, principal, e, "/ui/start/aoa")
     audit(
@@ -480,6 +505,7 @@ def aoa_report(
         ip=client_ip(request),
         detail=f"{len(report.errors)} error(s), {len(report.findings)} finding(s)",
     )
+    review_status = review_row.status.value if review_row is not None else None
     resp = _render(
         request,
         "check_aoa.html",
@@ -491,6 +517,17 @@ def aoa_report(
         contractor_types=get_args(ContractorType),
         query=request.url.query,
         groups=_by_severity(report.findings),
+        # the model review: offered only where it can run, and only for notes left open
+        can_review=settings.aoa_llm_enabled
+        and get_llm(request) is not None
+        and contract_doc is not None,
+        review_items=int(report.summary.get("review_items", "0")),
+        review_job=review_row.id if review_row is not None else None,
+        review_status=review_status,
+        review_running=review_status in (JobStatus.queued.value, JobStatus.running.value),
+        review_state=report.summary.get("review"),
+        review_marked=any(f.reviewed_by for f in report.findings),
+        review_auto=settings.aoa_llm_auto,
     )
     return resp  # no-store: set for every /ui/ response in main._security_headers
 
@@ -504,13 +541,27 @@ def aoa_annotated(
     act: str,
     contract: str | None = None,
     contractor_type: str | None = None,
+    advance_amount: str | None = None,
+    advance_date: str | None = None,
+    review: str | None = None,
 ) -> Response:
-    """A plain link, not a JS blob: works with JavaScript off and needs no CSP argument."""
+    """A plain link, not a JS blob: works with JavaScript off and needs no CSP argument. The
+    report's own query rides along, so the Word file carries the model's reading when the page
+    does."""
     try:
         aoa_doc, contract_doc, ctype = _aoa_inputs(
             session, principal, act, contract, contractor_type
         )
-        report = run_aoa(settings, aoa_doc, contract_doc, ctype)
+        advance = parse_advance(advance_amount, advance_date)
+        review_row = owned_review_job(session, principal, review, aoa_doc, contract_doc)
+        report = run_aoa(
+            settings,
+            aoa_doc,
+            contract_doc,
+            ctype,
+            advance,
+            review_job_id=review_row.id if review_row is not None else None,
+        )
         # 415 for a scan or a spreadsheet: an HTML navigation must not land on raw JSON.
         resp = annotated_docx(settings, aoa_doc, report)
     except HTTPException as e:
@@ -524,6 +575,61 @@ def aoa_annotated(
         detail=f"{len(report.errors)} error(s), {len(report.findings)} finding(s)",
     )
     return resp
+
+
+@router.post("/checks/aoa/review")
+def aoa_review(
+    request: Request,
+    principal: Annotated[Principal, Depends(authenticate)],
+    session: Annotated[Session, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    worker: Annotated[Worker, Depends(get_worker)],
+    act: str,
+    contract: str | None = None,
+    contractor_type: str | None = None,
+    advance_amount: str | None = None,
+    advance_date: str | None = None,
+) -> Response:
+    """Queue the model review of the notes the rules could not decide, then go back to the
+    report. Nothing else on the act's report ever calls the model.
+
+    The redirect rebuilds the report's own URL - the contractor type and the advance included -
+    and adds the review's id, so the page the user comes back to is the one they left, with the
+    model's reading on it once the job is done. A review of the same notes already asked is
+    reused (``queue_aoa_review``), so pressing again costs nothing.
+    """
+    llm = get_llm(request)
+    if not settings.aoa_llm_enabled:
+        return _error(request, principal, t("error.review_disabled", _lang(request)))
+    if llm is None:
+        return _error(request, principal, t("error.review_unavailable", _lang(request)))
+    try:
+        aoa_doc, contract_doc, ctype = _aoa_inputs(
+            session, principal, act, contract, contractor_type
+        )
+        queued = (
+            queue_aoa_review(
+                request, session, settings, principal, worker, llm, aoa_doc, contract_doc
+            )
+            if contract_doc is not None
+            else None
+        )
+    except HTTPException as e:
+        return _http_error(request, principal, e, "/ui/start/aoa")
+
+    params = {"act": aoa_doc.id}
+    if contract_doc is not None:
+        params["contract"] = contract_doc.id
+    if ctype:
+        params["contractor_type"] = ctype
+    for name, value in (("advance_amount", advance_amount), ("advance_date", advance_date)):
+        if value and value.strip():
+            params[name] = value.strip()
+    if queued is not None and queued.job is not None:
+        params["review"] = queued.job.id
+    return RedirectResponse(
+        f"/ui/checks/aoa?{urlencode(params)}", status_code=status.HTTP_303_SEE_OTHER
+    )
 
 
 @router.get("/checks/boq")

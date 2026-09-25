@@ -1,24 +1,36 @@
 """Document checks: acceptance act against its contract, BOQ bids, and two documents compared.
 
 Synchronous on purpose. Every check here is deterministic and runs in milliseconds — unlike
-extraction, which queues a background job because it may call the LLM. The comparison keeps
-that property: its optional model pass is a separate job, and this endpoint only ever *reads*
-what that job stored.
+extraction, which queues a background job because it may call the LLM. The comparison and the
+act check keep that property: each optional model pass is a separate job, and the check
+endpoints only ever *read* what that job stored.
 """
 
 from __future__ import annotations
 
 import tempfile
+from dataclasses import dataclass
+from datetime import date
+from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Literal, get_args
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from procurement_agent.api.deps import client_ip, owned_document
-from procurement_agent.checks.aoa import ContractorType, check_aoa
+from procurement_agent.api.deps import (
+    client_ip,
+    ensure_job_capacity,
+    get_llm,
+    get_worker,
+    owned_document,
+)
+from procurement_agent.api.extraction import JobOut, _job_out
+from procurement_agent.checks.aoa import ContractorType, check_aoa, scope_review_items
+from procurement_agent.checks.aoa_llm import ScopeReviewSet, review_digest
 from procurement_agent.checks.boq import (
     BidComparison,
     BoqLine,
@@ -33,15 +45,19 @@ from procurement_agent.checks.boq import (
 from procurement_agent.checks.compare import ComparisonReport, DocumentTooLargeError
 from procurement_agent.checks.compare_llm import ExplanationSet, apply_explanations
 from procurement_agent.checks.findings import CheckReport, Finding, SkipNote
+from procurement_agent.checks.fx_invoice import AdvanceInput, to_money
 from procurement_agent.config import Settings, get_settings
 from procurement_agent.db import get_session
 from procurement_agent.extraction.pipeline import (
     StoredDocument,
     compare_stored,
-    load_chunks,
+    load_document_text,
     result_dir,
     upload_path,
 )
+from procurement_agent.fx.provider import open_rate_provider
+from procurement_agent.jobs.worker import Worker
+from procurement_agent.llm.base import LLMClient
 from procurement_agent.models import Document, DocumentStatus, Job
 from procurement_agent.registry.snapshot import open_snapshot
 from procurement_agent.report.compare_xlsx import to_xlsx as compare_to_xlsx
@@ -61,14 +77,27 @@ class AoaCheckRequest(BaseModel):
     #: Drives the NET/VAT wording rules. Nothing in the document states it, so when it is
     #: omitted that rule is reported as skipped rather than guessed.
     contractor_type: ContractorType | None = None
+    #: An advance paid on a foreign-currency act, in the act's currency, and the day it was
+    #: paid (rule 9: the advance is invoiced at that day's rate). Omitted, each is read from the
+    #: act; an amount of 0 says no advance was paid.
+    advance_amount: Decimal | None = Field(default=None, ge=0, max_digits=15, decimal_places=2)
+    advance_date: date | None = Field(default=None, ge=date(1990, 1, 1), le=date(2100, 12, 31))
+    #: A finished ``aoa_review`` job (``POST /aoa/review``) whose model answers are applied to
+    #: the notes the rules could not decide. The check itself never calls the model.
+    review_job_id: str | None = Field(default=None, max_length=64)
+
+    def advance(self) -> AdvanceInput | None:
+        if self.advance_amount is None and self.advance_date is None:
+            return None
+        amount = None if self.advance_amount is None else to_money(self.advance_amount)
+        return AdvanceInput(amount=amount, paid_on=self.advance_date)
 
 
 def _document_text(settings: Settings, doc: Document) -> str:
     if doc.status != DocumentStatus.ready:
         msg = f"document {doc.id} is {doc.status.value}, not ready"
         raise HTTPException(status.HTTP_409_CONFLICT, msg)
-    chunks = load_chunks(settings, doc.id, doc.kind)
-    return "\n".join(c.body or c.text for c in chunks)
+    return load_document_text(settings, doc.id, doc.kind)
 
 
 def run_aoa(
@@ -76,22 +105,197 @@ def run_aoa(
     aoa: Document,
     contract: Document | None,
     contractor_type: ContractorType | None,
+    advance: AdvanceInput | None = None,
+    *,
+    review_job_id: str | None = None,
 ) -> CheckReport:
     """The whole act check. Shared by the JSON API, the DOCX download and the UI page, so the
-    registry snapshot is opened and closed in exactly one place."""
+    registry snapshot and the exchange-rate source are opened and closed in exactly one place.
+
+    ``review_job_id`` names a model review to apply, already resolved through
+    ``owned_review_job``; its answers are checked again against the notes this run leaves open.
+    """
+    review = (
+        load_review(settings, aoa.id, review_job_id)
+        if review_job_id and contract is not None
+        else None
+    )
     registry = open_snapshot(settings.registry_db) if settings.registry_db else None
     try:
-        return check_aoa(
-            aoa_text=_document_text(settings, aoa),
-            aoa_id=aoa.id,
-            contract_text=_document_text(settings, contract) if contract else None,
-            contract_id=contract.id if contract else "contract",
-            registry=registry,
-            contractor_type=contractor_type,
-        )
+        rates = open_rate_provider(settings)
+        try:
+            return check_aoa(
+                aoa_text=_document_text(settings, aoa),
+                aoa_id=aoa.id,
+                contract_text=_document_text(settings, contract) if contract else None,
+                contract_id=contract.id if contract else "contract",
+                registry=registry,
+                contractor_type=contractor_type,
+                rates=rates,
+                advance=advance,
+                review=review,
+            )
+        finally:
+            rates.close()
     finally:
         if registry is not None:
             registry.close()
+
+
+# --- the act check's model review ------------------------------------------------------------
+
+_REVIEW_KIND = "aoa_review"
+
+
+def owned_review_job(
+    session: Session,
+    principal: Principal,
+    job_id: str | None,
+    aoa: Document,
+    contract: Document | None,
+) -> Job | None:
+    """The caller's review job for exactly this act and contract, or None - never an error.
+
+    The same guard as ``owned_explain_job``, for the same reason: the id arrives in a URL and
+    is joined into a file path, so its shape is checked before anything touches the disk, and
+    its owner, kind and pair before its file is read. An id that fails is ignored, like one
+    whose job never finished - the rules' report stands on its own.
+    """
+    if contract is None:
+        return None
+    if not job_id or len(job_id) > 64 or not (job_id.isascii() and job_id.isalnum()):
+        return None
+    job = session.get(Job, job_id)
+    if (
+        job is None
+        or job.owner != principal.user
+        or job.kind != _REVIEW_KIND
+        or job.document_id != aoa.id
+        or job.params.get("contract") != contract.id
+    ):
+        return None
+    return job
+
+
+def load_review(settings: Settings, doc_id: str, job_id: str) -> ScopeReviewSet | None:
+    """A stored review, or None when there is nothing readable there. Callers resolve ``job_id``
+    through ``owned_review_job`` first; the shape check here is a second lock on the path."""
+    if not (job_id.isascii() and job_id.isalnum()):
+        return None
+    path = result_dir(settings, doc_id) / "jobs" / f"{job_id}.json"
+    if not path.is_file():
+        return None
+    try:
+        return ScopeReviewSet.model_validate_json(path.read_text())
+    except ValueError:
+        return None  # a job of another kind wrote here; not a review
+
+
+@dataclass(frozen=True)
+class QueuedReview:
+    """What asking for a review came to: its job - just queued, or the earlier one that asked
+    the same thing - or none when the rules left nothing open; and how many notes it asks."""
+
+    job: Job | None
+    items: int
+    created: bool = False
+
+
+def queue_aoa_review(
+    request: Request,
+    session: Session,
+    settings: Settings,
+    principal: Principal,
+    worker: Worker,
+    llm: LLMClient | None,
+    aoa: Document,
+    contract: Document,
+) -> QueuedReview:
+    """Queue the model review of an act's open notes, or find the one that already asked.
+
+    Shared by the report's button and the API. Nothing is queued when the operator turned the
+    review off, when no model is configured, or when the rules left nothing open. A review of
+    the same notes by the same model and prompt - the digest - is reused whatever state it
+    ended in, a failure included: asking again would bring the same answer, or the same
+    failure, after another minute or two of the single worker's time.
+    """
+    if not settings.aoa_llm_enabled:
+        raise HTTPException(status.HTTP_409_CONFLICT, "the model review is disabled on this server")
+    if llm is None:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "no LLM backend is configured")
+    items = scope_review_items(
+        aoa_text=_document_text(settings, aoa), contract_text=_document_text(settings, contract)
+    )
+    if not items:
+        return QueuedReview(None, 0)
+    digest = review_digest(items, model=settings.llm_fast_model)
+    earlier = session.scalars(
+        select(Job)
+        .where(Job.owner == principal.user, Job.kind == _REVIEW_KIND, Job.document_id == aoa.id)
+        .order_by(Job.created_at.desc())
+    )
+    for job in earlier:
+        if job.params.get("contract") == contract.id and job.params.get("digest") == digest:
+            return QueuedReview(job, len(items))
+
+    ensure_job_capacity(session, settings, principal)
+    job = Job(
+        document_id=aoa.id,
+        owner=principal.user,
+        kind=_REVIEW_KIND,
+        params={"contract": contract.id, "digest": digest},
+    )
+    session.add(job)
+    session.flush()
+    audit(
+        session,
+        actor=principal.user,
+        action="check.aoa.review",
+        document_id=aoa.id,
+        job_id=job.id,
+        ip=client_ip(request),
+        detail=f"{len(items)} note(s)",
+    )
+    session.commit()
+    worker.submit(job.id)
+    return QueuedReview(job, len(items), created=True)
+
+
+class AoaReviewRequest(BaseModel):
+    aoa_document_id: str = Field(max_length=64)
+    contract_document_id: str = Field(max_length=64)
+
+
+class AoaReviewOut(BaseModel):
+    """The review of an act's open notes. ``job`` is None when the rules left nothing open;
+    pass its id as ``review_job_id`` to ``POST /aoa`` once it is done."""
+
+    job: JobOut | None = None
+    #: the notes the model is asked about
+    items: int = 0
+
+
+@router.post("/aoa/review", response_model=AoaReviewOut)
+def review_acceptance_act(
+    request: Request,
+    response: Response,
+    body: AoaReviewRequest,
+    principal: Annotated[Principal, Depends(authenticate)],
+    session: Annotated[Session, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    worker: Annotated[Worker, Depends(get_worker)],
+    llm: Annotated[LLMClient | None, Depends(get_llm)],
+) -> AoaReviewOut:
+    """Ask the model about the notes the act check could not decide. 202 when a job was queued;
+    200 when an earlier review of the same notes is reused, or there is nothing to ask."""
+    aoa = owned_document(session, principal, body.aoa_document_id)
+    contract = owned_document(session, principal, body.contract_document_id)
+    queued = queue_aoa_review(request, session, settings, principal, worker, llm, aoa, contract)
+    if queued.created:
+        response.status_code = status.HTTP_202_ACCEPTED
+    return AoaReviewOut(
+        job=_job_out(queued.job) if queued.job is not None else None, items=queued.items
+    )
 
 
 @router.post("/aoa")
@@ -109,7 +313,15 @@ def check_acceptance_act(
         if body.contract_document_id
         else None
     )
-    report = run_aoa(settings, aoa, contract, body.contractor_type)
+    review = owned_review_job(session, principal, body.review_job_id, aoa, contract)
+    report = run_aoa(
+        settings,
+        aoa,
+        contract,
+        body.contractor_type,
+        body.advance(),
+        review_job_id=review.id if review is not None else None,
+    )
 
     audit(
         session,

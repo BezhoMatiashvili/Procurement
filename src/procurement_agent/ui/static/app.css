@@ -173,12 +173,12 @@ html:not(.js) .js-only { display:none !important; }
 label { display:block; margin:10px 0; }
 /* font:inherit keeps controls at >=16px, which stops iOS Safari zooming the page on focus */
 input, button, select, textarea { font: inherit; }
-input[type=text], input[type=password], input[type=file], select {
+input[type=text], input[type=password], input[type=date], input[type=file], select {
   width:100%; padding:10px 12px; border:1px solid var(--line-strong); border-radius:var(--radius-sm);
   margin-top:6px; min-height:var(--tap); background:var(--card); color:var(--fg);
   transition-property:border-color, box-shadow; transition-duration:120ms;
 }
-input[type=text]:focus-visible, input[type=password]:focus-visible, select:focus-visible { outline:2px solid var(--accent); outline-offset:1px; border-color:var(--accent); }
+input[type=text]:focus-visible, input[type=password]:focus-visible, input[type=date]:focus-visible, select:focus-visible { outline:2px solid var(--accent); outline-offset:1px; border-color:var(--accent); }
 input[aria-invalid="true"] { border-color:var(--danger); }
 input[type=file] { padding:9px; }
 input[type=checkbox] { width:20px; height:20px; accent-color:var(--accent); }
@@ -317,7 +317,7 @@ td.primary a:hover { text-decoration:underline; }
   td.quote { max-width:40ch; }
   tbody tr:hover td { background:color-mix(in srgb, var(--surface-2) 55%, transparent); }
   /* a text field spanning 1000px is hard to read and looks unfinished */
-  input[type=text], input[type=password], input[type=file], select { max-width:560px; }
+  input[type=text], input[type=password], input[type=date], input[type=file], select { max-width:560px; }
   /* keep column headers visible while scrolling a long result table */
   table.facts thead th { position:sticky; top:var(--header-h); z-index:1; }
 }
@@ -480,8 +480,13 @@ button.logout:hover { color:var(--fg); text-decoration:none; }
 .file-chip button { min-height:36px; width:36px; padding:0; }
 
 .options { border-top:1px solid var(--line); margin:4px 0 0; padding-top:18px; }
+.options + .options { margin-top:18px; }
 .options label { font-weight:600; margin:0; }
 .options p { margin:6px 0 0; }
+.options .options-title { font-weight:600; margin:0; }
+/* the advance: amount and date side by side, stacked on a phone */
+.advance-fields { display:flex; flex-wrap:wrap; gap:12px 16px; margin-top:8px; }
+.advance-fields label { flex:1 1 220px; min-width:0; font-weight:500; }
 .form-foot { display:flex; flex-wrap:wrap; gap:12px 16px; align-items:center; margin-top:20px; }
 .form-foot .muted { font-size:14px; }
 @media (max-width: 420px) { .form-foot button { width:100%; } }
@@ -593,7 +598,7 @@ h2 .sev { vertical-align:2px; }
 .rerun { display:flex; gap:12px; flex-wrap:wrap; align-items:end; }
 .rerun label { margin:0; font-weight:600; }
 .rerun label { flex:1 1 260px; min-width:0; }
-.rerun select { width:100%; max-width:420px; }
+.rerun select, .rerun input[type=text], .rerun input[type=date] { width:100%; max-width:420px; }
 .rerun p { flex-basis:100%; margin:0; }
 
 /* --- BOQ leaderboard ------------------------------------------------------------------------- */
@@ -730,6 +735,8 @@ img { outline:1px solid rgba(0,0,0,.1); outline-offset:-1px; }
              background:var(--card); display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
 .hunk-note p { margin:0; }
 .hunk-note .badge { background:var(--pill-info-bg); color:var(--pill-info-fg); }
+/* a note the model review read: the model's colour, apart from the rules' "needs review" */
+.badge.model { background:var(--pill-info-bg); color:var(--pill-info-fg); }
 .explain-box { display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between; }
 .explain-box > p, .explain-box > div { margin:0; flex:1 1 320px; }
 .explain-box button { min-height:40px; padding:8px 16px; }

@@ -51,6 +51,80 @@ def test_requisites_and_signature_blocks_merge_into_one_party() -> None:
     assert len(beta.directors) == 1
 
 
+def test_a_role_says_where_it_was_read() -> None:
+    """The definition "(შემდგომში „…“)" wins over a signature block's bare role word, even one
+    read first: a signature block can stand above the other column's name."""
+    parties = find_parties(CONTRACT)
+    assert [(p.role, p.role_source) for p in parties] == [
+        ("შემკვეთი", "defined"),
+        ("შემსრულებელი", "defined"),
+    ]
+    signed_first = "„შემსრულებელი“\nშპს „ალფა ჯგუფი“\nდირექტორი ნინო კაპანაძე\n" + CONTRACT
+    alfa = find_parties(signed_first)[0]
+    assert (alfa.name, alfa.role, alfa.role_source) == ("შპს ალფა ჯგუფი", "შემკვეთი", "defined")
+
+
+def test_a_defined_term_that_is_not_a_role_does_not_replace_a_role() -> None:
+    """ "(შემდგომში „მომსახურება“)" defines the service, not a party: a party named in the clause
+    before it keeps the role its signature block gave it."""
+    doc = (
+        "„შემკვეთი“\nშპს „ალფა ჯგუფი“, საიდენტიფიკაციო კოდი: 123456789\n"
+        "„შემსრულებელი“\nშპს „ბეტა სერვისი“, საიდენტიფიკაციო კოდი: 987654321\n"
+        "ხელშეკრულების საგანია შპს „ბეტა სერვისი“-ს მიერ ვებგვერდის დიზაინის შექმნა "
+        "(შემდგომში „მომსახურება“).\n"
+    )
+    assert [(p.role, p.role_source) for p in find_parties(doc)] == [
+        ("შემკვეთი", "signature"),
+        ("შემსრულებელი", "signature"),
+    ]
+
+
+def test_a_signature_role_is_used_when_nothing_is_defined() -> None:
+    doc = "ბოლო გვერდი\n„მიმწოდებელი“\nშპს „ბეტა სერვისი“\nდირექტორი: დავით მელაძე\n"
+    [beta] = find_parties(doc)
+    assert (beta.role, beta.role_source) == ("მიმწოდებელი", "signature")
+
+
+def test_a_party_says_where_its_name_code_and_role_were_read() -> None:
+    """Offsets into the text as ``find_parties`` normalised it: one flattened line indexes
+    directly, which is the text the AOA checker hands it."""
+    flat = " ".join(CONTRACT.split())
+    beta = find_parties(flat)[1]
+    assert beta.span is not None and beta.id_span is not None and beta.role_span is not None
+    assert flat[slice(*beta.span)] == "შპს „ბეტა სერვისი“"
+    assert flat[slice(*beta.id_span)] == "987654321"
+    assert flat[slice(*beta.role_span)] == "შემდგომში „შემსრულებელი“"
+
+
+_SHARED_CODE = CONTRACT.replace("987654321", "123456789")
+
+
+def test_one_code_under_two_names_is_split_only_when_asked() -> None:
+    """Merging two blocks on a shared code is right for extraction - one company written
+    twice - but it hides a code given to the wrong party, so the AOA checker asks to keep
+    them apart."""
+    merged = find_parties(_SHARED_CODE)
+    assert [(p.name, p.id_code) for p in merged] == [("შპს ალფა ჯგუფი", "123456789")]
+    split = find_parties(_SHARED_CODE, split_conflicts=True)
+    assert [(p.name, p.id_code, p.role) for p in split] == [
+        ("შპს ალფა ჯგუფი", "123456789", "შემკვეთი"),
+        ("შპს ბეტა სერვისი", "123456789", "შემსრულებელი"),
+    ]
+
+
+def test_splitting_still_merges_one_party_written_twice() -> None:
+    """The signature block, with no code of its own, joins its party by name; two blocks with
+    one code and one name are one party either way."""
+    doc = (
+        _SHARED_CODE
+        + "„შემსრულებელი“\nშპს „ბეტა სერვისი“\nდირექტორი: დავით მელაძე\n"
+        + "შპს „ალფა ჯგუფი“, საიდენტიფიკაციო კოდი: 123456789\n"
+    )
+    split = find_parties(doc, split_conflicts=True)
+    assert [p.name for p in split] == ["შპს ალფა ჯგუფი", "შპს ბეტა სერვისი"]
+    assert split[1].directors == ["დავით მელაძის"]
+
+
 def test_project_name_is_found_before_or_after_the_word_project() -> None:
     after = find_anchors("პროექტ „მზე“ (ს/კ: 01.02.03.456)")
     before = find_anchors("„მზე“ პროექტისთვის")

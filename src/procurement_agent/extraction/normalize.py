@@ -122,6 +122,152 @@ def names_match(a: str, b: str) -> bool:
     return bool(a) and bool(b) and name_stem(a) == name_stem(b)
 
 
+# --- content words ------------------------------------------------------------------------------
+
+#: Words that say nothing about what a clause is about: conjunctions, pronouns, postpositions
+#: written as words, and the connecting words of a legal sentence, Georgian and English.
+_STOPWORDS = frozenset(
+    {
+        "და",
+        "ან",
+        "თუ",
+        "რომ",
+        "რაც",
+        "რის",
+        "ეს",
+        "ის",
+        "ამ",
+        "იმ",
+        "მის",
+        "მისი",
+        "მათ",
+        "მათი",
+        "თავის",
+        "თავისი",
+        "ყველა",
+        "ყოველი",
+        "ნებისმიერი",
+        "მიერ",
+        "შორის",
+        "მიმართ",
+        "შესახებ",
+        "შესაბამისად",
+        "შესაბამისი",
+        "როგორც",
+        "ასევე",
+        "აგრეთვე",
+        "კერძოდ",
+        "არის",
+        "იყოს",
+        "უნდა",
+        "არ",
+        "ვერ",
+        "სხვა",
+        "მხოლოდ",
+        "ხოლო",
+        "მიხედვით",
+        "ფარგლებში",
+        "თანახმად",
+        "საფუძველზე",
+        "ჩათვლით",
+        "წინამდებარე",
+        "აღნიშნული",
+        "შემდეგი",
+        "რომელიც",
+        "რომლის",
+        "რომლებიც",
+        "რომელსაც",
+        "წარმოადგენს",
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "of",
+        "for",
+        "to",
+        "in",
+        "on",
+        "by",
+        "with",
+        "as",
+        "per",
+        "its",
+        "their",
+        "this",
+        "that",
+    }
+)
+#: What a Georgian word carries after its stem, cut from the end one at a time: postpositions
+#: ("-ში", "-ზე", "-თვის", "-დან"), the case endings - with the long forms a list takes before
+#: "და", "დიზაინისა და …" - the plural "-ებ-" and the nominative "-ი". Cut this far, two forms
+#: of one word agree - "სისტემების" and "სისტემებით" both come to "სისტემ" - and a vowel-final
+#: nominative ("სისტემა") keeps its vowel, which ``stems_match`` allows for.
+_CONTENT_SUFFIXES = (
+    "თვის",
+    "დან",
+    "მდე",
+    "თან",
+    "ისა",
+    "ითა",
+    "ში",
+    "ზე",
+    "ით",
+    "ად",
+    "ის",
+    "ებ",
+    "ს",
+    "ი",
+    "ე",
+)
+_WORD_RE = re.compile(r"[ა-ჰa-z]+")
+
+
+def _content_stem(word: str) -> str:
+    changed = True
+    while changed:
+        changed = False
+        for suffix in _CONTENT_SUFFIXES:
+            if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+                word = word[: -len(suffix)]
+                changed = True
+                break
+    return word
+
+
+def content_stems(text: str) -> tuple[str, ...]:
+    """The words of ``text`` that say what it is about, each cut to its stem, in order and each
+    once. Function words go; so do numbers, which a caller compares on their own.
+
+    ``name_stem`` stops at the genitive, which is all a name ever carries. A description of work
+    also takes postpositions, the plural and the other cases: "სერვისის გვერდების აღწერით" and
+    "სერვისის გვერდის აღწერა" must come out as the same words.
+    """
+    out: dict[str, None] = {}
+    for word in _WORD_RE.findall(normalize_confusables(text).lower()):
+        if word in _STOPWORDS:
+            continue
+        stem = _content_stem(word)
+        if stem not in _STOPWORDS:
+            out.setdefault(stem)
+    return tuple(out)
+
+
+def stems_match(a: str, b: str) -> bool:
+    """Whether two content stems (``content_stems``) are one word.
+
+    Equal; or the shorter one, four letters or more, starts the longer - a vowel-final
+    nominative against its cut stem, "სისტემა" / "სისტემ"; or, both six letters or more, one
+    letter apart - a typo, or the vowel some forms drop, "რესტორან" / "რესტორნ".
+    """
+    if a == b:
+        return True
+    short, long_ = sorted((a, b), key=len)
+    if len(short) >= 4 and long_.startswith(short):
+        return True
+    return len(short) >= 6 and edit_distance(a, b, cap=1) <= 1
+
+
 # --- numbers ------------------------------------------------------------------------------------
 
 

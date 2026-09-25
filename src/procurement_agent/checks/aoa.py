@@ -17,12 +17,62 @@ from __future__ import annotations
 
 import calendar
 import re
+from bisect import bisect_right
 from dataclasses import dataclass, field
 from datetime import date
+from decimal import Decimal
 from typing import Literal
 
-from procurement_agent.checks.amounts import digits_and_words, money_amounts
+from procurement_agent.checks.amounts import Money, digits_and_words
+from procurement_agent.checks.aoa_llm import (
+    SUBJECT_ID,
+    Decision,
+    ModelVerdict,
+    ReviewOutcome,
+    ScopeItem,
+    ScopeReviewSet,
+    decide,
+    escalated,
+    model_reading,
+    resolve_review,
+    review_items,
+    service_id,
+)
+from procurement_agent.checks.aoa_scope import MATCH_SHARE, Alignment, ScopeReading, read_scope
+from procurement_agent.checks.contract_terms import _ADVANCE as _ADVANCE_NAMED
+from procurement_agent.checks.contract_terms import (
+    AdvanceTerms,
+    AmountRole,
+    ContractTerm,
+    Deadline,
+    MethodHit,
+    PaymentMethod,
+    PaymentTerms,
+    RoledAmount,
+    TaxPhrase,
+    amount_roles,
+    fee_scope,
+    read_advance,
+    read_payment_terms,
+    read_term,
+    sentence_at,
+    sentence_spans,
+    tax_phrases,
+)
 from procurement_agent.checks.findings import CheckReport, Finding, Severity, SkipNote
+from procurement_agent.checks.fx_invoice import (
+    LOCAL_CURRENCY,
+    AdvanceInput,
+    InvoicePlan,
+    InvoiceTerm,
+    NoInvoice,
+    PricedTerm,
+    fee_currencies,
+    foreign_currencies,
+    invoice_gel,
+    plan_invoice,
+    price_terms,
+)
 from procurement_agent.extraction.anchors import AnchorHit, Party, find_anchors, find_parties
 from procurement_agent.extraction.normalize import (
     amounts_equal,
@@ -30,59 +80,161 @@ from procurement_agent.extraction.normalize import (
     name_stem,
     names_match,
     normalize_confusables,
+    normalize_name,
 )
-from procurement_agent.extraction.rules import RuleHit, find_dates, run_rules
+from procurement_agent.extraction.rules import RuleHit, find_dates, month_ka_correction
 from procurement_agent.extraction.schemas import FactType
 from procurement_agent.extraction.spellcheck import best_match, classify_difference
+from procurement_agent.fx.provider import NullRateProvider, RateProvider
 
 ContractorType = Literal[
     "company", "natural_person", "individual_entrepreneur_vat", "small_business", "foreign"
 ]
 
-#: "NET" as a word of its own, or the start of one ("ნეტო", "NET-ით") - never the tail of
-#: another: "ინტერნეტ" and "internet" contain the letters and say nothing about taxes.
-_NET = r"(?<!\w)(?:net|ნეტ)"
-
 #: Roles that receive the payment an act releases, and roles that make it.
-_PAYEE_ROLES = frozenset({"შემსრულებელი", "გამყიდველი"})
+_PAYEE_ROLES = frozenset({"შემსრულებელი", "გამყიდველი", "მიმწოდებელი"})
 _PAYER_ROLES = frozenset({"დამკვეთი", "შემკვეთი", "მყიდველი"})
 
-#: What the act must say about taxes, per contractor type (client rules 5-8). The wording is a
-#: set of regular expressions matched against the lower-cased act.
-TAX_WORDING: dict[ContractorType, tuple[tuple[str, ...], str, str]] = {
-    "natural_person": (
-        (_NET, "საშემოსავლო"),
-        "ფიზიკური პირისთვის ანაზღაურება უნდა იყოს NET "
+Side = Literal["payer", "payee"]
+#: A side as the English messages name it; the Georgian ones quote the document's own role word.
+_SIDE_EN: dict[Side, str] = {"payer": "the customer", "payee": "the contractor"}
+
+
+@dataclass(frozen=True)
+class _TaxRule:
+    """What the act must say about taxes for one contractor type (client rules 5-8)."""
+
+    #: the kinds of tax wording (``contract_terms.TaxPhrase.kind``) that contradict the rule
+    offends: frozenset[str]
+    #: the rule, as a finding states it
+    rule_ka: str
+    rule_en: str
+    #: what is missing when the act never says what the rule asks for
+    absent_ka: str
+    absent_en: str
+    #: the wording to write instead, for a Georgian and for an English sentence
+    fix_ka: str
+    fix_en: str
+
+
+_TAX_RULES: dict[ContractorType, _TaxRule] = {
+    "natural_person": _TaxRule(
+        offends=frozenset({"inclusion"}),
+        rule_ka="ფიზიკური პირისთვის ანაზღაურება უნდა ეწეროს NET ღირებულებით "
         "(საშემოსავლო და საპენსიო გადასახადების გარეშე)",
-        "for a natural person the fee must be stated NET of income and pension tax",
+        rule_en="for a natural person the fee must be stated NET "
+        "(excluding income tax and pension contributions)",
+        absent_ka="აქტში არც NET წერია და არც ის, რომ საშემოსავლო და საპენსიო გადასახადები "
+        "გამორიცხულია",
+        absent_en="the act says neither NET nor that income tax and pension contributions are "
+        "both excluded",
+        fix_ka="NET (საშემოსავლო და საპენსიო გადასახადების გარეშე)",
+        fix_en="NET (excluding income tax and pension contributions)",
     ),
-    "individual_entrepreneur_vat": (
-        ("დღგ",),
-        "დღგ-ს გადამხდელი ინდ. მეწარმისთვის უნდა ეწეროს, რომ თანხა დღგ-ს ჩათვლითაა",
-        "for a VAT-registered individual entrepreneur the fee must say it includes VAT",
+    "individual_entrepreneur_vat": _TaxRule(
+        offends=frozenset({"exclusion"}),
+        rule_ka="დღგ-ს გადამხდელი ინდ. მეწარმისთვის უნდა ეწეროს, რომ თანხა დღგ-ს ჩათვლითაა",
+        rule_en="for a VAT-registered individual entrepreneur the fee must say it includes VAT",
+        absent_ka="აქტში არ წერია, რომ თანხა დღგ-ს ჩათვლითაა",
+        absent_en="the act does not say VAT is included",
+        fix_ka="დღგ-ს ჩათვლით",
+        fix_en="including VAT",
     ),
-    "small_business": (
-        ("გადასახად",),
-        'მცირე მეწარმისთვის უნდა ეწეროს, რომ "ანგარიშსწორება ითვალისწინებს გადასახადებს"',
-        "for a small business the act must state that settlement includes taxes",
+    "small_business": _TaxRule(
+        offends=frozenset({"exclusion"}),
+        rule_ka="მცირე მეწარმისთვის უნდა ეწეროს, რომ „ანგარიშსწორება ითვალისწინებს გადასახადებს“",
+        rule_en="for a small business the act must state that settlement includes taxes",
+        absent_ka="აქტში არ წერია, რომ ანგარიშსწორება გადასახადებს ითვალისწინებს",
+        absent_en="the act does not say taxes are included",
+        fix_ka="გადასახადების ჩათვლით",
+        fix_en="including taxes",
     ),
-    "foreign": (
-        (_NET,),
-        "უცხოური ორგანიზაციისთვის უნდა ეწეროს NET თანხა, გადასახადები არ უნდა იყოს ნახსენები",
-        "for a foreign organisation the amount must be NET with no mention of taxes",
+    "foreign": _TaxRule(
+        offends=frozenset({"inclusion", "exclusion", "mention"}),
+        rule_ka="უცხოური ორგანიზაციისთვის თანხა უნდა ეწეროს NET, გადასახადების ხსენების გარეშე",
+        rule_en="for a foreign organisation the amount must be stated NET, with no mention "
+        "of taxes",
+        absent_ka="აქტში NET არ წერია",
+        absent_en="the act does not say NET",
+        fix_ka="NET",
+        fix_en="NET",
     ),
-    "company": ((), "", ""),
 }
 
+_GEORGIAN = re.compile(r"[ა-ჰ]")
+_LATIN = re.compile(r"[A-Za-z]")
+
+#: What an act amount is called in a fee finding, by its role - (Georgian, its genitive,
+#: English). An advance or a remainder line is the fee paid in parts.
+_FEE_LABEL: dict[AmountRole | None, tuple[str, str, str]] = {
+    None: ("საფასური", "საფასურის", "fee"),
+    "price": ("საფასური", "საფასურის", "fee"),
+    "advance": ("ავანსი", "ავანსის", "advance"),
+    "remainder": ("დარჩენილი თანხა", "დარჩენილი თანხის", "remainder"),
+}
+#: A contract amount that is not a price, as a fee finding names it when the act's fee equals
+#: it: (Georgian, in the dative "ემთხვევა" takes; English).
+_ROLE_NAME: dict[AmountRole, tuple[str, str]] = {
+    "advance": ("ავანსს", "the advance"),
+    "remainder": ("დარჩენილ თანხას", "the remainder"),
+    "penalty": ("პირგასამტეხლოს", "the penalty"),
+    "guarantee": ("საგარანტიო თანხას", "the guarantee"),
+    "tax": ("გადასახადის თანხას", "the tax amount"),
+}
+#: Act amounts that are neither the fee nor a part of it.
+_NOT_THE_FEE: frozenset[AmountRole | None] = frozenset({"penalty", "guarantee", "tax"})
+
 _NO_CONTRACT = "this rule compares the act against its contract, and none was supplied"
+
+#: What a party's field was compared against, as the messages name it: (Georgian, in the
+#: dative that "არ ემთხვევა" takes; English).
+_SOURCE: dict[str, tuple[str, str]] = {
+    "contract": ("ხელშეკრულებას", "the contract"),
+    "registry": ("რეესტრის მონაცემებს", "the registry"),
+}
 
 #: Contractor types for which the client does *not* want an invoice calculation (rule 9).
 _FX_EXEMPT: frozenset[str] = frozenset({"small_business", "foreign"})
 
+#: Rules the client's instructions do not apply to a contractor type at all, by rule id. They
+#: go in the summary, not in a skip note: a skip note reads "could not run", and nothing here
+#: failed to run - there was nothing for it to check.
+_NOT_APPLICABLE: tuple[tuple[str, frozenset[str]], ...] = (
+    ("AOA.TAX_WORDING", frozenset({"company"})),
+    ("AOA.FX_INVOICE", _FX_EXEMPT),
+)
+
 _ACT_DATE_KEYS = ("გაფორმდა", "გაფორმების თარიღი")
+#: The act's own signing, "აქტი გაფორმდა <date>" / "გაფორმების თარიღი: <date>". The label must
+#: stand as a word: "გაფორმების თარიღიდან 5 დღეში" counts a deadline from the date instead.
+_ACT_SIGNED = re.compile(r"გაფორმდა|გაფორმების\s+თარიღი(?![ა-ჰ])")
+#: An advance or prepayment clause: a date there is a payment's, never the act's.
+_ADVANCE_WORDS = re.compile(r"ავანს|წინასწარ|advance|prepay", re.IGNORECASE)
 _PERIOD_KEYS = ("შესრულდა", "შესრულების თარიღი", "შესრულების პერიოდი")
-_TERM_KEYS = ("შეასრულოს", "მოქმედების ვადა", "ჩათვლით")
-_TAX_FREE_MARKERS = ("გადასახად", "დღგ")
+
+#: The window a service period is held to (``_term_window``), as the messages name it: (Georgian,
+#: in the dative "სცდება" takes; English).
+_WINDOW_NAME: dict[str, tuple[str, str]] = {
+    "performance": ("ხელშეკრულების შესრულების ვადას", "the contract's performance period"),
+    "validity": ("ხელშეკრულების მოქმედების ვადას", "the contract term"),
+}
+#: A payment method as the messages name it: (Georgian, English).
+_METHOD_NAME: dict[PaymentMethod, tuple[str, str]] = {
+    "non_cash": ("უნაღდო ანგარიშსწორება", "non-cash (a transfer to an account)"),
+    "cash": ("ნაღდი ანგარიშსწორება", "cash"),
+}
+#: Which days a payment deadline counts, as the Georgian messages name them.
+_DAYS_KA = {"working": "სამუშაო", "calendar": "კალენდარული"}
+#: The parts of the payment terms, and the document that alone states one, as a skip names them.
+_PAYMENT_PART: dict[str, tuple[str, str]] = {
+    "deadline": ("გადახდის ვადა", "the payment deadline"),
+    "method": ("ანგარიშსწორების ფორმა", "the payment method"),
+    "advance": ("ავანსი", "the advance"),
+}
+_ONLY_IN: dict[bool, tuple[str, str]] = {
+    True: ("მხოლოდ ხელშეკრულებაში", "contract only"),
+    False: ("მხოლოდ აქტში", "act only"),
+}
 
 
 @dataclass
@@ -92,18 +244,68 @@ class DocumentView:
     doc_id: str
     text: str
     parties: list[Party] = field(default_factory=list)
+    #: Each line normalised on its own. ``text`` is flattened to one line, which erases the
+    #: line breaks and the "- " bullets a list of services is written with; spans still index
+    #: ``text``. Empty lines are left out. After ``parties``, so a positional build still works.
+    lines: tuple[str, ...] = ()
     _hits: list[AnchorHit] | None = field(default=None, init=False, repr=False, compare=False)
+    _sentences: list[tuple[int, int]] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _amounts: list[RoledAmount] | None = field(default=None, init=False, repr=False, compare=False)
+    _term: ContractTerm | None = field(default=None, init=False, repr=False, compare=False)
+    _payment: PaymentTerms | None = field(default=None, init=False, repr=False, compare=False)
+    _advance: dict[bool, AdvanceTerms] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
 
     @classmethod
     def build(cls, doc_id: str, text: str) -> DocumentView:
+        lines = tuple(line for line in map(normalize_confusables, text.split("\n")) if line)
         text = normalize_confusables(text)
-        return cls(doc_id=doc_id, text=text, parties=find_parties(text))
+        # one code under two names stays two parties here: that is AOA.ID_CODE_PARTY's evidence
+        parties = find_parties(text, split_conflicts=True)
+        return cls(doc_id=doc_id, text=text, parties=parties, lines=lines)
 
     def hits(self) -> list[AnchorHit]:
         """Every anchor in the document, computed once: the rules ask for them a dozen times."""
         if self._hits is None:
             self._hits = find_anchors(self.text)
         return self._hits
+
+    def sentences(self) -> list[tuple[int, int]]:
+        """The text's sentences (``contract_terms.sentence_spans``), computed once."""
+        if self._sentences is None:
+            self._sentences = sentence_spans(self.text)
+        return self._sentences
+
+    def amounts(self) -> list[RoledAmount]:
+        """Every amount and the role it plays (``contract_terms.amount_roles``), computed once:
+        the fee rule and the tax wording rule both read them."""
+        if self._amounts is None:
+            self._amounts = amount_roles(self.text, sentences=self.sentences())
+        return self._amounts
+
+    def term(self) -> ContractTerm:
+        """The signing date, the validity and the performance window (``read_term``), read once."""
+        if self._term is None:
+            self._term = read_term(self.text, sentences=self.sentences())
+        return self._term
+
+    def payment_terms(self) -> PaymentTerms:
+        """The payment deadline and method (``read_payment_terms``), read once."""
+        if self._payment is None:
+            self._payment = read_payment_terms(self.text, sentences=self.sentences())
+        return self._payment
+
+    def advance(self, *, in_act: bool) -> AdvanceTerms:
+        """What the document says about an advance (``read_advance``), read once: the payment
+        terms and the invoice rule both ask. ``in_act`` dates each amount by the payment."""
+        if in_act not in self._advance:
+            self._advance[in_act] = read_advance(
+                self.text, in_act=in_act, sentences=self.sentences(), amounts=self.amounts()
+            )
+        return self._advance[in_act]
 
     def anchors(self, ft: FactType) -> list[str]:
         return [h.value for h in self.hits() if h.type == ft]
@@ -142,14 +344,15 @@ def _date_hits_near(
     return out
 
 
-def _dates_near(text: str, keys: tuple[str, ...], window: int = 160) -> list[date]:
-    return [d for d, _ in _date_hits_near(text, keys, window)]
-
-
 def _month_typos(text: str) -> list[tuple[str, int, int]]:
     return [
         (h.note or "", h.start, h.end) for h in find_dates(text) if h.note and "misspell" in h.note
     ]
+
+
+def _finding_key(f: Finding) -> tuple[str, str, str, str | None, str | None]:
+    """What makes two findings the same mistake: everything but where the text says it."""
+    return (f.rule_id, f.severity, f.message_en, f.expected, f.actual)
 
 
 def _last_day(d: date) -> date:
@@ -163,6 +366,17 @@ def add_months(start: date, months: int) -> date:
     return date(year, month, min(start.day, calendar.monthrange(year, month)[1]))
 
 
+@dataclass(frozen=True, eq=False)
+class _PartyMatch:
+    """An act party, the contract party it is, and - when the act gives it another contract
+    party's identification code - that other party (AOA.ID_CODE_PARTY). Compared by identity:
+    a ``Party`` is mutable, so it has no value to compare."""
+
+    party: Party
+    match: Party | None
+    code_of: Party | None = None
+
+
 class AoaChecker:
     def __init__(
         self,
@@ -171,13 +385,31 @@ class AoaChecker:
         contract: DocumentView | None = None,
         registry: object | None = None,
         contractor_type: ContractorType | None = None,
+        rates: RateProvider | None = None,
+        advance: AdvanceInput | None = None,
+        review: ScopeReviewSet | None = None,
     ) -> None:
         self.aoa = aoa
         self.contract = contract
         self.registry = registry
         self.contractor_type = contractor_type
+        #: the NBG rates for a foreign-currency act's invoice (``rule_fx_invoice``)
+        self.rates: RateProvider = rates if rates is not None else NullRateProvider()
+        #: an advance the user entered; what it leaves blank is read from the act
+        self.advance = advance
+        #: a stored model review of the notes the scope rules could not decide (``aoa_llm``);
+        #: None checks with the rules alone
+        self.review = review
         self.findings: list[Finding] = []
         self.skipped: list[SkipNote] = []
+        #: the invoice ``rule_fx_invoice`` worked out, and its total in lari, for the summary
+        self._fx: tuple[InvoicePlan, Decimal | None] | None = None
+        #: which contract party each act party is (``_matched_parties``), worked out once a run
+        self._party_matches: list[_PartyMatch] | None = None
+        #: both documents' subjects and services, aligned (``_scope_reading``), once a run
+        self._scope: ScopeReading | None = None
+        #: ``review`` checked against this run's notes (``_review_outcome``), once a run
+        self._review: ReviewOutcome | None = None
 
     # --- plumbing ------------------------------------------------------------------------
 
@@ -193,7 +425,15 @@ class AoaChecker:
         span: tuple[int, int] | None = None,
         quote: str | None = None,
         confidence: float = 1.0,
+        needs_review: bool = False,
+        reviewed_by: Literal["llm"] | None = None,
     ) -> None:
+        # One finding per mistake. The same text can be read twice - a clause repeated in an
+        # annex, a table cell the parser emits in two places - and each copy sits at another
+        # offset, so the key leaves the span out: with it, no copy would ever match.
+        key = (rule_id, severity, en, expected, actual)
+        if any(_finding_key(f) == key for f in self.findings):
+            return
         if quote is None and span is not None:
             quote = self.aoa.text[span[0] : span[1]] or None
         self.findings.append(
@@ -207,6 +447,8 @@ class AoaChecker:
                 span=span,
                 quote=quote,
                 confidence=confidence,
+                needs_review=needs_review,
+                reviewed_by=reviewed_by,
             )
         )
 
@@ -219,12 +461,142 @@ class AoaChecker:
         i = self.aoa.text.find(needle)
         return (i, i + len(needle)) if i >= 0 else None
 
+    def _act_date(self) -> tuple[date, RuleHit] | None:
+        """The act's own date, and where it is written. Every rule that needs it reads it here,
+        so no two of them can cite different dates.
+
+        The date right after "გაფორმდა" / "გაფორმების თარიღი" in the same sentence; failing
+        that, the first date after either keyword as ``_date_hits_near`` reads it. A date in an
+        advance clause is a payment's, never the act's: "... აქტის გაფორმების თარიღიდან 5 დღეში;
+        ავანსი გადახდილია 2026 წლის 10 სექტემბერს" must not date the act 10 September.
+        """
+        text = self.aoa.text
+        hits = find_dates(text)
+        for m in _ACT_SIGNED.finditer(text):
+            end = self._sentence_of(m.start())[1]
+            hit = next((h for h in hits if m.end() <= h.start < end), None)
+            if hit is not None and not _ADVANCE_WORDS.search(text, m.end(), hit.start):
+                return date.fromisoformat(str(hit.normalized)), hit
+        for d, hit in _date_hits_near(text, _ACT_DATE_KEYS):
+            if not self._in_advance_clause(hit.start):
+                return d, hit
+        return None
+
+    def _period_hits(self) -> list[tuple[date, RuleHit]]:
+        """The service period's dates, read after "შესრულდა" / "შესრულების თარიღი" / "...
+        პერიოდი" (``_date_hits_near``). Every rule that needs the period reads it here.
+
+        A date an advance is named before is a payment's, as for the act's own date
+        (``_act_date``): "ავანსი გადახდილია 2026 წლის 10 სექტემბერს" written after the period does
+        not make it end on 10 September. Named between the words that open the period and the
+        date, or anywhere in a sentence those words are not in ("10 სექტემბერს გადახდილი
+        ავანსი ..."). Named after the period's own dates, it takes nothing from them: "... 30
+        აპრილის ჩათვლით, ავანსი კი ..." still ends on 30 April. The advance is named as
+        ``read_advance`` names it, so "წინასწარ შეთანხმებული გრაფიკით" (a schedule agreed
+        beforehand) and "in advance" name none.
+        """
+        text = self.aoa.text
+        opens = sorted(m.end() for k in _PERIOD_KEYS for m in re.finditer(re.escape(k), text))
+        out: list[tuple[date, RuleHit]] = []
+        for d, h in _date_hits_near(text, _PERIOD_KEYS):
+            i = bisect_right(opens, h.start)
+            opened = opens[i - 1] if i else None
+            a, b = self._sentence_of(h.start)
+            if opened is not None and _ADVANCE_NAMED.search(text, opened, h.start):
+                continue
+            if (opened is None or opened < a) and _ADVANCE_NAMED.search(text, a, b):
+                continue
+            out.append((d, h))
+        return out
+
+    def _sentence_of(self, pos: int) -> tuple[int, int]:
+        """The act's sentence holding ``pos``; an empty span when it falls between two."""
+        return sentence_at(self.aoa.sentences(), pos) or (pos, pos)
+
+    def _in_advance_clause(self, pos: int) -> bool:
+        a, b = self._sentence_of(pos)
+        return _ADVANCE_WORDS.search(self.aoa.text, a, b) is not None
+
+    def _scope_reading(self) -> ScopeReading:
+        """Both documents' subjects and services, aligned (``aoa_scope.read_scope``), read once:
+        the two scope rules, the summary and the model review all use it."""
+        if self.contract is None:  # the contract rules call this only with a contract
+            raise RuntimeError(_NO_CONTRACT)
+        if self._scope is None:
+            self._scope = read_scope(
+                self.aoa.text, self.aoa.lines, self.contract.text, self.contract.lines
+            )
+        return self._scope
+
+    def _review_outcome(self) -> ReviewOutcome | None:
+        """``review`` checked against the notes this run leaves open (``aoa_llm.resolve_review``),
+        once; None when no review was supplied."""
+        if self.review is None or self.contract is None:
+            return None
+        if self._review is None:
+            self._review = resolve_review(
+                review_items(self._scope_reading()),
+                self.review,
+                aoa_document_id=self.aoa.doc_id,
+                contract_document_id=self.contract.doc_id,
+            )
+        return self._review
+
+    def _decision(self, item_id: str, found: Alignment) -> Decision:
+        """What becomes of one part of the act (``aoa_llm.decide``): the rules' verdict, and the
+        model's when it was asked about this part - never about one the rules settled."""
+        verdict: ModelVerdict | None = None
+        outcome = self._review_outcome()
+        if outcome is not None and escalated(found):
+            verdict = outcome.verdicts.get(item_id)
+        return decide(found.verdict, verdict)
+
+    def _scope_note(
+        self,
+        rule_id: str,
+        item_id: str,
+        decision: Decision,
+        ka: str,
+        en: str,
+        span: tuple[int, int] | None,
+    ) -> None:
+        """A note the scope rules could not decide, with the model's reading and its reason when
+        the review answered for it."""
+        if decision.severity is None:
+            return
+        outcome = self._review_outcome()
+        if decision.model is not None and outcome is not None:
+            model_ka, model_en = model_reading(rule_id, outcome.answers[item_id])
+            ka, en = f"{ka}; {model_ka}", f"{en}; {model_en}"
+        self._add(
+            rule_id,
+            decision.severity,
+            ka,
+            en,
+            span=span,
+            confidence=0.5,
+            needs_review=decision.needs_review,
+            reviewed_by="llm" if decision.model is not None else None,
+        )
+
+    def _review_notes(self) -> None:
+        """What the model review left open or could not do, as ``AOA.REVIEW`` notes; nothing when
+        no review was supplied, so a check with the rules alone reads as it always has."""
+        outcome = self._review_outcome()
+        for note in outcome.notes if outcome is not None else ():
+            if note not in self.skipped:
+                self.skipped.append(note)
+
     # --- rules ---------------------------------------------------------------------------
 
     def run(self) -> CheckReport:
         # Every run starts clean, so running a checker twice reports each finding once.
         self.findings = []
         self.skipped = []
+        self._fx = None
+        self._party_matches = None
+        self._scope = None
+        self._review = None
         self.rule_amount_words()
         self.rule_required_fields()
         self.rule_act_date()
@@ -232,6 +604,7 @@ class AoaChecker:
         self.rule_iban_format()
         self.rule_bank_code_format()
         self.rule_tax_wording()
+        self.rule_fx_invoice()
         if self.contract is None:
             self._skip(
                 "AOA.CONTRACT_*",
@@ -240,11 +613,18 @@ class AoaChecker:
             )
         else:
             self.rule_parties()
+            self.rule_party_roles()
+            self.rule_party_missing()
             self.rule_cadastral()
             self.rule_project()
+            self.rule_subject()
+            self.rule_services()
+            self._review_notes()
             self.rule_bank()
             self.rule_fee()
             self.rule_period_in_term()
+            self.rule_act_date_in_term()
+            self.rule_payment_terms()
         self.rule_registry()
         return CheckReport(
             document_id=self.aoa.doc_id,
@@ -258,12 +638,62 @@ class AoaChecker:
         out: dict[str, str] = {}
         for i, p in enumerate(self.aoa.parties, 1):
             out[f"party_{i}"] = f"{p.role or '?'}: {p.name} ({p.id_code or 'no id'})"
-        period = _dates_near(self.aoa.text, _PERIOD_KEYS)
+        period = [d for d, _ in self._period_hits()]
         if period:
             out["execution_period"] = f"{period[0]}..{period[-1]}"
-        act = _dates_near(self.aoa.text, _ACT_DATE_KEYS)
+        act = self._act_date()
         if act:
             out["act_date"] = str(act[0])
+        not_applicable = [r for r, types in _NOT_APPLICABLE if self.contractor_type in types]
+        if not_applicable:
+            out["not_applicable"] = ", ".join(not_applicable)
+        out.update(self._fx_summary())
+        if self.contract is not None:
+            # the notes the model review can be asked about, so the report can offer it
+            open_notes = len(review_items(self._scope_reading()))
+            if open_notes:
+                out["review_items"] = str(open_notes)
+        outcome = self._review_outcome()
+        if outcome is not None:
+            # whether a supplied review was applied, or set aside as answering something else
+            out["review"] = "stale" if outcome.stale else "current"
+        return out
+
+    def _fx_summary(self) -> dict[str, str]:
+        """The act's currency, and for a foreign-currency act the invoice figures: amounts as
+        plain decimals and days as ISO dates, so the report's form can offer them back as they
+        are - the advance read from the act, to be confirmed or corrected.
+
+        A single advance is offered back; the act's several tranches are not, because one field
+        cannot hold them, and left blank they are read from the act again. An advance of 0 the
+        user entered is kept, or a re-run would quietly read the act's advance once more.
+        """
+        out: dict[str, str] = {}
+        currencies = fee_currencies(self.aoa.amounts())
+        foreign = foreign_currencies(self.aoa.amounts())
+        if currencies:
+            out["currency"] = ", ".join(foreign) or LOCAL_CURRENCY
+        if self._fx is not None:
+            plan, gel = self._fx
+            out["fx_total"] = f"{plan.total:.2f}"
+            advances = plan.advances
+            if len(advances) == 1:
+                out["advance_amount"] = f"{advances[0].amount:.2f}"
+                if advances[0].on is not None:
+                    out["advance_date"] = advances[0].on.isoformat()
+            elif not advances and plan.advance_source == "input":
+                out["advance_amount"] = "0.00"
+            if plan.advance_source is not None:
+                out["advance_source"] = plan.advance_source
+            if gel is not None:
+                out["invoice_gel"] = f"{gel:.2f}"
+        elif self.advance is not None and foreign and self.contractor_type not in _FX_EXEMPT:
+            # nothing was worked out (see the skip note); what the user entered stays in the form
+            if self.advance.amount is not None:
+                out["advance_amount"] = f"{self.advance.amount:.2f}"
+            if self.advance.paid_on is not None:
+                out["advance_date"] = self.advance.paid_on.isoformat()
+            out["advance_source"] = "input"
         return out
 
     def rule_amount_words(self) -> None:
@@ -331,9 +761,8 @@ class AoaChecker:
         same day; for a partial month (1-15 August) this rule follows the instruction's wording
         and expects the month's end. The messages say so, rather than "end of the period".
         """
-        period = _dates_near(self.aoa.text, _PERIOD_KEYS)
-        act_hits = _date_hits_near(self.aoa.text, _ACT_DATE_KEYS)
-        act_dates = [d for d, _ in act_hits]
+        period = [d for d, _ in self._period_hits()]
+        act = self._act_date()
         if not period:
             self._skip(
                 "AOA.ACT_DATE",
@@ -341,7 +770,7 @@ class AoaChecker:
                 "execution period not found in the act",
             )
             return
-        if not act_dates:
+        if act is None:
             self._add(
                 "AOA.ACT_DATE",
                 "error",
@@ -349,33 +778,39 @@ class AoaChecker:
                 "the act's date could not be found",
             )
             return
+        act_date, act_hit = act
         end = max(period)
         expected = _last_day(end) if len(period) > 1 else end
-        if all(d != expected for d in act_dates):
-            shown = ", ".join(str(d) for d in act_dates)
+        if act_date != expected:
             self._add(
                 "AOA.ACT_DATE",
                 "error",
-                f"აქტი დათარიღებულია {shown}-ით, მომსახურების პერიოდი მთავრდება {end}-ს — "
+                f"აქტი დათარიღებულია {act_date}-ით, მომსახურების პერიოდი მთავრდება {end}-ს — "
                 f"აქტი უნდა გაფორმდეს იმ თვის ბოლო დღეს, როდესაც პერიოდი მთავრდება ({expected})",
-                f"act dated {shown} but the service period ends {end}; it should be dated "
+                f"act dated {act_date} but the service period ends {end}; it should be dated "
                 f"the last day of the month the period ends in ({expected})",
                 expected=str(expected),
-                actual=shown,
-                span=(act_hits[0][1].start, act_hits[0][1].end),
+                actual=str(act_date),
+                span=(act_hit.start, act_hit.end),
             )
 
     def rule_month_spelling(self) -> None:
-        """Typos inside date wording, surfaced by the typo-tolerant month matcher."""
+        """Typos inside date wording, surfaced by the typo-tolerant month matcher.
+
+        The finding names the correct form (``month_ka_correction``) and anchors on the
+        misspelled word itself, so the Word comment says what to write, and where.
+        """
         for note, start, end in _month_typos(self.aoa.text):
             word = note.split(": ")[-1].strip("'\"")
+            at = self.aoa.text.find(word, start, end)
             self._add(
                 "AOA.SPELLING",
                 "warning",
                 f"თვის დასახელება შეცდომითაა დაწერილი: {word}",
                 f"month name appears misspelled: {word}",
+                expected=month_ka_correction(word),
                 actual=word,
-                span=(start, end),
+                span=(at, at + len(word)) if at >= 0 else (start, end),
                 confidence=0.9,
             )
 
@@ -419,8 +854,20 @@ class AoaChecker:
         return [h for h in self.aoa.bank_hits("SWIFT") if h.note]
 
     def rule_tax_wording(self) -> None:
-        """Client rules 5-8. Nothing in the document states the contractor type, so when it is
-        not supplied the rule is reported as not run rather than guessed at."""
+        """Client rules 5-8: what the act says about taxes, by contractor type.
+
+        Nothing in the document states the contractor type, so when it is not supplied the rule
+        is reported as not run rather than guessed at.
+
+        The wording is read where the fee is written - each price's sentence and the next one
+        (``fee_scope``). A phrase there that contradicts the rule ("გადასახადების ჩათვლით" for a
+        natural person) is reported on the phrase, once per fee, with the wording to write
+        instead. The wording the rule asks for counts anywhere in the act: an act that writes
+        NET beside its fee and restates the total later without it says NET all the same. It is
+        missing only when the act never says it, and is then reported on the fee. A foreign
+        organisation's act must not mention taxes at all, so for it every tax phrase anywhere
+        is reported, each once.
+        """
         if self.contractor_type is None:
             self._skip(
                 "AOA.TAX_WORDING",
@@ -430,34 +877,216 @@ class AoaChecker:
                 "small business / foreign organisation), so NET/VAT wording was not checked",
             )
             return
-        required, ka, en = TAX_WORDING[self.contractor_type]
-        low = self.aoa.text.lower()
+        if self.contractor_type == "company":
+            return  # rules 5-8 do not apply to a company; the summary says so (_NOT_APPLICABLE)
+        rule = _TAX_RULES[self.contractor_type]
+        phrases = tax_phrases(self.aoa.text)
+        fees = self._fee_amounts()
+        scopes = [fee_scope(self.aoa.sentences(), m.span) for m in fees]
+        if not scopes:  # no fee found to read beside: the whole act is where the wording is
+            scopes = [(0, len(self.aoa.text))]
         if self.contractor_type == "foreign":
-            offending = [w for w in _TAX_FREE_MARKERS if w in low]
-            if offending:
-                self._add("AOA.TAX_WORDING", "error", ka, en, actual=", ".join(offending))
+            fixed = self._tax_mentions(rule, phrases, scopes)
+        else:
+            fixed = self._tax_contradictions(rule, phrases, scopes)
+        # a contradiction reported beside the fee already names the wording to write there
+        if fixed or _tax_wording_met(self.contractor_type, phrases):
             return
-        if required and not any(re.search(w, low) for w in required):
-            shown = " / ".join("NET" if w == _NET else w for w in required)
-            self._add("AOA.TAX_WORDING", "error", ka, en, expected=shown)
+        fee = fees[0] if fees else None
+        fix = self._in_script(rule, fee.span[0] if fee else 0)
+        self._add(
+            "AOA.TAX_WORDING",
+            "error",
+            f"{rule.rule_ka}; {rule.absent_ka}",
+            f"{rule.rule_en}; {rule.absent_en}",
+            expected=f"{fee.raw} {fix}" if fee else fix,
+            span=fee.span if fee else None,
+        )
+
+    def _fee_amounts(self) -> list[Money]:
+        """The act's fee as written: the amounts called a price, or failing those, the ones
+        called nothing at all. An advance, a penalty or a tax amount is not where the fee's
+        tax wording goes."""
+        amounts = self.aoa.amounts()
+        return [r.money for r in amounts if r.role == "price"] or [
+            r.money for r in amounts if r.role is None
+        ]
+
+    def _in_script(self, rule: _TaxRule, pos: int) -> str:
+        """The rule's wording in the script of the sentence at ``pos``: an English sentence gets
+        "including VAT", a Georgian one "დღგ-ს ჩათვლით"."""
+        a, b = next(((a, b) for a, b in self.aoa.sentences() if a <= pos < b), (0, 0))
+        sentence = self.aoa.text[a:b]
+        latin = len(_LATIN.findall(sentence)) > len(_GEORGIAN.findall(sentence))
+        return rule.fix_en if latin else rule.fix_ka
+
+    def _tax_contradiction(self, rule: _TaxRule, phrase: TaxPhrase, fix: str | None) -> None:
+        self._add(
+            "AOA.TAX_WORDING",
+            "error",
+            f"{rule.rule_ka}; აქტში წერია „{phrase.text}“",
+            f"{rule.rule_en}; the act says '{phrase.text}'",
+            expected=fix,
+            actual=phrase.text,
+            span=phrase.span,
+        )
+
+    def _tax_contradictions(
+        self, rule: _TaxRule, phrases: list[TaxPhrase], scopes: list[tuple[int, int]]
+    ) -> bool:
+        """Wording beside a fee that says the opposite of the rule, one finding per fee.
+
+        A phrase two fees share (their sentences overlap) is reported with the first. True when
+        anything was reported.
+        """
+        seen: set[tuple[int, int]] = set()
+        for lo, hi in scopes:
+            wrong = [
+                p for p in phrases if p.kind in rule.offends and p.span[0] < hi and p.span[1] > lo
+            ]
+            fresh = [p for p in wrong if p.span not in seen]
+            seen.update(p.span for p in wrong)
+            if fresh:
+                self._tax_contradiction(rule, fresh[0], self._in_script(rule, fresh[0].span[0]))
+        return bool(seen)
+
+    def _tax_mentions(
+        self, rule: _TaxRule, phrases: list[TaxPhrase], scopes: list[tuple[int, int]]
+    ) -> bool:
+        """A foreign organisation's act: every tax phrase anywhere, each distinct one once.
+
+        Beside a fee, an inclusion or exclusion ("VAT included") is the place NET goes, and the
+        finding says so; a mere mention elsewhere is only to be removed. True when a finding
+        beside a fee already names NET as the wording to write.
+        """
+
+        def beside_a_fee(p: TaxPhrase) -> bool:
+            return any(p.span[0] < hi and p.span[1] > lo for lo, hi in scopes)
+
+        # the copy beside the fee first, so that is the one reported with its NET
+        offending = sorted(
+            (p for p in phrases if p.kind in rule.offends), key=lambda p: not beside_a_fee(p)
+        )
+        named_net = False
+        seen: set[str] = set()
+        for p in offending:
+            key = p.text.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            replaced = beside_a_fee(p) and p.kind != "mention"
+            named_net |= replaced
+            self._tax_contradiction(rule, p, self._in_script(rule, p.span[0]) if replaced else None)
+        return named_net
+
+    def rule_fx_invoice(self) -> None:
+        """Client rule 9: an act in a foreign currency is invoiced in lari at the NBG rate - an
+        advance at the rate of the day it was paid, the rest at the rate of the act's date.
+
+        One note, not an error: nothing in the act is wrong. The client asked to be told how the
+        invoice must be worked out, so that it can be checked (``fx_invoice``). The note is marked
+        on the act's total and carries no expected value, which would read as a mismatch. With no
+        rate source connected (``fx.provider``) it gives the formula and the days whose rates to
+        look up, and a skip note says the total in lari was not calculated.
+
+        A small business or a foreign organisation needs no such invoice, so for them the rule
+        does not apply and the summary says so (``_NOT_APPLICABLE``). With the contractor type
+        unknown the invoice is worked out all the same, and the note says who does not need it.
+        """
+        self._fx = None
+        if self.contractor_type in _FX_EXEMPT:
+            return
+        act = self._act_date()
+        found = plan_invoice(
+            self.aoa.amounts(),
+            self.aoa.advance(in_act=True),
+            act_date=act[0] if act else None,
+            entered=self.advance,
+        )
+        if found is None:  # an act in lari: there is nothing to convert
+            return
+        if isinstance(found, NoInvoice):
+            self._skip("AOA.FX_INVOICE", found.reason_ka, found.reason_en)
+            return
+        priced = price_terms(found, self.rates)
+        gel = invoice_gel(priced)
+        self._fx = (found, gel)
+        formula_ka = " + ".join(
+            _fx_term_ka(p, found.currency, priced=gel is not None) for p in priced
+        )
+        formula_en = " + ".join(
+            _fx_term_en(p, found.currency, priced=gel is not None) for p in priced
+        )
+        if gel is not None and len(priced) > 1:
+            formula_ka += f"; სულ {gel:,.2f} {LOCAL_CURRENCY}"
+            formula_en += f"; in total {gel:,.2f} {LOCAL_CURRENCY}"
+        ka = (
+            f"აქტი შედგენილია {found.currency}-ში. ანგარიშფაქტურა უნდა იყოს: {formula_ka} — "
+            "გადაამოწმეთ ანგარიშფაქტურა."
+        )
+        en = (
+            f"The act is in {found.currency}. The invoice must be: {formula_en} — verify the "
+            "invoice."
+        )
+        if found.advance_source == "act":
+            ka += " ავანსი აღებულია აქტიდან — დაადასტურეთ."
+            en += " The advance is taken from the act: confirm it."
+        if self.contractor_type is None:
+            ka += " მცირე მეწარმესა და უცხოურ ორგანიზაციას ასეთი ანგარიშფაქტურა არ სჭირდება."
+            en += " A small business or a foreign organisation needs no such invoice."
+        self._add("AOA.FX_INVOICE", "info", ka, en, span=found.anchor)
+        if gel is None:
+            self._fx_rate_skip(found.currency, priced)
+
+    def _fx_rate_skip(self, currency: str, priced: tuple[PricedTerm, ...]) -> None:
+        """Say the total in lari was not calculated, and name the days whose rates it needs."""
+        missing = [p.term for p in priced if p.quote is None]
+        days_ka = ", ".join(dict.fromkeys(_fx_day(t)[0] for t in missing))
+        days_en = ", ".join(dict.fromkeys(_fx_day(t)[1] for t in missing))
+        if isinstance(self.rates, NullRateProvider):
+            self._skip(
+                "AOA.FX_RATE",
+                "გაცვლითი კურსის წყარო დაკავშირებული არ არის, ამიტომ ანგარიშფაქტურის თანხა ლარში "
+                f"არ გამოთვლილა; მოიძიეთ NBG-ის {currency} კურსი: {days_ka}",
+                "no exchange-rate source is connected, so the invoice total in lari was not "
+                f"calculated; look up the NBG {currency} rate of: {days_en}",
+            )
+            return
+        self._skip(
+            "AOA.FX_RATE",
+            f"ანგარიშფაქტურის თანხა ლარში არ გამოთვლილა — NBG-ის {currency} კურსი ვერ მოიძებნა: "
+            f"{days_ka}",
+            f"the invoice total in lari was not calculated: no NBG {currency} rate was found for "
+            f"{days_en}",
+        )
 
     # --- rules that need the contract -----------------------------------------------------
 
-    def _matched_parties(self) -> list[tuple[Party, Party | None]]:
+    def _matched_parties(self) -> list[_PartyMatch]:
+        """Which contract party each act party is, worked out once a run: the party rules all
+        ask, and only the rules report what it found.
+
+        The identification code decides, and the name when there is no code. A code and a name
+        that point at two contract parties, each with a code of its own, mean one of them is
+        wrong in the act, and the rest of the act's block tells which. When its address and
+        signatories are more the code's party's than the name's, the name is the mistake, and
+        matching by code lets AOA.PARTY_NAME say so. Otherwise the code is (AOA.ID_CODE_PARTY):
+        a contractor written with the customer's code is still the contractor, not the customer
+        with a wrong name, address and director.
+        """
         if self.contract is None:  # run() calls the contract rules only with a contract
             raise RuntimeError(_NO_CONTRACT)
-        pairs: list[tuple[Party, Party | None]] = []
-        for p in self.aoa.parties:
-            match = None
-            if p.id_code:
-                match = next((q for q in self.contract.parties if q.id_code == p.id_code), None)
-            if match is None and p.name:
-                match = next(
-                    (q for q in self.contract.parties if q.name and names_match(p.name, q.name)),
-                    None,
-                )
-            pairs.append((p, match))
-        return pairs
+        if self._party_matches is None:
+            self._party_matches = [_match_party(p, self.contract.parties) for p in self.aoa.parties]
+        return self._party_matches
+
+    def _span_in_act(self, span: tuple[int, int] | None, holds: str) -> tuple[int, int] | None:
+        """``span`` when it lies in the act's text and covers ``holds``; a party built by hand, or
+        from another text, has none that can be trusted."""
+        if span is None:
+            return None
+        a, b = span
+        return span if 0 <= a < b <= len(self.aoa.text) and holds in self.aoa.text[a:b] else None
 
     def rule_parties(self) -> None:
         """Client rule 1 and the contract cross-check: identify by code, then verify the rest."""
@@ -483,7 +1112,10 @@ class AoaChecker:
                 actual=", ".join(sorted(a_ids)),
             )
 
-        for p, match in self._matched_parties():
+        for m in self._matched_parties():
+            p, match = m.party, m.match
+            if m.code_of is not None and match is not None:
+                self._id_code_party(p, match, m.code_of)
             if match is None:
                 self._add(
                     "AOA.PARTY_NAME",
@@ -529,8 +1161,144 @@ class AoaChecker:
                     span=self._find_span(d),
                 )
 
+    def _id_code_party(self, p: Party, match: Party, owner: Party) -> None:
+        """AOA.ID_CODE_PARTY: the act gives ``p`` (the contract's ``match``) the code the contract
+        gives ``owner``. Marked from the party's name to the code, where the act's text allows:
+        the code alone is also written, correctly, in the owner's own block."""
+        span = self._span_in_act(p.id_span, p.id_code or "")
+        named = self._span_in_act(p.span, "")
+        if span is not None and named is not None and 0 <= span[0] - named[0] <= 200:
+            span = (named[0], span[1])
+        self._add(
+            "AOA.ID_CODE_PARTY",
+            "error",
+            f"საიდენტიფიკაციო კოდი სხვა მხარისაა: აქტში {p.name}-ის კოდად წერია {p.id_code}, "
+            f"რაც ხელშეკრულებით {owner.name}-ის კოდია; {match.name}-ის კოდია {match.id_code}",
+            f"identification code belongs to another party: the act gives {p.name} the code "
+            f"{p.id_code}, which is {owner.name}'s in the contract; {match.name}'s code is "
+            f"{match.id_code}",
+            expected=match.id_code,
+            actual=p.id_code,
+            span=span,
+        )
+
+    def rule_party_roles(self) -> None:
+        """Client rules 10.1/10.2, the role: each party must be on the same side in the act as in
+        the contract - the customer who pays, or the contractor who is paid (AOA.PARTY_ROLE).
+
+        Sides, not words: "შემკვეთი" in one document and "დამკვეთი" in the other is the same
+        customer. Roles are taken only from each document's own definition, "(შემდგომში
+        „შემკვეთი“)". A signature block's bare role word stands above a name that a side-by-side
+        layout may have put in the other column, and a guess must not produce an error; a party
+        whose role either document does not define is named in a skip note instead.
+        """
+        if self.contract is None:  # run() calls the contract rules only with a contract
+            raise RuntimeError(_NO_CONTRACT)
+        parties = [q for q in self.contract.parties if _side(q.role)]
+        if not parties:
+            self._skip(
+                "AOA.PARTY_ROLE",
+                "ხელშეკრულებაში ვერ მოიძებნა არც დამკვეთი და არც შემსრულებელი (მაგ. „შემკვეთი“, "
+                "„შემსრულებელი“), ამიტომ მხარეების როლები არ შედარდა",
+                "the contract names no customer and no contractor (such as „შემკვეთი“, "
+                "„შემსრულებელი“), so the parties' roles were not compared",
+            )
+            return
+        matches = self._matched_parties()
+        for q in parties:
+            mine = [m.party for m in matches if m.match is q]
+            if not mine:
+                continue  # the party is not in the act at all: AOA.PARTY_MISSING says so
+            if q.role_source != "defined":
+                self._skip(
+                    "AOA.PARTY_ROLE",
+                    f"{q.name}: ხელშეკრულებაში მხარის როლი განსაზღვრული არ არის (შემდგომში „…“), "
+                    "ამიტომ აქტში მისი როლი არ შედარდა",
+                    f"{q.name}: the contract does not define this party's role (შემდგომში „…“), so "
+                    "its role in the act was not compared",
+                )
+                continue
+            defined = [p for p in mine if p.role_source == "defined" and _side(p.role)]
+            if not defined:
+                self._skip(
+                    "AOA.PARTY_ROLE",
+                    f"{q.name}: აქტში მხარის როლი განსაზღვრული არ არის (შემდგომში „…“), ამიტომ "
+                    "ხელშეკრულებას არ შედარდა",
+                    f"{q.name}: the act does not define this party's role (შემდგომში „…“), so it "
+                    "was not compared with the contract",
+                )
+                continue
+            for p in defined:
+                a_side, c_side = _side(p.role), _side(q.role)
+                if a_side is None or c_side is None or a_side == c_side:
+                    continue
+                self._add(
+                    "AOA.PARTY_ROLE",
+                    "error",
+                    f"მხარის როლი არ ემთხვევა ხელშეკრულებას: {p.name} აქტში განსაზღვრულია როგორც "
+                    f"„{p.role}“, ხელშეკრულებაში კი — როგორც „{q.role}“",
+                    f"party role does not match the contract: the act defines {p.name} as "
+                    f"'{p.role}' ({_SIDE_EN[a_side]}), the contract as '{q.role}' "
+                    f"({_SIDE_EN[c_side]})",
+                    expected=q.role,
+                    actual=p.role,
+                    span=self._span_in_act(p.role_span, p.role or ""),
+                )
+
+    def rule_party_missing(self) -> None:
+        """Client rules 10.1/10.2, presence: the contract's customer and contractor must both be in
+        the act (AOA.PARTY_MISSING).
+
+        A party is there when the act names a party with its code or its name. When the act
+        writes its code or its name only in a form not read as a party - no legal form, no
+        quotes - the party is not missing, but could not be compared, and a skip note says so.
+        """
+        if self.contract is None:  # run() calls the contract rules only with a contract
+            raise RuntimeError(_NO_CONTRACT)
+        parties = [q for q in self.contract.parties if _side(q.role)]
+        if not parties:
+            self._skip(
+                "AOA.PARTY_MISSING",
+                "ხელშეკრულებაში ვერ მოიძებნა არც დამკვეთი და არც შემსრულებელი, ამიტომ არ "
+                "შემოწმებულა, არის თუ არა ორივე მხარე აქტში",
+                "the contract names no customer and no contractor, so whether both are in the act "
+                "was not checked",
+            )
+            return
+        for q in parties:
+            side = _side(q.role)
+            if side is None or any(_is_party(p, q) for p in self.aoa.parties):
+                continue
+            if _mentions(self.aoa.text, q):
+                self._skip(
+                    "AOA.PARTY_MISSING",
+                    f"{q.name}: აქტში მისი კოდი ან დასახელება წერია, მაგრამ მხარედ (სამართლებრივი "
+                    "ფორმა და დასახელება ბრჭყალებში) ვერ წაიკითხა, ამიტომ მისი მონაცემები არ "
+                    "შედარდა",
+                    f"{q.name}: the act gives this party's code or name, but not in a form read as "
+                    "a party (a legal form and a quoted name), so its details were not compared",
+                )
+                continue
+            code_ka = f", საიდენტიფიკაციო კოდი {q.id_code}" if q.id_code else ""
+            code_en = f", identification code {q.id_code}" if q.id_code else ""
+            self._add(
+                "AOA.PARTY_MISSING",
+                "error",
+                f"ხელშეკრულების მხარე აქტში არ არის: {q.name} („{q.role}“{code_ka})",
+                f"a party to the contract is missing from the act: {q.name} "
+                f"({_SIDE_EN[side]}{code_en})",
+                expected=f"{q.name} ({q.id_code})" if q.id_code else q.name,
+            )
+
     def _compare_field(
-        self, rule_id: str, ka_label: str, en_label: str, actual: str | None, expected: str | None
+        self,
+        rule_id: str,
+        ka_label: str,
+        en_label: str,
+        actual: str | None,
+        expected: str | None,
+        *,
+        against: Literal["contract", "registry"] = "contract",
     ) -> None:
         if not actual or not expected:
             return
@@ -539,28 +1307,39 @@ class AoaChecker:
             return
         hint_ka = " (როგორც ჩანს, ორთოგრაფიული შეცდომაა)" if diff.looks_like_typo else ""
         hint_en = " (looks like a misspelling)" if diff.looks_like_typo else ""
+        source_ka, source_en = _SOURCE[against]
         self._add(
             rule_id,
             "error",
-            f"{ka_label} არ ემთხვევა ხელშეკრულებას: „{actual}“, უნდა იყოს „{expected}“{hint_ka}",
-            f"{en_label} does not match the contract: '{actual}', expected '{expected}'{hint_en}",
+            f"{ka_label} არ ემთხვევა {source_ka}: „{actual}“, უნდა იყოს „{expected}“{hint_ka}",
+            f"{en_label} does not match {source_en}: '{actual}', expected '{expected}'{hint_en}",
             expected=expected,
             actual=actual,
             span=self._find_span(actual),
         )
 
     def rule_cadastral(self) -> None:
-        """Every code the act names must be one the contract names.
+        """Every code the act names must be one the contract names, or lie inside one.
 
         A subset, not equality: a contract covering two plots may have an act for one of them,
-        which the equality test this replaced reported as an error.
+        which the equality test this replaced reported as an error. And a unit code
+        ("01.02.03.456.001.01.502") names part of its parcel ("01.02.03.456"), so either one
+        written in the act matches the other in the contract (``_cadastral_covers``).
         """
         if self.contract is None:  # run() calls the contract rules only with a contract
             raise RuntimeError(_NO_CONTRACT)
         a = set(self.aoa.anchors(FactType.cadastral_code))
         c = set(self.contract.anchors(FactType.cadastral_code))
-        if a and c and not a <= c:
-            extra = sorted(a - c)
+        if a and not c:
+            self._skip(
+                "AOA.CADASTRAL",
+                "ხელშეკრულებაში საკადასტრო კოდი ვერ მოიძებნა, ამიტომ აქტის კოდი არ შედარდა",
+                "no cadastral code found in the contract, so the act's code was not compared",
+            )
+            return
+        # an act with no code at all needs no note here: CADASTRAL_PRESENT already reports it
+        extra = sorted(x for x in a if not any(_cadastral_covers(x, y) for y in c))
+        if extra:
             self._add(
                 "AOA.CADASTRAL",
                 "error",
@@ -597,6 +1376,160 @@ class AoaChecker:
                 expected=c[0],
                 actual=name,
                 span=self._find_span(name),
+            )
+
+    def rule_subject(self) -> None:
+        """Client rule 10.3: the act restates the contract's subject (``aoa_scope``).
+
+        Only a number that differs, in a clause that otherwise reads as the contract's, is an
+        error. A subject in other words is marked for a person to read, as a note: the rules
+        cannot tell a paraphrase from another service, and a correct act must not fail on one.
+        The model review, when one was asked for, reads such a note (``aoa_llm.decide``).
+        The project and the plot the clause names are left to AOA.PROJECT_NAME and AOA.CADASTRAL.
+        """
+        reading = self._scope_reading()
+        contract = reading.contract_subject
+        if contract is None:
+            self._skip(
+                "AOA.SUBJECT",
+                "ხელშეკრულებაში საგნის პუნქტი (ხელშეკრულების საგანი … (შემდგომში „მომსახურება“)) "
+                "ვერ მოიძებნა, ამიტომ აქტის საგანი არ შედარდა",
+                "no subject clause ('ხელშეკრულების საგანი … (შემდგომში „მომსახურება“)') was found "
+                "in the contract, so the act's subject was not compared",
+            )
+            return
+        act = reading.act_subject
+        if act is None:
+            self._skip(
+                "AOA.SUBJECT",
+                "აქტში ხელშეკრულების საგანი (… საგანს წარმოადგენს … (შემდგომში „მომსახურება“)) "
+                "გამეორებული არ არის, ამიტომ არ შედარდა",
+                "the act does not restate the contract's subject ('… საგანს წარმოადგენს … "
+                "(შემდგომში „მომსახურება“)'), so it was not compared",
+            )
+            return
+        if not act.stems:
+            self._skip(
+                "AOA.SUBJECT",
+                "აქტის საგანში მხოლოდ პროექტი და საკადასტრო კოდი წერია, რომლებიც ცალკე შედარდა",
+                "the act's subject names only the project and the plot, which are compared on "
+                "their own",
+            )
+            return
+        found = reading.subject
+        if found is None:  # pragma: no cover - read_scope aligns two clauses with words
+            return
+        decision = self._decision(SUBJECT_ID, found)
+        if decision.severity is None:
+            return
+        if found.verdict == "number":
+            differ, stated = ", ".join(found.differ), ", ".join(contract.numbers)
+            self._add(
+                "AOA.SUBJECT",
+                decision.severity,
+                f"ხელშეკრულების საგანში რიცხვი განსხვავდება: აქტში {differ}, ხელშეკრულებაში "
+                f"{stated}",
+                f"a number in the subject differs from the contract: {differ} in the act, "
+                f"{stated} in the contract",
+                expected=stated,
+                actual=differ,
+                span=act.span,
+            )
+            return
+        shown_act, shown_contract = _shorten(act.text), _shorten(contract.text)
+        if found.share >= MATCH_SHARE:  # the words are the contract's; a number is the act's own
+            differ = ", ".join(found.differ)
+            ka = (
+                f"აქტში ხელშეკრულების საგანს რიცხვი ({differ}) აქვს დამატებული, რომელიც "
+                f"ხელშეკრულებაში არ წერია — გადაამოწმეთ: ხელშეკრულებაში „{shown_contract}“"
+            )
+            en = (
+                f"the act's subject states a number ({differ}) the contract's does not - check "
+                f"it: the contract says '{shown_contract}'"
+            )
+        else:
+            ka = (
+                f"აქტში ხელშეკრულების საგანი სხვა სიტყვებითაა აღწერილი — გადაამოწმეთ: აქტში "
+                f"„{shown_act}“, ხელშეკრულებაში „{shown_contract}“"
+            )
+            en = (
+                f"the act words the subject differently from the contract - check it: the act "
+                f"says '{shown_act}', the contract '{shown_contract}'"
+            )
+        self._scope_note("AOA.SUBJECT", SUBJECT_ID, decision, ka, en, act.span)
+
+    def rule_services(self) -> None:
+        """Client rule 10.6, the services: each service the act lists must be one the contract
+        lists (``aoa_scope``). The act may list fewer - an act covers a month of the work - so
+        a service the act leaves out is not reported.
+
+        As for the subject, only a number that differs in an item that otherwise reads as the
+        contract's is an error; an item whose words the contract's list does not clearly hold is
+        a note for a person to read, and for the model review when one was asked for. A contract
+        that lists no services, or an act that does not restate them, is named in a skip note.
+        """
+        reading = self._scope_reading()
+        if not reading.contract_services:
+            self._skip(
+                "AOA.SERVICES",
+                "ხელშეკრულებაში მომსახურების ჩამონათვალი (სია „… ჩააბაროს:“, „კერძოდ:“ ან "
+                "„მოიცავს:“ ქვეშ) ვერ მოიძებნა, ამიტომ აქტის მომსახურება არ შედარდა",
+                "no list of services (a list under '… ჩააბაროს:', 'კერძოდ:' or 'მოიცავს:') was "
+                "found in the contract, so the act's services were not compared",
+            )
+            return
+        if not reading.act_services:
+            self._skip(
+                "AOA.SERVICES",
+                "აქტში მომსახურების ჩამონათვალი (სია „მომსახურების აღწერა:“ ან „კერძოდ:“ ქვეშ) "
+                "ვერ მოიძებნა, ამიტომ ხელშეკრულებას არ შედარდა",
+                "the act lists no services (a list under 'მომსახურების აღწერა:' or 'კერძოდ:'), so "
+                "none were compared with the contract's",
+            )
+            return
+        for n, found in enumerate(reading.services, 1):
+            decision = self._decision(service_id(n), found)
+            if decision.severity is None:
+                continue
+            item, best = found.item, found.best
+            if found.verdict == "number" and best is not None:
+                self._add(
+                    "AOA.SERVICES",
+                    decision.severity,
+                    f"ჩამოთვლილ მომსახურებაში რიცხვი განსხვავდება ხელშეკრულებისგან: აქტში "
+                    f"„{item.text}“, ხელშეკრულებაში „{best.text}“",
+                    f"a number in a listed service differs from the contract: '{item.text}' in "
+                    f"the act, '{best.text}' in the contract",
+                    expected=best.text,
+                    actual=item.text,
+                    span=self._find_span(item.text),
+                )
+                continue
+            if best is not None and found.share >= MATCH_SHARE:
+                # the words are the contract's item's; a number is the act's own
+                ka = (
+                    f"აქტში ჩამოთვლილ მომსახურებას რიცხვი აქვს დამატებული, რომელიც ხელშეკრულებაში "
+                    f"არ წერია: აქტში „{item.text}“, ხელშეკრულებაში „{best.text}“ — გადაამოწმეთ"
+                )
+                en = (
+                    f"a service the act lists states a number the contract's does not: "
+                    f"'{item.text}' in the act, '{best.text}' in the contract - check it"
+                )
+            else:
+                closest_ka = closest_en = ""
+                if best is not None and found.share > 0:
+                    closest_ka = f"; ყველაზე ახლოს არის „{best.text}“"
+                    closest_en = f"; the closest is '{best.text}'"
+                ka = (
+                    "აქტში ჩამოთვლილი მომსახურება ხელშეკრულების ჩამონათვალში ცალსახად არ ჩანს: "
+                    f"„{item.text}“{closest_ka} — გადაამოწმეთ"
+                )
+                en = (
+                    f"a service the act lists is not clearly in the contract's list: "
+                    f"'{item.text}'{closest_en} - check it"
+                )
+            self._scope_note(
+                "AOA.SERVICES", service_id(n), decision, ka, en, self._find_span(item.text)
             )
 
     def rule_bank(self) -> None:
@@ -733,47 +1666,105 @@ class AoaChecker:
                 span=(hit.start, hit.end),
             )
 
-    def _amounts(self, view: DocumentView) -> set[float]:
-        return money_amounts(view.text)
-
     def rule_fee(self) -> None:
+        """Client rule 10.6, the amount: the act's fee must be a price the contract states.
+
+        A price, not any amount (``amount_roles``): an act whose fee equals the contract's
+        advance or penalty states the wrong fee, and the finding names the amount it took.
+        Amounts match on their currency as well as their figure, so 100 USD against a price of
+        100 GEL is reported as a currency that differs. The act's advance and remainder lines
+        are its fee in parts, not a second fee, and are set aside when they add up to it
+        (``_fee_parts_add_up``); when they do not, each is compared like a fee.
+        """
         if self.contract is None:  # run() calls the contract rules only with a contract
             raise RuntimeError(_NO_CONTRACT)
-        a, c = self._amounts(self.aoa), self._amounts(self.contract)
-        if not a:
+        act = [r for r in self.aoa.amounts() if r.role not in _NOT_THE_FEE]
+        if not act:
             self._add("AOA.FEE", "error", "აქტში საფასური ვერ მოიძებნა", "no fee found in the act")
             return
-        if not c:
+        contract = self.contract.amounts()
+        prices = [r.money for r in contract if r.role == "price"]
+        if not prices:  # nothing is called a price: take what is plainly not something else
+            prices = [r.money for r in contract if r.role not in ("advance", "penalty", "tax")]
+        if not prices:
             self._skip(
                 "AOA.FEE",
-                "ხელშეკრულებაში ვერ მოიძებნა თანხა შესადარებლად",
-                "no amount found in the contract to compare against",
+                "ხელშეკრულებაში ვერ მოიძებნა ღირებულება შესადარებლად",
+                "no price found in the contract to compare against",
             )
             return
-        unmatched = [x for x in a if not any(amounts_equal(x, y) for y in c)]
-        if unmatched:
+        fees = [r for r in act if r.role in (None, "price")]
+        parts = [r for r in act if r.role in ("advance", "remainder")]
+        matched = [r.money for r in fees if _states(prices, r.money)]
+        wrong = [r for r in fees if not _states(prices, r.money)]
+        if parts and not _fee_parts_add_up(parts, matched, prices):
+            # a part the contract itself states (its advance) is not the one that is wrong
+            wrong += [
+                r
+                for r in parts
+                if not _states(prices, r.money)
+                and not _states([c.money for c in contract if c.role == r.role], r.money)
+            ]
+        for r in sorted(wrong, key=lambda r: r.money.span):
+            self._fee_finding(r, prices, contract)
+
+    def _fee_finding(
+        self, r: RoledAmount, prices: list[Money], contract: list[RoledAmount]
+    ) -> None:
+        m = r.money
+        name_ka, genitive_ka, name_en = _FEE_LABEL[r.role]
+        actual = _money_text(m)
+        other = next(
+            (p for p in prices if p.currency != m.currency and amounts_equal(p.value, m.value)),
+            None,
+        )
+        if other is not None:
+            expected = _money_text(other)
             self._add(
                 "AOA.FEE",
                 "error",
-                f"საფასური ხელშეკრულების არცერთ თანხას არ ემთხვევა: "
-                f"{sorted(unmatched)} vs {sorted(c)}",
-                f"fee matches no amount in the contract: {sorted(unmatched)} vs {sorted(c)}",
-                expected=", ".join(f"{x:g}" for x in sorted(c)),
-                actual=", ".join(f"{x:g}" for x in sorted(unmatched)),
-                span=_amount_span(self.aoa.text, min(unmatched)),
+                f"{genitive_ka} ვალუტა განსხვავდება ხელშეკრულებისგან: აქტში {actual}, "
+                f"ხელშეკრულებაში {expected}",
+                f"the {name_en}'s currency differs from the contract: the act says {actual}, "
+                f"the contract {expected}",
+                expected=expected,
+                actual=actual,
+                span=m.span,
             )
+            return
+        expected = ", ".join(dict.fromkeys(_money_text(p) for p in prices))
+        hint_ka = hint_en = ""
+        for c in contract:
+            if c.role is not None and c.role in _ROLE_NAME and _states([c.money], m):
+                role_ka, role_en = _ROLE_NAME[c.role]
+                hint_ka = f"; ის ემთხვევა ხელშეკრულებით განსაზღვრულ {role_ka}"
+                hint_en = f"; it equals {role_en} in the contract"
+                break
+        self._add(
+            "AOA.FEE",
+            "error",
+            f"{name_ka} {actual} არ ემთხვევა ხელშეკრულებით განსაზღვრულ ღირებულებას "
+            f"({expected}){hint_ka}",
+            f"{name_en} {actual} matches no price in the contract ({expected}){hint_en}",
+            expected=expected,
+            actual=actual,
+            span=m.span,
+        )
 
     def rule_period_in_term(self) -> None:
+        """Client rule 10.5: the service period must lie inside the contract's term.
+
+        The term is the contract's performance window ("შეასრულოს მომსახურება ... -დან ...
+        ჩათვლით"), or failing that its validity - but only a validity with a last day, since
+        "until the obligations are fulfilled" bounds nothing (``_term_window``). When the
+        contract states neither, the rule says so. It used to fall back to the contract's first
+        and last dates, and to any date before "ჩათვლით", which let a payment deadline or "დღგ-ს
+        ჩათვლით" stretch the term.
+        """
         if self.contract is None:  # run() calls the contract rules only with a contract
             raise RuntimeError(_NO_CONTRACT)
-        period_hits = _date_hits_near(self.aoa.text, _PERIOD_KEYS)
+        period_hits = self._period_hits()
         period = [d for d, _ in period_hits]
-        term = _dates_near(self.contract.text, _TERM_KEYS)
-        if not term:
-            all_dates = [
-                date.fromisoformat(str(h.normalized)) for h in find_dates(self.contract.text)
-            ]
-            term = [min(all_dates), max(all_dates)] if len(all_dates) >= 2 else []
         if not period:
             self._add(
                 "AOA.PERIOD",
@@ -782,42 +1773,364 @@ class AoaChecker:
                 "the execution period could not be found in the act",
             )
             return
-        if not term:
+        window = _term_window(self.contract.term())
+        if window is None:
             self._skip(
                 "AOA.PERIOD_IN_TERM",
-                "ხელშეკრულების მოქმედების ვადა ვერ დადგინდა",
-                "contract term could not be determined",
+                "ხელშეკრულებაში ვერ მოიძებნა არც შესრულების ვადა და არც მოქმედების ვადის "
+                "დასასრული, ამიტომ შესრულების პერიოდი არ შედარდა",
+                "the contract states neither a performance period nor an end to its validity, "
+                "so the execution period was not compared with it",
             )
             return
-        lo, hi = min(term), max(term)
-        if min(period) < lo or max(period) > hi:
-            # anchor on the first date that lies outside, as the act writes it
-            outside = next(h for d, h in period_hits if d < lo or d > hi)
+        lo, hi, kind = window
+        # anchor on the first date that lies outside, as the act writes it
+        outside = [
+            h for d, h in period_hits if (lo is not None and d < lo) or (hi is not None and d > hi)
+        ]
+        if not outside:
+            return
+        name_ka, name_en = _WINDOW_NAME[kind]
+        shown = _window_text(lo, hi)
+        self._add(
+            "AOA.PERIOD_IN_TERM",
+            "error",
+            f"შესრულების პერიოდი {min(period)}..{max(period)} სცდება {name_ka} {shown}",
+            f"execution period {min(period)}..{max(period)} falls outside {name_en} {shown}",
+            expected=shown,
+            actual=f"{min(period)}..{max(period)}",
+            span=(outside[0].start, outside[0].end),
+        )
+
+    def rule_act_date_in_term(self) -> None:
+        """Client rule 10.5, the act itself: it must be dated inside the contract's term.
+
+        Dated before the contract was signed, or after a validity that states its last day, is an
+        error. Dated after the performance window only is a warning: the contract is still in
+        force. Rule 4 dates an act on the last day of the month, which for a window ending
+        mid-month falls after it, and when that is the case the message says so - which rule
+        gives way is for the client to decide.
+        """
+        if self.contract is None:  # run() calls the contract rules only with a contract
+            raise RuntimeError(_NO_CONTRACT)
+        act = self._act_date()
+        if act is None:
+            self._skip(
+                "AOA.ACT_DATE_IN_TERM",
+                "აქტის გაფორმების თარიღი ვერ მოიძებნა, ამიტომ ხელშეკრულების ვადას არ შედარდა",
+                "the act's date could not be found, so it was not compared with the contract's "
+                "term",
+            )
+            return
+        term = self.contract.term()
+        valid_until = term.validity.end if term.validity else None
+        perform_until = term.performance.end if term.performance else None
+        if term.signed is None and valid_until is None and perform_until is None:
+            self._skip(
+                "AOA.ACT_DATE_IN_TERM",
+                "ხელშეკრულებაში ვერ მოიძებნა არც გაფორმების თარიღი და არც ვადის დასასრული, "
+                "ამიტომ აქტის თარიღი არ შედარდა",
+                "the contract states neither when it was signed nor when its term ends, so the "
+                "act's date was not compared with it",
+            )
+            return
+        d, hit = act
+        allowed = _window_text(term.signed, valid_until or perform_until)
+        if term.signed is not None and d < term.signed:
             self._add(
-                "AOA.PERIOD_IN_TERM",
+                "AOA.ACT_DATE_IN_TERM",
                 "error",
-                f"შესრულების პერიოდი {min(period)}..{max(period)} სცდება ხელშეკრულების "
-                f"მოქმედების ვადას {lo}..{hi}",
-                f"execution period {min(period)}..{max(period)} falls outside the contract term "
-                f"{lo}..{hi}",
-                expected=f"{lo}..{hi}",
-                actual=f"{min(period)}..{max(period)}",
-                span=(outside.start, outside.end),
+                f"აქტი დათარიღებულია {d}-ით, ხელშეკრულების გაფორმებამდე ({term.signed})",
+                f"the act is dated {d}, before the contract was signed ({term.signed})",
+                expected=allowed,
+                actual=str(d),
+                span=(hit.start, hit.end),
+            )
+        elif valid_until is not None and d > valid_until:
+            self._add(
+                "AOA.ACT_DATE_IN_TERM",
+                "error",
+                f"აქტი დათარიღებულია {d}-ით, ხელშეკრულების მოქმედების ვადის ამოწურვის "
+                f"({valid_until}) შემდეგ",
+                f"the act is dated {d}, after the contract term ended ({valid_until})",
+                expected=allowed,
+                actual=str(d),
+                span=(hit.start, hit.end),
+            )
+        elif perform_until is not None and d > perform_until:
+            ka = (
+                f"აქტი დათარიღებულია {d}-ით, ხელშეკრულების შესრულების ვადის ({perform_until}) "
+                "შემდეგ"
+            )
+            en = f"the act is dated {d}, after the contract's performance period ended " + (
+                f"({perform_until})"
+            )
+            if d == _last_day(perform_until):
+                ka += (
+                    "; მე-4 წესით აქტი თვის ბოლო დღით თარიღდება, რაც ამ შემთხვევაში ვადის შემდეგ "
+                    "მოდის — გადაამოწმეთ, რომელი წესი მოქმედებს"
+                )
+                en += (
+                    "; rule 4 dates an act on the last day of the month, which here falls after "
+                    "the term - check which of the two applies"
+                )
+            self._add(
+                "AOA.ACT_DATE_IN_TERM",
+                "warning",
+                ka,
+                en,
+                expected=_window_text(term.signed, perform_until),
+                actual=str(d),
+                span=(hit.start, hit.end),
+                confidence=0.8,
+            )
+
+    def rule_payment_terms(self) -> None:
+        """Client rule 10.7, the terms: the act's payment deadline, method and advance must be
+        the contract's (AOA.PAYMENT_DEADLINE, AOA.PAYMENT_METHOD, AOA.PAYMENT_ADVANCE).
+
+        A part is compared only when both documents state it. An act need not restate its
+        contract's terms, and a contract that states none has nothing to compare with, so a part
+        only one of them states is named in one skip note, not reported. The advance is the
+        exception, because an act that records one records a payment: when the contract sets out
+        how it is paid - a deadline or a method - and provides for no advance, that is a warning.
+        """
+        if self.contract is None:  # run() calls the contract rules only with a contract
+            raise RuntimeError(_NO_CONTRACT)
+        contract, act = self.contract.payment_terms(), self.aoa.payment_terms()
+        c_advance = self.contract.advance(in_act=False)
+        a_advance = self.aoa.advance(in_act=True)
+        if not contract.stated and not c_advance.mentioned:
+            self._skip(
+                "AOA.PAYMENT_*",
+                "ხელშეკრულებაში გადახდის პირობები (ვადა, ანგარიშსწორების ფორმა, ავანსი) ვერ "
+                "მოიძებნა, ამიტომ აქტის პირობები არ შედარდა",
+                "no payment terms (deadline, method, advance) were found in the contract, so the "
+                "act's were not compared",
+            )
+            return
+        one_sided: list[tuple[str, bool]] = []  # (part, whether the contract is the one)
+        if contract.deadlines and act.deadlines:
+            self._payment_deadlines(contract.deadlines, act.deadlines)
+        elif contract.deadlines or act.deadlines:
+            one_sided.append(("deadline", bool(contract.deadlines)))
+        if contract.method and act.method:
+            self._payment_method(contract.method, act.method)
+        elif contract.method or act.method:
+            one_sided.append(("method", contract.method is not None))
+        if a_advance.stated and not c_advance.mentioned:
+            # the contract states payment terms here (see above), and none is an advance
+            self._add(
+                "AOA.PAYMENT_ADVANCE",
+                "warning",
+                "აქტში ავანსი წერია, ხელშეკრულების ანგარიშსწორების პირობებში კი ავანსი "
+                "გათვალისწინებული არ არის",
+                "the act states an advance, but the contract's payment terms provide for none",
+                span=a_advance.anchor,
+                confidence=0.8,
+            )
+        elif a_advance.stated:
+            self._payment_advance(c_advance, a_advance)
+        elif c_advance.stated and not a_advance.mentioned:
+            one_sided.append(("advance", True))
+        if one_sided:
+            self._skip(
+                "AOA.PAYMENT_*",
+                "მხოლოდ ერთ დოკუმენტშია მითითებული, ამიტომ არ შედარდა: "
+                + ", ".join(f"{_PAYMENT_PART[p][0]} ({_ONLY_IN[c][0]})" for p, c in one_sided),
+                "stated in only one of the two documents, so not compared: "
+                + ", ".join(f"{_PAYMENT_PART[p][1]} ({_ONLY_IN[c][1]})" for p, c in one_sided),
+            )
+
+    def _payment_deadlines(self, contract: tuple[Deadline, ...], act: tuple[Deadline, ...]) -> None:
+        """Every deadline the act states must be one the contract states, with the same days.
+
+        A different number or unit is an error, and so is working days against calendar days.
+        A deadline that says which days count against one that does not is a warning: "5 დღე"
+        may be meant as either.
+        """
+        stated = {(c.count, c.unit, c.qualifier) for c in contract}
+        for d in act:
+            if (d.count, d.unit, d.qualifier) in stated:
+                continue
+            same = next((c for c in contract if (c.count, c.unit) == (d.count, d.unit)), None)
+            if same is None:
+                expected = ", ".join(dict.fromkeys(c.raw for c in contract))
+                values = ", ".join(dict.fromkeys(c.value for c in contract))
+                self._add(
+                    "AOA.PAYMENT_DEADLINE",
+                    "error",
+                    f"გადახდის ვადა არ ემთხვევა ხელშეკრულებას: აქტში „{d.raw}“, ხელშეკრულებაში "
+                    f"„{expected}“",
+                    f"payment deadline differs from the contract: {d.value} in the act, "
+                    f"{values} in the contract",
+                    expected=expected,
+                    actual=d.raw,
+                    span=d.span,
+                )
+            elif d.qualifier and same.qualifier:
+                self._add(
+                    "AOA.PAYMENT_DEADLINE",
+                    "error",
+                    f"გადახდის ვადაში დღეები სხვაგვარადაა დათვლილი: აქტში — "
+                    f"{_DAYS_KA[d.qualifier]} („{d.raw}“), ხელშეკრულებაში — "
+                    f"{_DAYS_KA[same.qualifier]} („{same.raw}“)",
+                    f"the payment deadline counts {d.qualifier} days in the act ('{d.raw}') and "
+                    f"{same.qualifier} days in the contract ('{same.raw}')",
+                    expected=same.raw,
+                    actual=d.raw,
+                    span=d.span,
+                )
+            else:
+                known = d.qualifier or same.qualifier or ""
+                where_ka, where_en = (
+                    ("აქტში", "the act")
+                    if d.qualifier
+                    else (
+                        "ხელშეკრულებაში",
+                        "the contract",
+                    )
+                )
+                self._add(
+                    "AOA.PAYMENT_DEADLINE",
+                    "warning",
+                    f"გადახდის ვადა მხოლოდ {where_ka} ითვლება {_DAYS_KA[known]} დღეებით: აქტში "
+                    f"„{d.raw}“, ხელშეკრულებაში „{same.raw}“",
+                    f"only {where_en} says the payment deadline counts {known} days: "
+                    f"'{d.raw}' in the act, '{same.raw}' in the contract",
+                    expected=same.raw,
+                    actual=d.raw,
+                    span=d.span,
+                    confidence=0.8,
+                )
+
+    def _payment_method(self, contract: MethodHit, act: MethodHit) -> None:
+        if contract.method == act.method:
+            return
+        c_ka, c_en = _METHOD_NAME[contract.method]
+        a_ka, a_en = _METHOD_NAME[act.method]
+        self._add(
+            "AOA.PAYMENT_METHOD",
+            "error",
+            f"ანგარიშსწორების ფორმა არ ემთხვევა ხელშეკრულებას: აქტში — {a_ka} („{act.text}“), "
+            f"ხელშეკრულებაში — {c_ka} („{contract.text}“)",
+            f"payment method differs from the contract: {a_en} ('{act.text}') in the act, "
+            f"{c_en} ('{contract.text}') in the contract",
+            expected=contract.text,
+            actual=act.text,
+            span=act.span,
+        )
+
+    def _payment_advance(self, contract: AdvanceTerms, act: AdvanceTerms) -> None:
+        """The act's advance against the contract's, when both speak of one.
+
+        An error when the contract rules one out, or when both state its amount (in one
+        currency) or its share of the price and the two differ. An amount against a share is
+        not compared: which price the share is of is not always plain.
+        """
+        if contract.excluded and not (contract.payments or contract.shares):
+            self._add(
+                "AOA.PAYMENT_ADVANCE",
+                "error",
+                "აქტში ავანსი წერია, ხელშეკრულებით კი ავანსი გამორიცხულია",
+                "the act states an advance, which the contract rules out",
+                span=act.anchor,
+            )
+            return
+        planned = [p.money for p in contract.payments]
+        for p in act.payments:
+            same_currency = [m for m in planned if m.currency == p.money.currency]
+            if not same_currency or _states(same_currency, p.money):
+                continue
+            expected = ", ".join(dict.fromkeys(_money_text(m) for m in same_currency))
+            actual = _money_text(p.money)
+            self._add(
+                "AOA.PAYMENT_ADVANCE",
+                "error",
+                f"ავანსი არ ემთხვევა ხელშეკრულებას: აქტში {actual}, ხელშეკრულებაში {expected}",
+                f"the advance differs from the contract: {actual} in the act, {expected} in the "
+                "contract",
+                expected=expected,
+                actual=actual,
+                span=p.money.span,
+            )
+        shares = {s.percent for s in contract.shares}
+        for s in act.shares:
+            if not shares or s.percent in shares:
+                continue
+            expected = ", ".join(f"{x:g}%" for x in sorted(shares))
+            self._add(
+                "AOA.PAYMENT_ADVANCE",
+                "error",
+                f"ავანსის წილი არ ემთხვევა ხელშეკრულებას: აქტში {s.percent:g}%, "
+                f"ხელშეკრულებაში {expected}",
+                f"the advance's share differs from the contract: {s.percent:g}% in the act, "
+                f"{expected} in the contract",
+                expected=expected,
+                actual=f"{s.percent:g}%",
+                span=s.span,
             )
 
     def rule_registry(self) -> None:
-        """Client rule 1: verify name / address / directors against the business registry."""
+        """Client rule 1: verify name / address / directors against the business registry.
+
+        Each party, and each of its fields, is either compared or named in a skip note saying
+        why not - a party with no identification code cannot be looked up, and a field missing
+        from the act or from the registry export has nothing to be compared with.
+        """
         if self.registry is None:
+            if self.contract is not None:
+                self._skip(
+                    "AOA.REGISTRY",
+                    "სამეწარმეო რეესტრის ამონაწერი ჩატვირთული არ არის; მხარეების მონაცემები "
+                    "შედარდა მხოლოდ ხელშეკრულებას",
+                    "no business-registry snapshot loaded; party details were compared against "
+                    "the contract only",
+                )
+            else:
+                self._skip(
+                    "AOA.REGISTRY",
+                    "სამეწარმეო რეესტრის ამონაწერი ჩატვირთული არ არის და ხელშეკრულებაც არ არის "
+                    "ატვირთული; მხარეების მონაცემები არ შემოწმებულა",
+                    "no business-registry snapshot loaded and no contract supplied; party "
+                    "details were not verified",
+                )
+            return
+        if not self.aoa.parties:
             self._skip(
                 "AOA.REGISTRY",
-                "სამეწარმეო რეესტრის ამონაწერი ჩატვირთული არ არის; მხარეების მონაცემები "
-                "შედარდა მხოლოდ ხელშეკრულებას",
-                "no business-registry snapshot loaded; party details were compared against the "
-                "contract only",
+                "აქტში მხარე (სამართლებრივი ფორმა და დასახელება) ვერ მოიძებნა, ამიტომ რეესტრს "
+                "არაფერი შედარებია",
+                "no party (a legal form and a name) was found in the act, so nothing was "
+                "checked against the registry",
             )
             return
+        # A party written with another party's code (AOA.ID_CODE_PARTY): that code's entry is
+        # the other company, and would "correct" this one's name, address and director into it.
+        misplaced = (
+            [m.party for m in self._matched_parties() if m.code_of is not None]
+            if self.contract is not None
+            else []
+        )
         for p in self.aoa.parties:
             if not p.id_code:
+                self._skip(
+                    "AOA.REGISTRY",
+                    f"{p.name}: აქტში საიდენტიფიკაციო კოდი არ წერია, ამიტომ რეესტრში ვერ მოიძებნა",
+                    f"{p.name}: the act gives no identification code, so the party was not "
+                    "looked up in the registry",
+                )
+                continue
+            if any(p is q for q in misplaced):
+                self._skip(
+                    "AOA.REGISTRY",
+                    f"{p.name}: აქტში ამ მხარეს სხვა მხარის საიდენტიფიკაციო კოდი აქვს "
+                    "(AOA.ID_CODE_PARTY), ამიტომ მისი მონაცემები ამ კოდის რეესტრის ჩანაწერს არ "
+                    "შედარდა",
+                    f"{p.name}: the act gives this party another party's identification code "
+                    "(AOA.ID_CODE_PARTY), so its details were not compared with that code's "
+                    "registry entry",
+                )
                 continue
             entry = self.registry.lookup(p.id_code)  # type: ignore[attr-defined]
             if entry is None:
@@ -830,27 +2143,66 @@ class AoaChecker:
                 )
                 continue
             self._compare_field(
-                "AOA.REGISTRY_NAME", "დასახელება (რეესტრი)", "name (registry)", p.name, entry.name
+                "AOA.REGISTRY_NAME", "დასახელება", "name", p.name, entry.name, against="registry"
             )
-            self._compare_field(
-                "AOA.REGISTRY_ADDRESS",
-                "მისამართი (რეესტრი)",
-                "address (registry)",
-                p.address,
-                entry.address,
+            if not p.address:
+                self._skip(
+                    "AOA.REGISTRY_ADDRESS",
+                    f"{p.name}: აქტში იურიდიული მისამართი არ წერია, ამიტომ რეესტრს არ შედარდა",
+                    f"{p.name}: the act states no legal address, so none was compared with the "
+                    "registry",
+                )
+            elif not entry.address:
+                self._skip(
+                    "AOA.REGISTRY_ADDRESS",
+                    f"{p.name}: რეესტრის ამონაწერში მისამართი არ არის, ამიტომ აქტის მისამართი "
+                    "არ შემოწმებულა",
+                    f"{p.name}: the registry snapshot has no address for this company, so the "
+                    "act's address was not checked",
+                )
+            else:
+                self._compare_field(
+                    "AOA.REGISTRY_ADDRESS",
+                    "მისამართი",
+                    "address",
+                    p.address,
+                    entry.address,
+                    against="registry",
+                )
+            self._registry_directors(p, entry.directors)
+
+    def _registry_directors(self, p: Party, registered: tuple[str, ...]) -> None:
+        """The act's signatories for ``p`` against the registry's directors, or why not."""
+        if not p.directors:
+            self._skip(
+                "AOA.REGISTRY_DIRECTOR",
+                f"{p.name}: აქტში ხელმომწერი (დირექტორი) არ არის მითითებული, ამიტომ რეესტრს "
+                "არ შედარდა",
+                f"{p.name}: the act names no signatory (director), so none was compared with the "
+                "registry",
             )
-            for d in p.directors:
-                if entry.directors and not any(names_match(d, x) for x in entry.directors):
-                    self._add(
-                        "AOA.REGISTRY_DIRECTOR",
-                        "error",
-                        f"ხელმომწერი რეესტრის მონაცემებს არ ემთხვევა: „{d}“ "
-                        f"(რეესტრი: {', '.join(entry.directors)})",
-                        f"signatory does not match the registry: '{d}' "
-                        f"(registry: {', '.join(entry.directors)})",
-                        expected=", ".join(entry.directors),
-                        actual=d,
-                    )
+            return
+        if not registered:
+            self._skip(
+                "AOA.REGISTRY_DIRECTOR",
+                f"{p.name}: რეესტრის ამონაწერში დირექტორი მითითებული არ არის, ამიტომ ხელმომწერი "
+                "არ შემოწმებულა",
+                f"{p.name}: the registry snapshot names no director for this company, so the "
+                "signatory was not checked",
+            )
+            return
+        for d in p.directors:
+            if not any(names_match(d, x) for x in registered):
+                self._add(
+                    "AOA.REGISTRY_DIRECTOR",
+                    "error",
+                    f"ხელმომწერი რეესტრის მონაცემებს არ ემთხვევა: „{d}“ "
+                    f"(რეესტრი: {', '.join(registered)})",
+                    f"signatory does not match the registry: '{d}' "
+                    f"(registry: {', '.join(registered)})",
+                    expected=", ".join(registered),
+                    actual=d,
+                )
 
 
 #: How far apart an account and its bank code may be and still be read as one block.
@@ -875,6 +2227,210 @@ def _bank_pairs_with_hits(view: DocumentView) -> list[tuple[str, str, AnchorHit]
         code, account = (first, second) if first.unit == "SWIFT" else (second, first)
         out.append((account.value, code.value, code))
     return out
+
+
+def _side(role: str | None) -> Side | None:
+    """The side a role word puts a party on: the customer who pays, or the contractor paid."""
+    if role in _PAYER_ROLES:
+        return "payer"
+    if role in _PAYEE_ROLES:
+        return "payee"
+    return None
+
+
+def _is_party(p: Party, q: Party) -> bool:
+    """Whether the act's ``p`` is the contract's ``q``: the same code, or the same name."""
+    return bool(
+        (p.id_code and p.id_code == q.id_code)
+        or (p.name and q.name and names_match(p.name, q.name))
+    )
+
+
+def _agreement(p: Party, q: Party) -> int:
+    """How much of the act's block for ``p`` - its address and its signatories - is ``q``'s."""
+    address = bool(p.address and q.address and classify_difference(p.address, q.address) is None)
+    return address + sum(any(names_match(d, x) for x in q.directors) for d in p.directors)
+
+
+def _match_party(p: Party, parties: list[Party]) -> _PartyMatch:
+    """The contract party the act's ``p`` is (see ``AoaChecker._matched_parties``).
+
+    Only a name that points at a party with a code of its own, another code, contradicts the
+    code: a contract may write one party twice, the second time with no code or with the name
+    spelled otherwise, and those two records are one party, not a conflict.
+    """
+    by_code = next((q for q in parties if p.id_code and q.id_code == p.id_code), None)
+    by_name = next((q for q in parties if p.name and q.name and names_match(p.name, q.name)), None)
+    if by_code is None:
+        return _PartyMatch(p, by_name)
+    if (
+        by_name is None
+        or by_name is by_code
+        or not by_name.id_code
+        or by_name.id_code == p.id_code
+        or _agreement(p, by_code) > _agreement(p, by_name)
+    ):
+        return _PartyMatch(p, by_code)
+    return _PartyMatch(p, by_name, code_of=by_code)
+
+
+#: Legal forms, as ``normalize_name`` leaves them, that a party's name starts with: the name
+#: proper is what follows them.
+_LEGAL_FORM_WORDS = frozenset(
+    {"შპს", "სს", "ააიპ", "სსიპ", "ი/მ", "ი", "მ", "ინდ", "ინდივიდუალური", "მეწარმე", "მეწარმ"}
+)
+
+
+def _mentions(text: str, q: Party) -> bool:
+    """Whether ``text`` names the party ``q`` in any form: its identification code as a number
+    of its own - not digits inside an account number - or the words of its name, in order and
+    with any case ending, after its legal form."""
+    if q.id_code and re.search(rf"(?<![0-9A-Za-z]){re.escape(q.id_code)}(?![0-9A-Za-z])", text):
+        return True
+    words = [
+        w
+        for w in name_stem(q.name or "").split()
+        if w not in _LEGAL_FORM_WORDS and any(c.isalpha() for c in w)
+    ]
+    if not words:
+        return False
+    pattern = r"\W+".join(rf"{re.escape(w)}\w*" for w in words)
+    return re.search(rf"(?<!\w){pattern}", normalize_name(text)) is not None
+
+
+def _cadastral_covers(a: str, c: str) -> bool:
+    """Two cadastral codes name the same land when they are equal or one lies under the other.
+
+    A code lies under another when it continues it after a dot: "01.02.03.456.001" is inside
+    "01.02.03.456", while "01.02.03.4567" would be another parcel (and is no code at all).
+    """
+    return a == c or a.startswith(c + ".") or c.startswith(a + ".")
+
+
+def _money_text(m: Money) -> str:
+    return f"{m.value:,.2f} {m.currency}"
+
+
+def _shorten(text: str, limit: int = 160) -> str:
+    """A long clause cut down for a message; the finding marks all of it in the document."""
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+#: The multiplication sign of the invoice formula. Escaped: in the source it reads as an "x".
+_TIMES = "\u00d7"
+
+
+def _fx_day(term: InvoiceTerm) -> tuple[str, str]:
+    """The day whose NBG rate an invoice term takes, as the messages name it: (Georgian, English).
+    A day nobody states is named for what it is, so the reader knows which rate to look up."""
+    if term.on is not None:
+        return term.on.isoformat(), term.on.isoformat()
+    if term.part == "advance":
+        return "ავანსის გადახდის დღე — მითითებული არ არის", "the advance payment date (not stated)"
+    return "აქტის თარიღი — ვერ მოიძებნა", "the act's date (not found)"
+
+
+def _fx_term_ka(p: PricedTerm, currency: str, *, priced: bool) -> str:
+    """One term of the invoice formula in Georgian - the amount times "NBG-ის კურსი (2026-09-10)"
+    - with the rate and the lari when every term has its rate."""
+    day = _fx_day(p.term)[0]
+    head = f"{p.term.amount:,.2f} {currency} {_TIMES} NBG-ის კურსი ({day}"
+    if priced and p.quote is not None and p.gel is not None:
+        return f"{head}: {p.quote.rate:f}) = {p.gel:,.2f} {LOCAL_CURRENCY}"
+    return f"{head})"
+
+
+def _fx_term_en(p: PricedTerm, currency: str, *, priced: bool) -> str:
+    """One term of the invoice formula in English - the amount times "NBG rate of 2026-09-10" -
+    with the rate and the lari when every term has its rate."""
+    head = f"{p.term.amount:,.2f} {currency} {_TIMES} NBG rate of {_fx_day(p.term)[1]}"
+    if priced and p.quote is not None and p.gel is not None:
+        return f"{head} ({p.quote.rate:f}) = {p.gel:,.2f} {LOCAL_CURRENCY}"
+    return head
+
+
+def _window_text(lo: date | None, hi: date | None) -> str:
+    """A window of dates as the messages show it, an open end left blank: "2026-03-01.."."""
+    return f"{lo or ''}..{hi or ''}"
+
+
+def _term_window(term: ContractTerm) -> tuple[date | None, date | None, str] | None:
+    """The dates a service period must lie between (``rule_period_in_term``), and which window
+    they are: the performance window, else the validity when it states its last day.
+
+    A window's first day is its own, else the signing: no work is done under a contract before
+    it is signed. A performance window with no last day of its own ends when the validity does.
+    None when neither window bounds anything.
+    """
+    valid_from = term.validity.start if term.validity else None
+    valid_until = term.validity.end if term.validity else None
+    performance = term.performance
+    if performance is not None and (performance.start or performance.end):
+        return performance.start or term.signed, performance.end or valid_until, "performance"
+    if valid_until is not None:
+        return valid_from or term.signed, valid_until, "validity"
+    return None
+
+
+def _states(amounts: list[Money], m: Money) -> bool:
+    """Whether ``amounts`` holds ``m``: the same figure in the same currency."""
+    return any(a.currency == m.currency and amounts_equal(a.value, m.value) for a in amounts)
+
+
+def _fee_parts_add_up(parts: list[RoledAmount], fees: list[Money], prices: list[Money]) -> bool:
+    """Whether the act's advance and remainder lines are its fee paid in parts.
+
+    Per currency, the advances and the remainder must add up to a fee the act states and the
+    contract confirms (``fees``). With no remainder line the remainder is whatever the advances
+    leave of that fee, so any advance up to it adds up: an act states its total and the advance
+    already paid, and "the rest" goes without saying. An act that states its fee only in parts
+    has no fee line for them to make up; then the advance and the remainder must add up to a
+    price the contract states. A line the act restates counts once or as often as it is written,
+    whichever adds up.
+    """
+    for currency in dict.fromkeys(r.money.currency for r in parts):
+        advances = [
+            r.money.value for r in parts if r.money.currency == currency and r.role == "advance"
+        ]
+        rests = [
+            r.money.value for r in parts if r.money.currency == currency and r.role == "remainder"
+        ]
+        advance = {sum(advances), sum(set(advances))}
+        rest = {sum(rests), sum(set(rests))}
+        totals = [f.value for f in fees if f.currency == currency]
+        if totals and rests:
+            ok = any(amounts_equal(a + r, t) for a in advance for r in rest for t in totals)
+        elif totals:
+            ok = any(min(advance) <= t + 0.01 for t in totals)
+        else:
+            targets = [p.value for p in prices if p.currency == currency]
+            ok = bool(rests) and any(
+                amounts_equal(a + r, t) for a in advance for r in rest for t in targets
+            )
+        if not ok:
+            return False
+    return True
+
+
+def _tax_wording_met(contractor_type: ContractorType, phrases: list[TaxPhrase]) -> bool:
+    """Whether the act says what the contractor type needs about taxes, anywhere in it.
+
+    A natural person's fee is NET, or excludes both the income tax and the pension contribution
+    by name: "without taxes" alone does not say NET. A VAT-registered entrepreneur's fee says
+    VAT is included; a small business's that taxes are; a foreign organisation's is NET.
+    """
+    kinds = {p.kind for p in phrases}
+    if contractor_type == "natural_person":
+        excluded: set[str] = set()
+        for p in phrases:
+            if p.kind == "exclusion":
+                excluded |= p.names
+        return "net" in kinds or {"income", "pension"} <= excluded
+    if contractor_type == "individual_entrepreneur_vat":
+        return any(p.kind == "inclusion" and "vat" in p.names for p in phrases)
+    if contractor_type == "small_business":
+        return "inclusion" in kinds
+    return "net" in kinds
 
 
 def _word_stems_match(a: str, b: str) -> bool:
@@ -905,14 +2461,6 @@ def _project_names_match(a: str, b: str) -> bool:
     return all(any(_word_stems_match(w, x) for x in it) for w in short)
 
 
-def _amount_span(text: str, value: float) -> tuple[int, int] | None:
-    """Where in ``text`` a monetary amount of ``value`` is written, for a finding's anchor."""
-    for h in run_rules(text):
-        if h.currency and isinstance(h.normalized, float) and amounts_equal(h.normalized, value):
-            return (h.start, h.end)
-    return None
-
-
 def check_aoa(
     *,
     aoa_text: str,
@@ -921,10 +2469,25 @@ def check_aoa(
     contract_id: str = "contract",
     registry: object | None = None,
     contractor_type: ContractorType | None = None,
+    rates: RateProvider | None = None,
+    advance: AdvanceInput | None = None,
+    review: ScopeReviewSet | None = None,
 ) -> CheckReport:
     return AoaChecker(
         aoa=DocumentView.build(aoa_id, aoa_text),
         contract=DocumentView.build(contract_id, contract_text) if contract_text else None,
         registry=registry,
         contractor_type=contractor_type,
+        rates=rates,
+        advance=advance,
+        review=review,
     ).run()
+
+
+def scope_review_items(*, aoa_text: str, contract_text: str) -> list[ScopeItem]:
+    """The notes the model review can be asked about: the parts of the act the scope rules
+    could not decide, read exactly as ``check_aoa`` reads them. The report, the queue and the
+    worker all take them from here, so a stored review always answers the notes on the page."""
+    aoa = DocumentView.build("aoa", aoa_text)
+    contract = DocumentView.build("contract", contract_text)
+    return review_items(read_scope(aoa.text, aoa.lines, contract.text, contract.lines))

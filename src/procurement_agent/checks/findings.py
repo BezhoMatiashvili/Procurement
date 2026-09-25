@@ -33,6 +33,14 @@ class Finding(BaseModel):
     quote: str | None = None
     provenance: Provenance | None = None
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    #: A note the rules could not decide either way - the same clause in other words, a service
+    #: the contract's list may or may not hold. It is marked for a person to read, and the rules
+    #: never make it an error or a warning: a correct act written in other words must not fail.
+    #: Only the model review, when a user asks for it, can raise one to a warning (``aoa_llm``).
+    needs_review: bool = False
+    #: Who read a ``needs_review`` note after the rules: "llm" when the local model's answer was
+    #: applied to it (``checks/aoa_llm``). The model can mark a note, never clear it.
+    reviewed_by: Literal["llm"] | None = None
 
     @property
     def is_blocking(self) -> bool:

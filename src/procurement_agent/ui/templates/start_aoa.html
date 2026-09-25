@@ -26,6 +26,23 @@
     <p id="ct-hint" class="muted small">{{ t("upload.contractor_type.hint") }}</p>
   </div>
 
+  {# Rule 9 converts an advance at the rate of the day it was paid. Nothing here can be read
+     from the act before it is uploaded, so blank means "read it from the act"; the report then
+     offers what it read back for confirmation. type=text, not number: a browser blanks "1,000". #}
+  <div class="options" role="group" aria-labelledby="advance-title">
+    <p class="options-title" id="advance-title">{{ t("upload.advance") }}
+      <span class="slot-optional">{{ t("upload.optional") }}</span></p>
+    <div class="advance-fields">
+      <label for="advance_amount">{{ t("upload.advance.amount") }}
+        <input type="text" inputmode="decimal" id="advance_amount" name="advance_amount"
+               autocomplete="off" maxlength="32" aria-describedby="advance-hint"></label>
+      <label for="advance_date">{{ t("upload.advance.date") }}
+        <input type="date" id="advance_date" name="advance_date" min="1990-01-01"
+               max="2100-12-31" aria-describedby="advance-hint"></label>
+    </div>
+    <p id="advance-hint" class="muted small">{{ t("upload.advance.hint") }}</p>
+  </div>
+
   {{ up.progress() }}
   <div class="form-foot">
     <button type="submit" data-upload-submit>{{ icon("file-check") }}{{ t("upload.start") }}</button>

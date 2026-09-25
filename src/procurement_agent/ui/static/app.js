@@ -24,6 +24,19 @@
   document.querySelectorAll("form[data-confirm]").forEach(function (f) {
     f.addEventListener("submit", function (e) { if (!window.confirm(f.dataset.confirm)) e.preventDefault(); });
   });
+  // The act report's model review, when the operator has it run by itself (PA_AOA_LLM_AUTO).
+  // The form is only rendered while no review is attached, and the post comes back with one;
+  // the per-tab flag is a second guard, so nothing can turn this into a loop.
+  var once = document.querySelector("form[data-submit-once]");
+  if (once) {
+    var key = "pa-submitted:" + once.getAttribute("action");
+    var seen = null;
+    try { seen = window.sessionStorage.getItem(key); } catch (err) { seen = "unavailable"; }
+    if (!seen) {
+      try { window.sessionStorage.setItem(key, "1"); } catch (err) { /* the reply carries the review */ }
+      once.submit();
+    }
+  }
 
   // A link cannot open the print dialog, and the dialog is the only thing standing between a
   // report and a PDF, so this is a button whose whole job is one call. Every report has one.

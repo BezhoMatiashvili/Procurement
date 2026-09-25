@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Literal
 
 from procurement_agent.extraction.normalize import (
     QUOTE_CHARS,
@@ -27,6 +28,7 @@ from procurement_agent.extraction.normalize import (
     normalize_spaces,
     unlabelled_bic_plausible,
 )
+from procurement_agent.extraction.rules import CADASTRAL_RE
 from procurement_agent.extraction.schemas import FactType
 
 _Q = re.escape(QUOTE_CHARS)
@@ -69,7 +71,6 @@ _DIRECTOR = re.compile(
 _PROJECT_WORD = r"პრო[ეა]{1,3}ქტ[ა-ჰ]*"
 _PROJECT = re.compile(rf"{_PROJECT_WORD}\s*{_QUOTED}")
 _PROJECT_REV = re.compile(rf"{_QUOTED}\s*{_PROJECT_WORD}")
-_CADASTRAL = re.compile(r"(?<![\d.])\d{2}\.\d{2}\.\d{2}\.\d{3}(?:\.\d{3})?(?![\d.])")
 _IBAN = re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b")
 # An IBAN is also printed in groups of four ("GE29 NB00 0000 ..."). The grouped form can run
 # on into a following capitalised word, so it is accepted only at a length whose checksum
@@ -91,8 +92,20 @@ _ROLE = re.compile(rf"შემდგომში[\s\-\u2013\u2014]*(?:{_QUOTED}
 _ROLE_BARE = re.compile(rf"{_QUOTED}")
 
 ROLE_WORDS = frozenset(
-    {"შემკვეთი", "დამკვეთი", "შემსრულებელი", "მყიდველი", "გამყიდველი", "მხარე", "მხარეები"}
+    {
+        "შემკვეთი",
+        "დამკვეთი",
+        "შემსრულებელი",
+        "მიმწოდებელი",
+        "მყიდველი",
+        "გამყიდველი",
+        "მხარე",
+        "მხარეები",
+    }
 )
+#: The role words that put a party on a side - the one who pays, the one paid. "მხარე" (a party)
+#: names neither.
+_SIDE_WORDS = ROLE_WORDS - {"მხარე", "მხარეები"}
 # the same words in the genitive, which is how they appear before a noun
 _ROLE_WORDS_INFLECTED = frozenset(
     {w for r in ROLE_WORDS for w in (r, r[:-1] + "ის", r + "ს", r[:-1] + "მა")}
@@ -128,6 +141,13 @@ class AnchorHit:
     note: str | None = None
 
 
+#: Where a party's role was read. "defined": the document's own definition of its side,
+#: "(შემდგომში „შემკვეთი“)". "signature": the bare role word above the name in a signature
+#: block, which a side-by-side layout can pair with the other party's name. A role read from
+#: any other definition - "(შემდგომში „მომსახურება“)" - has no source.
+RoleSource = Literal["defined", "signature"]
+
+
 @dataclass(slots=True)
 class Party:
     """One contracting party, assembled from the labels around its name."""
@@ -140,6 +160,13 @@ class Party:
     is_bank: bool = False
     #: IBANs stated inside this party's block of requisites, in document order
     accounts: list[str] = field(default_factory=list)
+    role_source: RoleSource | None = None
+    #: Where the name, the identification code and the defined role were read, as offsets into
+    #: the text once ``find_parties`` has normalised it line by line. The AOA checker's text is
+    #: normalised already, so for it they index the text itself. None on a record built by hand.
+    span: tuple[int, int] | None = None
+    id_span: tuple[int, int] | None = None
+    role_span: tuple[int, int] | None = None
 
     @property
     def key(self) -> str:
@@ -192,19 +219,28 @@ def _ibans(text: str) -> list[tuple[str, int, int]]:
     return out
 
 
-def _same_party(a: Party, b: Party) -> bool:
+def _same_party(a: Party, b: Party, *, split_conflicts: bool = False) -> bool:
     if a.id_code and b.id_code:
-        return a.id_code == b.id_code
+        if a.id_code != b.id_code:
+            return False
+        # One code under two names. Merged, the second name's block vanishes into the first:
+        # a contractor written with the customer's code reads as the customer.
+        return not split_conflicts or not (a.name and b.name) or names_match(a.name, b.name)
     return bool(a.name and b.name and names_match(a.name, b.name))
 
 
-def find_parties(text: str) -> list[Party]:
+def find_parties(text: str, *, split_conflicts: bool = False) -> list[Party]:
     """Find every contracting party and the labelled fields that belong to it.
 
     A party's fields are read from the window that starts at its name and ends at the next
     party name, which is exactly how these documents lay them out. Parties are then merged by
     identification code (or by name when there is none), so that the requisites block at the
-    top and the signature block at the bottom contribute to one record.
+    top and the signature block at the bottom contribute to one record. A role the document
+    defines ("შემდგომში „…“") wins over a signature block's bare role word.
+
+    ``split_conflicts`` keeps two records with one code but different names apart instead of
+    merging them. The AOA checker asks for it, to see a code given to the wrong party; the
+    extraction pipeline does not, so what it reads is unchanged.
     """
     text = _prepare(text)
     matches = list(_PARTY_NAME.finditer(text))
@@ -218,7 +254,7 @@ def find_parties(text: str) -> list[Party]:
         window = text[start:end]
         before = text[max(0, start - 40) : start]
 
-        party = Party(name=_clean(f"{m.group(1)} {m.group(2)}"))
+        party = Party(name=_clean(f"{m.group(1)} {m.group(2)}"), span=m.span())
         # "ბანკი: სს „საქართველოს ბანკი“" and "...გადარიცხვით: სს „საქართველოს ბანკი“,
         # ბანკის კოდი:" are payment details, not contracting parties. A real party always
         # brings an identification code with it, so require one before believing the name.
@@ -228,6 +264,7 @@ def find_parties(text: str) -> list[Party]:
 
         if mm := _ID_CODE.search(window):
             party.id_code = mm.group(1)
+            party.id_span = (start + mm.start(1), start + mm.end(1))
         if mm := _ADDRESS.search(window):
             party.address = _clean(mm.group(1))
         for dm in _DIRECTOR.finditer(window):
@@ -242,11 +279,17 @@ def find_parties(text: str) -> list[Party]:
                     party.directors.append(cand)
         if rm := _ROLE.search(window):
             party.role = _clean(rm.group(1) or rm.group(2) or "")
+            # "(შემდგომში „მომსახურება“)" after a name in a clause defines the service, not the
+            # party: only a side is a definition that outranks a signature block's role
+            if party.role in _SIDE_WORDS:
+                party.role_source = "defined"
+                party.role_span = (start + rm.start(), start + rm.end())
         elif rm := _ROLE_BARE.search(before):
             # signature blocks put the bare role above the name: “შემსრულებელი” / შპს „…“
             cand = _clean(rm.group(1))
             if cand in ROLE_WORDS:
                 party.role = cand
+                party.role_source = "signature"
         party.accounts = list(dict.fromkeys(iban for iban, _, _ in _ibans(window)))
         parties.append(party)
 
@@ -259,21 +302,36 @@ def find_parties(text: str) -> list[Party]:
             if last is not None:
                 last.accounts.extend(a for a in p.accounts if a not in last.accounts)
             continue
-        existing = next((q for q in merged if _same_party(p, q)), None)
+        existing = next(
+            (q for q in merged if _same_party(p, q, split_conflicts=split_conflicts)), None
+        )
         if existing is None:
             merged.append(p)
             last = p
             continue
         existing.name = existing.name or p.name
-        existing.id_code = existing.id_code or p.id_code
+        if not existing.id_code:
+            existing.id_code, existing.id_span = p.id_code, p.id_span
         existing.address = existing.address or p.address
-        existing.role = existing.role or p.role
+        if not existing.role or (p.role_source == "defined" and existing.role_source != "defined"):
+            existing.role, existing.role_source = p.role, p.role_source
+            existing.role_span = p.role_span
         existing.accounts.extend(a for a in p.accounts if a not in existing.accounts)
         for d in p.directors:
             if not any(names_match(d, e) for e in existing.directors):
                 existing.directors.append(d)
         last = existing
     return merged
+
+
+def first_party_start(text: str) -> int | None:
+    """Where the first party's name starts, or None when no party is named.
+
+    A contract's preamble - its title, the place and the date it was signed - is everything
+    before it, which is how a reader tells the signing date from every other date.
+    """
+    m = _PARTY_NAME.search(text)
+    return m.start() if m else None
 
 
 def find_anchors(text: str) -> list[AnchorHit]:
@@ -332,7 +390,7 @@ def find_anchors(text: str) -> list[AnchorHit]:
         if _clean(m.group(1)) in _ROLE_WORDS_INFLECTED:
             continue
         add(FactType.project_name, m.group(1), m)
-    for m in _CADASTRAL.finditer(text):
+    for m in CADASTRAL_RE.finditer(text):
         add(FactType.cadastral_code, m.group(0), m, normalized=m.group(0))
     for iban, start, end in _ibans(text):
         emit(

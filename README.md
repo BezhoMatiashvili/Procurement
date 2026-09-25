@@ -56,11 +56,19 @@ of rendering a raw 404.
 ## Checks
 
 ```bash
-# acceptance act against its contract: 22 rule ids, fully deterministic, no LLM
+# acceptance act against its contract: 32 rule ids, fully deterministic, no LLM
 curl -s -H "$K" -X POST localhost:8000/api/v1/checks/aoa \
      -H 'content-type: application/json' \
      -d '{"aoa_document_id":"<act>","contract_document_id":"<contract>"}'
-# ?format=docx returns the act with one Word comment per finding
+# ?format=docx returns the act with one Word comment per finding. For an act in a foreign
+# currency, "advance_amount" (in the act's currency; 0 = none) and "advance_date" (ISO) give the
+# advance paid; left out, the act's own is used
+# optional: ask the local model about the notes the rules could not decide (subject, services);
+# 202 queues a job, 200 reuses the one that asked the same thing, "job": null means none open
+curl -s -H "$K" -X POST localhost:8000/api/v1/checks/aoa/review \
+     -H 'content-type: application/json' \
+     -d '{"aoa_document_id":"<act>","contract_document_id":"<contract>"}'
+# once that job is done, add "review_job_id":"<job>" to the check above to apply its reading
 # BOQ: all bidders merged into the template, stacked vertically, highest red / lowest green
 curl -s -H "$K" -X POST localhost:8000/api/v1/checks/boq \
      -H 'content-type: application/json' \
@@ -112,8 +120,35 @@ button.
 A rule that cannot run says so in `skipped` — bilingually, and in its own "could not run, and
 why" section of the report, never styled as a pass — rather than passing quietly — the contractor type
 for the NET/VAT wording rules, or a business-registry snapshot that has not been loaded
-(`cli load-registry`). Findings carry a stable rule id, a bilingual message, the expected value
+(`cli load-registry`). A rule the client's instructions do not apply to a contractor type (the
+NET/VAT wording for a company) is named in the report as not applicable instead, since nothing
+failed to run. Findings carry a stable rule id, a bilingual message, the expected value
 and a character span, so the same object serves the API, the Excel export and the Word comments.
+
+An act written in a foreign currency gets one note with the invoice it needs in lari, at the
+NBG rate: the advance at the rate of the day it was paid, the rest at the rate of the act's
+date. No rate source is connected yet (`PA_FX_RATE_SOURCE=none`, `fx/provider.py`), so the note
+gives the formula and the days to look up, and a skip note says the total was not calculated.
+The advance is read from the act, or entered on the upload page or the report's re-run form,
+where the one read from the act comes back to be confirmed; a contract's advance is never taken
+for a payment, since a contract only plans one. A small business or a foreign organisation needs
+no such invoice, and the report says the rule does not apply.
+
+The parties are matched by identification code, and by name where the act gives none. A party
+written with the other party's code is reported as a code on the wrong party
+(`AOA.ID_CODE_PARTY`), not as a party with a wrong name, address and director. Each party must be
+on the same side in the act as in the contract — the customer who pays, the contractor who is
+paid (`AOA.PARTY_ROLE`, read only from the documents' own "(შემდგომში „…“)" definitions) — and
+both of the contract's parties must be in the act (`AOA.PARTY_MISSING`). The act's restated
+subject and its list of services are compared with the contract's word by word (`AOA.SUBJECT`,
+`AOA.SERVICES`): a number that differs in an item that otherwise reads the same is an error, and
+wording the rules cannot match is a note marked "needs review", in the report and in the Word
+comment — which the rules never make an error or a warning, since other words are not a mistake.
+On request, the local model reads those notes: "review with the model" queues one batched call
+(`PA_AOA_LLM_ENABLED`; it never runs by itself unless `PA_AOA_LLM_AUTO` is set). Its reading is
+marked on each note, "likely the same" or "likely different" — the second raises the note to a
+warning — but it never clears a note or makes an error, a number that differs is never put to
+it, and every quote it gives is checked against the text it was shown (`docs/ACCURACY.md`).
 
 ## Development setup
 
@@ -275,8 +310,8 @@ number words changed and every digit stayed put, and the bank code naming a diff
 Next: Phase 3 proper — a contract draft reviewed against *itself* for internal inconsistency
 (the client's own draft uses "შემკვეთი" and "დამკვეთი" for the same party), which the
 comparison's entity layer does not cover because it compares two files rather than one; Phase 5
-power-of-attorney register lookup. The NBG-rate invoice calculation for foreign-currency acts is
-specified but not yet implemented.
+power-of-attorney register lookup; and an NBG rate source for the foreign-currency invoice,
+which today stops at the formula (`fx/provider.py`).
 
 How accuracy is measured, and which approaches were tried and rejected:
 **[docs/ACCURACY.md](docs/ACCURACY.md)**.

@@ -6,23 +6,32 @@ files are git-ignored, blocked by a pre-commit hook and confidential.
 
 from __future__ import annotations
 
+import io
 import re
 import time
+import zipfile
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
+from docx import Document as WordDocument
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from procurement_agent import db as dbmod
 from procurement_agent.api.checks import BoqCheckReport
 from procurement_agent.checks.compare import ComparisonReport
 from procurement_agent.checks.findings import CheckReport, Finding
 from procurement_agent.config import Settings, get_settings
+from procurement_agent.db import session_scope
 from procurement_agent.main import create_app
+from procurement_agent.models import Job
 from procurement_agent.ui.routes import _env
 from tests.boq_factory import LINES, blank, build_boq
+from tests.unit.test_aoa_llm import ReadingLLM
+from tests.unit.test_fx_invoice import USD_ACT
 
 KEY = "pa_devkey_for_tests_only"
 H = {"X-API-Key": KEY}
@@ -88,6 +97,22 @@ def _act(client: TestClient) -> str:
     return _upload(client, "act.docx", (FIXTURES / "contract_ka.docx").read_bytes(), DOCX)
 
 
+def _usd_act(client: TestClient) -> str:
+    """An act in dollars with an advance line (``tests/unit/test_fx_invoice``), as a Word file."""
+    doc = WordDocument()
+    for line in USD_ACT.splitlines():
+        doc.add_paragraph(line)
+    buf = io.BytesIO()
+    doc.save(buf)
+    return _upload(client, "act-usd.docx", buf.getvalue(), DOCX)
+
+
+def _rerun_form(body: str) -> str:
+    form = re.search(r'<form class="card rerun".*?</form>', body, re.S)
+    assert form is not None, "the report offers a re-run"
+    return form.group(0)
+
+
 def _boq_run(client: TestClient, n: int = 2) -> tuple[str, list[str]]:
     template = _upload(
         client, "Template.xlsx", build_boq(blank(), priced=False, stated_total=None), XLSX
@@ -104,6 +129,19 @@ def _boq_run(client: TestClient, n: int = 2) -> tuple[str, list[str]]:
 
 def _stub_doc() -> SimpleNamespace:
     return SimpleNamespace(id="a" * 32, display_name="act.docx", kind="docx")
+
+
+#: The act report's model-review context with no review on offer, for a direct render.
+_NO_REVIEW: dict[str, object] = {
+    "can_review": False,
+    "review_items": 0,
+    "review_job": None,
+    "review_status": None,
+    "review_running": False,
+    "review_state": None,
+    "review_marked": False,
+    "review_auto": False,
+}
 
 
 @pytest.mark.parametrize("name", NEW_TEMPLATES)
@@ -157,6 +195,7 @@ def test_every_new_template_renders_under_strict_undefined(name: str) -> None:
             "sev_of": lambda h: "info",
             "can_explain": True,
         },
+        **_NO_REVIEW,
     )
 
 
@@ -275,6 +314,528 @@ def test_the_word_download_carries_the_act_back_with_comments(client: TestClient
     assert r.status_code == 200
     assert r.headers["content-type"] == DOCX
     assert "attachment" in r.headers["content-disposition"]
+
+
+def test_the_rerun_form_opens_on_a_blank_choice_that_is_not_required(client: TestClient) -> None:
+    """With "company" listed first and no blank option, a re-run submitted without a choice
+    checked the act as a company's - and the wording rule then silently did nothing."""
+    body = client.get(f"/ui/checks/aoa?act={_act(client)}").text
+    select = re.search(r'<select id="rerun-type"[^>]*>(.*?)</select>', body, re.S)
+    assert select is not None
+    assert "required" not in select.group(0).split(">", 1)[0]
+    first = re.search(r"<option([^>]*)>([^<]*)</option>", select.group(1))
+    assert first is not None
+    assert first.group(1).strip() == 'value=""'
+    assert first.group(2) == "აირჩიეთ შემსრულებლის ტიპი"
+
+
+def test_a_company_report_says_the_wording_rules_do_not_apply(client: TestClient) -> None:
+    """Not applicable is neither a finding nor "could not run" - but it is said."""
+    act = _act(client)
+    unset = client.get(f"/ui/checks/aoa?act={act}").text
+    assert "არ ვრცელდება" not in unset
+    ka = client.get(f"/ui/checks/aoa?act={act}&contractor_type=company").text
+    assert "ამ ტიპის შემსრულებელზე არ ვრცელდება: NET/დღგ-ს ფორმულირების წესები (5-8)." in ka
+    assert "AOA.TAX_WORDING" not in ka  # not listed among the rules that could not run
+    client.post("/ui/lang", data={"lang": "en", "next": "/ui/"}, headers=SAME_ORIGIN)
+    en = client.get(f"/ui/checks/aoa?act={act}&contractor_type=company").text
+    assert "Not applicable to this contractor type: the NET/VAT wording rules (5-8)." in en
+
+
+# --- the advance for a foreign-currency act (rule 9) ----------------------------------------
+
+
+def test_the_start_page_asks_for_the_advance_as_text_and_a_date(client: TestClient) -> None:
+    """Text, not type=number: a browser blanks "1,000", and upload.js turns validation off."""
+    body = client.get("/ui/start/aoa").text
+    amount = re.search(r'<input[^>]*name="advance_amount"[^>]*>', body, re.S)
+    day = re.search(r'<input[^>]*name="advance_date"[^>]*>', body, re.S)
+    assert amount is not None and day is not None
+    assert 'type="text"' in amount.group(0) and 'inputmode="decimal"' in amount.group(0)
+    assert 'type="date"' in day.group(0)
+    assert "გადახდილი ავანსი" in body
+
+
+def test_the_upload_script_passes_the_advance_to_the_report() -> None:
+    script = (Path(_env.loader.searchpath[0]).parent / "static" / "upload.js").read_text()  # type: ignore[attr-defined]
+    assert '["advance_amount", "advance_date"]' in script
+
+
+def test_the_no_js_post_passes_the_advance_on_to_the_report(client: TestClient) -> None:
+    act = (FIXTURES / "contract_ka.docx").read_bytes()
+    r = client.post(
+        "/ui/start/aoa",
+        files={"act": ("act.docx", act, DOCX)},
+        data={"advance_amount": " 1 000,00 ", "advance_date": "2026-09-10", "contractor_type": ""},
+        headers=SAME_ORIGIN,
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    query = parse_qs(urlsplit(r.headers["location"]).query)
+    assert query["advance_amount"] == ["1 000,00"]
+    assert query["advance_date"] == ["2026-09-10"]
+    assert "contractor_type" not in query
+
+
+def test_a_blank_advance_is_not_passed_on(client: TestClient) -> None:
+    act = (FIXTURES / "contract_ka.docx").read_bytes()
+    r = client.post(
+        "/ui/start/aoa",
+        files={"act": ("act.docx", act, DOCX)},
+        data={"advance_amount": "  ", "advance_date": ""},
+        headers=SAME_ORIGIN,
+        follow_redirects=False,
+    )
+    query = parse_qs(urlsplit(r.headers["location"]).query)
+    assert "advance_amount" not in query and "advance_date" not in query
+
+
+def test_a_malformed_advance_in_the_link_still_opens_the_report(client: TestClient) -> None:
+    """The link is typed by hand as often as not; what does not read is left out."""
+    act = _act(client)
+    assert (
+        client.get(f"/ui/checks/aoa?act={act}&advance_amount=abc&advance_date=x").status_code == 200
+    )
+    r = client.get(
+        f"/ui/checks/aoa/annotated.docx?act={act}&advance_amount=-5&advance_date=31.12.2026"
+    )
+    assert r.status_code == 200
+
+
+def test_an_act_in_dollars_offers_its_advance_back_for_confirmation(client: TestClient) -> None:
+    body = client.get(f"/ui/checks/aoa?act={_usd_act(client)}").text
+    assert re.search(r'<span class="k">ვალუტა</span><strong>USD</strong>', body)
+    assert "ანგარიშფაქტურა უნდა იყოს" in body  # the invoice note
+    form = _rerun_form(body)
+    assert re.search(r'name="advance_amount"\s+value="1000.00"', form)
+    assert re.search(r'name="advance_date"\s+value="2026-09-10"', form)
+    assert "ავანსი ამოღებულია აქტიდან" in form
+
+
+def test_the_rerun_keeps_the_chosen_type_and_an_entered_zero(client: TestClient) -> None:
+    """A re-run to set the type must not lose the 0, or the act's advance is read again."""
+    act = _usd_act(client)
+    body = client.get(f"/ui/checks/aoa?act={act}&contractor_type=company&advance_amount=0").text
+    form = _rerun_form(body)
+    assert '<option value="company" selected>' in form
+    assert re.search(r'name="advance_amount"\s+value="0.00"', form)
+    assert "ავანსი ამოღებულია აქტიდან" not in form  # entered, not read
+    # and the download carries the same advance
+    assert re.search(
+        r'annotated\.docx\?act=[0-9a-f]+&amp;contractor_type=company&amp;advance_amount=0"', body
+    )
+
+
+def test_an_exempt_contractor_or_an_act_in_lari_gets_no_advance_fields(client: TestClient) -> None:
+    act = _usd_act(client)
+    body = client.get(f"/ui/checks/aoa?act={act}&contractor_type=foreign").text
+    assert 'name="advance_amount"' not in body
+    assert "უცხოური ვალუტის ანგარიშ-ფაქტურის წესი (9)" in body
+    assert 'name="advance_amount"' not in client.get(f"/ui/checks/aoa?act={_act(client)}").text
+
+
+def test_the_act_report_renders_an_invoice_summary_under_strict_undefined() -> None:
+    note = Finding(rule_id="AOA.FX_INVOICE", severity="info", message_ka="ka", message_en="en")
+    summary = {
+        "currency": "USD",
+        "fx_total": "11000.00",
+        "advance_amount": "1000.00",
+        "advance_date": "2026-09-10",
+        "advance_source": "act",
+        "invoice_gel": "28691.40",
+    }
+    html = _env.get_template("check_aoa.html").render(
+        lang="ka",
+        t=lambda key, **kw: key,
+        msg=lambda f: f.message_ka,
+        why=lambda s: s.reason_ka,
+        current_path="/ui/",
+        user="dev",
+        contractor_types=("company", "foreign"),
+        query="act=x",
+        groups=[("info", [note])],
+        report=CheckReport(document_id="a" * 32, findings=[note], summary=summary),
+        act=_stub_doc(),
+        contract=None,
+        contractor_type="company",
+        **_NO_REVIEW,
+    )
+    assert 'value="1000.00"' in html and 'value="2026-09-10"' in html
+    assert "aoa.advance.auto.act" in html
+    assert '<option value="company" selected>' in html
+
+
+def test_a_note_for_review_carries_a_badge_under_strict_undefined() -> None:
+    from procurement_agent.ui.i18n import t as translate
+
+    note = Finding(
+        rule_id="AOA.SERVICES",
+        severity="info",
+        message_ka="აქტში ჩამოთვლილი მომსახურება",
+        message_en="a service the act lists",
+        needs_review=True,
+    )
+    plain = Finding(rule_id="AOA.IBAN_CHECKSUM", severity="info", message_ka="ka", message_en="en")
+    html = _env.get_template("check_aoa.html").render(
+        lang="ka",
+        t=lambda key, **kw: translate(key, "ka"),
+        msg=lambda f: f.message_ka,
+        why=lambda s: s.reason_ka,
+        current_path="/ui/",
+        user="dev",
+        contractor_types=("company",),
+        query="act=x",
+        groups=[("info", [note, plain])],
+        report=CheckReport(document_id="a" * 32, findings=[note, plain]),
+        act=_stub_doc(),
+        contract=_stub_doc(),
+        contractor_type=None,
+        **_NO_REVIEW,
+    )
+    assert html.count('<span class="badge">გადასამოწმებელი</span>') == 1
+    assert '<span class="badge">გადასამოწმებელი</span> აქტში ჩამოთვლილი მომსახურება' in html
+
+
+def _word(client: TestClient, name: str, text: str) -> str:
+    doc = WordDocument()
+    for line in text.splitlines():
+        doc.add_paragraph(line)
+    buf = io.BytesIO()
+    doc.save(buf)
+    return _upload(client, name, buf.getvalue(), DOCX)
+
+
+def test_a_service_the_contract_never_listed_is_badged_for_review(client: TestClient) -> None:
+    """End to end, through the parser: the act's annex and the contract's list survive as list
+    lines, a service only the act lists comes back as a note to read, and the correct act as
+    no finding at all."""
+    from tests.unit.test_aoa_scope import ACT, CONTRACT
+
+    contract = _word(client, "contract.docx", CONTRACT)
+    extra = ACT.replace(
+        "- საკონტაქტო ფორმის აწყობა\n",
+        "- საკონტაქტო ფორმის აწყობა\n- 10 სერვისის გვერდის შექმნა და ლოგოს დიზაინი\n",
+    )
+    body = client.get(
+        f"/ui/checks/aoa?act={_word(client, 'act.docx', extra)}&contract={contract}"
+    ).text
+    assert '<span class="badge">გადასამოწმებელი</span>' in body
+    assert "AOA.SERVICES" in body and "10 სერვისის გვერდის შექმნა" in body
+
+    clean = client.get(f"/ui/checks/aoa?act={_word(client, 'ok.docx', ACT)}&contract={contract}")
+    assert "გადასამოწმებელი" not in clean.text
+    assert "AOA.SERVICES" not in clean.text and "AOA.SUBJECT" not in clean.text
+
+
+# --- the model review of the act's open notes -------------------------------------------------
+
+
+def _with_model(client: TestClient, llm: object) -> None:
+    """Stand a model in for the unreachable one the test app is configured with."""
+    client.app.state.llm = llm  # type: ignore[attr-defined]
+    client.app.state.worker._llm = llm  # type: ignore[attr-defined]
+
+
+def _wait_for_job(client: TestClient, job_id: str) -> str:
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        status = str(client.get(f"/api/v1/jobs/{job_id}", headers=H).json()["status"])
+        if status not in ("queued", "running"):
+            return status
+        time.sleep(0.05)
+    raise AssertionError("the review did not finish")
+
+
+def _open_pair(client: TestClient) -> tuple[str, str]:
+    """A contract and an act listing one service the contract never names: one open note."""
+    from tests.unit.test_aoa_scope import ACT, CONTRACT
+
+    extra = ACT.replace(
+        "- საკონტაქტო ფორმის აწყობა\n", "- საკონტაქტო ფორმის აწყობა\n- ლოგოს დიზაინი და ბრენდბუქი\n"
+    )
+    return _word(client, "act.docx", extra), _word(client, "contract.docx", CONTRACT)
+
+
+def _review_jobs(act: str) -> list[Job]:
+    with session_scope() as s:
+        return list(s.scalars(select(Job).where(Job.document_id == act, Job.kind == "aoa_review")))
+
+
+def test_the_model_review_is_asked_for_shown_and_carried_into_the_word_file(
+    client: TestClient,
+) -> None:
+    llm = ReadingLLM()
+    _with_model(client, llm)
+    act, contract = _open_pair(client)
+    page = client.get(f"/ui/checks/aoa?act={act}&contract={contract}").text
+    assert "გადამოწმება მოდელით" in page
+    assert f'action="/ui/checks/aoa/review?act={act}&amp;contract={contract}"' in page
+    assert "data-submit-once" not in page  # the operator did not ask for it to run by itself
+
+    r = client.post(
+        f"/ui/checks/aoa/review?act={act}&contract={contract}&advance_amount=5",
+        headers=SAME_ORIGIN,
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    location = r.headers["location"]
+    query = parse_qs(urlsplit(location).query)
+    # back to the same report - what it was run with kept - with the review added
+    assert (query["act"], query["contract"], query["advance_amount"]) == ([act], [contract], ["5"])
+    [job] = query["review"]
+    assert _wait_for_job(client, job) == "done"
+
+    body = client.get(location).text
+    assert '<span class="badge model">მოდელის შეფასება</span>' in body
+    assert "მოდელის შეფასებით" in body
+    assert "data-poll-job" not in body  # done: nothing left to poll
+    assert re.search(rf'name="review" value="{job}"', _rerun_form(body))
+
+    again = client.post(
+        f"/ui/checks/aoa/review?act={act}&contract={contract}",
+        headers=SAME_ORIGIN,
+        follow_redirects=False,
+    )
+    assert parse_qs(urlsplit(again.headers["location"]).query)["review"] == [job]
+    assert len(llm.calls) == 1 and len(_review_jobs(act)) == 1
+
+    docx = client.get(f"/ui/checks/aoa/annotated.docx?{urlsplit(location).query}")
+    assert docx.status_code == 200
+    comments = zipfile.ZipFile(io.BytesIO(docx.content)).read("word/comments.xml").decode()
+    assert "მოდელის შეფასებით" in comments
+
+
+def test_a_running_review_polls_its_job(client: TestClient) -> None:
+    """The page promises to refresh itself; the card carries the job app.js polls."""
+    act, contract = _open_pair(client)
+    with session_scope() as s:
+        job = Job(document_id=act, owner="dev", kind="aoa_review", params={"contract": contract})
+        s.add(job)
+        s.flush()
+        job_id = job.id  # never submitted: it stays queued
+    body = client.get(f"/ui/checks/aoa?act={act}&contract={contract}&review={job_id}").text
+    assert f'data-poll-job="{job_id}"' in body
+    assert "/ui/checks/aoa/review?" not in body  # no second request while one runs
+
+
+def test_a_failed_review_is_not_queued_again(client: TestClient) -> None:
+    llm = ReadingLLM(error=RuntimeError("the model process died"))
+    _with_model(client, llm)
+    act, contract = _open_pair(client)
+    url = f"/ui/checks/aoa/review?act={act}&contract={contract}"
+    first = client.post(url, headers=SAME_ORIGIN, follow_redirects=False)
+    [job] = parse_qs(urlsplit(first.headers["location"]).query)["review"]
+    assert _wait_for_job(client, job) == "failed"
+
+    second = client.post(url, headers=SAME_ORIGIN, follow_redirects=False)
+    assert parse_qs(urlsplit(second.headers["location"]).query)["review"] == [job]
+    assert len(llm.calls) == 1 and len(_review_jobs(act)) == 1
+    body = client.get(second.headers["location"]).text
+    assert "მოდელით გადამოწმება ვერ დასრულდა" in body
+    assert "/ui/checks/aoa/review?" not in body
+
+
+def test_a_review_the_model_did_not_answer_does_not_say_it_answered(client: TestClient) -> None:
+    """A model that is down still ends the job - with a note, not a failure - and the card must
+    not contradict that note by claiming the model answered."""
+    from procurement_agent.llm.base import LLMUnavailableError
+
+    _with_model(client, ReadingLLM(error=LLMUnavailableError("down")))
+    act, contract = _open_pair(client)
+    r = client.post(
+        f"/ui/checks/aoa/review?act={act}&contract={contract}",
+        headers=SAME_ORIGIN,
+        follow_redirects=False,
+    )
+    [job] = parse_qs(urlsplit(r.headers["location"]).query)["review"]
+    assert _wait_for_job(client, job) == "done"
+    body = client.get(r.headers["location"]).text
+    assert "მოდელმა ვერ უპასუხა: LLMUnavailableError" in body  # the note says what happened
+    assert "მოდელით გადამოწმებამ არცერთი შენიშვნა არ მონიშნა" in body
+    assert "მოდელმა უპასუხა" not in body
+
+
+def test_the_review_is_not_offered_without_a_model(client: TestClient) -> None:
+    """No model configured: no card, and a crafted post queues nothing."""
+    _with_model(client, None)
+    act, contract = _open_pair(client)
+    assert (
+        "გადამოწმება მოდელით"
+        not in client.get(f"/ui/checks/aoa?act={act}&contract={contract}").text
+    )
+    r = client.post(f"/ui/checks/aoa/review?act={act}&contract={contract}", headers=SAME_ORIGIN)
+    assert r.status_code == 200 and "მოდელი არ არის დაკავშირებული" in r.text
+    assert _review_jobs(act) == []
+
+
+def test_the_review_disappears_when_the_operator_turns_it_off(tmp_path: Path) -> None:
+    for c in _make_ui_client(tmp_path, aoa_llm_enabled=False):
+        act, contract = _open_pair(c)
+        assert (
+            "გადამოწმება მოდელით" not in c.get(f"/ui/checks/aoa?act={act}&contract={contract}").text
+        )
+        r = c.post(f"/ui/checks/aoa/review?act={act}&contract={contract}", headers=SAME_ORIGIN)
+        assert "მოდელით გადამოწმება ამ სერვერზე გამორთულია" in r.text
+        assert _review_jobs(act) == []
+
+
+def test_a_correct_act_is_offered_no_review(client: TestClient) -> None:
+    from tests.unit.test_aoa_scope import ACT, CONTRACT
+
+    act, contract = _word(client, "act.docx", ACT), _word(client, "contract.docx", CONTRACT)
+    body = client.get(f"/ui/checks/aoa?act={act}&contract={contract}").text
+    assert "გადამოწმება მოდელით" not in body
+
+
+def _render_review_card(**review: object) -> str:
+    note = Finding(
+        rule_id="AOA.SERVICES", severity="info", message_ka="ka", message_en="en", needs_review=True
+    )
+    context = {**_NO_REVIEW, "can_review": True, "review_items": 2, **review}
+    return _env.get_template("check_aoa.html").render(
+        lang="ka",
+        t=lambda key, **kw: key,
+        msg=lambda f: f.message_ka,
+        why=lambda s: s.reason_ka,
+        current_path="/ui/",
+        user="dev",
+        contractor_types=("company",),
+        query="act=x&contract=y",
+        groups=[("info", [note])],
+        report=CheckReport(document_id="a" * 32, findings=[note]),
+        act=_stub_doc(),
+        contract=_stub_doc(),
+        contractor_type="company",
+        **context,
+    )
+
+
+@pytest.mark.parametrize(
+    ("review", "shown", "absent"),
+    [
+        ({}, ["aoa.review.lead", 'action="/ui/checks/aoa/review?act=x&amp;contract=y"'], []),
+        ({"review_auto": True}, ["data-submit-once"], ["data-poll-job"]),
+        (
+            {"review_job": "j1", "review_status": "running", "review_running": True},
+            ['data-poll-job="j1"', "aoa.review.running"],
+            ["/ui/checks/aoa/review?"],
+        ),
+        (
+            {
+                "review_job": "j1",
+                "review_status": "done",
+                "review_state": "current",
+                "review_marked": True,
+            },
+            ["aoa.review.done"],
+            ["/ui/checks/aoa/review?", "data-poll-job", "aoa.review.unused"],
+        ),
+        (
+            {"review_job": "j1", "review_status": "done", "review_state": "current"},
+            ["aoa.review.unused"],  # every answer refused: nothing on the notes to point at
+            ["aoa.review.done", "/ui/checks/aoa/review?"],
+        ),
+        (
+            {"review_job": "j1", "review_status": "failed"},
+            ["aoa.review.failed"],
+            ["/ui/checks/aoa/review?", "data-poll-job"],
+        ),
+        (
+            {
+                "review_job": "j1",
+                "review_status": "done",
+                "review_state": "stale",
+                "review_auto": True,
+            },
+            ["aoa.review.stale", "/ui/checks/aoa/review?"],
+            ["data-submit-once"],  # asked once already: never again by itself
+        ),
+        ({"can_review": False}, [], ["aoa.review.title"]),
+        ({"review_items": 0}, [], ["aoa.review.title"]),
+        (
+            {
+                "review_job": "j1",
+                "review_status": "done",
+                "review_state": "stale",
+                "review_items": 0,
+            },
+            [],
+            ["aoa.review.title"],  # not an empty card: there is nothing left to ask about
+        ),
+    ],
+    ids=[
+        "offer",
+        "auto",
+        "running",
+        "done",
+        "unused",
+        "failed",
+        "stale",
+        "off",
+        "nothing-open",
+        "stale-nothing-open",
+    ],
+)
+def test_the_review_card_in_each_state_renders_under_strict_undefined(
+    review: dict[str, object], shown: list[str], absent: list[str]
+) -> None:
+    html = _render_review_card(**review)
+    for text in shown:
+        assert text in html
+    for text in absent:
+        assert text not in html
+
+
+def test_a_note_the_model_read_carries_its_badge() -> None:
+    from procurement_agent.ui.i18n import t as translate
+
+    note = Finding(
+        rule_id="AOA.SUBJECT",
+        severity="warning",
+        message_ka="ka",
+        message_en="en",
+        needs_review=True,
+        reviewed_by="llm",
+    )
+    html = _env.get_template("_findings.html").module.finding_list(  # type: ignore[attr-defined]
+        [note], lambda key, **kw: translate(key, "ka"), lambda f: f.message_ka
+    )
+    assert '<span class="badge">გადასამოწმებელი</span>' in str(html)
+    assert '<span class="badge model">მოდელის შეფასება</span>' in str(html)
+
+
+@pytest.mark.parametrize("running", [True, False])
+def test_the_compare_explain_card_polls_its_running_job(running: bool) -> None:
+    """The comparison's card said it refreshes itself but carried nothing to poll."""
+    html = _env.get_template("check_compare.html").render(
+        lang="ka",
+        t=lambda key, **kw: key,
+        msg=lambda f: f.message_ka,
+        why=lambda s: s.reason_ka,
+        current_path="/ui/",
+        user="dev",
+        query="left=a&right=b",
+        report=ComparisonReport(left_document_id="a" * 32, right_document_id="b" * 32),
+        left=_stub_doc(),
+        right=_stub_doc(),
+        show="all",
+        blocks=[],
+        matters=[],
+        groups=[],
+        can_explain=True,
+        unexplained=1,
+        explain_job="j1" if running else None,
+        explain_running=running,
+        d={
+            "t": lambda key, **kw: key,
+            "hunks": {},
+            "delta_msg": lambda delta: "",
+            "explanation": lambda h: "",
+            "sev_of": lambda h: "info",
+            "can_explain": True,
+        },
+    )
+    assert ('data-poll-job="j1"' in html) is running
 
 
 # --- the BOQ report ------------------------------------------------------------------------

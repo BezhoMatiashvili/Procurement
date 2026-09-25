@@ -693,6 +693,39 @@ def test_amount_helpers_keep_their_outputs(
     assert amounts.word_amounts(text) == words
 
 
+@pytest.mark.parametrize(("text", "money", "words"), _AMOUNT_TEXTS)
+def test_money_hits_are_the_money_amounts_with_where_each_is_written(
+    text: str, money: list[float], words: list[tuple[int, str]]
+) -> None:
+    from procurement_agent.checks import amounts
+
+    hits = amounts.money_hits(text)
+    assert sorted(h.value for h in hits) == money
+    assert all(text[h.span[0] : h.span[1]] == h.raw and h.currency for h in hits)
+
+
+def test_money_hits_keep_the_currency_and_the_document_order_and_drop_penalties() -> None:
+    from procurement_agent.checks import amounts
+
+    text = "Price USD 20.00; ღირებულება 1 000 ლარი; პირგასამტეხლო 50 ლარი."
+    assert [(h.value, h.currency) for h in amounts.money_hits(text)] == [
+        (20.0, "USD"),
+        (1000.0, "GEL"),
+    ]
+
+
+def test_the_checks_read_every_chunks_verbatim_body_in_order() -> None:
+    from procurement_agent.extraction.pipeline import chunks_text
+    from procurement_agent.extraction.schemas import Provenance
+    from procurement_agent.ingestion.chunker import Chunk
+
+    chunks = [
+        Chunk(id="d:0", text="სათაური\nპირველი", body="პირველი", provenance=Provenance()),
+        Chunk(id="d:1", text="მხოლოდ ტექსტი", body="", provenance=Provenance()),
+    ]
+    assert chunks_text(chunks) == "პირველი\nმხოლოდ ტექსტი"
+
+
 def test_aoa_amount_words_rule_keeps_its_outputs() -> None:
     from procurement_agent.checks.aoa import check_aoa
 

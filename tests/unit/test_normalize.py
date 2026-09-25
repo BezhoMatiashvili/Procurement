@@ -7,6 +7,7 @@ import pytest
 from procurement_agent.extraction.normalize import (
     amounts_equal,
     close_enough,
+    content_stems,
     edit_distance,
     iban_is_valid,
     names_match,
@@ -14,6 +15,7 @@ from procurement_agent.extraction.normalize import (
     normalize_name,
     parse_georgian_number_words,
     parse_number,
+    stems_match,
     strip_quotes,
 )
 
@@ -143,3 +145,42 @@ def test_edit_distance_gives_up_past_the_cap() -> None:
 def test_close_enough_is_stricter_for_short_words() -> None:
     assert close_enough("აგვისტო", "აგისტო")
     assert not close_enough("ორი", "სამი")
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ("სერვისის გვერდების აღწერით", "სერვისის გვერდის აღწერა"),
+        ("საძიებო სისტემებში", "საძიებო სისტემების"),
+        ("დიზაინისა და შემუშავებისთვის", "დიზაინის შემუშავებიდან"),
+    ],
+)
+def test_content_stems_fold_case_endings_postpositions_and_the_plural(a: str, b: str) -> None:
+    """Two forms of the same words come to stems that match one for one."""
+    left, right = content_stems(a), content_stems(b)
+    assert len(left) == len(right)
+    assert all(stems_match(x, y) for x, y in zip(left, right, strict=True))
+
+
+def test_content_stems_drop_function_words_numbers_and_repeats() -> None:
+    assert content_stems("4 გვერდი და მისი აღწერა, გვერდის აღწერა of the page") == (
+        "გვერდ",
+        "აღწერა",
+        "page",
+    )
+
+
+@pytest.mark.parametrize(
+    ("a", "b", "same"),
+    [
+        ("სისტემ", "სისტემა", True),  # the nominative keeps its vowel
+        ("რესტორნ", "რესტორან", True),  # the vowel some forms drop
+        ("ოპტიმიზაც", "ოპტიმიზაცია", True),
+        ("ფას", "ფასდაკლება", False),  # three letters start too many words
+        ("ლოგო", "გვერდ", False),
+        ("კლუბ", "კლუნ", False),  # one letter apart, but short words are too close to call
+    ],
+)
+def test_stems_match(a: str, b: str, same: bool) -> None:
+    assert stems_match(a, b) is same
+    assert stems_match(b, a) is same

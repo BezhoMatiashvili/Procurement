@@ -26,6 +26,7 @@ from docling_core.types.doc.document import DoclingDocument
 from docling_core.types.doc.items.text import TextItem
 from docling_core.types.doc.labels import DocItemLabel
 
+from procurement_agent.extraction.normalize import normalize_spaces
 from procurement_agent.extraction.schemas import Provenance
 from procurement_agent.tokens import estimate_tokens
 
@@ -119,22 +120,25 @@ def chunk_docling_document(
         serializer_provider=AllLabelsSerializerProvider(),
     )
     chunks: list[Chunk] = []
-    covered: set[str] = set()
+    #: every item a chunk lists, with the text of each chunk that lists it
+    cover: dict[str, list[str]] = {}
     for dc in chunker.chunk(doc):
         meta = dc.meta
         if not isinstance(meta, DocMeta):  # pragma: no cover - HybridChunker always yields DocMeta
             raise TypeError("unexpected chunk metadata")
-        covered.update(item.self_ref for item in meta.doc_items)
+        for listed in meta.doc_items:
+            cover.setdefault(listed.self_ref, []).append(dc.text)
         contextual = chunker.contextualize(dc)
         _append(chunks, doc, doc_id, contextual, dc.text, meta.doc_items, list(meta.headings or []))
 
     # Safety net: Docling's serializer silently drops some items (e.g. text the layout model
-    # labelled as a footnote). Anything with text that no chunk covers is emitted on its own, so
-    # that no part of the document can escape extraction.
+    # labelled as a footnote). Anything with text that no chunk carries is emitted on its own,
+    # so that no part of the document can escape extraction.
     orphans: list[TextItem] = []
     for item, _ in doc.iterate_items(included_content_layers=_ALL_LAYERS):
-        if isinstance(item, TextItem) and item.self_ref not in covered and item.text.strip():
+        if isinstance(item, TextItem) and item.self_ref not in cover and item.text.strip():
             orphans.append(item)
+    orphans = _not_yet_carried(doc, orphans, cover)
     if orphans:
         batch: list[TextItem] = []
         for item in orphans:
@@ -144,6 +148,68 @@ def chunk_docling_document(
             batch.append(item)
         _flush_orphans(chunks, doc, doc_id, batch)
     return chunks
+
+
+def _not_yet_carried(
+    doc: DoclingDocument, orphans: list[TextItem], cover: dict[str, list[str]]
+) -> list[TextItem]:
+    """The orphans whose text no chunk carries yet.
+
+    Docling's DOCX backend nests a table's content as paragraphs under the table, and a chunk
+    lists only the table itself. Every such paragraph therefore looked orphaned although the
+    table's serialised text already held it: on the client's acts 33 of the 39 orphans were
+    copies, 29% of the text, and each mistake in them was reported twice.
+
+    The unit of the test is the cell group directly under the nearest ancestor a chunk lists -
+    never a single paragraph. The serializer drops a table's header corner cell, and that cell
+    can mix a line repeated elsewhere (a company name) with one that is not (its director).
+    Filtered paragraph by paragraph, the company line went, and the director was read as the
+    signatory of whichever company came before it. So a group is dropped whole when its text
+    is inside the covering chunks' text, and kept whole otherwise. An orphan with no covered
+    ancestor has nothing to be a copy of and is always kept.
+    """
+    kept: list[TextItem] = []
+    carried: dict[str, bool] = {}
+    # each covered ancestor's text, normalised once: a table has a group per cell, and joining
+    # its chunks again for every cell made a long table quadratic
+    covering: dict[str, str] = {}
+    for item in orphans:
+        group, anchor = _cell_group(doc, item, cover)
+        if anchor is None:
+            kept.append(item)
+            continue
+        if group.self_ref not in carried:
+            text = normalize_spaces(
+                " ".join(
+                    t.text
+                    for t, _ in doc.iterate_items(root=group, included_content_layers=_ALL_LAYERS)
+                    if isinstance(t, TextItem)
+                )
+            )
+            if anchor not in covering:
+                covering[anchor] = normalize_spaces(" ".join(cover[anchor]))
+            # an empty group is contained in anything: never let that count as a copy
+            carried[group.self_ref] = bool(text) and text in covering[anchor]
+        if not carried[group.self_ref]:
+            kept.append(item)
+    return kept
+
+
+def _cell_group(
+    doc: DoclingDocument, item: TextItem, cover: dict[str, list[str]]
+) -> tuple[Any, str | None]:
+    """(the node directly under ``item``'s nearest covered ancestor, that ancestor's ref).
+
+    The ref is None when no ancestor is covered; the node is then the topmost one reached.
+    """
+    child: Any = item
+    parent = item.parent
+    while parent is not None:
+        node = parent.resolve(doc)
+        if node.self_ref in cover:
+            return child, node.self_ref
+        child, parent = node, node.parent
+    return child, None
 
 
 def _flush_orphans(

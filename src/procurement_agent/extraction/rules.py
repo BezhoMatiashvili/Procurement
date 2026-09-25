@@ -9,7 +9,7 @@ ambiguous stays generic (``amount``/``date``/...) and is left for the LLM to ref
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Hashable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date
 
@@ -41,13 +41,28 @@ _EN_MONTH_RE = (
     r"sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
 )
 
-_CURRENCY_ALIASES = {
-    "₾": "GEL", "gel": "GEL", "ლარი": "GEL", "ლარის": "GEL", "ლარს": "GEL", "ლარ": "GEL",
-    "$": "USD", "usd": "USD", "დოლარი": "USD", "დოლარის": "USD", "დოლარ": "USD",
-    "€": "EUR", "eur": "EUR", "ევრო": "EUR", "ევროს": "EUR",
-    "£": "GBP", "gbp": "GBP",
-}  # fmt: skip
-_CUR_RE = r"₾|\$|€|£|GEL|USD|EUR|GBP|ლარ(?:ი|ის|ს)?|დოლარ(?:ი|ის)?|ევრო(?:ს)?"
+#: A currency as the documents write it after an amount: the code or sign, or the name in the
+#: case the sentence needs - "აშშ დოლარს" (dative) is how a Georgian act states a dollar fee.
+#: Sterling only as "pound sterling": "100 pounds" is a weight as often as it is money.
+_CUR_RE = (
+    r"₾|\$|€|£|GEL|USD|EUR|GBP|ლარ(?:ი|ის|ს)?"
+    r"|(?:აშშ\s*|ა\.შ\.შ\.\s*)?დოლარ(?:ი|ის|ს|ით|ად)?"
+    r"|ევრო(?:ს|თი|დ)?"
+    r"|(?:გირვანქა|ფუნტი?)\s*სტერლინგ(?:ი|ის|ს|ით|ად)?"
+    r"|(?:US\s*|U\.S\.\s*)?dollars?|euros?|pounds?\s+sterling"
+)
+#: A currency written *before* an amount: a code or a sign only. A name there is the end of a
+#: sentence about something else - "... აშშ დოლარს 2026 წლის" read as 2,026 lari, because the
+#: name pattern found "ლარს" inside "დოლარს" - never "ლარი 100".
+_CUR_BEFORE_RE = r"(?<![A-Za-z])(?:GEL|USD|EUR|GBP)|₾|\$|€|£"
+#: What each currency is called, tested in this order: dollars before lari, because "დოლარ"
+#: (dollar) contains "ლარ" (lari).
+_CURRENCY_NAMES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("USD", re.compile(r"\$|usd|დოლარ|dollar", re.IGNORECASE)),
+    ("EUR", re.compile(r"€|eur|ევრო", re.IGNORECASE)),
+    ("GBP", re.compile(r"£|gbp|სტერლინგ|sterling", re.IGNORECASE)),
+    ("GEL", re.compile(r"₾|gel|ლარ", re.IGNORECASE)),
+)
 _NUM_RE = r"\d{1,3}(?:[ \u00a0,.]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?"
 
 # context windows (chars) used to classify generic hits
@@ -136,13 +151,18 @@ def keyword_in(text: str, kw: str) -> bool:
 _AFTER_PENALTY = 20  # keywords that follow a value are weaker evidence than those preceding it
 
 
-def _classify(text: str, start: int, end: int, candidates: tuple[FactType, ...]) -> FactType | None:
-    """Pick the candidate whose keyword sits closest to the hit *within the same sentence*.
+def nearest_keyword_group[K: Hashable](
+    text: str, start: int, end: int, groups: Mapping[K, Iterable[str]]
+) -> K | None:
+    """The group whose keyword sits closest to ``text[start:end]`` *within the same sentence*.
 
     At the same distance the longer keyword wins, because Georgian builds words with prefixes
     and stems therefore nest: "ფას" (price) matches two characters inside "საფასურ" (fee), and
     without this the fee in an acceptance act is labelled a unit price. Remaining ties are
-    resolved by candidate order, so callers list the more specific type first.
+    resolved by group order, so callers list the more specific group first.
+
+    Shared by the fact classifier below and by the checks that give an amount its role in a
+    contract (price, advance, penalty ...), so both weigh the same evidence the same way.
     """
     pre = text[max(0, start - _CTX) : start].lower()
     post = text[end : min(len(text), end + _CTX)].lower()
@@ -154,22 +174,28 @@ def _classify(text: str, start: int, end: int, candidates: tuple[FactType, ...])
     if m:
         post = post[: m.start()]
 
-    best: tuple[int, int, FactType] | None = None
-    for ft in candidates:
-        for kw in KEYWORDS.get(ft, ()):
+    best: tuple[int, int, K] | None = None
+    for group, keywords in groups.items():
+        for kw in keywords:
             pat = keyword_pattern(kw)
             pre_matches = list(pat.finditer(pre))
             if pre_matches:
                 dist = len(pre) - pre_matches[-1].end()
                 # sort key: nearer first, then longer keyword
                 if best is None or (dist, -len(kw)) < (best[0], -best[1]):
-                    best = (dist, len(kw), ft)
+                    best = (dist, len(kw), group)
             m_post = pat.search(post)
             if m_post:
                 dist = m_post.start() + _AFTER_PENALTY
                 if best is None or (dist, -len(kw)) < (best[0], -best[1]):
-                    best = (dist, len(kw), ft)
+                    best = (dist, len(kw), group)
     return best[2] if best else None
+
+
+def _classify(text: str, start: int, end: int, candidates: tuple[FactType, ...]) -> FactType | None:
+    """Pick the candidate type whose keyword sits closest to the hit (``nearest_keyword_group``
+    over ``KEYWORDS``). Callers list the more specific type first: it wins a tie."""
+    return nearest_keyword_group(text, start, end, {ft: KEYWORDS.get(ft, ()) for ft in candidates})
 
 
 def parse_number(s: str) -> float | None:
@@ -183,7 +209,8 @@ def parse_number(s: str) -> float | None:
 
 
 def _norm_currency(raw: str) -> str | None:
-    return _CURRENCY_ALIASES.get(raw.strip().lower()) or _CURRENCY_ALIASES.get(raw.strip())
+    """The ISO code of a currency as written: "აშშ დოლარს" is USD, "ლარს" GEL."""
+    return next((code for code, name in _CURRENCY_NAMES if name.search(raw)), None)
 
 
 # --- amounts -----------------------------------------------------------------------------------
@@ -193,7 +220,7 @@ _PAREN = r"(?:\([^()]{0,160}\)\s*)?"
 _AMOUNT_AFTER = re.compile(
     rf"(?<![\d.,])({_NUM_RE})\s*{_PAREN}({_CUR_RE})(?![A-Za-zა-ჰ])", re.IGNORECASE
 )
-_AMOUNT_BEFORE = re.compile(rf"({_CUR_RE})\s*({_NUM_RE})(?![\d])", re.IGNORECASE)
+_AMOUNT_BEFORE = re.compile(rf"({_CUR_BEFORE_RE})\s*({_NUM_RE})(?![\d])", re.IGNORECASE)
 
 # A number whose only separators are spaces and which has no decimal part: "5 100". Written
 # after a quantity keyword it is far more likely a count followed by a price ("რაოდენობა 5
@@ -304,6 +331,82 @@ def month_ka_is_misspelled(s: str) -> bool:
     if any(s.startswith(k) for k in _KA_MONTHS):
         return False
     return _month_ka(s) is not None
+
+
+#: The case forms a month takes in a date: nominative, genitive, dative, and the "-დან",
+#: "-მდე", "-ში" and "-ით" forms (August's genitive and dative are the same word). A misspelled
+#: month is corrected to the nearest of these, so the correction keeps the case the act used.
+_KA_MONTH_FORMS: dict[int, tuple[str, ...]] = {
+    1: ("იანვარი", "იანვრის", "იანვარს", "იანვრიდან", "იანვრამდე", "იანვარში", "იანვრით"),
+    2: (
+        "თებერვალი",
+        "თებერვლის",
+        "თებერვალს",
+        "თებერვლიდან",
+        "თებერვლამდე",
+        "თებერვალში",
+        "თებერვლით",
+    ),
+    3: ("მარტი", "მარტის", "მარტს", "მარტიდან", "მარტამდე", "მარტში", "მარტით"),
+    4: ("აპრილი", "აპრილის", "აპრილს", "აპრილიდან", "აპრილამდე", "აპრილში", "აპრილით"),
+    5: ("მაისი", "მაისის", "მაისს", "მაისიდან", "მაისამდე", "მაისში", "მაისით"),
+    6: ("ივნისი", "ივნისის", "ივნისს", "ივნისიდან", "ივნისამდე", "ივნისში", "ივნისით"),
+    7: ("ივლისი", "ივლისის", "ივლისს", "ივლისიდან", "ივლისამდე", "ივლისში", "ივლისით"),
+    8: ("აგვისტო", "აგვისტოს", "აგვისტოდან", "აგვისტომდე", "აგვისტოში", "აგვისტოთი"),
+    9: (
+        "სექტემბერი",
+        "სექტემბრის",
+        "სექტემბერს",
+        "სექტემბრიდან",
+        "სექტემბრამდე",
+        "სექტემბერში",
+        "სექტემბრით",
+    ),
+    10: (
+        "ოქტომბერი",
+        "ოქტომბრის",
+        "ოქტომბერს",
+        "ოქტომბრიდან",
+        "ოქტომბრამდე",
+        "ოქტომბერში",
+        "ოქტომბრით",
+    ),
+    11: ("ნოემბერი", "ნოემბრის", "ნოემბერს", "ნოემბრიდან", "ნოემბრამდე", "ნოემბერში", "ნოემბრით"),
+    12: (
+        "დეკემბერი",
+        "დეკემბრის",
+        "დეკემბერს",
+        "დეკემბრიდან",
+        "დეკემბრამდე",
+        "დეკემბერში",
+        "დეკემბრით",
+    ),
+}
+
+
+#: How far a misspelled month may lie from the form it is corrected to. A typo in the stem and
+#: one in the ending are two edits ("აგვუისტას" / "აგვისტოს"). A word further away carries an
+#: ending the forms do not list, "-სთვის" or "-ვე", and its nearest form says something else:
+#: "აგისტოსთვის" is nearest to "აგვისტოთი", another case.
+_MONTH_CORRECTION_DISTANCE = 2
+
+
+def month_ka_correction(word: str) -> str | None:
+    """How a misspelled Georgian month should be written: its case form nearest to ``word``.
+
+    "აგვუისტას" becomes "აგვისტოს" and "აპრლიდან" "აპრილიდან". None when the word is not a
+    month at all, and when even the nearest form is more than two edits away: a wrong
+    correction is worse than none. A tie goes to the form listed first.
+    """
+    month = _month_ka(word)
+    if month is None:
+        return None
+    low = word.lower()
+    forms = _KA_MONTH_FORMS[month]
+    # an uncapped distance: capped, every far form would tie at cap + 1
+    distance = {f: edit_distance(low, f, cap=max(len(low), len(f))) for f in forms}
+    best = min(forms, key=distance.__getitem__)
+    return best if distance[best] <= _MONTH_CORRECTION_DISTANCE else None
 
 
 def _month_en(s: str) -> int | None:
@@ -536,7 +639,13 @@ def find_contract_numbers(text: str) -> list[RuleHit]:
 _IBAN_GE = re.compile(r"\bGE\d{2}[ \u00a0]?[A-Z]{2}\d{2}(?:[ \u00a0]?\d{4}){3}[ \u00a0]?\d{2}\b")
 _SWIFT = re.compile(r"\b[A-Z]{4}GE[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b")
 _SPACE_CHARS = re.compile(r"[ \u00a0]")
-_CADASTRAL = re.compile(r"(?<![\d.])\d{2}\.\d{2}\.\d{2}\.\d{3}(?:\.\d{3})?(?![\d.])")
+#: A cadastral code: the parcel, "01.02.03.456", and a building or unit under it written with up
+#: to three more groups ("01.19.21.004.024.01.513"). The full stop that ends a sentence may
+#: follow it ("კოდი: 01.02.03.456."); more digits, or a dot and more digits, may not. Shared
+#: with the anchors, so an act's code and a fact's code are read by one pattern.
+CADASTRAL_RE = re.compile(
+    r"(?<![\d.])\d{2}\.\d{2}\.\d{2}\.\d{3}(?:\.\d{3}(?:\.\d{2}(?:\.\d{3})?)?)?(?!\d|\.\d)"
+)
 
 
 def find_bank_accounts(text: str) -> list[RuleHit]:
@@ -594,7 +703,7 @@ def find_cadastral_codes(text: str) -> list[RuleHit]:
             normalized=m.group(0),
             confidence=0.85,
         )
-        for m in _CADASTRAL.finditer(text)
+        for m in CADASTRAL_RE.finditer(text)
     ]
 
 
@@ -673,7 +782,7 @@ def normalize_fact_value(ft: FactType, value: str) -> str | float | None:
             return compact
         return None
     if ft == FactType.cadastral_code:
-        m = _CADASTRAL.search(v)
+        m = CADASTRAL_RE.search(v)
         return m.group(0) if m else None
     if ft == FactType.contract_number:
         m = _REFERENCE_TOKEN.fullmatch(_LEADING_MARKER.sub("", v))

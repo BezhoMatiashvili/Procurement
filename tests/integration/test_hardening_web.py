@@ -208,6 +208,52 @@ def test_deleting_the_left_document_during_an_explain_leaves_nothing(
     assert not (_settings_of(client).results_dir / right / "jobs" / f"{job_id}.json").exists()
 
 
+def test_deleting_the_contract_during_a_review_leaves_nothing(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The review hangs off the act, so deleting the contract does not cancel it on its own;
+    settling re-checks both documents, and the stored answers go."""
+    from procurement_agent.checks.aoa_llm import ScopeReviewSet
+
+    act, contract = _ready_doc(client), _ready_doc(client, _xlsx(total=700))
+    job_id = _job_row(act, "aoa_review", {"contract": contract, "digest": "d"})
+
+    def review(*_: Any, **kwargs: Any) -> ScopeReviewSet:
+        assert client.delete(f"/api/v1/documents/{contract}", headers=H).status_code == 204
+        return ScopeReviewSet(
+            model="stub",
+            aoa_document_id=kwargs["aoa_document_id"],
+            contract_document_id=kwargs["contract_document_id"],
+            digest="d",
+        )
+
+    monkeypatch.setattr(worker_mod, "request_review", review)
+    _worker(client)._process(job_id)
+    assert _job_status(job_id) == JobStatus.cancelled
+    assert not (_settings_of(client).results_dir / act / "jobs" / f"{job_id}.json").exists()
+
+
+def test_a_review_whose_contract_is_gone_is_cancelled_before_the_model(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    act, contract = _ready_doc(client), _ready_doc(client, _xlsx(total=700))
+    job_id = _job_row(act, "aoa_review", {"contract": contract, "digest": "d"})
+    assert client.delete(f"/api/v1/documents/{contract}", headers=H).status_code == 204
+
+    def never(*_: Any, **__: Any) -> Any:  # pragma: no cover - the point is it is not called
+        raise AssertionError("the model was asked about a deleted contract")
+
+    monkeypatch.setattr(worker_mod, "request_review", never)
+    _worker(client)._process(job_id)
+    assert _job_status(job_id) == JobStatus.cancelled
+
+
+def test_a_review_job_without_its_contract_fails_plainly(client: TestClient) -> None:
+    job_id = _job_row(_ready_doc(client), "aoa_review", {})
+    _worker(client)._process(job_id)
+    assert _job_status(job_id) == JobStatus.failed
+
+
 def test_finishing_never_overwrites_a_cancelled_job(client: TestClient) -> None:
     doc_id = _ready_doc(client)
     job_id = _job_row(doc_id, "extract")
@@ -861,6 +907,63 @@ def test_the_compare_job_parameter_must_be_the_callers_explain_run(
             s, Principal("dev", None), job_id or real, s.get(Document, left), s.get(Document, right)
         )
         assert (found is not None) == expected
+
+
+def _act_with_review(owner: str, *, kind: str = "aoa_review") -> tuple[str, str, str]:
+    """An act, its contract and a review job over the pair, all written straight to the DB."""
+    with session_scope() as s:
+        docs = [
+            Document(owner="dev", display_name=n, kind="docx", size_bytes=1, sha256="0" * 64)
+            for n in ("act.docx", "contract.docx")
+        ]
+        s.add_all(docs)
+        s.flush()
+        job = Job(document_id=docs[0].id, owner=owner, kind=kind, params={"contract": docs[1].id})
+        s.add(job)
+        s.flush()
+        return docs[0].id, docs[1].id, job.id
+
+
+@pytest.mark.parametrize(
+    ("owner", "kind", "job_id", "expected"),
+    [
+        ("dev", "aoa_review", None, True),
+        ("mallory", "aoa_review", None, False),  # someone else's review
+        ("dev", "compare_explain", None, False),  # a job of another kind
+        ("dev", "aoa_review", "../../x/jobs/y", False),  # a path, not an id
+        ("dev", "aoa_review", "a" * 65, False),
+        ("dev", "aoa_review", "", False),
+    ],
+)
+def test_the_act_review_parameter_must_be_the_callers_review(
+    client: TestClient, owner: str, kind: str, job_id: str | None, expected: bool
+) -> None:
+    from procurement_agent.api.checks import owned_review_job
+    from procurement_agent.security.auth import Principal
+
+    act, contract, real = _act_with_review(owner, kind=kind)
+    with session_scope() as s:
+        found = owned_review_job(
+            s,
+            Principal("dev", None),
+            real if job_id is None else job_id,
+            s.get(Document, act),
+            s.get(Document, contract),
+        )
+        assert (found is not None) == expected
+
+
+def test_a_review_of_another_pair_or_of_no_contract_is_ignored(client: TestClient) -> None:
+    from procurement_agent.api.checks import owned_review_job
+    from procurement_agent.security.auth import Principal
+
+    act, _, job = _act_with_review("dev")
+    _, other_contract, _ = _act_with_review("dev")
+    with session_scope() as s:
+        principal, doc = Principal("dev", None), s.get(Document, act)
+        assert doc is not None
+        assert owned_review_job(s, principal, job, doc, s.get(Document, other_contract)) is None
+        assert owned_review_job(s, principal, job, doc, None) is None
 
 
 def test_an_explain_run_for_another_pair_is_ignored(client: TestClient) -> None:

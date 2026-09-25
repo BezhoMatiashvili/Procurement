@@ -12,14 +12,16 @@ import re
 from dataclasses import dataclass
 
 from procurement_agent.extraction.normalize import parse_georgian_number_words, parse_number
-from procurement_agent.extraction.rules import run_rules
+from procurement_agent.extraction.rules import find_amounts
 from procurement_agent.extraction.schemas import FactType
 
 __all__ = [
     "NUM_IN_TEXT",
     "DigitsAndWords",
+    "Money",
     "digits_and_words",
     "money_amounts",
+    "money_hits",
     "number_of",
     "word_amounts",
 ]
@@ -55,20 +57,39 @@ def number_of(value: str, normalized: str | float | None = None) -> float | None
     return parse_number(found.group()) if found else None
 
 
-def money_amounts(text: str) -> set[float]:
-    """Monetary amounts only.
+@dataclass(frozen=True, slots=True)
+class Money:
+    """One monetary amount as the document writes it: "100 (ასი) ლარს" is 100.0 GEL."""
+
+    value: float
+    currency: str
+    #: where it is written, for a finding's anchor
+    span: tuple[int, int]
+    raw: str
+
+
+def money_hits(text: str, *, penalties: bool = False) -> list[Money]:
+    """Monetary amounts only, in document order, each with its currency and where it is written.
 
     A currency is required: without it the penalty clauses ("50%", "0.5% per day") come back as
-    amounts and a fee comparison reports them as candidate contract values.
+    amounts and a fee comparison reports them as candidate contract values. An amount the rules
+    classify as a penalty is left out for the same reason - unless ``penalties`` asks for it: a
+    check that gives every amount its own role (``contract_terms.amount_roles``) names a
+    penalty instead of losing it.
     """
-    out: set[float] = set()
-    for h in run_rules(text):
-        if h.type not in _MONEY_TYPES or not h.currency:
+    out: list[Money] = []
+    for h in sorted(find_amounts(text), key=lambda h: (h.start, h.end)):
+        if not h.currency or (h.type not in _MONEY_TYPES and not penalties):
             continue
         n = number_of(h.value, h.normalized if isinstance(h.normalized, float) else None)
         if n is not None:
-            out.add(n)
+            out.append(Money(value=n, currency=h.currency, span=(h.start, h.end), raw=h.raw_text))
     return out
+
+
+def money_amounts(text: str) -> set[float]:
+    """The values of ``money_hits``, which is what the document comparison compares."""
+    return {m.value for m in money_hits(text)}
 
 
 def word_amounts(text: str) -> list[tuple[int, str]]:

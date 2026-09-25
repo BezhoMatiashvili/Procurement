@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -59,6 +59,21 @@ def load_chunks(
         return sheet_chunks(read_workbook(data, notes=notes), doc_id=doc_id)
     doc = load_document(result_dir(settings, doc_id) / "docling.json")
     return chunk_docling_document(doc, doc_id=doc_id)
+
+
+def chunks_text(chunks: Sequence[Chunk]) -> str:
+    """The text a document check reads: every chunk's verbatim body, in document order."""
+    return "\n".join(c.body or c.text for c in chunks)
+
+
+def load_document_text(settings: Settings, doc_id: str, kind: str) -> str:
+    """The stored document as the checks read it.
+
+    Plain, with no HTTP in it, so a background job can read a document exactly as the API does;
+    the evaluation joins its own cached chunks with ``chunks_text``, the same join. The caller
+    checks that the document is ready (the API answers 409 when it is not).
+    """
+    return chunks_text(load_chunks(settings, doc_id, kind))
 
 
 def load_segments(

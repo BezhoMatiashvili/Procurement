@@ -351,6 +351,11 @@
       if (ids.contract) params.set("contract", ids.contract[0]);
       var type = form.querySelector("[name=contractor_type]");
       if (type && type.value) params.set("contractor_type", type.value);
+      // the advance for a foreign-currency act (rule 9); left blank, the report reads the act's
+      ["advance_amount", "advance_date"].forEach(function (name) {
+        var field = form.querySelector("[name=" + name + "]");
+        if (field && field.value.trim()) params.set(name, field.value.trim());
+      });
       return nextBase + "?" + params.toString();
     }
     if (flow === "compare") {

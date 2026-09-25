@@ -49,6 +49,14 @@ STRINGS: dict[str, tuple[str, str]] = {
         "The model pass is disabled on this server.",
         "მოდელით ახსნა ამ სერვერზე გამორთულია.",
     ),
+    "error.review_disabled": (
+        "The model review is disabled on this server.",
+        "მოდელით გადამოწმება ამ სერვერზე გამორთულია.",
+    ),
+    "error.review_unavailable": (
+        "No model is connected on this server, so the review cannot run.",
+        "ამ სერვერზე მოდელი არ არის დაკავშირებული, ამიტომ გადამოწმება ვერ შესრულდება.",
+    ),
     # --- picker ---
     "picker.title": ("What do you want to do?", "რისი გაკეთება გსურთ?"),
     "picker.lead": (
@@ -82,8 +90,10 @@ STRINGS: dict[str, tuple[str, str]] = {
     ),
     "upload.contract": ("Contract", "ხელშეკრულება"),
     "upload.contract.hint": (
-        "Without it, six cross-document rules cannot run and are reported as skipped.",
-        "მის გარეშე ექვსი შემოწმება ვერ შესრულდება და მოინიშნება როგორც გამოტოვებული.",
+        "Without it, the rules that compare the act with its contract cannot run and are "
+        "reported as skipped.",
+        "მის გარეშე აქტის ხელშეკრულებასთან შედარების წესები ვერ შესრულდება და მოინიშნება "
+        "როგორც გამოტოვებული.",
     ),
     "upload.template": ("Empty BOQ template", "ცარიელი BOQ შაბლონი"),
     "upload.template.hint": (
@@ -104,11 +114,22 @@ STRINGS: dict[str, tuple[str, str]] = {
     "upload.contractor_type": ("Contractor type", "შემსრულებლის ტიპი"),
     "upload.contractor_type.hint": (
         "Nothing in the act states this. Leave it unset and the NET/VAT wording rule is "
-        "reported as skipped rather than guessed.",
+        "reported as skipped rather than guessed. A small business or a foreign organisation "
+        "also needs no invoice calculation for an act in a foreign currency.",
         "აქტში ეს არ წერია. თუ არ მიუთითებთ, NET/დღგ-ს ფორმულირების წესი მოინიშნება როგორც "
-        "გამოტოვებული და არ გამოიცნობა.",
+        "გამოტოვებული და არ გამოიცნობა. მცირე მეწარმესა და უცხოურ ორგანიზაციას "
+        "უცხოურვალუტიანი აქტისთვის ანგარიშფაქტურის გამოთვლაც არ სჭირდება.",
     ),
     "upload.contractor_type.unset": ("not stated", "არ არის მითითებული"),
+    "upload.advance": ("Advance paid", "გადახდილი ავანსი"),
+    "upload.advance.amount": ("Advance amount", "ავანსის თანხა"),
+    "upload.advance.date": ("Advance payment date", "ავანსის ჩარიცხვის თარიღი"),
+    "upload.advance.hint": (
+        "For an act in a foreign currency only, in the act's currency. Left blank, an advance "
+        "the act states is used; 0 means none was paid.",
+        "მხოლოდ უცხოურვალუტიანი აქტისთვის, აქტის ვალუტაში. თუ ცარიელს დატოვებთ, გამოიყენება "
+        "აქტში მითითებული ავანსი; 0 ნიშნავს, რომ ავანსი არ გადახდილა.",
+    ),
     "upload.start": ("Upload and check", "ატვირთვა და შემოწმება"),
     "upload.start.boq": ("Upload and compare", "ატვირთვა და შედარება"),
     "upload.status.waiting": ("waiting", "რიგში"),
@@ -137,6 +158,10 @@ STRINGS: dict[str, tuple[str, str]] = {
     "report.actual": ("In the document", "დოკუმენტში"),
     "report.rule": ("Rule", "წესი"),
     "report.message": ("Finding", "დასკვნა"),
+    # a note the rules could not decide either way; a person reads it (Finding.needs_review)
+    "report.needs_review": ("Needs review", "გადასამოწმებელი"),
+    # ... and the model review's reading of it is on the note (Finding.reviewed_by)
+    "report.reviewed_by": ("Model's reading", "მოდელის შეფასება"),
     "report.skipped.title": ("Could not run, and why", "ვერ შესრულდა და რატომ"),
     "report.skipped.lead": (
         "These rules did not run. They are not passes.",
@@ -161,7 +186,25 @@ STRINGS: dict[str, tuple[str, str]] = {
         "Word comments can only be attached to a .docx act; this one is a {kind}.",
         "შენიშვნების ჩაწერა შესაძლებელია მხოლოდ .docx აქტში; ეს ფაილი არის {kind}.",
     ),
-    "aoa.rerun": ("Re-run with this contractor type", "ხელახლა შემოწმება ამ ტიპით"),
+    "aoa.rerun": ("Re-run with these details", "ხელახლა შემოწმება ამ მონაცემებით"),
+    "aoa.rerun.choose": ("Choose the contractor type", "აირჩიეთ შემსრულებლის ტიპი"),
+    "aoa.currency": ("Currency", "ვალუტა"),
+    "aoa.advance.auto.act": (
+        "The advance was read from the act — confirm or correct it.",
+        "ავანსი ამოღებულია აქტიდან — დაადასტურეთ ან შეასწორეთ.",
+    ),
+    "aoa.not_applicable": (
+        "Not applicable to this contractor type: {rules}.",
+        "ამ ტიპის შემსრულებელზე არ ვრცელდება: {rules}.",
+    ),
+    "aoa.not_applicable.tax": (
+        "the NET/VAT wording rules (5-8)",
+        "NET/დღგ-ს ფორმულირების წესები (5-8)",
+    ),
+    "aoa.not_applicable.fx": (
+        "the foreign-currency invoice rule (9)",
+        "უცხოური ვალუტის ანგარიშ-ფაქტურის წესი (9)",
+    ),
     # --- BOQ report ---
     "boq.title": ("BOQ comparison", "BOQ-ების შედარება"),
     "boq.template": ("Template", "შაბლონი"),
@@ -443,8 +486,13 @@ STRINGS: dict[str, tuple[str, str]] = {
     ),
     "aoa.again": ("Check another act", "სხვა აქტის შემოწმება"),
     "aoa.rerun.lead": (
-        "Tell us the contractor type and the NET/VAT wording rule runs too.",
-        "მიუთითეთ შემსრულებლის ტიპი და NET/დღგ-ს ფორმულირების წესიც შესრულდება.",
+        "Tell us the contractor type and the NET/VAT wording rule runs too. For an act in a "
+        "foreign currency, confirm or correct the advance paid (0 if none); a small business or "
+        "a foreign organisation needs no invoice calculation.",
+        "მიუთითეთ შემსრულებლის ტიპი და NET/დღგ-ს ფორმულირების წესიც შესრულდება. "
+        "უცხოურვალუტიანი აქტისთვის დაადასტურეთ ან შეასწორეთ გადახდილი ავანსი (0, თუ არ "
+        "გადახდილა); მცირე მეწარმესა და უცხოურ ორგანიზაციას ანგარიშფაქტურის გამოთვლა არ "
+        "სჭირდება.",
     ),
     "boq.again": ("New comparison", "ახალი შედარება"),
     "boq.bidders_n": ("{n} bidders", "{n} კომპანია"),
@@ -498,6 +546,46 @@ STRINGS: dict[str, tuple[str, str]] = {
         "სტრიქონობრივ ხედში ცვლილებებს შორის გადასვლა:",
     ),
     "compare.explain.title": ("Explain with the model", "ახსნა მოდელით"),
+    "aoa.review.title": ("Review with the model", "გადამოწმება მოდელით"),
+    "aoa.review.lead": (
+        "The rules could not tell whether the notes marked “needs review” give the contract's "
+        "subject and services in other words, or name other work. The local model can read "
+        "them: it may mark a note, or raise it to a warning, but never clears one and never "
+        "makes an error.",
+        "წესებმა ვერ დაადგინეს, „გადასამოწმებლად“ მონიშნული შენიშვნები ხელშეკრულების საგანსა "
+        "და მომსახურებას სხვა სიტყვებით გადმოსცემს თუ სხვა სამუშაოს ასახელებს. ლოკალურ მოდელს "
+        "მათი წაკითხვა შეუძლია: შენიშვნას მონიშნავს ან გაფრთხილებად აქცევს, მაგრამ არასდროს "
+        "მოხსნის და შეცდომად არ აქცევს.",
+    ),
+    "aoa.review.run": (
+        "Ask the model about {n} note(s)",
+        "მოდელისთვის {n} შენიშვნის გადაცემა",
+    ),
+    "aoa.review.slow": (
+        "On CPU this takes a minute or two. The page refreshes itself when it is done.",
+        "CPU-ზე ამას ერთი-ორი წუთი სჭირდება. დასრულებისას გვერდი თავად განახლდება.",
+    ),
+    "aoa.review.running": ("The model is reading the notes…", "მოდელი კითხულობს შენიშვნებს…"),
+    "aoa.review.done": (
+        "The model's reading is on the notes above, marked as such.",
+        "მოდელის შეფასება ზემოთ, შენიშვნებზეა მითითებული და შესაბამისად მონიშნული.",
+    ),
+    # the review ended, but put its reading on no note: the model was down, nothing fit in the
+    # prompt, or every answer was unsure or refused - the notes under "could not run" say which
+    "aoa.review.unused": (
+        "The model's review marked none of the notes; why is under “Could not run, and why”. "
+        "The notes above are the rules' alone.",
+        "მოდელით გადამოწმებამ არცერთი შენიშვნა არ მონიშნა; მიზეზი ნაწილშია „ვერ შესრულდა და "
+        "რატომ“. ზემოთ მხოლოდ წესების შენიშვნებია.",
+    ),
+    "aoa.review.stale": (
+        "The notes have changed since the model was asked; ask it again.",
+        "შენიშვნები შეიცვალა მას შემდეგ, რაც მოდელს ჰკითხეს; ჰკითხეთ თავიდან.",
+    ),
+    "aoa.review.failed": (
+        "The model review did not finish; the notes above are the rules' alone.",
+        "მოდელით გადამოწმება ვერ დასრულდა; ზემოთ მხოლოდ წესების შენიშვნებია.",
+    ),
     "docs.lead": (
         "Everything you have uploaded. Open a document to extract fields from it.",
         "ყველა ატვირთული ფაილი. ველების ამოსაღებად გახსენით დოკუმენტი.",
@@ -530,6 +618,7 @@ STRINGS: dict[str, tuple[str, str]] = {
     "jobkind.parse": ("Reading", "წაკითხვა"),
     "jobkind.extract": ("Extraction", "ამოღება"),
     "jobkind.compare_explain": ("Model explanation", "მოდელით ახსნა"),
+    "jobkind.aoa_review": ("Model review", "მოდელით გადამოწმება"),
 }
 
 

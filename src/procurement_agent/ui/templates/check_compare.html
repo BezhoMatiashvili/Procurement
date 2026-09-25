@@ -107,7 +107,8 @@
 {% if can_explain and unexplained %}
 <section class="explain">
 <h2>{{ icon("sparkle") }} {{ t("compare.explain.title") }}</h2>
-<div class="card explain-box">
+{# polled while the job runs (app.js), so the page does refresh itself as the lead promises #}
+<div class="card explain-box"{% if explain_running %} data-poll-job="{{ explain_job }}"{% endif %}>
   {% if explain_running %}
   <p role="status" aria-live="polite"><span class="status running">{{ t("compare.explain.running") }}</span></p>
   {% else %}

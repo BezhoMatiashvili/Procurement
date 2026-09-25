@@ -26,7 +26,7 @@ from procurement_agent.checks.compare import compare as compare_documents
 from procurement_agent.config import Settings
 from procurement_agent.eval.gold import GoldDocument, GoldSet
 from procurement_agent.eval.score import DocumentScore, SetScore, score_extraction, score_findings
-from procurement_agent.extraction.pipeline import run_extraction
+from procurement_agent.extraction.pipeline import chunks_text, run_extraction
 from procurement_agent.extraction.schemas import ExtractionResult
 from procurement_agent.ingestion.chunker import Chunk, chunk_docling_document
 from procurement_agent.ingestion.docling_service import (
@@ -156,10 +156,6 @@ def load_chunks_for(path: Path, settings: Settings, cache_dir: Path) -> list[Chu
     return chunk_docling_document(_parsed(path, settings, cache_dir), doc_id=doc_id)
 
 
-def _text_of(chunks: list[Chunk]) -> str:
-    return "\n".join(c.body or c.text for c in chunks)
-
-
 def _segments_for(path: Path, settings: Settings, cache_dir: Path) -> list[Segment]:
     """Segments for a gold document, reusing the same Docling cache the chunks use."""
     if path.suffix.lower() in {".xlsx", ".xlsm", ".xls"}:
@@ -214,14 +210,14 @@ def run_document(
             reported = _compare_rule_ids(gold, settings, cache_dir)
         else:
             reference = (
-                _text_of(load_chunks_for(gold.reference, settings, cache_dir))
+                chunks_text(load_chunks_for(gold.reference, settings, cache_dir))
                 if gold.reference
                 else None
             )
             registry = open_snapshot(settings.registry_db) if settings.registry_db else None
             try:
                 report = check_aoa(
-                    aoa_text=_text_of(chunks),
+                    aoa_text=chunks_text(chunks),
                     aoa_id=gold.name,
                     contract_text=reference,
                     registry=registry,
