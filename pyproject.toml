@@ -28,6 +28,10 @@ dependencies = [
     "sqlalchemy>=2.0",
     "structlog>=24.4",
     "pyyaml>=6.0.3",
+    # --- spelling ---
+    # hunspell in pure Python, for the act's prose spelling (checks/aoa_spelling.py). Capped below
+    # 0.2 because that module indexes spylls' affix lookup from the inside.
+    "spylls>=0.1.7,<0.2",
 ]
 
 [project.optional-dependencies]
@@ -99,7 +103,7 @@ files = ["src/procurement_agent"]
 explicit_package_bases = true
 
 [[tool.mypy.overrides]]
-module = ["docling.*", "docling_core.*", "slowapi.*", "pypdfium2.*", "argon2.*"]
+module = ["docling.*", "docling_core.*", "slowapi.*", "pypdfium2.*", "argon2.*", "spylls.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

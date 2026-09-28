@@ -122,7 +122,8 @@ with the command in SECURITY.md §2.
 - [ ] If `172.30.231.0/24` or `172.30.232.0/24` collides with a host network, set `PA_INTERNAL_SUBNET`/`PA_EDGE_SUBNET`/`PA_EDGE_GATEWAY` and
   `PA_PROXY_IP` in `.env` together.
 - [ ] Copy `./models` and the `ollama` volume from the connected machine that ran
-  `scripts/prefetch_models.sh`.
+  `scripts/prefetch_models.sh`. The spelling dictionary is not among them: the image carries
+  it, fetched and hash-checked by `docker compose build`, which needs the network anyway.
 
 ### 5.4 Keys
 

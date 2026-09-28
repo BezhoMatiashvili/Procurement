@@ -47,6 +47,12 @@ from procurement_agent.checks.aoa_llm import (
     service_id,
 )
 from procurement_agent.checks.aoa_scope import MATCH_SHARE, Alignment, ScopeReading, read_scope
+from procurement_agent.checks.aoa_spelling import (
+    NOT_SUPPLIED,
+    Lexicon,
+    SpellingUnavailable,
+    prose_typos,
+)
 from procurement_agent.checks.contract_terms import _ADVANCE as _ADVANCE_NAMED
 from procurement_agent.checks.contract_terms import (
     AdvanceTerms,
@@ -315,6 +321,8 @@ class DocumentView:
     #: folds to Latin stays Cyrillic here. The same length, so a span of ``text`` is a span of
     #: this; empty on a view built by hand.
     written: str = ""
+    #: The text came from a scan (``build``): a letter in it may be a misreading.
+    ocr: bool = False
     _hits: list[AnchorHit] | None = field(default=None, init=False, repr=False, compare=False)
     _sentences: list[tuple[int, int]] | None = field(
         default=None, init=False, repr=False, compare=False
@@ -338,7 +346,7 @@ class DocumentView:
         text = fold_look_alikes(fix(written))
         # one code under two names stays two parties here: that is AOA.ID_CODE_PARTY's evidence
         parties = find_parties(text, split_conflicts=True)
-        return cls(doc_id=doc_id, text=text, parties=parties, lines=lines, written=written)
+        return cls(doc_id=doc_id, text=text, parties=parties, lines=lines, written=written, ocr=ocr)
 
     def as_written(self, start: int, end: int) -> str:
         """The text at a span of ``text``, in the letters the document writes."""
@@ -513,12 +521,16 @@ class AoaChecker:
         advance: AdvanceInput | None = None,
         review: ScopeReviewSet | None = None,
         ocr: bool = False,
+        speller: Lexicon | SpellingUnavailable | None = None,
     ) -> None:
         self.aoa = aoa
         self.contract = contract
         #: either document was read from a scan: a difference scanning explains is reported as a
         #: misreading to check against the paper, not as a mistake (``_misread``)
         self.ocr = ocr
+        #: the dictionary for the prose spelling rule (``aoa_spelling.open_speller``), or why
+        #: there is none; None skips that rule with a note
+        self.speller = speller
         self.registry = registry
         self.contractor_type = contractor_type
         #: the NBG rates for a foreign-currency act's invoice (``rule_fx_invoice``)
@@ -777,6 +789,7 @@ class AoaChecker:
         self.rule_act_date()
         self.rule_month_spelling()
         self.rule_script_spelling()
+        self.rule_prose_spelling()
         self.rule_iban_format()
         self.rule_bank_code_format()
         self.rule_tax_wording()
@@ -1105,6 +1118,38 @@ class AoaChecker:
                 quote=word,
                 span=(found.start, found.end),
                 confidence=0.95,
+            )
+
+    def rule_prose_spelling(self) -> None:
+        """A word the dictionary does not know, one letter from one it does: "ეთმანეთის".
+
+        The gates are ``aoa_spelling``'s. It runs after the month, number-word and stray-letter
+        rules, and a word one of them reported is not reported again.
+        """
+        if self.speller is None or isinstance(self.speller, SpellingUnavailable):
+            why = self.speller or NOT_SUPPLIED
+            self._skip("AOA.SPELLING", why.reason_ka, why.reason_en)
+            return
+        taken = [f.span for f in self.findings if f.span is not None]
+        reading = prose_typos(self.aoa, self.contract, self.speller, taken=taken)
+        if (short := reading.shortfall()) is not None:
+            self._skip("AOA.SPELLING", short.reason_ka, short.reason_en)
+        for typo in reading.typos:
+            word = self.aoa.as_written(typo.start, typo.end)
+            ka, en = f"სიტყვა შეცდომითაა დაწერილი: „{word}“", f"word appears misspelled: '{word}'"
+            if self.aoa.ocr:  # on a scan, a misread letter looks just like a typo
+                ka, en = _MISREAD_KA + ka, _MISREAD_EN + en
+            self._add(
+                "AOA.SPELLING",
+                "warning",
+                ka,
+                en,
+                expected=typo.correction,
+                actual=word,
+                quote=word,
+                span=(typo.start, typo.end),
+                confidence=0.8,
+                needs_review=self.aoa.ocr,
             )
 
     def rule_iban_format(self) -> None:
@@ -2980,6 +3025,7 @@ def check_aoa(
     review: ScopeReviewSet | None = None,
     aoa_ocr: bool = False,
     contract_ocr: bool = False,
+    speller: Lexicon | SpellingUnavailable | None = None,
 ) -> CheckReport:
     """``aoa_ocr`` / ``contract_ocr`` say a document's text came from a scan (OCR)."""
     return AoaChecker(
@@ -2995,6 +3041,7 @@ def check_aoa(
         advance=advance,
         review=review,
         ocr=aoa_ocr or contract_ocr,
+        speller=speller,
     ).run()
 
 

@@ -156,6 +156,15 @@ class Settings(BaseSettings):
     #: a note in the report says how many.
     aoa_llm_max_chars: int = Field(default=6000, ge=500, le=60_000)
 
+    # --- acceptance act: prose spelling (AOA.SPELLING) ---
+    #: The hunspell ka_GE dictionary (``ka_GE.aff`` + ``ka_GE.dic``), fetched once with
+    #: ``scripts/fetch_spelling_dictionary.py`` and read from disk: nothing is downloaded at
+    #: runtime. Missing files skip the prose check with a note; they never fail a check.
+    spelling_dictionary_path: Path = Path("./models/hunspell")
+    #: Check the act's prose words against the dictionary, beyond the months, the numbers in
+    #: words and the stray letters the other spelling rules read. Measured in docs/ACCURACY.md.
+    prose_spelling_enabled: bool = True
+
     # --- Docling / OCR ---
     docling_artifacts_path: Path | None = None
     docling_num_threads: int = Field(default=12, ge=1, le=256)

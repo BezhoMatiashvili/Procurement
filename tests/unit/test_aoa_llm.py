@@ -201,7 +201,11 @@ def test_a_correct_act_asks_nothing_and_stays_clean() -> None:
     assert (stored.items, stored.notes, stored.asked) == ([], [], [])
     report = checked(ACT, stored)
     assert report.findings == []
-    assert [s.rule_id for s in report.skipped] == ["AOA.TAX_WORDING", "AOA.REGISTRY"]
+    assert [s.rule_id for s in report.skipped] == [
+        "AOA.SPELLING",
+        "AOA.TAX_WORDING",
+        "AOA.REGISTRY",
+    ]
     assert "review_items" not in report.summary
 
 

@@ -26,6 +26,9 @@ services:
       PA_OLLAMA_BASE_URL: http://ollama:11434
       PA_DATA_DIR: /data
       PA_DOCLING_ARTIFACTS_PATH: /models/docling
+      # Baked into the image (Dockerfile), so a development path copied into .env cannot point
+      # the prose spelling check at a directory the container does not have.
+      PA_SPELLING_DICTIONARY_PATH: /app/dictionaries/hunspell
       # Only the relay may set X-Forwarded-For. Client addresses feed the audit log and the
       # rate-limit buckets; trusting any other peer would let a caller choose its own address.
       FORWARDED_ALLOW_IPS: ${PA_PROXY_IP:-172.30.231.10}

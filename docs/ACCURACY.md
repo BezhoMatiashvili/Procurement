@@ -82,25 +82,111 @@ runs, and anchor hit rate is reported per field.
 
 ## Decisions taken against measurements
 
-### Free-text spell checking is out of scope — twice rejected
+### Prose spelling: the third attempt, measured, on by default
 
-The client asks for `მართლწერა` checking. Two general approaches were built and measured
-against the client's own documents, and both were rejected:
+The client asks for `მართლწერა` checking. Two general approaches were built and rejected first:
 
 1. **Compare the act's vocabulary with the contract's.** Georgian is heavily inflected, so
    `დირექტორი`/`დირექტორის` and `შემკვეთის`/`შემკვეთს` are one edit apart while both are
-   correct. On the *correct* act this produced 17 findings — on the one document that must
-   produce none. Stemming reduced it to about three, not zero.
-2. **Use the offline hunspell `ka_GE` dictionary** (`hunspell-ka`, 143k entries, MIT/CC-BY).
-   Its entries carry affix flags, so a plain wordlist lookup rejects 39% of the words in a
-   correct document; it needs a full affix engine (`spylls`), and its coverage of legal and
-   administrative Georgian is unmeasured.
+   correct. On the *correct* act this produced 17 findings; stemming left about three.
+2. **The hunspell `ka_GE` word list without its affix rules** rejects 39% of the words of a
+   correct document.
 
-What is reliable is checking the fields where an authoritative comparison target exists — a
-name, an address, a project, a month inside a date, a number written out in words. **Every typo
-the client planted lives in such a field**, and each is caught with no false positives. If
-free-text checking is wanted later, the honest path is option 2 plus a measured false-positive
-rate on the correct act; the dictionary is packaged and installable offline.
+The one that ships (`checks/aoa_spelling.py`, rule id `AOA.SPELLING`) reads that dictionary
+through `spylls`, a full hunspell affix engine in pure Python, and reports a word only when every
+gate below holds. Each gate is listed with what it removed on the documents it was tuned on:
+the client's set and Test Set 2. Test Set 3 is held out and was never run.
+
+| gate | why | removed here |
+|---|---|---|
+| Georgian letters only, four or more | three letters sit one edit from too many words; a Latin or Cyrillic letter is the stray-letter rule's | - |
+| not a name: in quotes (each pair matched where it stands, so a stray quote hides nothing), three words after a legal form, a first name and surname after a title (`დირექტორი`, `წარმომადგენელი`, `ხელმოწერა`), any word the anchors read as a party, director, address or project wherever it is written, a surname by its ending (`-შვილი`, `-ძე`) | a dictionary lacks names, and the name rules own a misspelt one | the director's misspelt first name, twice, in Mistake #5; quoted project names |
+| not in a date or a figure's words, and not reported by the month or stray-letter rule | those rules own them | `ასოი`; the month typos of Mistake #5 and Test Set 2 #11 |
+| not a word the contract writes | the documents' own vocabulary, in the dictionary or not | nothing beyond the gates above: each correct act gives the same flags with no contract at all |
+| unknown to spylls in every form | the dictionary itself | known: 411 of the 457 distinct words of both contracts and the client's correct act |
+| not a known word less its final `ი` | the attributive ("ყოველ ვადაგადაცილებულ დღეზე"), which the word list often lacks | `ვადაგადაცილებულ` (contract) |
+| not a vowel stem (`-ა -ე -ო -უ`) plus a whole postposition, `-თი`, the old plural `-თა`/`-ნი`, or a particle | forms the word list lacks: "შეწყვეტამდე", "მოლაპარაკებათა". Not the one-letter cases `-ს -მ -დ`, which it spells out for every vowel stem it has: one of those it lacks is a letter added in error. Not after `-ი`, the consonant stem's nominative ending, or `შემსრულებელის` passes | both (contract); leaving out the one-letter cases turned a missed harness typo (`შესრულდად`) into a find |
+| a known word one edit away | the edits hunspell's suggester tries first (two neighbours swapped, a letter dropped, added or replaced from its TRY letters), each checked as it checks a suggestion; one edit already gives a common word five or more neighbours, so distance 2 was not tried | - |
+| the correction keeps the first letter | a writer rarely mistypes the first letter; a word that differs there is usually another word | `დარიცხვის` -> `გარიცხვის` (correct act: `დარიცხვა` is a word the list lacks) |
+| no neighbour differs only in the participle vowel (`-ულ-`/`-ილ-`) | a usage question the adjudication ruled out, not a slip | `შედგენულია` beside `შედგენილია` (correct act) |
+| one best correction: a word the documents write first, then the one keeping the word's ending; a tie reports nothing | a wrong correction is worse than none | two of 40 harness typos (six and 29 neighbours) |
+
+**Correct documents.** Every flag, on every correct document allowed here:
+
+| document | flags |
+|---|---|
+| client correct act, with its contract or without | `ეთმანეთის` -> `ერთმანეთის`, `იდენტიურ` -> `იდენტურ`, `შემსრულებელის` -> `შემსრულებლის` (the adjudicated three) and `მოიხსენებიან` -> `მოიხსენიებიან` |
+| Test Set 2 correct act, with its contract or without | the same four: its template carries them |
+| client contract, read as a document on its own (no vocabulary gate at all) | eleven words, all misspelt: `მოიხსენიერბიან`, `პრობების`, `განახორდციელებს`, `შესსრულებულ`, `სააგნარიშო`, `აუნაზღაროს`, `უპირობოთ` (twice), `დაუყოვნებლოვ`, `ცამხრივად`, `ეგზემპლიარად`, `მხარები`. One correction is arguable: `უპირობოთ` -> `უპირობო`, where `უპირობოდ` is meant |
+| Test Set 2 contract, the same way | the same eleven |
+
+`მოიხსენებიან` is argued a genuine misspelling, not a false flag: the standard form is
+`მოიხსენიებიან` (the passive of `მოხსენიება`), and the contract misspells the same word
+differently (`მოიხსენიერბიან`, an extra `რ`), so both documents meant it and the act's is one
+letter short. Neither labeller listed it, so the adjudicated gold does not: until the gold rules
+on it, strict scoring counts it once per act. **On by default rests on that ruling**; if it goes
+the other way, `PA_PROSE_SPELLING_ENABLED=false` turns the check off, and no other word in this
+corpus needs a rule.
+
+**Strict evaluation** (`scripts/evaluate.py --strict`). `client_v2`: the three typo entries now
+match in all six acts, one Word comment each; before, all three were missing in every act. One
+unexpected finding per act, `მოიხსენებიან`. `ts2`: every planted finding still matches, and
+each of the twelve acts gains the same four warnings, which the ts2 gold does not list
+(48 unexpected). Its gold needs the client's three entries in every act (and `მოიხსენებიან`
+if accepted).
+
+**Recall on planted typos** (`scripts/mutate_aoa.py --classes prose_typo --seed 21
+--per-class 40`: one letter dropped, inserted, swapped or replaced at random in an ordinary word
+of five letters or more, never the first letter):
+
+| detected | correction right | Word comment placed | false positive |
+|---|---|---|---|
+| 37/40 (92.5%) | 35/40 (87.5%; 35 of the 37 detected) | 37/40 | 1/40 |
+
+By edit: inserted 11/11, replaced 10/11, dropped 8/9, swapped 8/9. The three misses: an original
+the dictionary does not know itself (`დარიცხვის`, then swapped), and two ties (six and 29 known
+neighbours). The two wrong corrections are real ambiguities (`შესრულა`: `შეასრულა` or
+`შესრულდა`; `რომილს`: `რომელს` or `რომლის`). The false positive is the next paragraph.
+Counting edits at the first letter, which are never corrected, recall would be about 81%: at
+these words' lengths (median 8.5 letters) one edit in eight falls there.
+
+**A typo inside a service line or the subject clause** also leaves the scope rules'
+`AOA.SERVICES`/`AOA.SUBJECT` review note (`info`, `needs_review`), since the line's words are no
+longer all the contract's. The fix is the one `aoa_scope._clean` got for stray letters in 028a3d9:
+compare the corrected word. Not made here; that module is outside this change.
+
+**Nothing else moved.** The whole harness (seed 21, 20 per class, 35 classes), run with the
+rule on and off: every class but `prose_typo` scores the same, every harmless change still
+at 0% false positives.
+
+**Speed**, this box (18-core CPU): loading the dictionary and building its indexes takes 1.1 s
+once per process; the rule reads a whole act in 0.65 s from cold, then under 0.01 s for
+another act of the same template; a contract read with no vocabulary, 1.6 s. spylls alone
+spends 5-50 ms deciding that a string is no word, seconds per unknown word over all its edits,
+so two shortcuts carry it, both held to plain spylls by a test: a string-level check that some
+split of the string leaves a dictionary stem, and an index by flag of spylls' second-suffix
+scan. At most 40 distinct words a document go to the correction search (acts need 8, contracts
+20); past that a skip note counts the rest.
+
+**The dictionary.** [`gamag/ka_GE.spell`](https://github.com/gamag/ka_GE.spell) at commit
+`26d33614360c3784c199e3a6766eb5b095a134b8`, `dictionaries/ka_GE.aff` (sha256
+`80d04afc4319209882a6e9be3bcb8d41543e79d94a8057c1e08b07d5e805352d`) and `ka_GE.dic` (143,020
+entries, sha256 `5963f268e996f1e27e17163873b4d32f41fae2a1e5bef0117126caefe62f5857`). MIT
+(the text is in the `.aff` header; the repository's GPL-3.0 covers only its generator scripts).
+Generated from word lists by Dato Bumbeishvili (GeoWordsDatabase, MIT) and Kevin Scannell
+(Crúbadán, [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/)), the attribution that
+licence asks for. `scripts/fetch_spelling_dictionary.py` fetches it into `models/hunspell/`;
+the Docker build pins the same URLs and hashes (`ADD --checksum`), and a unit test fails when
+the two differ. Upstream calls the list "automatically created by crawling the internet": it
+lacks words (`დარიცხვა`) and may hold misspellings, which it would then accept.
+
+**On a scanned act** a misread letter looks exactly like a typo, so the rule's warnings there
+carry the scan's "possibly misread - check the paper original" and need review, the form
+GOLD_SPEC section 6 allows on OCR input. A scanned contract changes nothing about the act's.
+
+**Not measured.** How the dictionary covers other document families; this corpus is two
+templates of one kind of act. Real typos seen: four in the acts, eleven in the contracts. Nor
+how many words a scan's misreadings add: OCR runs only inside the Docker image.
 
 ### IBAN checksums are information, never errors
 
@@ -500,3 +586,5 @@ real number needs labelled paraphrases and substitutions, which this corpus does
   lead-in; a spreadsheet, or a table holding the list, has none, and the rule says it did not run.
 * The registry rules run only against a snapshot the client exports (`cli load-registry`); with
   no snapshot they are reported as skipped, never as passed.
+* A prose typo inside a service line or the subject clause also leaves a scope review note
+  (see "Prose spelling"); the scope rules should compare the corrected word.

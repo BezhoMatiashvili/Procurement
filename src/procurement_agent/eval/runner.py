@@ -24,6 +24,7 @@ from docling.datamodel.base_models import ConversionStatus
 from docling_core.types.doc.document import DoclingDocument
 
 from procurement_agent.checks.aoa import check_aoa
+from procurement_agent.checks.aoa_spelling import open_speller
 from procurement_agent.checks.compare import ComparisonReport
 from procurement_agent.checks.compare import compare as compare_documents
 from procurement_agent.checks.findings import CheckReport, Finding
@@ -356,6 +357,7 @@ def _aoa_report(
             contractor_type=gold.contractor_type,
             aoa_ocr=_scanned(gold.document),
             contract_ocr=gold.reference is not None and _scanned(gold.reference),
+            speller=open_speller(settings),
         )
     finally:
         if registry is not None:
