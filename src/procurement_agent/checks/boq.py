@@ -48,25 +48,57 @@ from procurement_agent.extraction.normalize import normalize_spaces, parse_numbe
 from procurement_agent.report.xlsx_safe import cell_safe
 
 #: Sheets that carry no priced lines.
-SKIP_SHEETS = frozenset({"COVER PAGE", "INSTRUCTION TO BIDDERS", "SUMMARY"})
+SKIP_SHEETS = frozenset(
+    {"COVER PAGE", "INSTRUCTION TO BIDDERS", "INSTRUCTIONS", "SUMMARY", "READ ME", "README"}
+)
 _SUMMARY = "SUMMARY"
+#: A Summary by another name: "BOQ SUMMARY", "Summary of Prices", "კრებსითი".
+_SUMMARY_NAME = re.compile(r"(?<![A-Z])SUMMARY(?![A-Z])|კრებსით|შეჯამებ", re.IGNORECASE)
 
 #: Header labels we understand, normalised. The prototype required the exact lowercase strings
 #: "quantity" and "unit" and silently skipped any sheet that spelled them differently.
 _HEADER_SYNONYMS: dict[str, tuple[str, ...]] = {
     "no": ("no", "no.", "item", "item no", "№", "#"),
-    "desc": ("description", "descriptions", "description of works", "work description"),
+    "desc": (
+        "description",
+        "descriptions",
+        "description of works",
+        "work description",
+        "აღწერა",
+        "დასახელება",
+        "სამუშაოს დასახელება",
+        "სამუშაოს აღწერა",
+        "სამუშაოების დასახელება",
+    ),
     "qty": ("quantity", "qty", "q-ty", "qnt", "quant", "quantities", "amount of work", "რაოდენობა"),
-    "unit": ("unit", "units", "unit of measure", "uom", "ერთეული"),
-    "rate_materials": ("materials", "material"),
+    "unit": (
+        "unit",
+        "units",
+        "unit of measure",
+        "uom",
+        "ერთეული",
+        "განზ. ერთეული",
+        "ზომის ერთეული",
+        "განზომილება",
+    ),
+    "rate_materials": ("materials", "material", "მასალა", "მასალები"),
     "sum_materials": ("materials sum", "material sum"),
-    "rate_labor": ("labor", "labour"),
+    "rate_labor": ("labor", "labour", "ხელფასი", "შრომა"),
     "sum_labor": ("labor sum", "labour sum"),
     # _norm_label strips surrounding whitespace, so "delivery " needs no entry of its own
-    "rate_delivery": ("delivery", "transportation"),
+    "rate_delivery": ("delivery", "transportation", "ტრანსპორტი", "ტრანსპორტირება", "მიწოდება"),
     "sum_delivery": ("delivery sum", "transportation sum"),
-    "rate_total": ("rate in us $", "rate in usd", "rate"),
-    "amount": ("amount in us $", "amount in usd", "amount", "total"),
+    "rate_total": (
+        "rate in us $",
+        "rate in usd",
+        "rate",
+        "unit rate",
+        "unit price",
+        "ერთეულის ფასი",
+        "ერთ. ფასი",
+        "ერთეულის ღირებულება",
+    ),
+    "amount": ("amount in us $", "amount in usd", "amount", "total", "ღირებულება", "სულ", "ჯამი"),
 }
 _LABEL_TO_KEY = {label: key for key, labels in _HEADER_SYNONYMS.items() for label in labels}
 #: The columns a number is read from; text in one of them is reported, never read as 0.
@@ -128,9 +160,18 @@ _UNIT_ALIASES: dict[str, str] = {
 }
 
 
+#: A currency a header names after its label: "ერთეულის ფასი, აშშ დოლარი", "Amount (USD)".
+_LABEL_CURRENCY = re.compile(
+    r"\s*[,(]\s*(?:აშშ\s+)?(?:დოლარ[ა-ჰ]*|ლარ[ა-ჰ]*|ევრო|usd|gel|eur|us\s*\$|\$|₾|€)\s*\)?\s*$",
+    re.IGNORECASE,
+)
+
+
 def _norm_label(v: object) -> str:
-    """A header label as compared: "Qty." and "Unit:" are "qty" and "unit"."""
-    return normalize_spaces(str(v or "")).strip().lower().rstrip(":.").strip()
+    """A header label as compared: "Qty." and "Unit:" are "qty" and "unit", and "ღირებულება, აშშ
+    დოლარი" is "ღირებულება"."""
+    label = normalize_spaces(str(v or "")).strip().lower().rstrip(":.").strip()
+    return _LABEL_CURRENCY.sub("", label).strip()
 
 
 def _num(v: object) -> float | None:
@@ -491,8 +532,13 @@ def read_boq(path: Path, *, name: str | None = None) -> BoqWorkbook:
 
 
 def _summary_sheet_name(names: list[str]) -> str | None:
-    # Matched the way SKIP_SHEETS is: a bidder's "Summary" is still the Summary.
-    return next((n for n in names if n.strip().upper() == _SUMMARY), None)
+    """The Summary sheet: named "SUMMARY" the way SKIP_SHEETS matches it (a bidder's "Summary" is
+    still the Summary), else the one sheet whose name says it is a summary ("BOQ SUMMARY")."""
+    exact = next((n for n in names if n.strip().upper() == _SUMMARY), None)
+    if exact is not None:
+        return exact
+    named = [n for n in names if _SUMMARY_NAME.search(n)]
+    return named[0] if len(named) == 1 else None
 
 
 def _referenced_sheets(ws: object) -> set[str]:
@@ -513,7 +559,7 @@ def _read_boq(values: Workbook, formulas: Workbook, *, name: str) -> BoqWorkbook
     linked = _referenced_sheets(formulas[summary_sheet]) if summary_sheet else set()
 
     for sheet_name in values.sheetnames:
-        if sheet_name.strip().upper() in SKIP_SHEETS:
+        if sheet_name.strip().upper() in SKIP_SHEETS or sheet_name == summary_sheet:
             continue
         ws, wf = values[sheet_name], formulas[sheet_name]
         cols, header_row = _map_headers(ws)
@@ -619,18 +665,44 @@ def _summary_columns(ws: object) -> tuple[int | None, int | None, int | None, in
     shifted one column to the right, which a reader that assumed columns A and B silently read
     as all zeroes - a wrong answer that looks like a correct one.
     """
-    item_col = desc_col = total_col = None
-    header_row = 0
-    for row in ws.iter_rows(min_row=1, max_row=_HEADER_SCAN_ROWS, max_col=_HEADER_SCAN_COLS):  # type: ignore[attr-defined]
-        for cell in row:
-            label = _norm_label(cell.value)
-            if label == "total" and total_col is None:
-                total_col, header_row = cell.column, max(header_row, cell.row)
-            elif label == "item" and item_col is None:
-                item_col, header_row = cell.column, max(header_row, cell.row)
-            elif label == "description" and desc_col is None:
-                desc_col, header_row = cell.column, max(header_row, cell.row)
-    return item_col, desc_col, total_col, header_row
+    cells = [
+        (cell.row, cell.column, _norm_label(cell.value))
+        for row in ws.iter_rows(min_row=1, max_row=_HEADER_SCAN_ROWS, max_col=_HEADER_SCAN_COLS)  # type: ignore[attr-defined]
+        for cell in row
+        if cell.value not in (None, "")
+    ]
+    item = next(((r, c) for r, c, label in cells if label in _SUMMARY_ITEM_LABELS), None)
+    desc = next(((r, c) for r, c, label in cells if label in _SUMMARY_DESC_LABELS), None)
+    # "TOTAL" itself wins: the client's Summary puts it under a group header "AMOUNT EXCL.
+    # VAT" that spans the materials, labour and transport columns. Only without one does a label
+    # that starts with a total's word name the column - and only in the header's own rows, not
+    # in a row below it that says "TOTAL COST".
+    total = next(((r, c) for r, c, label in cells if label == "total"), None)
+    if total is None and desc is not None:
+        total = next(
+            (
+                (r, c)
+                for r, c, label in cells
+                if desc[0] <= r <= desc[0] + 1 and label.startswith(_SUMMARY_TOTAL_LABELS)
+            ),
+            None,
+        )
+    header_row = max((pos[0] for pos in (item, desc, total) if pos is not None), default=0)
+    return (
+        item[1] if item else None,
+        desc[1] if desc else None,
+        total[1] if total else None,
+        header_row,
+    )
+
+
+#: The Summary's own column headers: "Item | Description | TOTAL", or "No | Section | Amount,
+#: USD excl. VAT" - a label that starts with the word is the column.
+_SUMMARY_TOTAL_LABELS = ("total", "amount", "ღირებულება", "ჯამი", "სულ", "თანხა")
+_SUMMARY_ITEM_LABELS = frozenset({"item", "no", "№", "#", "n"})
+_SUMMARY_DESC_LABELS = frozenset(
+    {"description", "section", "sections", "name", "აღწერა", "დასახელება", "განყოფილება"}
+)
 
 
 def _read_summary_rows(book: BoqWorkbook, ws: object, wf: object) -> list[SummaryRow]:

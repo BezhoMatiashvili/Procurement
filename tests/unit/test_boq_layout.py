@@ -136,3 +136,68 @@ def test_a_subtotal_that_does_not_add_up_is_reported(tmp_path: Path) -> None:
     assert gaps[0].severity == "error"
     assert gaps[0].expected == "1,000.00"
     assert gaps[0].actual == "4,455.00"
+
+
+def test_a_sheet_headed_in_georgian_with_currencies_in_its_labels_is_read(tmp_path: Path) -> None:
+    """ "აღწერა", "ერთეულის ფასი, აშშ დოლარი", "ღირებულება, აშშ დოლარი": the columns are named
+    in Georgian and carry their currency; the sheet is read like any other."""
+    wb = Workbook()
+    ws = wb.active
+    assert ws is not None
+    ws.title = "C - Works"
+    headers = ["№", "აღწერა", "ერთეული", "რაოდენობა", "მასალა", "ხელფასი", "ტრანსპორტი",
+               "ერთეულის ფასი, აშშ დოლარი", "ღირებულება, აშშ დოლარი"]  # fmt: skip
+    for col, title in enumerate(headers, start=1):
+        ws.cell(7, col, title)
+    ws.cell(9, 1, "C1")
+    ws.cell(9, 2, "კედლების მოწყობა")
+    for row, (item, desc, unit, qty, rate) in enumerate(
+        [("1.1", "ტიხრის მოწყობა", "m2", 35, 20.0), ("1.2", "ჰიდროიზოლაცია", "m2", 88, 7.5)],
+        start=10,
+    ):
+        for col, value in enumerate([item, desc, unit, qty, rate, 0, 0, rate, qty * rate], 1):
+            ws.cell(row, col, value)
+    ws.cell(12, 2, "SUB-TOTAL")
+    ws.cell(12, 9, 35 * 20.0 + 88 * 7.5)
+    summary = wb.create_sheet("BOQ SUMMARY")
+    summary.cell(1, 1, "TOTAL COST")
+    wb.create_sheet("Read Me").cell(1, 1, "How to fill in this bill of quantities")
+    path = tmp_path / "georgian.xlsx"
+    wb.save(path)
+    book = read_boq(path)
+    sheet = book.sheets["C - Works"]
+    assert [(line.item_no, line.quantity, line.amount) for line in sheet.leaf_lines] == [
+        ("1.1", 35.0, 700.0),
+        ("1.2", 88.0, 660.0),
+    ]
+    assert set(book.sheets) == {"C - Works"}  # the Summary and the Read Me are no priced sheets
+    assert reconcile(sheet) is None
+
+
+def test_a_summary_with_its_columns_named_otherwise_is_read(tmp_path: Path) -> None:
+    """ "No | Section | Amount, USD excl. VAT": the Summary's columns are found by what their
+    headers say, not by three exact words."""
+    from procurement_agent.checks.boq import grand_total
+
+    wb = Workbook()
+    ws = wb.active
+    assert ws is not None
+    ws.title = "BOQ SUMMARY"
+    ws.cell(7, 1, "No")
+    ws.cell(7, 2, "Section")
+    ws.cell(7, 3, "Amount, USD excl. VAT")
+    for row, (item, label, value) in enumerate(
+        [
+            ("A", "A. WORKS", 1000.0),
+            (None, "TOTAL COST", 1000.0),
+            (None, "VAT", 180.0),
+            (None, "TOTAL PRICE INCLUDING VAT", 1180.0),
+        ],  # fmt: skip
+        start=9,
+    ):
+        ws.cell(row, 1, item)
+        ws.cell(row, 2, label)
+        ws.cell(row, 3, value)
+    path = tmp_path / "summary.xlsx"
+    wb.save(path)
+    assert grand_total(read_boq(path)) == 1180.0
