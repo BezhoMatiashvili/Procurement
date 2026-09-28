@@ -813,9 +813,11 @@ class AoaChecker:
             if spelled is None:
                 fix = number_words_typo(words, int(digits)) if digits.is_integer() else None
                 if fix is not None:
+                    # the amount in words is the fee's operative statement: misspelled, it must be
+                    # corrected before the act is signed, however plain the intended number is
                     self._add(
                         "AOA.AMOUNT_WORDS",
-                        "warning",
+                        "error",
                         f"თანხა სიტყვიერად შეცდომითაა დაწერილი: „{words}“, უნდა იყოს „{fix}“",
                         f"the amount in words is misspelled: '{words}', should be '{fix}'",
                         expected=fix,

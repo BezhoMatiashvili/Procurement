@@ -117,7 +117,7 @@ def test_a_latin_look_alike_in_the_finding_still_finds_the_cyrillic_word(tmp_pat
 
 def test_a_letter_dropped_from_a_short_number_word_is_a_misspelling() -> None:
     [finding] = _of("AOA.AMOUNT_WORDS", ACT.replace("100 (ასი)", "100 (აი)"))
-    assert (finding.actual, finding.expected, finding.severity) == ("აი", "ასი", "warning")
+    assert (finding.actual, finding.expected, finding.severity) == ("აი", "ასი", "error")
 
 
 def test_a_two_letter_word_in_brackets_is_not_taken_for_a_number() -> None:

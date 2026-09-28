@@ -65,8 +65,16 @@ def test_amount_in_words_must_match_the_digits() -> None:
     assert "AOA.AMOUNT_WORDS" in errors(ACT.replace("100 (ასი)", "100 (ორასი)"))
 
 
-def test_unreadable_amount_in_words_is_a_warning_not_an_error() -> None:
+def test_a_misspelled_amount_in_words_is_an_error_with_its_correction() -> None:
     report = check_aoa(aoa_text=ACT.replace("100 (ასი)", "100 (ასოი)"), contract_text=CONTRACT)
+    [finding] = [f for f in report.findings if f.rule_id == "AOA.AMOUNT_WORDS"]
+    assert (finding.severity, finding.actual, finding.expected) == ("error", "ასოი", "ასი")
+
+
+def test_unreadable_amount_in_words_is_a_warning_not_an_error() -> None:
+    """Words that read as no number and as no misspelling of the figure: the reader may be the
+    one at fault, so a person is asked to look."""
+    report = check_aoa(aoa_text=ACT.replace("100 (ასი)", "100 (ასი ასი)"), contract_text=CONTRACT)
     assert report.ok
     assert any(f.rule_id == "AOA.AMOUNT_WORDS" and f.severity == "warning" for f in report.findings)
 
