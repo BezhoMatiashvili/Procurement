@@ -185,6 +185,22 @@ def anchor_hits_to_facts(
     return facts
 
 
+#: Types whose values are codes a label names: one value is one type.
+_CODE_TYPES = frozenset(
+    {
+        FactType.cadastral_code,
+        FactType.bank_account,
+        FactType.bank_code,
+        FactType.party_id_code,
+        FactType.contract_number,
+    }
+)
+
+
+def _fold_code(value: str) -> str:
+    return "".join(value.split()).upper()
+
+
 def merge(
     rule_facts: list[ExtractedFact],
     llm_facts: list[ExtractedFact],
@@ -229,7 +245,16 @@ def merge(
         add(f)
     for f in rule_facts:
         add(f)
+    # a code the document's own labels name as one type is not the model's value for another:
+    # the model has no type for a cadastral code in its list and files it as a contract number
+    codes = {
+        (_fold_code(f.value), f.type)
+        for f in [*(anchor_facts or []), *rule_facts]
+        if f.type in _CODE_TYPES
+    }
     for f in llm_facts:
+        if any(value == _fold_code(f.value) and t != f.type for value, t in codes):
+            continue
         add(f)
 
     # conflicts among single-valued types

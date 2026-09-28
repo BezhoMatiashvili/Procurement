@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 
 from procurement_agent.extraction import weights
 from procurement_agent.extraction.labels import LABELS
-from procurement_agent.extraction.normalize import normalize_name
+from procurement_agent.extraction.normalize import normalize_name, parse_georgian_number_words
 from procurement_agent.extraction.prompts import (
     SYSTEM_EXTRACT,
     SYSTEM_QUESTION,
@@ -109,6 +109,64 @@ def text_grounded_in_quote(value: str, quote: str) -> bool:
     numbers = _DIGITS.findall(value)
     quote_numbers = set(_DIGITS.findall(quote.replace(" ", "").replace("\u00a0", "")))
     return bool(numbers) and all(n in quote_numbers or n in quote for n in numbers)
+
+
+#: Shapes a value of one type has that another type never has.
+_CADASTRAL_SHAPE = re.compile(r"\b\d{2}\.\d{2}\.\d{2}\.\d{3}\b")
+_IBAN_SHAPE = re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b")
+_BIC_SHAPE = re.compile(r"\b[A-Z]{4}GE[A-Z0-9]{2}\b")
+_DATE_SHAPE = re.compile(r"^\s*(?:\d{4}-\d{2}-\d{2}|\d{1,2}[./]\d{1,2}[./]\d{4})\s*$")
+_BARE_ID = re.compile(r"^\s*(?:\d{9}|\d{11})\s*$")
+_BANK_WORDS = re.compile(r"ბანკ|ანგარიშის\s+ნომ|ა/ა|swift|iban|bic", re.IGNORECASE)
+#: A duration or a share: what a deadline, a period and payment terms are made of.
+_TIME_OR_SHARE = re.compile(
+    r"\d|%|დღ|თვ|წელ|კვირ|საათ|ვადა|ჩათვლით|დან|მდე|უვადო"
+    r"|(?<![a-z])(?:day|week|month|year|hour|until|within)",
+    re.IGNORECASE,
+)
+
+
+def _names_a_number(value: str) -> bool:
+    """Whether a word of ``value`` is a number written out: "ხუთი", "ოცდაათი" - whole words,
+    since "ორ" (two) also stands inside "ანგარიშსწორებით" (settlement)."""
+    return any(parse_georgian_number_words(w) is not None for w in re.findall(r"[ა-ჰ]+", value))
+
+
+def plausible(fact_type: FactType, value: str) -> bool:
+    """Whether a value the model proposed has the shape its type must have.
+
+    The model files what it finds under the nearest type it knows: a cadastral code as a
+    contract number, a bank block as payment terms, a service line as a quantity. A code is
+    never a date or another code's shape, payment terms name a time or a share and no bank, a
+    period or a deadline names a date or a duration, and an amount or a quantity a number.
+    """
+    v = value.strip()
+    if fact_type == FactType.contract_number:
+        return not (
+            _CADASTRAL_SHAPE.search(v)
+            or _IBAN_SHAPE.search(v)
+            or _DATE_SHAPE.match(v)
+            or _BARE_ID.match(v)
+        )
+    if fact_type == FactType.payment_terms:
+        if _IBAN_SHAPE.search(v) or _BIC_SHAPE.search(v) or _BANK_WORDS.search(v):
+            return False
+        return bool(_TIME_OR_SHARE.search(v) or _names_a_number(v))
+    if fact_type in _PERIOD_TYPES:
+        return bool(_TIME_OR_SHARE.search(v) or _names_a_number(v))
+    if fact_type in (FactType.total_amount, FactType.price, FactType.quantity):
+        return bool(_DIGITS.search(v) or _names_a_number(v))
+    return True
+
+
+_PERIOD_TYPES = frozenset(
+    {
+        FactType.validity_period,
+        FactType.execution_period,
+        FactType.warranty_period,
+        FactType.delivery_deadline,
+    }
+)
 
 
 @dataclass(slots=True)
@@ -280,6 +338,12 @@ def run_llm_extraction(
                     # legitimate and cannot be told from an invention by string matching.
                     normalized = normalize_fact_value(f.type, f.value)
                     confidence, note = weights.LLM, None
+                    if not plausible(f.type, f.value):
+                        # a value of another type's shape, filed under the nearest type the
+                        # model knew: a cadastral code as a contract number, a bank as terms
+                        dropped += 1
+                        log.info("llm_value_implausible", chunk=chunk.id, type=f.type.value)
+                        continue
                     if f.type in _CODE_TYPES and not _DIGITS.search(f.value):
                         # every reference number, ID, account and cadastral code has digits; a
                         # value without one is a word the model lifted - in the injection test,
