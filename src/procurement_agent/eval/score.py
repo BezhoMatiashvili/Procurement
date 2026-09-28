@@ -15,15 +15,30 @@ right, is what makes that overfitting visible instead of silent.
 from __future__ import annotations
 
 import re
+import tempfile
+import unicodedata
+import zipfile
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 
+from lxml import etree  # type: ignore[import-untyped]
+
+from procurement_agent.checks.findings import Finding
+from procurement_agent.eval.gold import ExpectedFinding
 from procurement_agent.extraction.normalize import (
     amounts_equal,
     names_match,
     normalize_name,
     parse_number,
 )
-from procurement_agent.extraction.schemas import ExtractedFact, ExtractionResult, FactType
+from procurement_agent.extraction.schemas import (
+    DEFAULT_TARGETS,
+    ExtractedFact,
+    ExtractionResult,
+    FactType,
+)
+from procurement_agent.report.docx_annotate import UnsupportedDocumentError, annotate_docx
 
 #: Types compared as money rather than as text.
 _NUMERIC = frozenset({FactType.price, FactType.total_amount, FactType.amount, FactType.quantity})
@@ -146,6 +161,10 @@ class DocumentScore:
     chunks_selected: int = 0
     chunks_with_facts: int = 0
     seconds: float = 0.0
+    #: The strict scores (``--strict``), kept apart so the lenient numbers above keep meaning
+    #: what they meant in every earlier run report.
+    strict: StrictExtractionScore | None = None
+    strict_findings: FindingsScore | None = None
 
     @property
     def findings_ok(self) -> bool:
@@ -218,3 +237,464 @@ class SetScore:
     @property
     def clean(self) -> bool:
         return all(d.findings_ok for d in self.documents)
+
+
+# --------------------------------------------------------------------------------------------
+# Strict scoring (docs/GOLD_SPEC.md sections 1-4). Opt-in: ``scripts/evaluate.py --strict``.
+#
+# The lenient scorer above forgives inflection, substrings and display formats, which is what
+# made its numbers look better than the product is. The strict one compares canonical values
+# only, scores every target type for every document (a type the gold does not list is expected
+# to be absent) and matches findings on their words and corrections, not just their rule ids.
+# It deliberately depends on nothing in ``extraction/`` beyond the schema, so a change to the
+# product can never move the yardstick it is measured with.
+# --------------------------------------------------------------------------------------------
+
+#: Every type strict scoring holds each document to.
+STRICT_TARGETS: tuple[FactType, ...] = tuple(
+    dict.fromkeys((*DEFAULT_TARGETS, FactType.act_date, FactType.bank_code))
+)
+#: Leftovers the rules could not classify: counted and reported, never scored.
+GENERIC_TYPES = frozenset(
+    {
+        FactType.amount,
+        FactType.date,
+        FactType.percentage,
+        FactType.duration,
+        FactType.id_code,
+        FactType.other,
+    }
+)
+#: Types compared as numbers (money, and percentages such as a penalty rate).
+_STRICT_NUMERIC = frozenset({FactType.price, FactType.total_amount, FactType.penalty})
+
+_QUOTES = frozenset(
+    map(chr, (0x201E, 0x201C, 0x201D, 0x22, 0x27, 0x2018, 0x2019, 0xAB, 0xBB, 0x201A))
+)
+_DASHES = str.maketrans(dict.fromkeys(map(chr, (0x2013, 0x2014, 0x2011, 0x2212)), "-"))
+_SPACES = re.compile(r"\s+")
+#: A canonical number, optionally a percentage, and whatever follows it ("0.5% per day").
+_LEADING_NUMBER = re.compile(r"(-?\d+(?:\.\d+)?)(%?)(.*)", re.DOTALL)
+_NUMBER_TOLERANCE = 0.005
+#: A subject matches when this share of the gold's words is in the fact...
+_SUBJECT_GOLD_SHARE = 0.8
+#: ...and this share of the fact's words is in the gold.
+_SUBJECT_FACT_SHARE = 0.5
+#: Georgian case endings, postpositions and plural forms, longest first. Only the subject rule
+#: stems; every other type is compared exactly.
+_GEORGIAN_SUFFIXES = tuple(
+    sorted(
+        (
+            "ებისთვის", "ისათვის", "ისთვის", "ებისგან", "ისგან", "ებში", "ებზე", "ებით",
+            "ების", "ებად", "ებმა", "ებს", "ები", "თვის", "ამდე", "მდე", "იდან", "დან",
+            "თან", "კენ", "ში", "ზე", "ით", "ის", "ად", "მა", "ს", "ი", "ო", "ე", "ა",
+        ),
+        key=len,
+        reverse=True,
+    )
+)  # fmt: skip
+_MIN_STEM = 3
+
+
+def _is_latin(ch: str) -> bool:
+    return ch.isascii() or unicodedata.name(ch, "").startswith("LATIN")
+
+
+def fold(s: str) -> str:
+    """GOLD_SPEC section 1: NFC, quotes dropped, dashes unified, whitespace collapsed, Latin
+    upper-cased. Georgian is left as it is: ``str.upper`` would turn Mkhedruli into Mtavruli."""
+    s = unicodedata.normalize("NFC", s)
+    s = "".join(ch for ch in s if ch not in _QUOTES).translate(_DASHES)
+    s = _SPACES.sub(" ", s).strip()
+    return "".join(ch.upper() if ch.isalpha() and _is_latin(ch) else ch for ch in s)
+
+
+def canonical(fact: ExtractedFact) -> str:
+    """The value strict scoring compares: the normalised form when there is one."""
+    return str(fact.normalized) if fact.normalized is not None else fact.value
+
+
+def _stem(word: str) -> str:
+    if not any(0x10D0 <= ord(ch) <= 0x10FF for ch in word):
+        return word
+    for suffix in _GEORGIAN_SUFFIXES:
+        if word.endswith(suffix) and len(word) - len(suffix) >= _MIN_STEM:
+            word = word[: -len(suffix)]
+            break
+    # "მომსახურება" and "მომსახურების" must meet: drop a plural-looking "-ებ" left behind
+    if word.endswith("ებ") and len(word) - 2 >= _MIN_STEM:
+        word = word[:-2]
+    return word
+
+
+def _stems(s: str) -> list[str]:
+    return [_stem(w) for w in re.findall(r"\w+", fold(s))]
+
+
+def _subject_match(expected: str, actual: str) -> bool:
+    gold, got = _stems(expected), _stems(actual)
+    if not gold or not got:
+        return False
+    gold_set, got_set = set(gold), set(got)
+    gold_share = sum(1 for w in gold if w in got_set) / len(gold)
+    fact_share = sum(1 for w in got if w in gold_set) / len(got)
+    return gold_share >= _SUBJECT_GOLD_SHARE and fact_share >= _SUBJECT_FACT_SHARE
+
+
+def _numeric_match(expected: str, actual: str) -> bool | None:
+    """Numbers compared as numbers, the rest of the value exactly; None when either side does
+    not start with a canonical number (then the caller compares the folded strings)."""
+    want, got = _LEADING_NUMBER.fullmatch(expected), _LEADING_NUMBER.fullmatch(actual)
+    if want is None or got is None:
+        return None
+    return (
+        abs(float(want.group(1)) - float(got.group(1))) <= _NUMBER_TOLERANCE
+        and want.group(2) == got.group(2)
+        and fold(want.group(3)) == fold(got.group(3))
+    )
+
+
+def strict_values_match(fact_type: FactType, expected: str, actual: str) -> bool:
+    """Whether a canonical value is the gold's, per GOLD_SPEC section 2 (strict scoring)."""
+    want, got = fold(expected), fold(actual)
+    if fact_type == FactType.subject:
+        return _subject_match(want, got)
+    if fact_type in _STRICT_NUMERIC:
+        numeric = _numeric_match(want, got)
+        if numeric is not None:
+            return numeric
+    return want == got
+
+
+@dataclass(slots=True)
+class StrictFieldScore:
+    fact_type: FactType
+    expected: int = 0
+    true_positives: int = 0
+    false_positives: int = 0
+    #: gold values nothing matched, and canonical values that matched no gold value
+    missing: list[str] = field(default_factory=list)
+    wrong: list[str] = field(default_factory=list)
+
+    @property
+    def false_negatives(self) -> int:
+        return max(0, self.expected - self.true_positives)
+
+    @property
+    def precision(self) -> float | None:
+        """None when nothing was returned: there is no precision to speak of."""
+        returned = self.true_positives + self.false_positives
+        return self.true_positives / returned if returned else None
+
+    @property
+    def recall(self) -> float | None:
+        """None when the gold expects nothing of this type."""
+        return self.true_positives / self.expected if self.expected else None
+
+    @property
+    def correct(self) -> bool:
+        return self.false_positives == 0 and self.false_negatives == 0
+
+    def add(self, other: StrictFieldScore) -> None:
+        self.expected += other.expected
+        self.true_positives += other.true_positives
+        self.false_positives += other.false_positives
+
+
+@dataclass(slots=True)
+class StrictExtractionScore:
+    name: str
+    fields: dict[FactType, StrictFieldScore] = field(default_factory=dict)
+    #: types the gold marks as labelled rather than derived
+    provisional: set[FactType] = field(default_factory=set)
+    ignored: list[FactType] = field(default_factory=list)
+    #: generic facts (amount, date, ...) the extractor could not classify, per type
+    unclassified: dict[FactType, int] = field(default_factory=dict)
+
+    @property
+    def unclassified_total(self) -> int:
+        return sum(self.unclassified.values())
+
+
+def score_extraction_strict(
+    result: ExtractionResult,
+    expected: dict[FactType, list[str]],
+    name: str,
+    *,
+    ignore: Sequence[FactType] = (),
+    provisional: Sequence[FactType] = (),
+) -> StrictExtractionScore:
+    """Score every target type: listed types against their values, unlisted ones as absent."""
+    ignored = set(ignore)
+    score = StrictExtractionScore(
+        name=name,
+        provisional=set(provisional) - ignored,
+        ignored=sorted(ignored, key=lambda t: t.value),
+    )
+    by_type: dict[FactType, list[ExtractedFact]] = {}
+    for fact in result.facts:
+        if fact.type in GENERIC_TYPES:
+            score.unclassified[fact.type] = score.unclassified.get(fact.type, 0) + 1
+        else:
+            by_type.setdefault(fact.type, []).append(fact)
+
+    targets = [*STRICT_TARGETS, *(t for t in expected if t not in STRICT_TARGETS)]
+    for fact_type in targets:
+        if fact_type in ignored or fact_type in GENERIC_TYPES:
+            continue
+        wanted = expected.get(fact_type, [])
+        unmatched = list(by_type.get(fact_type, []))
+        fs = StrictFieldScore(fact_type=fact_type, expected=len(wanted))
+        for want in wanted:
+            hit = next(
+                (f for f in unmatched if strict_values_match(fact_type, want, canonical(f))),
+                None,
+            )
+            if hit is None:
+                fs.missing.append(want)
+            else:
+                unmatched.remove(hit)
+                fs.true_positives += 1
+        fs.false_positives = len(unmatched)
+        fs.wrong = [canonical(f) for f in unmatched]
+        score.fields[fact_type] = fs
+    return score
+
+
+# -- findings ---------------------------------------------------------------------------------
+
+#: How a finding is described in a report: rule, severity, the words it points at, its fix.
+_DESCRIBE_LIMIT = 160
+
+
+def _short(s: str | None) -> str:
+    s = (s or "").replace("\n", " ")
+    return s if len(s) <= _DESCRIBE_LIMIT else s[: _DESCRIBE_LIMIT - 1] + "…"
+
+
+def describe_finding(finding: Finding, label: str | None = None) -> str:
+    where = finding.quote or finding.actual
+    parts = [f"{finding.rule_id} [{finding.severity}]"]
+    if label:
+        parts.append(f"label={label!r}")
+    if where is not None:
+        parts.append(f"at {_short(where)!r}")
+    if finding.expected is not None:
+        parts.append(f"expected={_short(finding.expected)!r}")
+    parts.append(f"({_short(finding.message_en)})")
+    return " ".join(parts)
+
+
+def describe_entry(entry: ExpectedFinding) -> str:
+    parts = [entry.rule]
+    for key in ("severity", "label", "text", "correction", "before", "after", "occurrences"):
+        value = getattr(entry, key)
+        if value is not None:
+            parts.append(f"{key}={value!r}")
+    return " ".join(parts)
+
+
+def finding_matches_entry(entry: ExpectedFinding, finding: Finding, label: str | None) -> bool:
+    """GOLD_SPEC sections 3-4: the rule id, and every property the entry states."""
+    if finding.rule_id != entry.rule:
+        return False
+    if entry.severity is not None and finding.severity != entry.severity:
+        return False
+    if entry.text is not None and fold(entry.text) not in fold(
+        finding.quote or finding.actual or ""
+    ):
+        return False
+    if entry.correction is not None and (
+        finding.expected is None or fold(finding.expected) != fold(entry.correction)
+    ):
+        return False
+    if entry.label is not None and (label is None or fold(label) != fold(entry.label)):
+        return False
+    if entry.before is not None and (
+        finding.expected is None or fold(finding.expected) != fold(entry.before)
+    ):
+        return False
+    return entry.after is None or (
+        finding.actual is not None and fold(finding.actual) == fold(entry.after)
+    )
+
+
+def _assign(candidates: list[list[int]], n_findings: int) -> list[int | None]:
+    """A maximum one-to-one assignment of entries to findings (Kuhn's augmenting paths), so a
+    broad entry can never take the only finding a more specific entry could have matched."""
+    owner: list[int | None] = [None] * n_findings
+
+    def augment(entry: int, seen: set[int]) -> bool:
+        for f in candidates[entry]:
+            if f in seen:
+                continue
+            seen.add(f)
+            current = owner[f]
+            if current is None or augment(current, seen):
+                owner[f] = entry
+                return True
+        return False
+
+    for entry in range(len(candidates)):
+        augment(entry, set())
+    assigned: list[int | None] = [None] * len(candidates)
+    for finding_index, owning_entry in enumerate(owner):
+        if owning_entry is not None:
+            assigned[owning_entry] = finding_index
+    return assigned
+
+
+@dataclass(slots=True)
+class FindingsScore:
+    #: (expected entry, the finding that matched it)
+    matched: list[tuple[str, str]] = field(default_factory=list)
+    missing: list[str] = field(default_factory=list)
+    #: reported, expected by nothing, not allowed (only with ``strict_findings``)
+    unexpected: list[str] = field(default_factory=list)
+    #: a second finding for an entry already matched: one mistake is one finding
+    duplicates: list[str] = field(default_factory=list)
+    #: reported under an ``allowed_findings`` rule and expected by nothing
+    allowed: list[str] = field(default_factory=list)
+    #: entries whose finding marked a different number of places in the Word file
+    occurrence_errors: list[str] = field(default_factory=list)
+    #: why the findings could not be scored at all (e.g. no reference document)
+    unscorable: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return (
+            self.unscorable is None
+            and not self.missing
+            and not self.unexpected
+            and not self.duplicates
+            and not self.occurrence_errors
+        )
+
+
+#: Counts the Word comments a finding produces whose anchored text contains the entry's text;
+#: None when that cannot be checked (not a .docx).
+OccurrenceCounter = Callable[[ExpectedFinding, Finding], "int | None"]
+
+
+def score_findings_strict(
+    entries: Sequence[ExpectedFinding],
+    reported: Sequence[Finding],
+    *,
+    labels: Sequence[str | None] | None = None,
+    strict: bool = False,
+    allowed: Sequence[str] = (),
+    count_occurrences: OccurrenceCounter | None = None,
+) -> FindingsScore:
+    """Match expected entries to reported findings, one to one."""
+    labels = list(labels) if labels is not None else [None] * len(reported)
+    candidates = [
+        [i for i, f in enumerate(reported) if finding_matches_entry(e, f, labels[i])]
+        for e in entries
+    ]
+    assigned = _assign(candidates, len(reported))
+    score = FindingsScore()
+    used = {i for i in assigned if i is not None}
+    for entry, index in zip(entries, assigned, strict=True):
+        if index is None:
+            score.missing.append(describe_entry(entry))
+            continue
+        finding = reported[index]
+        score.matched.append((describe_entry(entry), describe_finding(finding, labels[index])))
+        if entry.occurrences is not None and count_occurrences is not None:
+            marked = count_occurrences(entry, finding)
+            if marked is None:
+                score.occurrence_errors.append(f"{describe_entry(entry)}: could not annotate")
+            elif marked != entry.occurrences:
+                score.occurrence_errors.append(
+                    f"{describe_entry(entry)}: {marked} place(s) marked, "
+                    f"expected {entry.occurrences}"
+                )
+    allowed_rules = set(allowed)
+    for i, finding in enumerate(reported):
+        if i in used:
+            continue
+        text = describe_finding(finding, labels[i])
+        if any(i in c for c in candidates):
+            if strict:
+                score.duplicates.append(text)
+        elif finding.rule_id in allowed_rules:
+            score.allowed.append(text)
+        elif strict:
+            score.unexpected.append(text)
+    return score
+
+
+# -- Word comments ----------------------------------------------------------------------------
+
+_W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+
+
+def comment_anchors(docx: Path) -> dict[str, str]:
+    """Each comment id in ``word/document.xml`` and the folded text its range covers."""
+    with zipfile.ZipFile(docx) as z:
+        parser = etree.XMLParser(resolve_entities=False, no_network=True)
+        root = etree.fromstring(z.read("word/document.xml"), parser)
+    open_ranges: dict[str, list[str]] = {}
+    done: dict[str, str] = {}
+    for event, el in etree.iterwalk(root, events=("start", "end")):
+        tag = el.tag
+        if event == "start":
+            if tag == f"{_W}commentRangeStart":
+                open_ranges[el.get(f"{_W}id", "")] = []
+            elif tag == f"{_W}commentRangeEnd":
+                cid = el.get(f"{_W}id", "")
+                if cid in open_ranges:
+                    done[cid] = fold("".join(open_ranges.pop(cid)))
+            elif tag in (f"{_W}t", f"{_W}delText"):
+                for parts in open_ranges.values():
+                    parts.append(el.text or "")
+            elif tag in (f"{_W}tab", f"{_W}br"):
+                for parts in open_ranges.values():
+                    parts.append(" ")
+        elif tag == f"{_W}p":
+            for parts in open_ranges.values():
+                parts.append(" ")
+    return done
+
+
+def count_marked_places(source: Path, findings: Sequence[Finding], text: str | None) -> int | None:
+    """Annotate ``source`` with ``findings`` exactly as the product does (no ``text=``, like
+    ``api/checks.py``) into a temporary directory, and count the comments whose anchored text
+    contains ``text`` (every comment when ``text`` is None). None when it cannot annotate."""
+    if source.suffix.lower() != ".docx":
+        return None
+    with tempfile.TemporaryDirectory(prefix="eval-annotate-") as tmp:
+        out = Path(tmp) / "annotated.docx"
+        try:
+            annotate_docx(source, findings, out)
+        except UnsupportedDocumentError:
+            return None
+        anchors = comment_anchors(out)
+    if text is None:
+        return len(anchors)
+    needle = fold(text)
+    return sum(1 for anchored in anchors.values() if needle in anchored)
+
+
+@dataclass(slots=True)
+class StrictTotals:
+    """Strict per-field totals over a set, derived and provisional kept apart."""
+
+    derived: dict[FactType, StrictFieldScore] = field(default_factory=dict)
+    provisional: dict[FactType, StrictFieldScore] = field(default_factory=dict)
+    unclassified: dict[FactType, int] = field(default_factory=dict)
+    documents: int = 0
+
+
+def strict_totals(documents: Sequence[DocumentScore]) -> StrictTotals:
+    totals = StrictTotals()
+    for doc in documents:
+        if doc.strict is None:
+            continue
+        totals.documents += 1
+        for fact_type, fs in doc.strict.fields.items():
+            bucket = totals.provisional if fact_type in doc.strict.provisional else totals.derived
+            bucket.setdefault(fact_type, StrictFieldScore(fact_type=fact_type)).add(fs)
+        for fact_type, n in doc.strict.unclassified.items():
+            totals.unclassified[fact_type] = totals.unclassified.get(fact_type, 0) + n
+    return totals

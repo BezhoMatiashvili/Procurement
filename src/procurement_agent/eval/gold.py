@@ -25,6 +25,29 @@ from procurement_agent.extraction.schemas import FactType
 NO_FINDINGS = "*"
 
 
+class ExpectedFinding(BaseModel):
+    """One finding a check must report, described the way ``docs/GOLD_SPEC.md`` sections 3-4
+    describe it: by rule id and, when known, the words it must point at and the fix it must
+    propose. Only ``rule`` is required, so an entry can be as specific as the gold can be.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    rule: str
+    severity: Literal["error", "warning", "info"] | None = None
+    #: the offending words exactly as the document writes them (AOA)
+    text: str | None = None
+    #: the correct variant, in the document's own form; compared with ``Finding.expected``
+    correction: str | None = None
+    #: how many places in the act a Word comment must mark
+    occurrences: int | None = Field(default=None, ge=0)
+    #: the value in the earlier document and in the revision (compare)
+    before: str | None = None
+    after: str | None = None
+    #: the English label the comparison's finding must carry, e.g. "Bank code"
+    label: str | None = None
+
+
 class GoldDocument(BaseModel):
     """What a document should yield, written by hand from reading it."""
 
@@ -35,7 +58,7 @@ class GoldDocument(BaseModel):
     #: Which check to score. ``aoa`` reads the document against its contract; ``compare`` diffs
     #: the two documents against each other and scores the CMP.* rules that fire. The model
     #: forbids extra keys, so a new check has to be named here rather than smuggled in.
-    check: Literal["aoa", "compare"] = "aoa"
+    check: Literal["aoa", "compare"] | None = "aoa"
     #: The other document: the contract an act is checked against, or the earlier version a
     #: revision is compared with.
     reference: Path | None = None
@@ -49,6 +72,18 @@ class GoldDocument(BaseModel):
     #: which is the constraint that matters most: a checker that fires on a correct document
     #: is worse than no checker.
     forbidden_findings: list[str] = Field(default_factory=list)
+    #: Target types the gold cannot yet state canonically: skipped by strict scoring (the
+    #: reason goes in ``notes``).
+    ignore: list[FactType] = Field(default_factory=list)
+    #: Types whose values were read off the page by a person rather than derived; strict
+    #: scoring reports them apart from the derived ones until the user confirms them.
+    provisional: list[FactType] = Field(default_factory=list)
+    #: Every finding the check must report, with its words and correction (GOLD_SPEC 3-4).
+    findings: list[ExpectedFinding] = Field(default_factory=list)
+    #: Rule ids that may be reported without being expected.
+    allowed_findings: list[str] = Field(default_factory=list)
+    #: Whether anything reported beyond ``findings`` and ``allowed_findings`` is a false positive.
+    strict_findings: bool = False
     notes: str | None = None
 
     @field_validator("document", "reference")
