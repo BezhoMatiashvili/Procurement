@@ -5,8 +5,8 @@ The client asks for the act's spelling to be checked. Two earlier attempts faile
 correct act (docs/ACCURACY.md): comparing the act's words with the contract's reads every other
 case ending as a typo, and the hunspell word list read without its affix rules rejects a third of
 a correct document. This reads the same hunspell ka_GE dictionary through spylls, a full affix
-engine, and reports a word only when every gate below holds. The correct act must stay clean, so
-each gate is there because a correct word got through without it:
+engine, and reports a word only when every gate below holds. The correct act must stay clean;
+docs/ACCURACY.md lists what each gate removed on the documents it was tuned on:
 
 * the word is Georgian, four letters or more, and nobody else's: not a name (in quotes, after a
   legal form or a signatory's title, a word of any party, director, address or project the
@@ -15,8 +15,8 @@ each gate is there because a correct word got through without it:
 * the contract does not write it - the documents' own vocabulary, in the dictionary or not;
 * the dictionary does not know it in any form;
 * it is not a form the dictionary merely lacks: a known word less its final "ი" (the attributive
-  "ყოველ ვადაგადაცილებულ დღეზე"), or a known word ending in a vowel plus a whole case ending,
-  postposition or particle ("შეწყვეტამდე", "მოლაპარაკებათა");
+  "ყოველ ვადაგადაცილებულ დღეზე"), or a known vowel stem plus a whole postposition, the old
+  plural or a particle ("შეწყვეტამდე", "მოლაპარაკებათა");
 * one known word is the best correction: one letter away (dropped, added, replaced, or two
   swapped - the edits hunspell's suggester tries first), with the same first letter, and among
   those the one the documents write, then the one keeping the word's ending. A tie reports
