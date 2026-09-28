@@ -319,6 +319,8 @@ class DocumentView:
     #: folds to Latin stays Cyrillic here. The same length, so a span of ``text`` is a span of
     #: this; empty on a view built by hand.
     written: str = ""
+    #: The text came from a scan (``build``): a letter in it may be a misreading.
+    ocr: bool = False
     _hits: list[AnchorHit] | None = field(default=None, init=False, repr=False, compare=False)
     _sentences: list[tuple[int, int]] | None = field(
         default=None, init=False, repr=False, compare=False
@@ -342,7 +344,7 @@ class DocumentView:
         text = fold_look_alikes(fix(written))
         # one code under two names stays two parties here: that is AOA.ID_CODE_PARTY's evidence
         parties = find_parties(text, split_conflicts=True)
-        return cls(doc_id=doc_id, text=text, parties=parties, lines=lines, written=written)
+        return cls(doc_id=doc_id, text=text, parties=parties, lines=lines, written=written, ocr=ocr)
 
     def as_written(self, start: int, end: int) -> str:
         """The text at a span of ``text``, in the letters the document writes."""
@@ -1117,16 +1119,20 @@ class AoaChecker:
             self._skip("AOA.SPELLING", short.reason_ka, short.reason_en)
         for typo in reading.typos:
             word = self.aoa.as_written(typo.start, typo.end)
+            ka, en = f"სიტყვა შეცდომითაა დაწერილი: „{word}“", f"word appears misspelled: '{word}'"
+            if self.aoa.ocr:  # on a scan, a misread letter looks just like a typo
+                ka, en = _MISREAD_KA + ka, _MISREAD_EN + en
             self._add(
                 "AOA.SPELLING",
                 "warning",
-                f"სიტყვა შეცდომითაა დაწერილი: „{word}“",
-                f"word appears misspelled: '{word}'",
+                ka,
+                en,
                 expected=typo.correction,
                 actual=word,
                 quote=word,
                 span=(typo.start, typo.end),
                 confidence=0.8,
+                needs_review=self.aoa.ocr,
             )
 
     def rule_iban_format(self) -> None:

@@ -251,6 +251,21 @@ def test_the_act_check_reports_a_prose_typo_where_it_is_written() -> None:
     assert not [s for s in report.skipped if s.rule_id == "AOA.SPELLING"]
 
 
+def test_on_a_scanned_act_a_prose_typo_may_be_a_misreading() -> None:
+    # a misread letter looks exactly like a typo: said so, and left for a person to check
+    scanned = check_aoa(aoa_text=_TYPO_ACT, contract_text=CONTRACT, speller=_LEXICON, aoa_ocr=True)
+    [f] = [f for f in scanned.findings if f.rule_id == "AOA.SPELLING"]
+    assert (f.severity, f.expected, f.needs_review) == ("warning", "ერთმანეთის", True)
+    assert f.message_en.startswith("Possibly misread from the scan")
+    # a scanned contract says nothing about how the act was read
+    typed = check_aoa(
+        aoa_text=_TYPO_ACT, contract_text=CONTRACT, speller=_LEXICON, contract_ocr=True
+    )
+    [g] = [g for g in typed.findings if g.rule_id == "AOA.SPELLING"]
+    assert not g.needs_review
+    assert g.message_en.startswith("word appears misspelled")
+
+
 def test_the_correct_act_stays_clean_and_a_rerun_reports_the_same() -> None:
     checker_input = {"aoa_text": ACT, "contract_text": CONTRACT, "speller": _LEXICON}
     assert not [f for f in check_aoa(**checker_input).findings if f.rule_id == "AOA.SPELLING"]
