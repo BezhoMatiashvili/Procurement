@@ -24,7 +24,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import date
-from typing import Literal
+from typing import Literal, get_args
 
 from procurement_agent.extraction.normalize import (
     QUOTE_CHARS,
@@ -51,6 +51,8 @@ Case = Literal[
     "nom", "erg", "dat", "gen", "ins", "adv",
     "gen_tvis", "gen_gan", "gen_ken", "dat_shi", "dat_ze", "dat_tan", "ins_dan", "adv_mde",
 ]  # fmt: skip
+#: Every case and postposition ``inflect`` writes.
+CASES: tuple[Case, ...] = get_args(Case)
 
 
 def words(text: str) -> list[tuple[str, int, int]]:

@@ -53,6 +53,7 @@ from procurement_agent.ingestion.docling_service import (
 from procurement_agent.ingestion.excel_reader import read_formulas, read_workbook, sheet_chunks
 from procurement_agent.ingestion.segmenter import (
     Segment,
+    pdf_has_text_layer,
     segments_from_docling,
     segments_from_workbook,
 )
@@ -332,6 +333,11 @@ def _occurrence_counter(
     return count
 
 
+def _scanned(path: Path) -> bool:
+    """A PDF with no text layer of its own: what it says came from OCR."""
+    return path.suffix.lower() == ".pdf" and not pdf_has_text_layer(path)
+
+
 def _aoa_report(
     gold: GoldDocument, chunks: list[Chunk], settings: Settings, cache_dir: Path
 ) -> CheckReport:
@@ -348,6 +354,8 @@ def _aoa_report(
             contract_text=reference,
             registry=registry,
             contractor_type=gold.contractor_type,
+            aoa_ocr=_scanned(gold.document),
+            contract_ocr=gold.reference is not None and _scanned(gold.reference),
         )
     finally:
         if registry is not None:

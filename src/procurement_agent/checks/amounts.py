@@ -45,7 +45,10 @@ FIGURE = r"\d{1,3}(?:[ \u00a0.,]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?"
 #: "100 (ასი) ლარს" - a figure, then the same number written out. Digits may appear inside the
 #: brackets only for tetri ("ლარი და 50 თეთრი").
 _DIGITS_THEN_WORDS = re.compile(
-    rf"(?<![\d.,])({FIGURE})(?!\d)\s*\(\s*([ა-ჰ][ა-ჰ0-9 ,.]{{1,80}}?)\s*\)"
+    rf"(?<![\d.,])({FIGURE})(?!\d)\s*\(\s*([ა-ჰ][ა-ჰ0-9 ,.]{{1,80}}?)\s*"
+    # a scan reads the closing bracket as ":" or "|" now and then; before a currency word
+    # nothing else can be meant
+    r"(?:\)|[:;|\]}](?=\s*(?:აშშ\s+)?(?:ლარ|დოლარ|ევრო)))"
 )
 #: Currency words inside the brackets: "(ასი ლარი)", "(ათასი აშშ დოლარი)".
 _CURRENCY_WORD = re.compile(r"(?:აშშ\s+)?(?:ლარ|დოლარ|ევრო|ფუნტ|რუბლ)[ა-ჰ]*")

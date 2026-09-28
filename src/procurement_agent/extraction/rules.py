@@ -232,7 +232,12 @@ def _norm_currency(raw: str) -> str | None:
 # --- amounts -----------------------------------------------------------------------------------
 
 # "48 750,00 (ორმოცდარვა ათას ...) ლარს": contracts spell the number out between digits and currency
-_PAREN = r"(?:\([^()]{0,160}\)\s*)?"
+_PAREN = (
+    r"(?:\([^()]{0,160}?"
+    # a scan reads the closing bracket as ":" or "|" now and then; before a currency word
+    # nothing else can be meant
+    rf"(?:\)|[:;|\]}}](?=\s*(?:{_CUR_RE})))\s*)?"
+)
 _AMOUNT_AFTER = re.compile(
     rf"(?<![\d.,])({_NUM_RE})\s*{_PAREN}({_CUR_RE})(?![A-Za-zა-ჰ])", re.IGNORECASE
 )
@@ -302,10 +307,10 @@ def find_amounts(text: str) -> list[RuleHit]:
 _DATE_NUMERIC = re.compile(r"(?<!\d)(\d{1,2})[./-](\d{1,2})[./-](\d{4})(?!\d)")
 _DATE_ISO = re.compile(r"(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)")
 _DATE_KA_YMD = re.compile(
-    rf"(?<!\d)(\d{{4}})[.,\s]*წ(?:ლის|\.)?\s*(\d{{1,2}})\s*({_KA_MONTH_FUZZY})", re.IGNORECASE
+    rf"(?<!\d)(\d{{4}})[.,\s]*წ(?:ლის|\.)?\s*(\d{{1,2}})\.?\s*({_KA_MONTH_FUZZY})", re.IGNORECASE
 )
 _DATE_KA_DMY = re.compile(
-    rf"(?<!\d)(\d{{1,2}})\s*({_KA_MONTH_FUZZY}),?\s*(\d{{4}})\s*(?:წ(?:ელი|ლის|\.)?)?",
+    rf"(?<!\d)(\d{{1,2}})\.?\s*({_KA_MONTH_FUZZY}),?\s*(\d{{4}})\s*(?:წ(?:ელი|ლის|\.)?)?",
     re.IGNORECASE,
 )
 _DATE_EN_DMY = re.compile(

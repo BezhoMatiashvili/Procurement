@@ -223,7 +223,12 @@ def main(argv: list[str] | None = None) -> int:
                 ):
                     if contract_text is None:
                         continue
-                    rep = check_aoa(aoa_text=text, contract_text=contract_text)
+                    rep = check_aoa(
+                        aoa_text=text,
+                        contract_text=contract_text,
+                        aoa_ocr=True,
+                        contract_ocr=label == "vs_scanned_contract",
+                    )
                     entry[label] = [
                         {"rule": f.rule_id, "severity": f.severity, "actual": f.actual,
                          "expected": f.expected}

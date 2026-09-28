@@ -51,6 +51,7 @@ from procurement_agent.db import get_session
 from procurement_agent.extraction.pipeline import (
     StoredDocument,
     compare_stored,
+    is_scanned_pdf,
     load_document_text,
     result_dir,
     upload_path,
@@ -134,6 +135,11 @@ def run_aoa(
                 rates=rates,
                 advance=advance,
                 review=review,
+                # a scan's letters and codes may be misread: its differences are said so
+                aoa_ocr=is_scanned_pdf(settings, aoa.id, aoa.kind),
+                contract_ocr=(
+                    contract is not None and is_scanned_pdf(settings, contract.id, contract.kind)
+                ),
             )
         finally:
             rates.close()

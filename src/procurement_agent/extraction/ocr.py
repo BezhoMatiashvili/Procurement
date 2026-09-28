@@ -57,6 +57,9 @@ _IBAN = re.compile(r"GE\d{2}[A-Z]{2}\d{16}")
 _BIC_LABEL = re.compile(r"(?:ბანკის\s+კოდი|SWIFT|BIC)\s*:?\s*", re.IGNORECASE)
 _BIC_TOKEN = re.compile(r"[A-Za-z0-9]{8}(?:[A-Za-z0-9]{3})?(?![A-Za-z0-9])")
 _BIC = re.compile(r"[A-Z]{4}GE[A-Z0-9]{2}(?:[A-Z0-9]{3})?")
+#: A day of the month read as a bar or a letter: "2026 წლის | აგვისტოდან". After "წლის" and
+#: before a word, only a number fits.
+_DAY_AS_BAR = re.compile(r"((?:წლის|წ\.)\s+)[|lI](\s+[ა-ჰ])")
 
 
 def _alike_letters(a: str, b: str) -> bool:
@@ -104,13 +107,15 @@ def _bic(token: str) -> str | None:
 
 
 def repair_codes(text: str) -> str:
-    """``text`` with its scanned IBANs, and the bank codes after a bank-code label, put back in
-    shape. Only for text that came from OCR; the length never changes."""
+    """``text`` with its scanned IBANs, the bank codes after a bank-code label and a date's day
+    read as a bar put back in shape. Only for text that came from OCR; the length never
+    changes."""
 
     def iban(m: re.Match[str]) -> str:
         return _iban(m.group(0)) or m.group(0)
 
     text = _IBAN_TOKEN.sub(iban, text)
+    text = _DAY_AS_BAR.sub(r"\g<1>1\g<2>", text)
     out = list(text)
     for label in _BIC_LABEL.finditer(text):
         m = _BIC_TOKEN.match(text, label.end())
