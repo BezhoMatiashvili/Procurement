@@ -2231,7 +2231,9 @@ def main(argv: list[str] | None = None) -> int:
     logging.disable(logging.WARNING)
     settings = Settings(env="dev", docling_artifacts_path=ROOT / "models" / "docling")
     keep = (
-        Path(args.keep_failures).resolve()
+        # absolute, not resolved: samples/ may be a symlink (a worktree), and a resolved path
+        # would no longer sit under ROOT
+        Path(args.keep_failures).absolute()
         if args.keep_failures
         else ROOT / "samples" / "mutations" / "aoa" / f"seed-{args.seed}"
     )
@@ -2300,7 +2302,7 @@ def main(argv: list[str] | None = None) -> int:
                     if key in r and Path(r[key]).exists():
                         dst = keep / Path(r[key]).name
                         dst.write_bytes(Path(r[key]).read_bytes())
-                        r[key] = str(dst.relative_to(ROOT))
+                        r[key] = str(dst.relative_to(ROOT) if dst.is_relative_to(ROOT) else dst)
             elif "path" in r:
                 r.pop("path", None)
                 r.pop("annotated", None)

@@ -448,3 +448,21 @@ def test_a_name_written_in_two_alphabets_is_compared_as_written() -> None:
     ]
     right = [left[0].replace("ABC", "XYZ"), left[1]]
     assert ("CMP.PARTY", "შპს ABCჯგუფი", "შპს XYZჯგუფი") in found(left, right)
+
+
+def test_an_amount_restated_with_its_tetri_is_no_change() -> None:
+    """ "100 (ასი) ლარს" and "100.00 (ასი ლარი და 00 თეთრი)" state one amount."""
+    from procurement_agent.checks.compare import word_amount_deltas
+
+    assert (
+        word_amount_deltas(
+            "საფასური შეადგენს 100 (ასი) ლარს.",
+            "საფასური შეადგენს 100.00 (ასი ლარი და 00 თეთრი).",
+        )
+        == []
+    )
+    [delta] = word_amount_deltas(
+        "საფასური შეადგენს 100 (ასი) ლარს.",
+        "საფასური შეადგენს 100.50 (ასი ლარი და ორმოცდაათი თეთრი).",
+    )
+    assert delta.right == "ასი ლარი და ორმოცდაათი თეთრი (100.50)"

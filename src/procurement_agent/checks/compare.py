@@ -39,7 +39,13 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from procurement_agent.checks.amounts import FIGURE, NUM_IN_TEXT, looks_like_numeral, number_of
+from procurement_agent.checks.amounts import (
+    FIGURE,
+    NUM_IN_TEXT,
+    looks_like_numeral,
+    number_of,
+    read_words,
+)
 from procurement_agent.checks.findings import Finding, Severity, SkipNote
 from procurement_agent.extraction.anchors import bic_is_well_formed, find_anchors, find_parties
 from procurement_agent.extraction.georgian import (
@@ -1123,7 +1129,11 @@ def _spelled_numbers(text: str) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     for m in _PARENTHESIS.finditer(text):
         inner = m.group(1).strip()
-        if looks_like_numeral(inner) or _misspells_figure(text[: m.start()], inner):
+        if (
+            looks_like_numeral(inner)
+            or _spelled_value(inner) is not None  # "ასი ლარი და 00 თეთრი": currency and tetri
+            or _misspells_figure(text[: m.start()], inner)
+        ):
             out.append((inner, text[m.end() : m.end() + _AFTER]))
     return out
 
@@ -1140,9 +1150,16 @@ def _misspells_figure(before: str, words: str) -> bool:
     return number_words_typo(words, int(figure)) is not None
 
 
-def _spelled_display(words: str, value: int) -> str:
+def _spelled_display(words: str, value: float) -> str:
     """A number in words as a finding shows it: "ორი ათას ოთხასი (2400)"."""
-    return f"{words} ({value})"
+    shown = str(int(value)) if float(value).is_integer() else f"{value:.2f}"
+    return f"{words} ({shown})"
+
+
+def _spelled_value(inner: str) -> float | None:
+    """What a bracket's words say, currency words and tetri read with them: "ასი ლარი და 00
+    თეთრი" is 100, like "ასი" - restating an amount with its tetri changes nothing."""
+    return read_words(inner)[1]
 
 
 def word_amount_deltas(left: str, right: str) -> list[ValueDelta]:
@@ -1158,7 +1175,7 @@ def word_amount_deltas(left: str, right: str) -> list[ValueDelta]:
 
 
 #: A number in words that changed, and what it read as before and after when both sides read.
-_WordChange = tuple[ValueDelta, tuple[int, int] | None]
+_WordChange = tuple[ValueDelta, tuple[float, float] | None]
 
 
 def _word_number_changes(left: str, right: str) -> list[_WordChange]:
@@ -1179,8 +1196,8 @@ def _word_number_changes(left: str, right: str) -> list[_WordChange]:
 
 
 def _spelled_delta(a: tuple[str, str] | None, b: tuple[str, str] | None) -> _WordChange | None:
-    va = parse_number_words(a[0]) if a else None
-    vb = parse_number_words(b[0]) if b else None
+    va = _spelled_value(a[0]) if a else None
+    vb = _spelled_value(b[0]) if b else None
     kind = _numeral_kind(*(b or a))  # type: ignore[misc]
     en, ka = _WORD_NUMBER_LABELS[kind]
     severity: Severity = "error" if kind in ("amount", "duration") else "warning"
@@ -1203,7 +1220,11 @@ def _spelled_delta(a: tuple[str, str] | None, b: tuple[str, str] | None) -> _Wor
             return changed, (va, vb)
         # one side does not read as a number: the same number misspelled, or a changed one
         known, other = (va, b[0]) if va is not None else (vb, a[0])
-        if known is not None and number_words_typo(other, known) is not None:
+        if (
+            known is not None
+            and float(known).is_integer()
+            and number_words_typo(other, int(known)) is not None
+        ):
             typo = _spelling(
                 a[0],
                 b[0],
@@ -1238,7 +1259,7 @@ def _spelled_delta(a: tuple[str, str] | None, b: tuple[str, str] | None) -> _Wor
     return gone_or_new, None
 
 
-def _restated(read: tuple[int, int] | None, values: list[ValueDelta]) -> bool:
+def _restated(read: tuple[float, float] | None, values: list[ValueDelta]) -> bool:
     """Whether a number in words that changed is its figure's change told a second time.
 
     "1 200 (ათას ორასი) ლარს" rewritten as "1 700 (ათას შვიდასი) ლარს" is one new fee, and
