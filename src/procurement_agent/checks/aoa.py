@@ -259,7 +259,18 @@ _ACT_DATE_KEYS = ("გაფორმდა", "გაფორმების �
 _ACT_SIGNED = re.compile(r"გაფორმდა|გაფორმების\s+თარიღი(?![ა-ჰ])")
 #: An advance or prepayment clause: a date there is a payment's, never the act's.
 _ADVANCE_WORDS = re.compile(r"ავანს|წინასწარ|advance|prepay", re.IGNORECASE)
-_PERIOD_KEYS = ("შესრულდა", "შესრულების თარიღი", "შესრულების პერიოდი")
+#: What opens the service period: "შესრულდა …", a "შესრულების თარიღი" heading, and the other
+#: ways acts say it - "გაწეულია 01.11.2026 - 30.11.2026 პერიოდში" (the services rendered), a
+#: "საანგარიშო პერიოდი" (reporting period) heading.
+_PERIOD_KEYS = (
+    "შესრულდა",
+    "შესრულების თარიღი",
+    "შესრულების პერიოდი",
+    "გაწეულია",
+    "გაიწია",
+    "საანგარიშო პერიოდ",
+    "მომსახურების პერიოდ",
+)
 
 #: The window a service period is held to (``_term_window``), as the messages name it: (Georgian,
 #: in the dative "სცდება" takes; English).
@@ -1424,6 +1435,7 @@ class AoaChecker:
                 p.address,
                 match.address,
             )
+            self._proxies(p, match)
             for d in p.directors:
                 if any(names_match(d, cd) for cd in match.directors):
                     continue
@@ -1456,6 +1468,31 @@ class AoaChecker:
                         actual=form,
                         span=span,
                     )
+
+    def _proxies(self, p: Party, match: Party) -> None:
+        """AOA.DIRECTOR, as a warning: the act is signed for ``p`` under a power of attorney by
+        someone the contract does not name. Not provably wrong - the client's rule says the
+        authority must be checked - so the report asks for the power of attorney, at every place
+        the attorney is named, and proposes no name to write instead."""
+        named = [*match.directors, *match.proxies]
+        for proxy in p.proxies:
+            if any(names_match(proxy, n) for n in named):
+                continue
+            director = match.directors[0] if match.directors else None
+            ka_dir = f"; ხელშეკრულებით ხელმომწერია {director}" if director else ""
+            en_dir = f"; the contract names {director}" if director else ""
+            forms: list[tuple[str, tuple[int, int] | None]] = [*self._written_forms(proxy)]
+            for form, span in forms or [(proxy, self._find_span(proxy))]:
+                self._add(
+                    "AOA.DIRECTOR",
+                    "warning",
+                    f"აქტს {match.name}-ის სახელით ხელს აწერს მინდობილობით მოქმედი პირი „{form}“"
+                    f"{ka_dir} — გადაამოწმეთ მინდობილობა",
+                    f"the act is signed for {match.name} under a power of attorney by '{form}'"
+                    f"{en_dir} - check the power of attorney",
+                    actual=form,
+                    span=span,
+                )
 
     def _id_code_party(self, p: Party, match: Party, owner: Party) -> None:
         """AOA.ID_CODE_PARTY: the act gives ``p`` (the contract's ``match``) the code the contract

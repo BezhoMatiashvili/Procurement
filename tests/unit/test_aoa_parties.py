@@ -332,25 +332,31 @@ class TestPartyMissing:
             "a party (a legal form and a quoted name), so its details were not compared"
         ]
 
-    @pytest.mark.parametrize(
-        ("legal_form", "written"),
-        [("ი / მ", "ი / მ ნიკა ხარაზი"), ("ინდ. მეწარმე", "ნიკა ხარაზი")],
-        ids=["spaced-legal-form", "name-without-legal-form"],
-    )
-    def test_an_entrepreneur_not_read_as_a_party_is_skipped(
-        self, legal_form: str, written: str
-    ) -> None:
-        """An individual entrepreneur's legal form is not part of the name to look for: "ი / მ"
-        written with spaces, or left out, still names the party."""
-        contract = CONTRACT.replace("შპს „ბეტა სერვისი“", f"{legal_form} „ნიკა ხარაზი“")
-        block = _CONTRACTOR_BLOCK.replace("შპს „ბეტა სერვისი“", written).replace(
+    def test_an_entrepreneur_without_a_legal_form_is_skipped(self) -> None:
+        """An individual entrepreneur's legal form is not part of the name to look for: left
+        out, the name still names the party."""
+        contract = CONTRACT.replace("შპს „ბეტა სერვისი“", "ინდ. მეწარმე „ნიკა ხარაზი“")
+        block = _CONTRACTOR_BLOCK.replace("შპს „ბეტა სერვისი“", "ნიკა ხარაზი").replace(
             ", საიდენტიფიკაციო კოდი: 987654321", ""
         )
         act = ACT.replace(_CONTRACTOR_BLOCK, block).replace(_CONTRACTOR_SIGNATURE, "")
         report = _check(act, contract)
         assert "AOA.PARTY_MISSING" not in _ids(report)
         [reason] = _skips(report, "AOA.PARTY_MISSING")
-        assert reason.startswith(f"{legal_form} ნიკა ხარაზი: the act gives this party's code")
+        assert reason.startswith("ინდ. მეწარმე ნიკა ხარაზი: the act gives this party's code")
+
+    def test_an_entrepreneur_named_without_quotes_is_read_and_compared(self) -> None:
+        """ "ი / მ ნიკა ხარაზი": an individual entrepreneur is named, not quoted, and read as the
+        party the contract's "ი/მ „ნიკა ხარაზი“" is."""
+        contract = CONTRACT.replace("შპს „ბეტა სერვისი“", "ი / მ „ნიკა ხარაზი“")
+        block = _CONTRACTOR_BLOCK.replace("შპს „ბეტა სერვისი“", "ი / მ ნიკა ხარაზი").replace(
+            ", საიდენტიფიკაციო კოდი: 987654321", ""
+        )
+        act = ACT.replace(_CONTRACTOR_BLOCK, block).replace(_CONTRACTOR_SIGNATURE, "")
+        report = _check(act, contract)
+        assert "AOA.PARTY_MISSING" not in _ids(report)
+        assert _skips(report, "AOA.PARTY_MISSING") == []
+        assert "AOA.PARTY_NAME" not in _ids(report)
 
     def test_digits_inside_an_account_number_are_not_the_partys_code(self) -> None:
         """The contractor is gone from the act; an account number that happens to hold its code's
