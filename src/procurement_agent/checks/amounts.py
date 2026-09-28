@@ -11,19 +11,24 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from procurement_agent.extraction.georgian import damerau, number_to_words, parse_number_words
 from procurement_agent.extraction.normalize import parse_georgian_number_words, parse_number
 from procurement_agent.extraction.rules import find_amounts
 from procurement_agent.extraction.schemas import FactType
 
 __all__ = [
+    "FIGURE",
     "NUM_IN_TEXT",
     "DigitsAndWords",
     "Money",
     "digits_and_words",
+    "looks_like_numeral",
     "money_amounts",
     "money_hits",
     "number_of",
+    "render_figure_like",
     "word_amounts",
+    "words_for",
 ]
 
 #: The first run of digits (with grouping) in a string.
@@ -31,11 +36,19 @@ NUM_IN_TEXT = re.compile("\\d[\\d\\s.,\u00a0]*\\d|\\d")
 
 _MONEY_TYPES = frozenset({FactType.price, FactType.total_amount, FactType.amount})
 
-#: "100 (ასი) ლარს" - digits, then the same number written out. Georgian letters only inside
-#: the brackets: this is the act's own restatement of a figure, not any parenthetical.
+#: A figure as documents write it: digits grouped in threes by a space, a dot or a comma, and
+#: an optional decimal part - "2 400", "2.400,50", "100". A group is exactly three digits after
+#: one separator, so an item number in front ("საფასური: 1. 100 (ასი)") is not read into it,
+#: which a looser pattern did: it read 1100 there and reported the words as wrong.
+FIGURE = r"\d{1,3}(?:[ \u00a0.,]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?"
+#: "100 (ასი) ლარს" - a figure, then the same number written out. Digits may appear inside the
+#: brackets only for tetri ("ლარი და 50 თეთრი").
 _DIGITS_THEN_WORDS = re.compile(
-    r"(?<![\d.,])(\d[\d\u00a0 .,]{0,14}\d|\d)\s*\(\s*([ა-ჰ ]{2,60})\s*\)"
+    rf"(?<![\d.,])({FIGURE})(?!\d)\s*\(\s*([ა-ჰ][ა-ჰ0-9 ,.]{{1,80}}?)\s*\)"
 )
+#: Currency words inside the brackets: "(ასი ლარი)", "(ათასი აშშ დოლარი)".
+_CURRENCY_WORD = re.compile(r"(?:აშშ\s+)?(?:ლარ|დოლარ|ევრო|ფუნტ|რუბლ)[ა-ჰ]*")
+_TETRI_PART = re.compile(r"(?:\s*,?\s*და)?\s*(\d{1,2}|[ა-ჰ ]+?)\s*(?:თეთრ|ცენტ)[ა-ჰ]*\s*$")
 #: Any short parenthetical. The comparison reads every one, because a revision that edits only
 #: the words leaves the digits beside them untouched.
 _PARENTHETICAL = re.compile(r"\(([^()]{2,80})\)")
@@ -113,11 +126,73 @@ class DigitsAndWords:
     """One "digits (words)" pair, e.g. "100 (ასი)", and what each half reads as."""
 
     digits: float
+    #: the words as written, currency words and tetri left out: "ასი" of "(ასი ლარი)"
     words: str
-    #: the words as a number, or None when they do not read as one
-    spelled: int | None
+    #: the words as a number (tetri included), or None when they do not read as one - strictly:
+    #: "ათასი ათასი" is not 2000
+    spelled: float | None
     raw: str
     span: tuple[int, int]
+    #: where the figure and the words are, for a finding that marks only the wrong half
+    digits_span: tuple[int, int] = (0, 0)
+    words_span: tuple[int, int] = (0, 0)
+    #: whether the bracket holds a numeral at all: "დანართი 1 (ტექნიკური დავალება)" does not
+    numeral: bool = True
+
+    @property
+    def digits_raw(self) -> str:
+        return self.raw[: self.digits_span[1] - self.span[0]].strip()
+
+
+#: Every word a numeral up to a thousand is written with, and the scale words: the vocabulary a
+#: bracket must mostly be made of to be an amount in words, typos allowed.
+_NUMERAL_WORDS = frozenset(
+    {w for n in range(1, 1000) for w in number_to_words(n).split()}
+    | {w for n in (1000, 2000, 10**6, 2 * 10**6, 10**9) for w in number_to_words(n).split()}
+    | {"ათას", "მილიონ", "მილიარდ", "ნული"}
+)
+
+
+def _is_numeral_word(word: str) -> bool:
+    """A numeral word, or one garbled: one edit away, or two that keep its first two letters
+    ("ხუთთთ" for "ხუთი") - enough to say "a number was meant here" without reading "ოფისი"
+    (office) as one."""
+    if word in _NUMERAL_WORDS or parse_georgian_number_words(word) is not None:
+        return True
+    if len(word) < 3:
+        return False
+    for w in _NUMERAL_WORDS:
+        if abs(len(w) - len(word)) > 2:
+            continue
+        d = damerau(word, w, cap=2)
+        if d <= 1 or (d == 2 and len(word) >= 4 and word[:2] == w[:2]):
+            return True
+    return False
+
+
+def looks_like_numeral(words: str) -> bool:
+    """Whether a bracket is a number written out, allowing for a typo in it."""
+    toks = [t for t in words.split() if t != "და"]
+    hits = sum(1 for t in toks if _is_numeral_word(t))
+    return bool(toks) and hits * 2 >= len(toks)
+
+
+def _read_words(inner: str) -> tuple[str, float | None]:
+    """The numeral part of a bracket and its value, tetri included: "ასი ლარი და 50 თეთრი" is
+    ("ასი", 100.5). A value that does not parse strictly is None."""
+    tetri = 0.0
+    m = _TETRI_PART.search(inner)
+    if m and _CURRENCY_WORD.search(inner[: m.start()] or ""):
+        part = m.group(1).strip()
+        cents = float(part) if part.isdigit() else parse_number_words(part)
+        if cents is None:
+            return _CURRENCY_WORD.sub(" ", inner[: m.start()]).strip(), None
+        tetri = cents / 100
+        inner = inner[: m.start()]
+    words = " ".join(_CURRENCY_WORD.sub(" ", inner).replace(",", " ").split())
+    words = re.sub(r"\s+და$", "", words)
+    value = parse_number_words(words)
+    return words, None if value is None else value + tetri
 
 
 def digits_and_words(text: str) -> list[DigitsAndWords]:
@@ -127,14 +202,43 @@ def digits_and_words(text: str) -> list[DigitsAndWords]:
         digits = parse_number(m.group(1))
         if digits is None:
             continue
-        words = m.group(2).strip()
+        inner = m.group(2).strip()
+        words, spelled = _read_words(inner)
+        at = text.find(words, m.start(2), m.end(2) + 1) if words else -1
+        words_span = (at, at + len(words)) if at >= 0 else m.span(2)
         out.append(
             DigitsAndWords(
                 digits=digits,
                 words=words,
-                spelled=parse_georgian_number_words(words),
+                spelled=spelled,
                 raw=m.group(0).strip(),
                 span=m.span(),
+                digits_span=m.span(1),
+                words_span=words_span,
+                numeral=looks_like_numeral(words),
             )
         )
     return out
+
+
+def words_for(value: float) -> str:
+    """How an amount is written out in the brackets after its figure: "ასი", or with tetri
+    "ასი ლარი და 50 თეთრი"."""
+    lari = int(value)
+    cents = round((value - lari) * 100)
+    base = number_to_words(lari)
+    return f"{base} ლარი და {cents} თეთრი" if cents else base
+
+
+def render_figure_like(value: float, example: str) -> str:
+    """``value`` written the way ``example`` writes a figure: "2 400", "2,400.00", "2400"."""
+    ex = example.strip()
+    decimals = re.search(r"[.,](\d{1,2})$", ex)
+    grouped = re.search(r"\d[ \u00a0.,]\d{3}", ex)
+    sep = grouped.group(0)[1] if grouped else ""
+    dec_sep = decimals.group(0)[0] if decimals else ""
+    places = len(decimals.group(1)) if decimals else 0
+    whole = f"{value:,.{places}f}" if places else f"{round(value):,}"
+    int_part, _, frac = whole.partition(".")
+    int_part = int_part.replace(",", sep)
+    return f"{int_part}{dec_sep}{frac}" if places else int_part

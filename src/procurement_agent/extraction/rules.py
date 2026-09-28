@@ -13,6 +13,7 @@ from collections.abc import Callable, Hashable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date
 
+from procurement_agent.extraction.georgian import month_typo
 from procurement_agent.extraction.normalize import (
     amounts_equal,
     edit_distance,
@@ -341,87 +342,21 @@ def _month_ka(s: str) -> int | None:
 
 
 def month_ka_is_misspelled(s: str) -> bool:
-    """True when the word resolves to a month but is not spelled like one."""
-    s = s.lower()
-    if any(s.startswith(k) for k in _KA_MONTHS):
-        return False
-    return _month_ka(s) is not None
-
-
-#: The case forms a month takes in a date: nominative, genitive, dative, and the "-დან",
-#: "-მდე", "-ში" and "-ით" forms (August's genitive and dative are the same word). A misspelled
-#: month is corrected to the nearest of these, so the correction keeps the case the act used.
-_KA_MONTH_FORMS: dict[int, tuple[str, ...]] = {
-    1: ("იანვარი", "იანვრის", "იანვარს", "იანვრიდან", "იანვრამდე", "იანვარში", "იანვრით"),
-    2: (
-        "თებერვალი",
-        "თებერვლის",
-        "თებერვალს",
-        "თებერვლიდან",
-        "თებერვლამდე",
-        "თებერვალში",
-        "თებერვლით",
-    ),
-    3: ("მარტი", "მარტის", "მარტს", "მარტიდან", "მარტამდე", "მარტში", "მარტით"),
-    4: ("აპრილი", "აპრილის", "აპრილს", "აპრილიდან", "აპრილამდე", "აპრილში", "აპრილით"),
-    5: ("მაისი", "მაისის", "მაისს", "მაისიდან", "მაისამდე", "მაისში", "მაისით"),
-    6: ("ივნისი", "ივნისის", "ივნისს", "ივნისიდან", "ივნისამდე", "ივნისში", "ივნისით"),
-    7: ("ივლისი", "ივლისის", "ივლისს", "ივლისიდან", "ივლისამდე", "ივლისში", "ივლისით"),
-    8: ("აგვისტო", "აგვისტოს", "აგვისტოდან", "აგვისტომდე", "აგვისტოში", "აგვისტოთი"),
-    9: (
-        "სექტემბერი",
-        "სექტემბრის",
-        "სექტემბერს",
-        "სექტემბრიდან",
-        "სექტემბრამდე",
-        "სექტემბერში",
-        "სექტემბრით",
-    ),
-    10: (
-        "ოქტომბერი",
-        "ოქტომბრის",
-        "ოქტომბერს",
-        "ოქტომბრიდან",
-        "ოქტომბრამდე",
-        "ოქტომბერში",
-        "ოქტომბრით",
-    ),
-    11: ("ნოემბერი", "ნოემბრის", "ნოემბერს", "ნოემბრიდან", "ნოემბრამდე", "ნოემბერში", "ნოემბრით"),
-    12: (
-        "დეკემბერი",
-        "დეკემბრის",
-        "დეკემბერს",
-        "დეკემბრიდან",
-        "დეკემბრამდე",
-        "დეკემბერში",
-        "დეკემბრით",
-    ),
-}
-
-
-#: How far a misspelled month may lie from the form it is corrected to. A typo in the stem and
-#: one in the ending are two edits ("აგვუისტას" / "აგვისტოს"). A word further away carries an
-#: ending the forms do not list, "-სთვის" or "-ვე", and its nearest form says something else:
-#: "აგისტოსთვის" is nearest to "აგვისტოთი", another case.
-_MONTH_CORRECTION_DISTANCE = 2
+    """True when the word is a month misspelled: not one of the month's correct forms, but
+    within two edits of one (``georgian.month_typo``). A prefix test missed every typo after the
+    stem - "სექტემბრდან" starts with "სექტემბ" - and those are typos the client plants."""
+    return month_typo(s) is not None
 
 
 def month_ka_correction(word: str) -> str | None:
-    """How a misspelled Georgian month should be written: its case form nearest to ``word``.
+    """How a misspelled Georgian month should be written: its correct form nearest to ``word``,
+    in the case the act meant ("აგვუისტას" becomes "აგვისტოს", "სექტემბრდან" "სექტემბრიდან").
 
-    "აგვუისტას" becomes "აგვისტოს" and "აპრლიდან" "აპრილიდან". None when the word is not a
-    month at all, and when even the nearest form is more than two edits away: a wrong
-    correction is worse than none. A tie goes to the form listed first.
+    None when the word is no month, when it is already correct, and when two months are equally
+    close ("ივმისი"): a wrong correction is worse than none.
     """
-    month = _month_ka(word)
-    if month is None:
-        return None
-    low = word.lower()
-    forms = _KA_MONTH_FORMS[month]
-    # an uncapped distance: capped, every far form would tie at cap + 1
-    distance = {f: edit_distance(low, f, cap=max(len(low), len(f))) for f in forms}
-    best = min(forms, key=distance.__getitem__)
-    return best if distance[best] <= _MONTH_CORRECTION_DISTANCE else None
+    found = month_typo(word)
+    return found.correction if found else None
 
 
 def _month_en(s: str) -> int | None:

@@ -25,6 +25,7 @@ from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 from docx import Document
+from docx.comments import Comment
 from docx.document import Document as DocumentType
 from docx.opc.exceptions import PackageNotFoundError
 from docx.text.paragraph import Paragraph
@@ -112,28 +113,40 @@ def _normalised_index(text: str) -> tuple[str, list[int]]:
     return "".join(out), index
 
 
-def _locate(text: str, needle: str) -> tuple[int, int] | None:
-    """Offsets of ``needle`` in ``text``, tolerating quoting and spacing differences."""
-    direct = text.find(needle)
+def _locate(text: str, needle: str, start: int = 0) -> tuple[int, int] | None:
+    """Offsets of ``needle`` in ``text`` at or after ``start``, tolerating quoting and spacing
+    differences."""
+    direct = text.find(needle, start)
     if direct >= 0:
         return direct, direct + len(needle)
     flat, index = _normalised_index(text)
     flat_needle, _ = _normalised_index(needle)
     if not flat_needle:
         return None
-    at = flat.find(flat_needle)
+    flat_start = next((i for i, orig in enumerate(index) if orig >= start), len(flat))
+    at = flat.find(flat_needle, flat_start)
     if at < 0:
         return None
     return index[at], index[at + len(flat_needle) - 1] + 1
 
 
-def _runs_covering(paragraph: Paragraph, needle: str) -> list[Run] | None:
+def _runs_covering(paragraph: Paragraph, needle: str, start_at: int = 0) -> list[Run] | None:
     """Split runs as needed so ``needle`` is covered by a whole number of runs."""
+    found = _cover_next(paragraph, needle, start_at)
+    return found[0] if found else None
+
+
+def _cover_next(
+    paragraph: Paragraph, needle: str, start_at: int
+) -> tuple[list[Run], int, int] | None:
+    """The runs covering the first occurrence of ``needle`` at or after ``start_at``, split so
+    they cover it exactly, and its offsets. Splitting leaves the paragraph's text unchanged,
+    so offsets stay valid from one occurrence to the next and between findings."""
     needle = needle.strip()
     if not needle:
         return None
     text = "".join(r.text for r in paragraph.runs)
-    located = _locate(text, needle)
+    located = _locate(text, needle, start_at)
     if located is None:
         return None
     start, end = located
@@ -158,7 +171,7 @@ def _runs_covering(paragraph: Paragraph, needle: str) -> list[Run] | None:
             covered.append(run)
         pos = run_end
     _drop_empty_runs(paragraph)
-    return covered or None
+    return (covered, start, end) if covered else None
 
 
 #: Children a run may have and still count as "empty text with nothing else in it".
@@ -183,6 +196,24 @@ def _drop_empty_runs(paragraph: Paragraph) -> None:
             parent.remove(run._r)
 
 
+def _offending(finding: Finding, text: str | None = None) -> list[str]:
+    """The candidates that are the finding's own words (span, quote, actual) - the ones every
+    occurrence of which is wrong - as opposed to ``expected``, the value it should have been."""
+    out: list[str] = []
+    # the finding's own quote first: ``text[span]`` is only right when ``text`` is exactly the
+    # text the span indexes, and a check may have normalised its text before reading it
+    if finding.quote:
+        out.append(finding.quote.strip())
+    if text is not None and finding.span is not None:
+        start, end = finding.span
+        if 0 <= start < end <= len(text):
+            out.append(text[start:end].strip())
+    if finding.actual:
+        for candidate in (finding.actual, finding.actual.split(" (")[0]):
+            out.append(normalize_spaces(candidate).removesuffix("…"))
+    return [c for c in dict.fromkeys(out) if c]
+
+
 def _candidates(finding: Finding, text: str | None = None) -> list[str]:
     """Text to look for, most specific first.
 
@@ -203,11 +234,11 @@ def _candidates(finding: Finding, text: str | None = None) -> list[str]:
         if candidate and candidate not in out:
             out.append(candidate)
 
+    add(finding.quote)
     if text is not None and finding.span is not None:
         start, end = finding.span
         if 0 <= start < end <= len(text):
             add(text[start:end])
-    add(finding.quote)
     for raw in (finding.actual, finding.expected):
         if not raw:
             continue
@@ -231,16 +262,43 @@ def all_paragraphs(container: object) -> Iterator[Paragraph]:
                 yield from all_paragraphs(cell)
 
 
+#: One place a comment goes: the paragraph, the offsets in its text, and the runs covering them.
+_Place = tuple[Paragraph, int, int, list[Run]]
+
+
 def _anchor_for(
     document: DocumentType, finding: Finding, text: str | None = None
 ) -> list[Run] | None:
     """Find the runs a finding should be attached to, most specific candidate first."""
+    places = _places_for(document, finding, text)
+    return places[0][3] if places else None
+
+
+def _places_for(document: DocumentType, finding: Finding, text: str | None = None) -> list[_Place]:
+    """Every place a finding should be marked.
+
+    A wrong value written in several places is wrong in each - a misspelled director in the
+    preamble, the signature block and the annex - and a reviewer who corrects the one marked
+    place leaves the rest. So the finding's own words are marked wherever they occur. The value
+    it *should* have been (``expected``), searched only as a last resort, marks one place: its
+    other occurrences are correct.
+    """
+    offending = _offending(finding, text)
     for needle in _candidates(finding, text):
+        found: list[_Place] = []
         for paragraph in all_paragraphs(document):
-            runs = _runs_covering(paragraph, needle)
-            if runs:
-                return runs
-    return None
+            if needle not in offending:
+                if (hit := _cover_next(paragraph, needle, 0)) is not None:
+                    return [(paragraph, hit[1], hit[2], hit[0])]
+                continue
+            at = 0
+            while (hit := _cover_next(paragraph, needle, at)) is not None:
+                runs, start, end = hit
+                found.append((paragraph, start, end, runs))
+                at = end
+        if found:
+            return found
+    return []
 
 
 def annotate_docx(
@@ -275,12 +333,24 @@ def annotate_docx(
         msg = f"the file is not a Word document that comments can be written into: {e}"
         raise UnsupportedDocumentError(msg) from e
     unanchored: list[Finding] = []
+    # Findings that land on exactly the same words share one comment: a bank code that is both
+    # malformed and not the contract's is one place to fix, not two notes on top of each other.
+    # A place is its paragraph and the offsets in the paragraph's text, which splitting runs for
+    # later findings never changes.
+    comments: dict[tuple[object, int, int], Comment] = {}
     for finding in findings:
-        runs = _anchor_for(document, finding, text)
-        if runs is None:
+        places = _places_for(document, finding, text)
+        if not places:
             unanchored.append(finding)
             continue
-        document.add_comment(runs, text=comment_text(finding), author=author, initials=INITIALS)
+        for paragraph, start, end, runs in places:
+            key = (paragraph._p, start, end)
+            if (existing := comments.get(key)) is not None:
+                existing.add_paragraph(comment_text(finding))
+                continue
+            comments[key] = document.add_comment(
+                runs, text=comment_text(finding), author=author, initials=INITIALS
+            )
 
     if unanchored:
         para = document.add_paragraph()

@@ -385,7 +385,8 @@ class TestClientSide:
     def test_a_changed_client_signatory_is_caught(self) -> None:
         act = ACT.replace("დირექტორი ნინო კაპანაძე", "დირექტორი ლევან ხარაზი")
         finding = _only(_check(act), "AOA.DIRECTOR")
-        assert (finding.expected, finding.actual) == ("ნინო კაპანაძის", "ლევან ხარაზი")
+        # the contract's director in the act's own case: the act writes a nominative there
+        assert (finding.expected, finding.actual) == ("ნინო კაპანაძე", "ლევან ხარაზი")
 
     def test_a_changed_client_name_under_its_code_is_caught(self) -> None:
         report = _check(ACT.replace("შპს „ალფა ჯგუფი“", "შპს „ომეგა“", 1))

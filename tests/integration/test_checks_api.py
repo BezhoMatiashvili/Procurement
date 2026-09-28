@@ -175,9 +175,11 @@ def test_a_contract_rule_runs_end_to_end(client: TestClient) -> None:
         json={"aoa_document_id": act, "contract_document_id": contract},
     ).json()
     [finding] = [f for f in report["findings"] if f["rule_id"] == "AOA.PERIOD_IN_TERM"]
+    # a year earlier lands the whole period inside the window: the year is what was mistyped,
+    # and the correction is the period as the act writes it, with the right year
     assert (finding["expected"], finding["actual"]) == (
-        "2026-03-01..2026-09-01",
-        "2025-04-01..2025-04-30",
+        "2026 წლის 1 აპრილიდან 2026 წლის 30 აპრილის",
+        "2025 წლის 1 აპრილიდან 2025 წლის 30 აპრილის",
     )
 
 

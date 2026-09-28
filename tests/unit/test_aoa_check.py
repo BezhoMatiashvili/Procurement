@@ -96,15 +96,15 @@ def test_a_misspelled_month_comes_with_its_correction_anchored_on_the_word() -> 
     assert finding.quote == "აპრლიდან"  # the word itself, not the whole date
 
 
-def test_a_misspelled_month_no_listed_form_fits_is_reported_with_no_correction() -> None:
-    """No listed form ends in "-სთვის": the nearest one would drop it, so none is offered."""
+def test_a_misspelled_month_keeps_its_postposition_in_the_correction() -> None:
+    """Every correct form is listed, "-ისთვის" too, so the correction keeps the act's case."""
     act = ACT.replace("30 აპრილის ჩათვლით", "30 აპრლისთვის")
     report = check_aoa(aoa_text=act, contract_text=CONTRACT)
     [finding] = report.findings
     assert (finding.rule_id, finding.actual, finding.expected) == (
         "AOA.SPELLING",
         "აპრლისთვის",
-        None,
+        "აპრილისთვის",
     )
     assert report.summary["execution_period"] == "2026-04-01..2026-04-30"
 
@@ -338,7 +338,8 @@ class TestFee:
         [finding] = report.findings
         assert (finding.rule_id, finding.severity) == ("AOA.FEE", "error")
         assert f"it equals {role} in the contract" in finding.message_en
-        assert (finding.expected, finding.actual) == ("100.00 GEL", "700.00 GEL")
+        # the correction is written as the act writes its fee, ready to type over the mark
+        assert (finding.expected, finding.actual) == ("100 (ასი) ლარს", "700.00 GEL")
         assert finding.quote == "700 (შვიდასი) ლარს"
         assert "ემთხვევა ხელშეკრულებით განსაზღვრულ" in finding.message_ka
 
@@ -412,7 +413,8 @@ class TestFee:
     def test_an_unrelated_extra_amount_still_trips_the_fee(self) -> None:
         [(message, expected, actual, quote)] = _fees(ACT + "დამატებით: 50 ლარი.\n")
         assert message == "fee 50.00 GEL matches no price in the contract (100.00 GEL)"
-        assert (expected, actual, quote) == ("100.00 GEL", "50.00 GEL", "50 ლარი")
+        # the correction is written as the act writes the marked amount
+        assert (expected, actual, quote) == ("100 ლარი", "50.00 GEL", "50 ლარი")
 
     @pytest.mark.parametrize(
         "breakdown",

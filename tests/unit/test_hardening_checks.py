@@ -735,11 +735,15 @@ def test_aoa_amount_words_rule_keeps_its_outputs() -> None:
         for f in report.findings
         if f.rule_id == "AOA.AMOUNT_WORDS"
     ]
-    assert got == [("warning", None, "ხუთთთ", (33, 42))]
+    # the words themselves are marked, not the figure beside them
+    assert got == [("warning", None, "ხუთთთ", (36, 41))]
+    # with no contract to say which half is right, the figure stands and the words are corrected
     report = check_aoa(aoa_text="100 (ორასი) ლარი")
     assert [
-        (f.severity, f.expected) for f in report.findings if f.rule_id == "AOA.AMOUNT_WORDS"
-    ] == [("error", "100")]
+        (f.severity, f.expected, f.actual)
+        for f in report.findings
+        if f.rule_id == "AOA.AMOUNT_WORDS"
+    ] == [("error", "ასი", "ორასი")]
 
 
 # --- 6 and 7. the model pass over a comparison ---------------------------------------------------

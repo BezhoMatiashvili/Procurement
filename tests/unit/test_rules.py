@@ -342,11 +342,25 @@ def test_a_word_that_is_no_month_has_no_correction() -> None:
     assert month_ka_correction("ხელშეკრულება") is None
 
 
-@pytest.mark.parametrize("word", ["აგისტოსთვის", "სექტემრისთვის", "აგისტოშივე"])
-def test_a_month_with_an_ending_the_forms_do_not_list_gets_no_correction(word: str) -> None:
-    """The nearest listed form would drop the ending or change the case ("აგვისტოთი" for
-    "აგისტოსთვის"): a wrong correction is worse than none."""
-    assert month_ka_correction(word) is None
+@pytest.mark.parametrize(
+    ("word", "correction"),
+    [
+        ("აგისტოსთვის", "აგვისტოსთვის"),
+        ("სექტემრისთვის", "სექტემბრისთვის"),
+        ("აგისტოშივე", "აგვისტოშივე"),
+        ("სექტემბრდან", "სექტემბრიდან"),  # a letter dropped after the stem
+    ],
+)
+def test_a_month_keeps_its_postposition_and_particle_in_the_correction(
+    word: str, correction: str
+) -> None:
+    """Every correct form is listed, postpositions and particles included, so the correction
+    never drops an ending or changes the case the act wrote."""
+    assert month_ka_correction(word) == correction
+
+
+def test_two_equally_close_months_give_no_correction() -> None:
+    assert month_ka_correction("ივმისი") is None  # ივნისი or ივლისი
 
 
 def test_run_rules_sorted_and_spans_valid() -> None:
