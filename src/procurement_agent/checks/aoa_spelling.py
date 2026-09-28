@@ -46,7 +46,14 @@ from spylls.hunspell.algo.lookup import AffixForm, Lookup
 from spylls.hunspell.algo.trie import Trie
 
 from procurement_agent.checks.amounts import digits_and_words
-from procurement_agent.extraction.georgian import damerau, is_georgian_word, words
+from procurement_agent.extraction.georgian import (
+    damerau,
+    is_georgian_word,
+    syncopated,
+    typing_slip,
+    word_lemmas,
+    words,
+)
 from procurement_agent.extraction.normalize import QUOTE_CHARS
 from procurement_agent.extraction.rules import find_dates
 from procurement_agent.extraction.schemas import FactType
@@ -410,7 +417,9 @@ def prose_typos(
     for word, start, end in words(text):
         if len(word) < MIN_LETTERS or not is_georgian_word(word):
             continue
-        if word in contract_words or word in names or _SURNAME.search(word):
+        if word in contract_words or word in names or word in _ABBREVIATIONS:
+            continue
+        if _SURNAME.search(word):
             continue
         if fenced.touches(start, end):
             continue
@@ -425,6 +434,12 @@ def prose_typos(
         if correction is not None:
             out.append(ProseTypo(word, start, end, correction))
     return ProseReading(out, len(unsearched))
+
+
+def spelled_right(word: str, lexicon: Lexicon) -> bool:
+    """Whether ``word`` is a word as far as the dictionary can tell: one it knows, or a form of
+    one it does not list (``_lacked_form``)."""
+    return lexicon.known(word) or _lacked_form(word, lexicon)
 
 
 def _lacked_form(word: str, lexicon: Lexicon) -> bool:
@@ -444,6 +459,79 @@ def _lacked_form(word: str, lexicon: Lexicon) -> bool:
         stems = _VOWELS if ending in _PARTICLES else _VOWEL_STEMS
         if word.endswith(ending) and len(base) >= 3 and base[-1] in stems and lexicon.known(base):
             return True
+    if word.endswith("ისას") and _spelled(word[:-2], lexicon):
+        return True  # "შენიშვნისას", "at the time of the remark": the genitive and "-ას"
+    return _case_form(word, lexicon) or _full_form(word, lexicon)
+
+
+def _spelled(word: str, lexicon: Lexicon) -> bool:
+    """A word the dictionary knows, or a case form of one (``_case_form``)."""
+    return lexicon.known(word) or _case_form(word, lexicon)
+
+
+def _aorist_like(word: str) -> bool:
+    """Whether a word in "-ა" may be a verb's aorist ("შესრულდა", "გაიწია") rather than a noun:
+    it starts with a preverb and does not end as a verbal noun ends ("-ება", "-ობა", "-ვა")."""
+    return (
+        word.endswith("ა")
+        and word.startswith(tuple(p for p in _PREVERBS if len(p) > 1))
+        and not word.endswith(("ება", "ობა", "ვა"))
+    )
+
+
+def _case_form(word: str, lexicon: Lexicon) -> bool:
+    """A case form of a noun or adjective the dictionary lists, which it does not list itself:
+    ka_GE knows "შემსყიდველი" and "პირგასამტეხლო" but not "შემსყიდველს" or "პირგასამტეხლოს".
+    The forms are the case model's (``georgian.word_lemmas``), a plural's singular included, and
+    three are not taken for forms:
+
+    * a genitive that keeps the vowel its noun drops, when the dictionary knows the form without
+      it: "შემსრულებელის" beside "შემსრულებლის";
+    * a letter added to a word in "-ა" that may be an aorist (``_aorist_like``): "შესრულდად"
+      is a slip, not an adverbial case, while "გადამოწმებას" and "მედიანას" are datives;
+    * a plural that drops the vowel its singular keeps: "მხარე" makes "მხარეები", so "მხარები"
+      is a letter dropped."""
+    unsyncopated = syncopated(word)
+    if unsyncopated is not None and lexicon.known(unsyncopated):
+        return False
+    for lemma in word_lemmas(word) - {word}:
+        if word[:-1] == lemma and _aorist_like(lemma):
+            continue
+        if any(lexicon.known(s) for s in (lemma, *_singulars(lemma))):
+            return True
+    return False
+
+
+def _singulars(lemma: str) -> tuple[str, ...]:
+    """The nominatives a plural nominative is the plural of: "ტრასები" of "ტრასა", "სახლები" of
+    "სახლი", "ფოტოები" of "ფოტო"."""
+    if not lemma.endswith("ები") or len(lemma) < 6:
+        return ()
+    stem = lemma[:-3]
+    return (stem + "ა", stem + "ი", *((stem,) if stem[-1] in "ეოუ" else ()))
+
+
+def _full_form(word: str, lexicon: Lexicon) -> bool:
+    """A word with the "-ა" of the short copula or of a case ending's full form, or a
+    participle's perfect: the word before it is known, or a form of one, and
+
+    * ends in a vowel: "გაწეულია" ("is rendered"); after a noun in "-ა" too ("მომსახურებაა"),
+      but not after an aorist, where "-ა" doubled is a slip ("შესრულდაა");
+    * ends in a consonant, where the copula is "-აა": "გარეთაა", "შეცდომითაა";
+    * ends in "-ის", "-ით", "-ად" or "-ს", the full case form: "ფეისბუქისა და", "ფაილსა და";
+    * is a participle in "-ულ"/"-ილ": its perfect, "არ შემოწმებულა" ("has not been checked")."""
+    if not word.endswith("ა") or len(word) < MIN_LETTERS + 1:
+        return False
+    base = word[:-1]
+    if base.endswith("ა"):
+        stem = base[:-1]
+        if len(stem) >= 3 and stem[-1] not in _VOWELS and _spelled(stem, lexicon):
+            return True
+        return not _aorist_like(base) and _spelled(base, lexicon)
+    if base.endswith(("ულ", "ილ")) and lexicon.known(base + "ი"):
+        return True
+    if base[-1] in "იეოუ" or base.endswith(("ის", "ით", "ად", "ს")):
+        return _spelled(base, lexicon)
     return False
 
 
@@ -460,12 +548,21 @@ _WHOLE_ENDINGS = (
 
 def _correction(word: str, lexicon: Lexicon, written: frozenset[str] | set[str]) -> str | None:
     """The one known word ``word`` most likely meant, or None when there is none or two are as
-    likely: a wrong correction is worse than none."""
+    likely: a wrong correction is worse than none.
+
+    A neighbour that is the same word in another form says ``word`` is a form too, one the
+    dictionary lacks: the other participle vowel, the verb's other person, its other version.
+    A letter put in place of another is a slip only as a hand or an ear slips (``typing_slip``)
+    - or when the documents write the word it replaced; otherwise ``word`` is more likely a
+    word the dictionary lacks ("კონტენტის", not "კონვენტის")."""
     near = lexicon.neighbours(word)
-    if any(_participle_vowel(word, other) for other in near):
+    if any(
+        _participle_vowel(word, other) or _other_person(word, other) or _other_version(word, other)
+        for other in near
+    ):
         return None
     # the first letter is rarely the mistyped one; a word that differs there is another word
-    near = tuple(c for c in near if c[:1] == word[:1])
+    near = tuple(c for c in near if c[:1] == word[:1] and (c in written or _slipped(word, c)))
     if not near:
         return None
     ranked = sorted(((c in written, _shared_ending(word, c)), c) for c in near)
@@ -484,6 +581,51 @@ def _participle_vowel(word: str, other: str) -> bool:
         and {word[diff[0]], other[diff[0]]} == {"უ", "ი"}
         and word[diff[0] + 1 : diff[0] + 2] == "ლ"
     )
+
+
+def _other_person(word: str, other: str) -> bool:
+    """The verb's other person or number, one letter at the end: "-ს" for "-თ"
+    ("გადაამოწმოს" / "გადაამოწმოთ"), or the plural's "-თ" after a vowel ("გადავურიცხეთ" /
+    "გადავურიცხე")."""
+    if len(word) == len(other):
+        return word[:-1] == other[:-1] and {word[-1], other[-1]} == {"ს", "თ"}
+    short, long_ = sorted((word, other), key=len)
+    return long_ == short + "თ" and short[-1] in _VOWELS
+
+
+#: Preverbs, longest first: the version vowel follows one of them.
+_PREVERBS = (
+    "გადმო", "შემო", "წამო", "ჩამო", "გამო", "აღმო", "მიმო", "გადა", "ამო", "შე", "წა",
+    "ჩა", "და", "მი", "მო", "გა", "აღ", "ა",
+)  # fmt: skip
+_VERSION_VOWELS = "იუაე"
+
+
+def _other_version(word: str, other: str) -> bool:
+    """The verb's other version, the vowel after its preverb: "გამოიწეროს" / "გამოწეროს",
+    "გაუწეროს" / "გაიწეროს"."""
+    for preverb in _PREVERBS:
+        if not (word.startswith(preverb) and other.startswith(preverb)):
+            continue
+        a, b = word[len(preverb) :], other[len(preverb) :]
+        if a[:1] in _VERSION_VOWELS and b[:1] in _VERSION_VOWELS and a[1:] == b[1:]:
+            return bool(a[1:])
+        if a[:1] in _VERSION_VOWELS and a[1:] == b:
+            return bool(b)
+        if b[:1] in _VERSION_VOWELS and b[1:] == a:
+            return bool(a)
+    return False
+
+
+def _slipped(word: str, meant: str) -> bool:
+    """Whether ``word`` is ``meant`` typed with a slip: a letter dropped, added or two swapped
+    as they come, a letter put in place of another only as ``typing_slip`` allows."""
+    if len(word) != len(meant):
+        return True
+    diff = [i for i, (a, b) in enumerate(zip(word, meant, strict=True)) if a != b]
+    if len(diff) != 1:
+        return True  # two neighbours swapped
+    return typing_slip(word[diff[0]], meant[diff[0]])
 
 
 def _shared_ending(a: str, b: str) -> int:
@@ -514,6 +656,8 @@ _NAME_AFTER = (
     ),
     re.compile(rf"(?<![ა-ჰ])(?:{_SIGNATORY})(?![ა-ჰ])[\s:,-]*((?:[ა-ჰ]+\.?\s+)?[ა-ჰ]+)"),
 )
+#: Legal forms written as letters, four or more of them: "სსიპ", "ააიპ". No word to spell.
+_ABBREVIATIONS = frozenset({"სსიპ", "ააიპ", "ნააიპ"})
 _NAME_TYPES = frozenset(
     {FactType.party_name, FactType.party_director, FactType.party_address, FactType.project_name}
 )

@@ -182,9 +182,14 @@ def case_of(word: str) -> Case:
     for ending, case in _ENDINGS:
         if word.endswith(ending) and len(word) - len(ending) >= 3:
             return case
-    if len(word) >= 4 and word[-1] == "ს" and word[-2] in "აეოუი":
-        return "gen"  # a vowel stem's genitive or dative, which are the same word
+    if len(word) >= 4 and word[-2] in "აეოუი" and word[-1] in _VOWEL_STEM_ENDINGS:
+        # a vowel stem's one-letter endings; its genitive and dative are the same word
+        return _VOWEL_STEM_ENDINGS[word[-1]]
     return "nom"
+
+
+#: The cases a vowel stem marks with one letter: "ლომაიას", "ლომაიამ", "ფოტოდ".
+_VOWEL_STEM_ENDINGS: dict[str, Case] = {"ს": "gen", "მ": "erg", "დ": "adv"}
 
 
 def lemma_word(word: str) -> str:
@@ -221,8 +226,8 @@ def _lemma_candidates(word: str) -> list[str]:
             out.extend([stem + "ა", stem + "ი", stem])
         else:
             out.extend([stem + "ი", stem, stem + "ა", stem + "ე"])
-    if case == "gen" and word.endswith("ს"):
-        out.append(word[:-1])  # vowel stem + "-ს"
+    if word[-2] in _VOWELS and _VOWEL_STEM_ENDINGS.get(word[-1]) == case:
+        out.append(word[:-1])  # vowel stem + "-ს" / "-მ" / "-დ"
     return list(dict.fromkeys(out))
 
 
@@ -288,7 +293,7 @@ def _stems_of(word: str) -> set[str]:
     return out
 
 
-def _syncopated(form: str) -> str | None:
+def syncopated(form: str) -> str | None:
     """``form`` with the vowel before its stem's last consonant dropped, as some nouns do before
     an ending: "მოედანის" -> "მოედნის", "სექტემბერის" -> "სექტემბრის". None when no such
     vowel stands there."""
@@ -300,7 +305,7 @@ def _syncopated(form: str) -> str | None:
 
 def word_lemmas(word: str) -> frozenset[str]:
     """Every nominative ``word`` is a form of under the case model - each candidate lemma that
-    inflects back to it exactly (or with the vowel some nouns drop, ``_syncopated``) - with the
+    inflects back to it exactly (or with the vowel some nouns drop, ``syncopated``) - with the
     word itself, and the full form of a bare attributive stem ("ლაზურ" of "ლაზური")."""
     if not is_georgian_word(word):
         return frozenset({word})
@@ -323,7 +328,7 @@ def word_lemmas(word: str) -> frozenset[str]:
     for lemma_candidate in candidates:
         for c in cases:
             form = inflect_word(lemma_candidate, c)
-            if word in (form, _syncopated(form)):
+            if word in (form, syncopated(form)):
                 out.add(lemma_candidate)
     return frozenset(out)
 
@@ -645,6 +650,10 @@ class MixedWord:
     end: int
     #: the word as it should read, or None when it cannot be told
     correction: str | None
+    #: what it may have been: the stray key's Georgian letter put back, the stray letter dropped
+    readings: tuple[str, ...] = ()
+    #: the correction is a word the documents write, not only the stray letter dropped
+    attested: bool = False
 
 
 def mixed_script_words(text: str, *, vocabulary: frozenset[str] = frozenset()) -> list[MixedWord]:
@@ -686,7 +695,16 @@ def mixed_script_words(text: str, *, vocabulary: frozenset[str] = frozenset()) -
         # spelling, not the removal of a stray letter
         if attested:
             correction = attested[0]
-        out.append(MixedWord(word=w, start=m.start(), end=m.end(), correction=correction))
+        out.append(
+            MixedWord(
+                word=w,
+                start=m.start(),
+                end=m.end(),
+                correction=correction,
+                readings=tuple(candidates),
+                attested=bool(attested),
+            )
+        )
     return out
 
 
@@ -699,6 +717,45 @@ _KA_KEYS = dict(
         strict=True,
     )
 )
+
+#: The letter rows of that keyboard, by the Latin letter each key carries.
+_KEY_ROWS = ("qwertyuiop", "asdfghjkl", "zxcvbnm")
+#: Georgian's stops and affricates come in series - voiced, aspirated, ejective - whose letters
+#: a writer confuses by ear: "კ" for "ქ", "პ" for "ფ".
+_SOUND_SERIES = ("ბფპ", "დთტ", "გქკ", "ძცწ", "ჯჩჭ", "ქხყ")
+
+
+def _key_neighbours() -> dict[str, frozenset[str]]:
+    """Each letter's slips: the letters of the keys around it, and the other letter of its own
+    key (shift held or missed). A row sits half a key right of the one above it."""
+    where = {key: (r, c) for r, row in enumerate(_KEY_ROWS) for c, key in enumerate(row)}
+
+    def letters(key: str) -> set[str]:
+        return {_KA_KEYS[k] for k in (key, key.upper()) if k in _KA_KEYS}
+
+    out: dict[str, frozenset[str]] = {}
+    for key, (r, c) in where.items():
+        around = [(r, c - 1), (r, c + 1), (r - 1, c), (r - 1, c + 1), (r + 1, c - 1), (r + 1, c)]
+        near = {
+            ch
+            for rr, cc in around
+            if 0 <= rr < len(_KEY_ROWS) and 0 <= cc < len(_KEY_ROWS[rr])
+            for ch in letters(_KEY_ROWS[rr][cc])
+        }
+        for letter in letters(key):
+            out[letter] = frozenset(near | letters(key) - {letter})
+    return out
+
+
+_SLIPS = _key_neighbours()
+
+
+def typing_slip(typed: str, meant: str) -> bool:
+    """Whether writing the letter ``typed`` where ``meant`` belongs is a slip: a key next to it,
+    its own key with the shift held or missed, or a letter of the same sound series."""
+    if typed in _SLIPS.get(meant, frozenset()):
+        return True
+    return any(typed in series and meant in series for series in _SOUND_SERIES)
 
 
 # --- legal forms ---------------------------------------------------------------------------------

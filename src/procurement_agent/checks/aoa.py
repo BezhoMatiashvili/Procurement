@@ -52,6 +52,7 @@ from procurement_agent.checks.aoa_spelling import (
     Lexicon,
     SpellingUnavailable,
     prose_typos,
+    spelled_right,
 )
 from procurement_agent.checks.contract_terms import _ADVANCE as _ADVANCE_NAMED
 from procurement_agent.checks.contract_terms import (
@@ -1094,7 +1095,9 @@ class AoaChecker:
 
         No Georgian word holds another alphabet's letter, so on a typed document this is always
         a slip - one the eye passes over, since the stray letter sits beside the right ones. The
-        correction drops it, preferring a word the contract or the act itself writes.
+        correction drops it, preferring a word the contract or the act itself writes; when they
+        write neither reading - the stray key's Georgian letter put back, or the stray letter
+        dropped - the dictionary picks the one that is a word ("უფლeბები" is "უფლებები").
         """
         vocabulary = frozenset(
             w
@@ -1103,17 +1106,27 @@ class AoaChecker:
             for w, _, _ in georgian_words(doc.text)
             if is_georgian_word(w)
         )
+        speller = None if isinstance(self.speller, SpellingUnavailable) else self.speller
         for found in mixed_script_words(self.aoa.text, vocabulary=vocabulary):
             # the word as the act writes it: the text read here has Cyrillic look-alikes folded
             # to Latin, and a quote in the wrong alphabet is found neither by eye nor in Word
             word = self.aoa.as_written(found.start, found.end)
             stray_ka, stray_en = _stray_letters(word)
+            correction = found.correction
+            if speller is not None and not found.attested:
+                known = [r for r in found.readings if spelled_right(r, speller)]
+                if len(known) == 1:
+                    correction = known[0]
+                elif len(known) > 1 and _inside(found.word):
+                    # both are words: inside a word the stray letter stood for its key's letter,
+                    # at an edge it was a key pressed as well
+                    correction = found.readings[0]
             self._add(
                 "AOA.SPELLING",
                 "warning",
                 f"ქართულ სიტყვაში ურევია {stray_ka}: „{word}“",
                 f"a Georgian word holds {stray_en}: '{word}'",
-                expected=found.correction,
+                expected=correction,
                 actual=word,
                 quote=word,
                 span=(found.start, found.end),
@@ -2992,6 +3005,11 @@ def _project_names_match(a: str, b: str) -> bool:
     short, long_ = sorted((wa, wb), key=len)
     it = iter(long_)
     return all(any(same_word(w, x) for x in it) for w in short)
+
+
+def _inside(word: str) -> bool:
+    """Whether every letter of another alphabet in ``word`` stands between two Georgian ones."""
+    return all(0 < i < len(word) - 1 for i, ch in enumerate(word) if not is_georgian_word(ch))
 
 
 def _stray_letters(word: str) -> tuple[str, str]:

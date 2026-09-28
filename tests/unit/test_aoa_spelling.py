@@ -121,9 +121,9 @@ def test_a_word_the_documents_write_is_preferred_over_one_they_do_not() -> None:
 
 
 def test_two_equally_good_corrections_report_nothing() -> None:
-    # a wrong correction is worse than none
-    lexicon = Lexicon(words={"სახლის", "სახელის"}, unknown={"სახეის"})
-    assert _typos("ეს სახეის ნაწილია.", lexicon) == []
+    # a wrong correction is worse than none: a letter dropped either way
+    lexicon = Lexicon(words={"სახლის", "სახვის"}, unknown={"სახის"})
+    assert _typos("ეს სახის ნაწილია.", lexicon) == []
 
 
 def test_a_correction_never_changes_the_first_letter() -> None:
@@ -156,6 +156,134 @@ def test_one_letter_added_to_a_word_ending_in_a_vowel_is_still_a_typo() -> None:
     # the dictionary spells out a vowel stem's one-letter cases itself; one it lacks is a slip
     lexicon = Lexicon(words={"შესრულდა"}, unknown={"შესრულდად"})
     assert _typos("მომსახურება შესრულდად ჯეროვნად.", lexicon) == [("შესრულდად", "შესრულდა")]
+
+
+def test_a_case_form_of_a_known_noun_the_dictionary_does_not_list_is_a_form_of_it() -> None:
+    # the dictionary lists these nouns in the nominative only; each form is one letter from a
+    # word it does list, which is the correction it would otherwise get
+    lexicon = Lexicon(
+        words={"შემსყიდველი", "პირგასამტეხლო", "მარკირება", "მარკირებას", "პირგასამტეხლოა"},
+        unknown={"შემსყიდველს", "შემსყიდველმა", "პირგასამტეხლოს", "მარკირების"},
+    )
+    assert _typos("ხელშეკრულება შემსყიდველს უფლებას აძლევს.", lexicon) == []
+    assert _typos("ხელშეკრულება შემსყიდველმა შეწყვიტა.", lexicon) == []
+    assert _typos("დაეკისრება პირგასამტეხლოს გადახდა.", lexicon) == []
+    assert _typos("გზის მარკირების სამუშაოები.", lexicon) == []
+
+
+def test_a_genitive_that_keeps_the_vowel_its_noun_drops_is_still_a_typo() -> None:
+    # "შემსრულებელი" drops its "ე" before "-ის": the dictionary's "შემსრულებლის" says so
+    lexicon = Lexicon(words={"შემსრულებელი", "შემსრულებლის"}, unknown={"შემსრულებელის"})
+    act = "1. შემსრულებელის მიერ შესრულებული სამუშაო."
+    assert _typos(act, lexicon) == [("შემსრულებელის", "შემსრულებლის")]
+
+
+def test_a_plural_is_a_form_of_its_singular_only_as_the_singular_forms_it() -> None:
+    # "ტრასა" drops its "-ა" before "-ები"; "მხარე" keeps its "-ე" ("მხარეები"), so "მხარები"
+    # is a letter dropped, not a plural
+    lexicon = Lexicon(
+        words={"ტრასა", "ტერასების", "მხარე", "მხარეები"}, unknown={"ტრასების", "მხარები"}
+    )
+    assert _typos("საავტომობილო ტრასების მოვლა.", lexicon) == []
+    assert _typos("მხარები თანხმდებიან.", lexicon) == [("მხარები", "მხარეები")]
+
+
+def test_the_short_copula_and_a_full_case_ending_are_forms_of_the_word() -> None:
+    # "გაწეულია" is "გაწეული არის"; "ფეისბუქისა და" is the genitive's full form before "და"
+    lexicon = Lexicon(words={"გაწეული", "ფეისბუქის"}, unknown={"გაწეულია", "ფეისბუქისა"})
+    assert _typos("მომსახურება გაწეულია სრულად.", lexicon) == []
+    assert _typos("ფეისბუქისა და სხვა გვერდების მართვა.", lexicon) == []
+
+
+def test_the_copula_after_a_consonant_and_after_a_noun_in_a() -> None:
+    # after a consonant the short copula is "-აა": "გარეთაა", "შეცდომითაა" (of "შეცდომა");
+    # after a noun in "-ა" it is "-ა": "მომსახურებაა"
+    # each is one letter from a word the lexicon knows, which it would otherwise be read as
+    lexicon = Lexicon(
+        words={"გარეთ", "გარეთა", "შეცდომა", "შეცდომითა", "მომსახურება"},
+        unknown={"გარეთაა", "შეცდომითაა", "მომსახურებაა"},
+    )
+    assert _typos("ეს პუნქტი ხელშეკრულების გარეთაა.", lexicon) == []
+    assert _typos("თანხა შეცდომითაა მითითებული.", lexicon) == []
+    assert _typos("ეს უკვე მომსახურებაა და არა საქონელი.", lexicon) == []
+
+
+def test_the_perfect_of_a_participle() -> None:
+    # "არ შემოწმებულა", "has not been checked": the participle as a verb
+    lexicon = Lexicon(
+        words={"შემოწმებული", "შემოწმებულია", "გადახდილი", "გადახდილია"},
+        unknown={"შემოწმებულა", "გადახდილა"},
+    )
+    assert _typos("აქტი ჯერ არ შემოწმებულა.", lexicon) == []
+    assert _typos("ავანსი ჯერ არ გადახდილა.", lexicon) == []
+
+
+def test_the_genitive_with_as_is_while() -> None:
+    # "შენიშვნისას", "at the time of the remark"
+    lexicon = Lexicon(words={"შენიშვნა", "შენიშვნის", "შენიშვნისა"}, unknown={"შენიშვნისას"})
+    assert _typos("შენიშვნისას მიეთითება ვადა.", lexicon) == []
+
+
+def test_a_verbal_noun_in_a_takes_its_one_letter_cases() -> None:
+    # nouns in "-ება", "-ვა" and nouns that start with no preverb are no aorist
+    lexicon = Lexicon(
+        words={"გადამოწმება", "მედიანა", "უზრუნველყოფა"},
+        unknown={"გადამოწმებას", "გადამოწმებამ", "მედიანას", "უზრუნველყოფად"},
+    )
+    assert _typos("შემკვეთი ახორციელებს გადამოწმებას.", lexicon) == []
+    assert _typos("გადამოწმებამ აჩვენა შედეგი.", lexicon) == []
+    assert _typos("ფასები შედარდა მედიანას.", lexicon) == []
+    assert _typos("თანხა გამოიყენება უზრუნველყოფად.", lexicon) == []
+
+
+def test_a_legal_form_abbreviation_is_no_word() -> None:
+    lexicon = Lexicon(words={"სიპ", "ააი"}, unknown={"სსიპ", "ააიპ"})
+    assert _typos("შემკვეთი: სსიპ და ააიპ წარმომადგენლები.", lexicon) == []
+
+
+def test_a_letter_added_to_a_verb_ending_in_a_is_no_case_form() -> None:
+    # an aorist ("შესრულდა") looks like a noun ending in "-ა"; an ending added to it is a slip
+    lexicon = Lexicon(words={"შესრულდა"}, unknown={"შესრულდას", "შესრულდაა"})
+    assert _typos("მომსახურება შესრულდას ჯეროვნად.", lexicon) == [("შესრულდას", "შესრულდა")]
+    assert _typos("მომსახურება შესრულდაა ჯეროვნად.", lexicon) == [("შესრულდაა", "შესრულდა")]
+
+
+def test_another_person_or_version_of_a_verb_is_a_form_the_dictionary_lacks() -> None:
+    # "-ს" and "-თ" are the verb's person, a final "-თ" its plural, and the vowel after the
+    # preverb its version: "გამოიწეროს" beside "გამოწეროს", "გაუწეროს" beside "გაიწეროს"
+    lexicon = Lexicon(
+        words={"გადაამოწმოთ", "გამოწეროს", "გაიწეროს", "გადავურიცხე"},
+        unknown={"გადაამოწმოს", "გამოიწეროს", "გაუწეროს", "გადავურიცხეთ"},
+    )
+    assert _typos("შემკვეთმა უნდა გადაამოწმოს აქტი.", lexicon) == []
+    assert _typos("ანგარიშფაქტურა უნდა გამოიწეროს ლარში.", lexicon) == []
+    assert _typos("შემსრულებელმა უნდა გაუწეროს სწორი ვარიანტი.", lexicon) == []
+    assert _typos("ავანსი გადავურიცხეთ ათ დღეში.", lexicon) == []
+
+
+def test_a_letter_from_a_distant_key_makes_another_word_not_a_slip() -> None:
+    # "ტ" and "ვ", "ა" and "ხ" sit far apart and sound nothing alike: "კონტენტის" is a word the
+    # dictionary lacks, not a slip for "კონვენტის"
+    lexicon = Lexicon(words={"კონვენტის", "ლხინში"}, unknown={"კონტენტის", "ლაინში"})
+    assert _typos("ვებგვერდის კონტენტის განახლება.", lexicon) == []
+    assert _typos("ცხრილის რომელ ლაინში რა შეიცვალა.", lexicon) == []
+
+
+def test_a_letter_from_a_neighbouring_key_or_of_the_same_sound_is_a_slip() -> None:
+    lexicon = Lexicon(words={"მომსახურების", "პირობების"}, unknown={"მომსახირების", "პირობეპის"})
+    assert _typos("მომსახირების ღირებულება.", lexicon) == [("მომსახირების", "მომსახურების")]
+    assert _typos("ხელშეკრულების პირობეპის შესაბამისად.", lexicon) == [("პირობეპის", "პირობების")]
+
+
+def test_a_distant_letter_is_a_slip_when_the_documents_write_the_word_it_replaced() -> None:
+    lexicon = Lexicon(words={"სამუშაოები"}, unknown={"სამუშაოჟბი"})
+    act = "სამუშაოები დასრულდა. ყველა სამუშაოჟბი მიღებულია."
+    assert _typos(act, lexicon) == [("სამუშაოჟბი", "სამუშაოები")]
+
+
+def test_the_full_dative_is_a_form_of_the_word() -> None:
+    lexicon = Lexicon(words={"ფაილს"}, unknown={"ფაილსა"})
+    assert _typos("საწყის ფაილსა და მიღებულ ფაილებს შორის.", lexicon) == []
 
 
 def test_a_participle_with_the_other_participle_vowel_is_a_usage_question() -> None:
@@ -224,6 +352,30 @@ def test_words_of_an_amount_and_of_a_date_belong_to_their_rules() -> None:
 def test_a_word_with_a_letter_of_another_alphabet_belongs_to_the_script_rule() -> None:
     lexicon = Lexicon(words={"მომიჯნავე"}, unknown={"მომიჯნaვე"})
     assert _typos("საავტორო და მომიჯნaვე უფლებები.", lexicon) == []
+
+
+def test_the_dictionary_settles_which_letter_a_stray_one_stood_for() -> None:
+    # "e" is the key of "ე": with the layout switched "შეთანხმeბები" reads "შეთანხმებები", with
+    # the letter dropped "შეთანხმბები"; neither document writes either, the dictionary knows one
+    act = ACT.replace("მომსახურების გაწევა.", "მომსახურების გაწევა. მხარეთა შეთანხმeბები.")
+
+    def corrections(speller: Lexicon | None) -> list[str | None]:
+        report = check_aoa(aoa_text=act, contract_text=CONTRACT, speller=speller)
+        return [f.expected for f in report.findings if f.actual == "შეთანხმeბები"]
+
+    assert corrections(Lexicon(words={"შეთანხმებები"}).reading(act, CONTRACT)) == ["შეთანხმებები"]
+    assert corrections(None) == ["შეთანხმბები"]  # no dictionary: the stray letter goes
+    # both readings are words: inside a word the stray letter stood for its key's letter
+    both = Lexicon(words={"შეთანხმებები", "შეთანხმბები"}).reading(act, CONTRACT)
+    assert corrections(both) == ["შეთანხმებები"]
+
+
+def test_a_stray_letter_at_the_edge_of_a_word_was_a_key_pressed_as_well() -> None:
+    act = ACT.replace("მომსახურების გაწევა.", "მომსახურების გაწევა. მხარეთა sშეთანხმებები.")
+    lexicon = Lexicon(words={"შეთანხმებები", "სშეთანხმებები"}).reading(act, CONTRACT)
+    report = check_aoa(aoa_text=act, contract_text=CONTRACT, speller=lexicon)
+    found = [f.expected for f in report.findings if f.actual == "sშეთანხმებები"]
+    assert found == ["შეთანხმებები"]
 
 
 # --- inside the act check -----------------------------------------------------------------------
@@ -299,9 +451,11 @@ def test_the_correction_search_stops_at_its_limit_and_counts_the_rest() -> None:
 
 
 def test_a_document_past_the_limit_says_how_much_went_unchecked() -> None:
-    # 48 distinct unknown words, each one letter from a word the lexicon knows
+    # 48 distinct unknown words, each a word the lexicon knows with a letter dropped
     unknown = [f"ტექსტ{a}{b}" for a in "აბგდევ" for b in "ვზთიკლმნ"]
-    lexicon = Lexicon(words={f"ტექსტ{a}ჰ" for a in "აბგდევ"}, unknown=unknown)
+    lexicon = Lexicon(
+        words={f"ტექსტ{a}ჰ{b}" for a in "აბგდევ" for b in "ვზთიკლმნ"}, unknown=unknown
+    )
     act = ACT + " ".join(unknown) + ".\n"
     report = check_aoa(aoa_text=act, contract_text=CONTRACT, speller=lexicon.reading(act, CONTRACT))
     assert len([f for f in report.findings if f.rule_id == "AOA.SPELLING"]) == MAX_SEARCHES
@@ -448,6 +602,34 @@ def test_ka_ge_corrects_the_typo_shapes_of_legal_prose(ka_ge: Speller) -> None:
         ("შემსრულებელის", "შემსრულებლის"),
         ("იდენტიურ", "იდენტურ"),
     }
+
+
+@needs_ka_ge
+def test_ka_ge_leaves_regular_forms_it_does_not_list_alone(ka_ge: Speller) -> None:
+    """Forms of words it knows, which ka_GE does not list: a dative, an ergative, a genitive, a
+    plural, the copula, a full case ending. Each was reported on a correct document once."""
+    act = ACT.replace(
+        "მომსახურების გაწევა.",
+        "მომსახურების გაწევა. მომსახურება გაწეულია და ჩაბარებულია. შემსყიდველს და "
+        "შემსყიდველმა ეკისრება პირგასამტეხლოს გადახდა; გზის მარკირების და ტრასების მოვლა; "
+        "ფეისბუქისა და სხვა გვერდების მართვა.",
+    )
+    report = check_aoa(aoa_text=act, contract_text=CONTRACT, speller=ka_ge)
+    assert [f.actual for f in report.findings if f.rule_id == "AOA.SPELLING"] == []
+
+
+@needs_ka_ge
+def test_ka_ge_leaves_verb_forms_and_loanwords_it_does_not_list_alone(ka_ge: Speller) -> None:
+    """Each was reported on a correct text once: a verb in another person or version, the full
+    dative, a loanword one distant letter from a word ka_GE knows."""
+    act = ACT.replace(
+        "მომსახურების გაწევა.",
+        "მომსახურების გაწევა. შემკვეთმა უნდა გადაამოწმოს აქტი, ანგარიშფაქტურა უნდა "
+        "გამოიწეროს და გაუწეროს სწორი ვარიანტი; ავანსი გადავურიცხეთ ათ დღეში. საწყის "
+        "ფაილსა და ცხრილის რომელ ლაინში რა შეიცვალა; ვებგვერდის კონტენტის განახლება.",
+    )
+    report = check_aoa(aoa_text=act, contract_text=CONTRACT, speller=ka_ge)
+    assert [f.actual for f in report.findings if f.rule_id == "AOA.SPELLING"] == []
 
 
 @needs_ka_ge

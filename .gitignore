@@ -57,3 +57,6 @@ eval_runs/
 
 # --- Local tool state (agent worktrees, editor settings) ---
 .claude/
+
+# a copy of the client documents at the top level
+/AI Test/

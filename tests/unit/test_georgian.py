@@ -29,6 +29,8 @@ from procurement_agent.extraction.georgian import (
         ("ლევან მამულაშვილის", "ლევან მამულაშვილი"),  # consonant stem
         ("ლევან მამულაშვილით", "ლევან მამულაშვილი"),
         ("ეკა ლომაიას", "ეკა ლომაია"),  # vowel stem
+        ("ეკა ლომაიამ", "ეკა ლომაია"),  # a vowel stem's ergative, "-მ"
+        ("გიორგი ბერიძემ", "გიორგი ბერიძე"),
         ("მზის ქალაქისთვის", "მზის ქალაქი"),  # a project name with a postposition
         ("მზის ქალაქის", "მზის ქალაქი"),
         ("ტყის სახლში", "ტყის სახლი"),
@@ -71,6 +73,9 @@ def test_case_of_reads_the_ending() -> None:
     assert case_of("ქალაქისთვის") == "gen_tvis"
     assert case_of("კაპანაძე") == "nom"
     assert case_of("სილქ") == "nom"
+    # a vowel stem's one-letter endings: the ergative "-მ", the adverbial "-დ"
+    assert case_of("მხარემ") == "erg"
+    assert case_of("უზრუნველყოფად") == "adv"
 
 
 @pytest.mark.parametrize(
