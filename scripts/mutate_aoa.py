@@ -61,6 +61,7 @@ from docx.oxml.ns import qn  # noqa: E402
 from lxml import etree  # noqa: E402
 
 from procurement_agent.checks.aoa import check_aoa  # noqa: E402
+from procurement_agent.checks.aoa_spelling import Speller, load_speller, open_speller  # noqa: E402
 from procurement_agent.config import Settings  # noqa: E402
 from procurement_agent.extraction import georgian as g  # noqa: E402
 from procurement_agent.extraction.labels import LABELS  # noqa: E402
@@ -1029,6 +1030,77 @@ def gen_script_letter(b: Base, rng: random.Random) -> Case:
     )
 
 
+#: The Georgian alphabet a typo draws a letter from.
+GEORGIAN_LETTERS = [chr(c) for c in range(0x10D0, 0x10F1)]
+PROSE_EDITS = ("drop", "insert", "swap", "replace")
+_LEGAL_FORM_OR_TITLE = re.compile(r"(?:შპს|სს|ი/მ|ფ/პ|ააიპ|დირექტორ[ა-ჰ]*)\s*:?\s*$")
+
+
+def gen_prose_typo(b: Base, rng: random.Random) -> Case:
+    """One letter edit in an ordinary word of the act's prose (the prose spelling rule): a letter
+    dropped, a random letter inserted, two neighbours swapped or one replaced. Never the first
+    letter: the rule never corrects that one, and a writer rarely mistypes it (report recall with
+    it included as this class times the share of edits that fall there).
+
+    The word is five letters or more and nobody else's: not a name, an address, a project or the
+    fee's words (``protected``), not quoted, not in a date, no month or number word, not a word
+    the base act already reports. The typo must be no word the dictionary knows, none the
+    contract writes and none the act has anywhere else, or it is not one typo in one place."""
+    speller = load_speller(ROOT / "models" / "hunspell")
+    if not isinstance(speller, Speller):
+        raise NotApplicableError("no spelling dictionary (scripts/fetch_spelling_dictionary.py)")
+    protected = set(re.findall(rf"[{KA}]+", " ".join(b.protected)))
+    reported = {w for f in b.findings for w in re.findall(rf"[{KA}]+", f.actual or "")}
+    contract_words = set(re.findall(rf"[{KA}]+", b.contract_text))
+    act_words = set(re.findall(rf"[{KA}]+", b.full))
+    cands = []
+    for pi, s in enumerate(b.texts):
+        fenced = [m.span() for m in re.finditer(rf"{QO}[^„“”\"«»]{{1,90}}?{QC}", s)]
+        fenced += [m.span() for m in DATE_KA.finditer(s)]
+        fenced += [m.span() for m in re.finditer(r"\([^()]{1,80}\)", s)]  # "2 (ორი)"
+        for m in re.finditer(rf"(?<![\w-])[{KA}]{{5,}}(?![\w-])", s):
+            w = m.group(0)
+            if w in protected or w in MONTHS or w in reported:
+                continue
+            if g.parse_number_words(w) is not None or _LEGAL_FORM_OR_TITLE.search(s[: m.start()]):
+                continue
+            if any(a <= m.start() < z for a, z in fenced):
+                continue
+            cands.append(Span(pi, m.start(), m.end(), w))
+    need(cands, "prose words")
+    for _ in range(200):
+        sp = rng.choice(cands)
+        w, kind = sp.text, rng.choice(PROSE_EDITS)
+        if kind == "drop":
+            i = rng.randrange(1, len(w))
+            new = w[:i] + w[i + 1 :]
+        elif kind == "insert":
+            i = rng.randrange(1, len(w) + 1)
+            new = w[:i] + rng.choice(GEORGIAN_LETTERS) + w[i:]
+        elif kind == "swap":
+            i = rng.randrange(1, len(w) - 1)
+            new = w[:i] + w[i + 1] + w[i] + w[i + 2 :]
+        else:
+            i = rng.randrange(1, len(w))
+            new = w[:i] + rng.choice([c for c in GEORGIAN_LETTERS if c != w[i]]) + w[i + 1 :]
+        if new == w or new in act_words or new in contract_words or speller.known(new):
+            continue
+        break
+    else:
+        raise NotApplicableError("no typo that is no word")
+    known = "known" if speller.known(w) else "unknown"
+    return Case(
+        "prose_typo",
+        f"{kind}/{known}",
+        b,
+        [Edit(sp.pi, sp.i, sp.j, new)],
+        expects=[Expect(("AOA.SPELLING",), new, (w,), 1)],
+        cmp=CmpExpect("one", ("CMP.SPELLING", "CMP.TEXT_CHANGED"), (), (w,), (new,)),
+        must_parse=[new],
+        summary=f"{w} -> {new} ({kind}, original {known} to the dictionary)",
+    )
+
+
 def gen_project_removed(b: Base, rng: random.Random) -> Case:
     spans = need(b.facts.project_forms, "project name")
     edits = []
@@ -1499,6 +1571,7 @@ GENERATORS: dict[str, Callable[[Base, random.Random], Case]] = {
     "month_typo": gen_month_typo,
     "number_word_typo": gen_number_word_typo,
     "script_letter": gen_script_letter,
+    "prose_typo": gen_prose_typo,
     "project_removed": gen_project_removed,
     "cadastral_removed": gen_cadastral_removed,
     "role_swap": gen_role_swap,
@@ -1573,7 +1646,9 @@ def load_bases(settings: Settings) -> list[Base]:
         texts = docx_texts(act)
         act_text, segments = parse(act, settings)
         contract_text, _ = parse(contract, settings)
-        report = check_aoa(aoa_text=act_text, contract_text=contract_text)
+        report = check_aoa(
+            aoa_text=act_text, contract_text=contract_text, speller=open_speller(settings)
+        )
         facts = discover(texts)
         protected = [c for _, c in facts.party_names] + facts.addresses
         protected += [f"{d['first']} {f}" for d in facts.directors for f in d["forms"]]
@@ -1839,7 +1914,9 @@ def run_case(case: Case, settings: Settings, work: Path, tag: str) -> dict[str, 
         res["invalid"] = problems
         res["path"] = str(mut)
         return res
-    report = check_aoa(aoa_text=act_text, contract_text=b.contract_text)
+    report = check_aoa(
+        aoa_text=act_text, contract_text=b.contract_text, speller=open_speller(settings)
+    )
     findings = list(report.findings)
     annotated = work / f"{tag}.annotated.docx"
     annotate_docx(mut, findings, annotated, text=act_text)
@@ -2061,13 +2138,15 @@ def calibrate(settings: Settings, work: Path) -> list[dict[str, Any]]:
         base_texts = docx_texts(corrects[0])
         facts = discover(base_texts)
         base_text, base_segs = parse(corrects[0], settings)
-        base_rep = check_aoa(aoa_text=base_text, contract_text=ctext)
+        base_rep = check_aoa(
+            aoa_text=base_text, contract_text=ctext, speller=open_speller(settings)
+        )
         base_info = {f.rule_id for f in base_rep.findings if f.severity == "info"}
         acts = sorted(p for p in folder.glob("*.docx") if "_AoA_" in p.name)
         for act in acts:
             short = act.stem.split("_AoA_", 1)[1]
             atext, segs = parse(act, settings)
-            rep = check_aoa(aoa_text=atext, contract_text=ctext)
+            rep = check_aoa(aoa_text=atext, contract_text=ctext, speller=open_speller(settings))
             fired = {f.rule_id for f in rep.findings}
             info = {f.rule_id for f in rep.findings if f.severity == "info"}
             notes: list[str] = []
@@ -2300,7 +2379,7 @@ def main(argv: list[str] | None = None) -> int:
                     if key in r and Path(r[key]).exists():
                         dst = keep / Path(r[key]).name
                         dst.write_bytes(Path(r[key]).read_bytes())
-                        r[key] = str(dst.relative_to(ROOT))
+                        r[key] = str(dst.relative_to(ROOT) if dst.is_relative_to(ROOT) else dst)
             elif "path" in r:
                 r.pop("path", None)
                 r.pop("annotated", None)
