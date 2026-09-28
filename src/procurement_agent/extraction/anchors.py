@@ -483,7 +483,10 @@ def find_anchors(text: str) -> list[AnchorHit]:
                 max(index, 0),
                 max(index, 0) + len(party.address),
             )
-        for director in party.directors:
+        # the signatories: the party's directors, and whoever signs under a power of attorney
+        for director, how in [(d, "signatory") for d in party.directors] + [
+            (p, "signatory under a power of attorney") for p in party.proxies
+        ]:
             index = text.find(director)
             if index < 0:
                 index = 0
@@ -493,7 +496,7 @@ def find_anchors(text: str) -> list[AnchorHit]:
                 text[index : index + len(director)] or director,
                 index,
                 index + len(director),
-                note=f"signatory for {party.name}" if party.name else None,
+                note=f"{how} for {party.name}" if party.name else None,
             )
 
     # Names are deduplicated by stem: "ნინო კაპანაძის" in the preamble and

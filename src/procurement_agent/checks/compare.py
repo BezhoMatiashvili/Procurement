@@ -510,7 +510,19 @@ def _range_end(text: str, rules: list[RuleHit], i: int) -> tuple[int, FactType] 
     marked = _RANGE_GAP.fullmatch(gap) is not None or (
         text[first.start : first.end].endswith("დან") and _RANGE_AFTER_FROM.fullmatch(gap)
     )
+    if marked and ft is FactType.date:
+        # two dates written as a range are a period whatever word names it ("გაწეულია
+        # 01.11.2026 - 30.11.2026 პერიოდში"): the time the work is done, or the contract's
+        # validity where the words before say so
+        before = text[max(0, first.start - _VALIDITY_WINDOW) : first.start]
+        valid = _VALIDITY_WORDS.search(before) is not None
+        ft = FactType.validity_period if valid else FactType.execution_period
     return (j, ft) if marked else None
+
+
+#: Words that make a range the contract's validity rather than the time the work is done.
+_VALIDITY_WORDS = re.compile(r"მოქმედ|ძალაში|(?<![a-z])(?:valid|in\s+force)", re.IGNORECASE)
+_VALIDITY_WINDOW = 80
 
 
 def _is_range(hit: _Hit) -> bool:
@@ -1225,6 +1237,22 @@ def _spelled_delta(a: tuple[str, str] | None, b: tuple[str, str] | None) -> _Wor
             and float(known).is_integer()
             and number_words_typo(other, int(known)) is not None
         ):
+            if kind == "amount":
+                # an amount's words are its operative statement: misspelled, they are wrong as
+                # the amount is wrong - an error, as the act check reports it (GOLD_SPEC 3-4)
+                misspelled = ValueDelta(
+                    type=FactType.total_amount,
+                    kind="changed",
+                    rule_id="CMP.AMOUNT_WORDS",
+                    severity="error",
+                    label_en=en,
+                    label_ka=ka,
+                    left=a[0],
+                    right=b[0],
+                    note_en="the amount in words is misspelled",
+                    note_ka="თანხა სიტყვიერად შეცდომითაა დაწერილი",
+                )
+                return misspelled, None
             typo = _spelling(
                 a[0],
                 b[0],

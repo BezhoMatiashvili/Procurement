@@ -126,3 +126,55 @@ def test_an_act_dated_the_day_its_period_ends_keeps_the_period_whole() -> None:
     report = check_aoa(aoa_text=act, contract_text=CONTRACT)
     assert report.summary["execution_period"] == "2026-04-01..2026-04-30"
     assert report.errors == []
+
+
+def test_the_acts_date_repeated_beside_every_row_is_never_the_periods() -> None:
+    """A table whose first row the parser took for its header: its "„აქტი“ გაფორმდა <date>"
+    is repeated beside every row, the period's row among them."""
+    header = "„აქტი“ გაფორმდა 30.04.2026."
+    act = _in_figures(
+        f"2, {header} = „მომსახურება“ გაწეულია 01.04.2025 - 30.04.2025 პერიოდში.. "
+        f"3, {header} = „შემსრულებელმა“ გასწია მომსახურება.."
+    )
+    report = check_aoa(aoa_text=act, contract_text=CONTRACT)
+    assert report.summary["execution_period"] == "2025-04-01..2025-04-30"
+    assert "AOA.PERIOD_IN_TERM" in [f.rule_id for f in report.errors]
+
+
+# --- a contract's performance window and validity, worded otherwise -------------------------------
+
+
+def test_the_services_to_be_rendered_between_two_dates_is_the_performance_window() -> None:
+    from datetime import date
+
+    from procurement_agent.checks.contract_terms import read_term
+
+    for clause, window in (
+        (
+            "2.1. შემსრულებელი ვალდებულია გასწიოს მომსახურება 2026 წლის 1 ოქტომბრიდან "
+            "2027 წლის 31 მარტის ჩათვლით (6 თვე).",
+            (date(2026, 10, 1), date(2027, 3, 31)),
+        ),
+        (
+            "2.1. „მომსახურება“ გაიწევა 01.09.2026 - 31.12.2026 (4 თვე).",
+            (date(2026, 9, 1), date(2026, 12, 31)),
+        ),
+    ):
+        term = read_term(clause)
+        assert term.performance is not None
+        assert (term.performance.start, term.performance.end) == window
+
+
+def test_in_force_upon_signing_runs_from_the_signing() -> None:
+    from datetime import date
+
+    from procurement_agent.checks.contract_terms import read_term
+
+    text = (
+        "ხელშეკრულება\nქ. თბილისი 01.09.2026\n"
+        "შპს „ალფა ჯგუფი“, საიდენტიფიკაციო კოდი: 123456789 (შემდგომში „შემკვეთი“)\n"
+        "4.1. ხელშეკრულება ძალაში შედის ხელმოწერისთანავე და შედგენილია ორ ეგზემპლარად."
+    )
+    term = read_term(text)
+    assert term.validity is not None
+    assert (term.validity.start, term.validity.end) == (date(2026, 9, 1), None)

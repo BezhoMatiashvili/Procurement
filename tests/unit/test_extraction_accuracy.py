@@ -65,3 +65,34 @@ def test_the_director_label_must_end_its_word() -> None:
 def test_a_contact_number_is_not_a_contract_number() -> None:
     text = "Contact #5551234; კონტაქტი N 599123456; ხელშეკრულება № PR-2026/017"
     assert [h.value for h in find_contract_numbers(text)] == ["PR-2026/017"]
+
+
+def test_an_act_states_its_contracts_date_and_no_other_date_is_taken_for_it() -> None:
+    """The act's own date, its period and an advance's date were each guessed a "contract date"
+    from the word "ხელშეკრულება" nearby; the act names the contract's date once, and that is
+    the one."""
+    from procurement_agent.checks.document_facts import document_facts
+    from procurement_agent.extraction.schemas import FactType
+
+    act = (
+        "მიღება-ჩაბარების აქტი\n"
+        "ვინაიდან მხარეებმა 01.03.2026 გააფორმეს ხელშეკრულება (შემდგომში „ხელშეკრულება“), "
+        "მხარეები აფორმებენ აქტს.\n"
+        "მომსახურება შესრულდა 2026 წლის 1 აპრილიდან 2026 წლის 30 აპრილის ჩათვლით "
+        "ხელშეკრულების შესაბამისად.\n"
+        "აქტი გაფორმდა 2026 წლის 30 აპრილს.\n"
+    )
+    dates = [f.normalized for f in document_facts(act) if f.type == FactType.contract_date]
+    assert dates == ["2026-03-01"]
+
+
+def test_the_subject_is_the_service_whatever_the_cadastral_label() -> None:
+    from procurement_agent.checks.document_facts import _trim_subject
+
+    for clause in (
+        "„შემკვეთის“ პროექტ „ტყის ბაღისთვის“ (საკადასტრო კოდი: 01.02.03.456) "
+        "სოციალური მედიის მართვის მომსახურების გაწევა",
+        "„შემკვეთის“ პროექტის - „ტყის ბაღი“ (ს/კ: 01.02.03.456) ფარგლებში "
+        "სოციალური მედიის მართვის მომსახურების გაწევა",
+    ):
+        assert _trim_subject(clause) == "სოციალური მედიის მართვის მომსახურების გაწევა"
