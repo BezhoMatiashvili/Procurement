@@ -2189,6 +2189,64 @@ def _build(
 # --- findings -------------------------------------------------------------------------------
 
 
+#: What changed in a line: each run of words that changed, as (before, after).
+_Change = tuple[tuple[str, str], ...]
+
+
+def _changed_words(left: str, right: str) -> _Change:
+    lt, rt = _TOKEN.findall(left), _TOKEN.findall(right)
+    return tuple(
+        (normalize_spaces("".join(lt[i1:i2])), normalize_spaces("".join(rt[j1:j2])))
+        for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
+            None, lt, rt, autojunk=False
+        ).get_opcodes()
+        if tag != "equal"
+    )
+
+
+def _nested(a: tuple[str, str], b: tuple[str, str]) -> bool:
+    """Whether one changed line holds the other on both sides: a table cell and one of its
+    paragraphs."""
+    return (a[0] in b[0] and a[1] in b[1]) or (b[0] in a[0] and b[1] in a[1])
+
+
+#: Unchanged words quoted either side of a change in a "text changed" finding.
+_CONTEXT_WORDS = 3
+
+
+def changed_passage(left: str, right: str) -> tuple[str, str]:
+    """The part of a changed line that changed, on each side, with a few unchanged words either
+    side and "…" where the line goes on: "… საბანკო ანგარიშზე უნაღდო …". A finding that quoted
+    the whole paragraph, cut at 160 characters, showed two identical texts when the change lay
+    further on. The whole line when nothing but spacing changed."""
+    lt, rt = _TOKEN.findall(left), _TOKEN.findall(right)
+    changed = [
+        (i1, i2, j1, j2)
+        for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
+            None, lt, rt, autojunk=False
+        ).get_opcodes()
+        if tag != "equal"
+    ]
+    if not changed:
+        return left, right
+    (i1, _, j1, _), (_, i2, _, j2) = changed[0], changed[-1]
+    return _around(lt, i1, i2), _around(rt, j1, j2)
+
+
+def _around(tokens: list[str], start: int, end: int) -> str:
+    """``tokens[start:end]`` with ``_CONTEXT_WORDS`` words either side."""
+    words = 0
+    while start > 0 and words < _CONTEXT_WORDS:
+        start -= 1
+        words += tokens[start][0].isalnum()
+    words = 0
+    while end < len(tokens) and words < _CONTEXT_WORDS:
+        words += tokens[end][0].isalnum()
+        end += 1
+    text = normalize_spaces("".join(tokens[start:end]))
+    return f"{'… ' if start > 0 else ''}{text}{' …' if end < len(tokens) else ''}"
+
+
 def _short(text: str | None, limit: int = 160) -> str | None:
     if text is None:
         return None
@@ -2353,6 +2411,9 @@ def _findings_of(
     def texts(h: Hunk) -> tuple[str | None, str | None]:
         return (h.left.text if h.left else None, h.right.text if h.right else None)
 
+    # the text changes reported so far, each with the words it changed
+    text_changes: list[tuple[_Change, tuple[str, str]]] = []
+
     for h in hunks if not unrelated else []:
         # Two documents that are not versions of one another have no line to line changes worth
         # a finding: their positional diff is noise, and a value both carry was reported
@@ -2441,13 +2502,22 @@ def _findings_of(
         ka, en = _TEXT_MESSAGES[rule]
         anchor = h.right or h.left
         where = anchor.path if anchor is not None else ""
+        before, after = h.left.text if h.left else None, h.right.text if h.right else None
+        if before is not None and after is not None:
+            change = _changed_words(before, after)
+            if any(
+                change == other and _nested((before, after), lines) for other, lines in text_changes
+            ):
+                continue  # a table cell and its own paragraph, both emitted by the parser
+            text_changes.append((change, (before, after)))
+            before, after = changed_passage(before, after)
         add(
             rule,
             "warning",
             f"{ka} ({where})",
             f"{en} ({where})",
-            expected=_short(h.left.text if h.left else None),
-            actual=_short(h.right.text if h.right else None),
+            expected=_short(before),
+            actual=_short(after),
             full=texts(h),
         )
 

@@ -198,9 +198,10 @@ def test_the_short_copula_and_a_full_case_ending_are_forms_of_the_word() -> None
 def test_the_copula_after_a_consonant_and_after_a_noun_in_a() -> None:
     # after a consonant the short copula is "-აა": "გარეთაა", "შეცდომითაა" (of "შეცდომა");
     # after a noun in "-ა" it is "-ა": "მომსახურებაა"
-    # each is one letter from a word the lexicon knows, which it would otherwise be read as
+    # each is one letter from a word the lexicon knows, which it would otherwise be read as;
+    # "შეცდომა" starts like a verb, and its genitive says it is a noun
     lexicon = Lexicon(
-        words={"გარეთ", "გარეთა", "შეცდომა", "შეცდომითა", "მომსახურება"},
+        words={"გარეთ", "გარეთა", "შეცდომა", "შეცდომის", "შეცდომითა", "მომსახურება"},
         unknown={"გარეთაა", "შეცდომითაა", "მომსახურებაა"},
     )
     assert _typos("ეს პუნქტი ხელშეკრულების გარეთაა.", lexicon) == []
@@ -239,6 +240,46 @@ def test_a_verbal_noun_in_a_takes_its_one_letter_cases() -> None:
 def test_a_legal_form_abbreviation_is_no_word() -> None:
     lexicon = Lexicon(words={"სიპ", "ააი"}, unknown={"სსიპ", "ააიპ"})
     assert _typos("შემკვეთი: სსიპ და ააიპ წარმომადგენლები.", lexicon) == []
+
+
+def test_only_a_regular_form_of_a_noun_is_a_form_the_dictionary_lacks() -> None:
+    # each reads as a case form of a word the dictionary knows, but no noun forms it that way:
+    # a vowel dropped that its noun keeps ("ძალის"), a genitive of a genitive ("სევრის" is
+    # one), an ending on a verb form ("შესრულდი" is "you were done")
+    lexicon = Lexicon(
+        words={"ძალი", "ძალის", "სევრის", "სერვისის", "შესრულდა", "შესრულდი"},
+        unknown={"ძლის", "სევრისის", "შესრულდად"},
+    )
+    assert _typos("ფორს-მაჟორის ძლის მქონე გარემოება.", lexicon) == [("ძლის", "ძალის")]
+    assert _typos("ვებ-სევრისის მხარდაჭერა.", lexicon) == [("სევრისის", "სერვისის")]
+    assert _typos("მომსახურება შესრულდად ჯეროვნად.", lexicon) == [("შესრულდად", "შესრულდა")]
+
+
+def test_a_verb_without_the_vowel_after_its_preverb_is_a_letter_dropped() -> None:
+    # "შეასრულა" has the version vowel; "შესრულა" has lost it, the commonest slip there is
+    lexicon = Lexicon(words={"შეასრულა"}, unknown={"შესრულა"})
+    assert _typos("შემსრულებელმა შესრულა სამუშაო.", lexicon) == [("შესრულა", "შეასრულა")]
+
+
+def test_the_verbs_other_person_excuses_a_verb_not_a_noun() -> None:
+    # "-ის" beside "-ით" is a noun's genitive beside its instrumental: "ძლის" is "ძალის" with a
+    # letter dropped, whatever "ძლით" is
+    lexicon = Lexicon(words={"ძალი", "ძალის", "ძლით"}, unknown={"ძლის"})
+    assert _typos("ფორს-მაჟორის ძლის მქონე გარემოება.", lexicon) == [("ძლის", "ძალის")]
+
+
+def test_a_second_vowel_after_the_preverb_is_no_version() -> None:
+    lexicon = Lexicon(words={"შეასრულა"}, unknown={"შეეასრულა"})
+    assert _typos("შემსრულებელმა შეეასრულა სამუშაო.", lexicon) == [("შეეასრულა", "შეასრულა")]
+
+
+def test_between_two_corrections_the_one_a_hand_makes_wins() -> None:
+    # "ჯ" sits on the key beside "ი": typed for it, not added after "ტ" from across the board
+    lexicon = Lexicon(words={"აქტს", "აქტის"}, unknown={"აქტჯს"})
+    assert _typos("მხარეები ხელს აწერენ აქტჯს.", lexicon) == [("აქტჯს", "აქტის")]
+    # a swap, not an "ლ" added from nowhere
+    lexicon = Lexicon(words={"რომლის", "რომის"}, unknown={"რომილს"})
+    assert _typos("ხელშეკრულება, რომილს საგანია მომსახურება.", lexicon) == [("რომილს", "რომლის")]
 
 
 def test_a_letter_added_to_a_verb_ending_in_a_is_no_case_form() -> None:

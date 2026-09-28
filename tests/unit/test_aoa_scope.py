@@ -104,6 +104,30 @@ def test_the_subject_restated_in_other_case_forms_still_matches() -> None:
     assert _scope(_check(act)) == []
 
 
+@pytest.mark.parametrize(
+    ("right", "wrong"),
+    [
+        ("- 4 სერვისის გვერდის აღწერა GEO/ENG\n", "- 4 სევრისის გვერდის აღწერა GEO/ENG\n"),
+        (f"{_SUBJECT} (შემდგომში", f"{_SUBJECT.replace('შემუშავების', 'შემუშავეის')} (შემდგომში"),
+    ],
+)
+def test_a_typo_in_a_service_or_the_subject_is_the_spelling_rules_alone(
+    right: str, wrong: str
+) -> None:
+    """A misspelled word in a listed service or in the subject is AOA.SPELLING's finding; read
+    with its correction, the part is the contract's, so no note of another service follows."""
+    from tests.unit.test_aoa_spelling import Lexicon
+
+    act = ACT.replace(right, wrong)
+    assert act != ACT
+    typo = next(w for w in wrong.split() if w not in right.split())
+    speller = Lexicon(
+        words={"სერვისის", "შემუშავების"}, unknown={"სევრისის", "შემუშავეის"}
+    ).reading(act, CONTRACT)
+    report = check_aoa(aoa_text=act, contract_text=CONTRACT, speller=speller)
+    assert [(f.rule_id, f.actual) for f in report.findings] == [("AOA.SPELLING", typo)]
+
+
 def test_the_act_may_list_fewer_services_than_the_contract() -> None:
     """An act covers a month of the work: a service it does not list is not reported."""
     act = ACT.replace("- 4 სერვისის გვერდის აღწერა GEO/ENG\n- საკონტაქტო ფორმის აწყობა\n", "")

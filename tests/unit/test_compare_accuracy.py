@@ -82,6 +82,33 @@ def test_a_month_typo_and_a_stray_latin_letter_are_spelling() -> None:
     ]
 
 
+def test_a_changed_word_in_a_long_paragraph_is_quoted_where_it_changed() -> None:
+    """A finding that quoted the whole paragraph, cut at 160 characters, showed two identical
+    texts when the change lay further on; it quotes the change and a few words around it."""
+    long_ = (
+        "მომსახურების საფასური გადაიხდება ამ აქტის გაფორმების თარიღიდან ხუთი სამუშაო დღის "
+        "განმავლობაში, შემსრულებლის მიერ წარმოდგენილი ანგარიშფაქტურის საფუძველზე, "
+        "შემსრულებლის საბანკო ანგარიშზე უნაღდო ანგარიშსწორების წესით."
+    )
+    assert len(long_) > 160
+    [f] = run([*ACT, long_], [*ACT, long_.replace("ანგარიშზე", "ანაგრიშზე")]).findings
+    assert f.expected is not None and f.actual is not None
+    assert "ანგარიშზე" in f.expected and "ანაგრიშზე" in f.actual
+    assert len(f.expected) < 80 and f.expected.startswith("…") and f.expected.endswith("…")
+
+
+def test_a_change_inside_a_table_cell_and_its_own_paragraph_is_one_finding() -> None:
+    """A cell of two paragraphs reaches the diff whole and as its paragraphs (the parser emits
+    both), so one typo in it was two "text changed" findings."""
+    cell = "შპს „ალფა“ სამუშაოების შესრულება\nსამუშაოები შესრულდა ხარისხიანად და დროულად"
+    line = "სამუშაოები შესრულდა ხარისხიანად და დროულად"
+    left, right = [*ACT, cell, line], [*ACT, cell, line]
+    right[-2] = right[-2].replace("ხარისხიანად", "ხარისხინად")
+    right[-1] = right[-1].replace("ხარისხიანად", "ხარისხინად")
+    [f] = run(left, right).findings
+    assert f.expected is not None and "ხარისხიანად" in f.expected
+
+
 def test_a_relabelled_price_is_not_a_change() -> None:
     left = ["ფასი შეადგენს 100 ლარს."]
     right = ["ღირებულება შეადგენს 100 ლარს."]

@@ -19,7 +19,7 @@ import calendar
 import re
 import unicodedata
 from bisect import bisect_right
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -46,7 +46,15 @@ from procurement_agent.checks.aoa_llm import (
     review_items,
     service_id,
 )
-from procurement_agent.checks.aoa_scope import MATCH_SHARE, Alignment, ScopeReading, read_scope
+from procurement_agent.checks.aoa_scope import (
+    MATCH_SHARE,
+    Alignment,
+    ScopePart,
+    ScopeReading,
+    align,
+    read_scope,
+    scope_part,
+)
 from procurement_agent.checks.aoa_spelling import (
     NOT_SUPPLIED,
     Lexicon,
@@ -715,6 +723,22 @@ class AoaChecker:
                 self.aoa.text, self.aoa.lines, self.contract.text, self.contract.lines
             )
         return self._scope
+
+    def _as_corrected(self, found: Alignment, candidates: Sequence[ScopePart]) -> Alignment:
+        """``found`` aligned again with the words AOA.SPELLING reported put right: a typo in a
+        listed service or in the subject is that rule's finding, not another service. The
+        alignment as it was when no reported word stands in the part."""
+        if found.verdict == "match":
+            return found
+        text = found.item.text
+        for f in self.findings:
+            if f.rule_id == "AOA.SPELLING" and f.actual and f.expected:
+                text = re.sub(
+                    rf"(?<![{GEORGIAN}]){re.escape(f.actual)}(?![{GEORGIAN}])", f.expected, text
+                )
+        if text == found.item.text:
+            return found
+        return align(scope_part(text, found.item.span), candidates)
 
     def _review_outcome(self) -> ReviewOutcome | None:
         """``review`` checked against the notes this run leaves open (``aoa_llm.resolve_review``),
@@ -1842,6 +1866,8 @@ class AoaChecker:
         found = reading.subject
         if found is None:  # pragma: no cover - read_scope aligns two clauses with words
             return
+        if self._as_corrected(found, [contract]).verdict == "match":
+            return  # a misspelled word, which AOA.SPELLING reports
         decision = self._decision(SUBJECT_ID, found)
         if decision.severity is None:
             return
@@ -1911,6 +1937,8 @@ class AoaChecker:
             )
             return
         for n, found in enumerate(reading.services, 1):
+            if self._as_corrected(found, reading.contract_services).verdict == "match":
+                continue  # a misspelled word, which AOA.SPELLING reports
             decision = self._decision(service_id(n), found)
             if decision.severity is None:
                 continue

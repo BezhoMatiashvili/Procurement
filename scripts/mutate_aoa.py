@@ -1036,16 +1036,30 @@ PROSE_EDITS = ("drop", "insert", "swap", "replace")
 _LEGAL_FORM_OR_TITLE = re.compile(r"(?:შპს|სს|ი/მ|ფ/პ|ააიპ|დირექტორ[ა-ჰ]*)\s*:?\s*$")
 
 
-def gen_prose_typo(b: Base, rng: random.Random) -> Case:
-    """One letter edit in an ordinary word of the act's prose (the prose spelling rule): a letter
-    dropped, a random letter inserted, two neighbours swapped or one replaced. Never the first
-    letter: the rule never corrects that one, and a writer rarely mistypes it (report recall with
-    it included as this class times the share of edits that fall there).
+@dataclass
+class _ProseWords:
+    cands: list[Span]
+    speller: Speller
+    act_words: set[str]
+    contract_words: set[str]
+
+    def no_word(self, w: str, new: str) -> bool:
+        """The typo is one typo in one place: no word the dictionary knows, the contract writes
+        or the act has anywhere else."""
+        return not (
+            new == w
+            or new in self.act_words
+            or new in self.contract_words
+            or self.speller.known(new)
+        )
+
+
+def _prose_words(b: Base) -> _ProseWords:
+    """The act's ordinary prose words a typo class may edit.
 
     The word is five letters or more and nobody else's: not a name, an address, a project or the
     fee's words (``protected``), not quoted, not in a date, no month or number word, not a word
-    the base act already reports. The typo must be no word the dictionary knows, none the
-    contract writes and none the act has anywhere else, or it is not one typo in one place."""
+    the base act already reports."""
     speller = load_speller(ROOT / "models" / "hunspell")
     if not isinstance(speller, Speller):
         raise NotApplicableError("no spelling dictionary (scripts/fetch_spelling_dictionary.py)")
@@ -1068,6 +1082,17 @@ def gen_prose_typo(b: Base, rng: random.Random) -> Case:
                 continue
             cands.append(Span(pi, m.start(), m.end(), w))
     need(cands, "prose words")
+    return _ProseWords(cands, speller, act_words, contract_words)
+
+
+def gen_prose_typo(b: Base, rng: random.Random) -> Case:
+    """One letter edit in an ordinary word of the act's prose (the prose spelling rule): a letter
+    dropped, a random letter inserted, two neighbours swapped or one replaced - any letter, as
+    no hand types. Never the first letter: the rule never corrects that one, and a writer rarely
+    mistypes it (report recall with it included as this class times the share of edits that
+    fall there). ``prose_slip`` makes the edits a hand makes."""
+    pw = _prose_words(b)
+    cands, speller = pw.cands, pw.speller
     for _ in range(200):
         sp = rng.choice(cands)
         w, kind = sp.text, rng.choice(PROSE_EDITS)
@@ -1083,7 +1108,7 @@ def gen_prose_typo(b: Base, rng: random.Random) -> Case:
         else:
             i = rng.randrange(1, len(w))
             new = w[:i] + rng.choice([c for c in GEORGIAN_LETTERS if c != w[i]]) + w[i + 1 :]
-        if new == w or new in act_words or new in contract_words or speller.known(new):
+        if not pw.no_word(w, new):
             continue
         break
     else:
@@ -1099,6 +1124,71 @@ def gen_prose_typo(b: Base, rng: random.Random) -> Case:
         must_parse=[new],
         summary=f"{w} -> {new} ({kind}, original {known} to the dictionary)",
     )
+
+
+#: The edits a hand makes: a neighbouring key or the shift slipped, a letter doubled, a
+#: neighbouring key caught as well, two letters swapped, one dropped - and a letter of the same
+#: sound series written by ear.
+SLIP_EDITS = ("key", "sound", "double", "extra", "swap", "drop")
+
+
+def gen_prose_slip(b: Base, rng: random.Random) -> Case:
+    """``prose_typo`` with the edits typing and spelling by ear make (``SLIP_EDITS``) instead of
+    any letter anywhere: the typos the prose rule is built for, beside the random ones it is
+    measured on as well."""
+    pw = _prose_words(b)
+    keys = {
+        c: [o for o in GEORGIAN_LETTERS if o != c and g.typing_slip(o, c) and not _same_sound(o, c)]
+        for c in GEORGIAN_LETTERS
+    }
+    sounds = {
+        c: [o for o in GEORGIAN_LETTERS if o != c and _same_sound(o, c)] for c in GEORGIAN_LETTERS
+    }
+    for _ in range(300):
+        sp = rng.choice(pw.cands)
+        w, kind = sp.text, rng.choice(SLIP_EDITS)
+        i = rng.randrange(1, len(w))
+        if kind in ("key", "sound"):
+            pool = (keys if kind == "key" else sounds).get(w[i], [])
+            if not pool:
+                continue
+            new = w[:i] + rng.choice(pool) + w[i + 1 :]
+        elif kind == "double":
+            new = w[:i] + w[i] + w[i:]
+        elif kind == "extra":
+            pool = keys.get(w[i], [])
+            if not pool:
+                continue
+            new = w[:i] + rng.choice(pool) + w[i:]
+        elif kind == "swap":
+            if i >= len(w) - 1:
+                continue
+            new = w[:i] + w[i + 1] + w[i] + w[i + 2 :]
+        else:
+            new = w[:i] + w[i + 1 :]
+        if pw.no_word(w, new):
+            break
+    else:
+        raise NotApplicableError("no slip that is no word")
+    return Case(
+        "prose_slip",
+        kind,
+        b,
+        [Edit(sp.pi, sp.i, sp.j, new)],
+        expects=[Expect(("AOA.SPELLING",), new, (w,), 1)],
+        cmp=CmpExpect("one", ("CMP.SPELLING", "CMP.TEXT_CHANGED"), (), (w,), (new,)),
+        must_parse=[new],
+        summary=f"{w} -> {new} ({kind})",
+    )
+
+
+def _same_sound(a: str, b: str) -> bool:
+    return any(a in series and b in series for series in SOUND_SERIES)
+
+
+#: Georgian's stop and affricate series (voiced, aspirated, ejective), as the spelling rule
+#: reads them (``georgian.typing_slip``).
+SOUND_SERIES = ("ბფპ", "დთტ", "გქკ", "ძცწ", "ჯჩჭ", "ქხყ")
 
 
 def gen_project_removed(b: Base, rng: random.Random) -> Case:
@@ -1572,6 +1662,7 @@ GENERATORS: dict[str, Callable[[Base, random.Random], Case]] = {
     "number_word_typo": gen_number_word_typo,
     "script_letter": gen_script_letter,
     "prose_typo": gen_prose_typo,
+    "prose_slip": gen_prose_slip,
     "project_removed": gen_project_removed,
     "cadastral_removed": gen_cadastral_removed,
     "role_swap": gen_role_swap,
