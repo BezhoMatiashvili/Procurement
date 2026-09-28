@@ -652,8 +652,8 @@ def mixed_script_words(text: str, *, vocabulary: frozenset[str] = frozenset()) -
 
     A letter from another alphabet does not belong inside a Georgian word, and on a born-digital
     document it is a typing slip (on a scan it may be the OCR - the caller decides). The
-    correction drops the stray characters when that leaves a Georgian word, preferring a word
-    ``vocabulary`` (the other document's words) actually contains.
+    correction drops the stray characters, or puts back the Georgian letter on the stray one's
+    key when ``vocabulary`` (both documents' words) attests that word.
     """
     out: list[MixedWord] = []
     for m in _TOKEN.finditer(text):
@@ -669,21 +669,23 @@ def mixed_script_words(text: str, *, vocabulary: frozenset[str] = frozenset()) -
         # the letter typed on the wrong keyboard layout, in place of the Georgian one on its key
         # ("უფლeბები" for "უფლებები"), or a stray key pressed as well ("sმომიჯნავე")
         keyed = "".join(ch if _GEO.match(ch) else _KA_KEYS.get(ch, "") for ch in w)
+        # a stray letter standing where a Georgian one was: the words the documents write with
+        # a Georgian letter in its place ("მომсახურების" for "მომსახურების")
+        slot = re.compile("".join(re.escape(ch) if _GEO.match(ch) else f"[{GEORGIAN}]" for ch in w))
+        in_place = sorted(v for v in vocabulary if slot.fullmatch(v))
         correction: str | None = stripped if len(stripped) >= 3 else None
         candidates = [c for c in dict.fromkeys((keyed, stripped)) if len(c) >= 3]
-        # a word the documents write as it stands beats one they write in another form: the
-        # stray "i" in "დირექტორiი" is dropped, not doubled into "დირექტორიი"
-        attested = [c for c in candidates if c in vocabulary] or [
-            c for c in candidates if any(same_word(c, v) for v in vocabulary)
-        ]
+        attested = (
+            (in_place if len(in_place) == 1 else [])
+            or [c for c in candidates if c in vocabulary]
+            or [c for c in candidates if any(same_word(c, v) for v in vocabulary)]
+        )
+        # a word the documents write as it stands beats one they write in another form, and
+        # otherwise the stray letter alone goes: rewriting another letter towards a word the
+        # contract spells differently ("ეგზემპლიარად" for the act's "ეგზემპლარად") is prose
+        # spelling, not the removal of a stray letter
         if attested:
             correction = attested[0]
-        else:
-            near = [v for v in vocabulary if abs(len(v) - len(stripped)) <= 1]
-            if near:
-                best = min(near, key=lambda v: damerau(v, stripped, cap=2))
-                if damerau(best, stripped, cap=2) <= 1:
-                    correction = best
         out.append(MixedWord(word=w, start=m.start(), end=m.end(), correction=correction))
     return out
 

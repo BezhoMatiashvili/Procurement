@@ -192,7 +192,7 @@ def test_a_summary_with_its_columns_named_otherwise_is_read(tmp_path: Path) -> N
             (None, "TOTAL COST", 1000.0),
             (None, "VAT", 180.0),
             (None, "TOTAL PRICE INCLUDING VAT", 1180.0),
-        ],  # fmt: skip
+        ],
         start=9,
     ):
         ws.cell(row, 1, item)

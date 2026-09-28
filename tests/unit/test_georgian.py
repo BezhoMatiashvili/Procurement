@@ -239,3 +239,17 @@ def test_a_letter_added_before_the_ending_is_no_inflection() -> None:
     assert same_word("ლაზურ", "ლაზური")
     assert classify_difference("ქ. თბილისი, ვაკიის რაიონი", "ქ. თბილისი, ვაკის რაიონი")
     assert classify_difference("ნინო კაპანაძის", "ნინო კაპანაძე") is None
+
+
+def test_a_stray_letter_is_removed_not_rewritten_towards_another_spelling() -> None:
+    """The contract spells "ეგზემპლიარად", the act "ეგზემპლარად": a stray letter in the act's
+    word is removed, and the act keeps its own spelling."""
+    from procurement_agent.extraction.georgian import mixed_script_words
+
+    [found] = mixed_script_words(
+        "ეგზემპლაaრად", vocabulary=frozenset({"ეგზემპლიარად", "შედგენილია"})
+    )
+    assert found.correction == "ეგზემპლარად"
+    # a stray letter where a Georgian one belongs takes back the word the documents write
+    [slot] = mixed_script_words("მომcახურების", vocabulary=frozenset({"მომსახურების"}))
+    assert slot.correction == "მომსახურების"
