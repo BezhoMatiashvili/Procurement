@@ -1549,9 +1549,22 @@ def parse(path: Path, settings: Settings) -> tuple[str, list[Any]]:
     return chunks_text(chunk_docling_document(doc, doc_id="x")), segments_from_docling(doc)
 
 
+#: Sets kept out of every harness run: the held-out set is scored once, never tuned against.
+HELD_OUT = frozenset({"Test Set 3"})
+
+
+def base_folders() -> list[Path]:
+    """Every ``AOA and Contract`` folder under ``samples/`` except the held-out sets."""
+    return [
+        folder
+        for folder in sorted((ROOT / "samples").glob("*/AOA and Contract"))
+        if folder.parent.name not in HELD_OUT
+    ]
+
+
 def load_bases(settings: Settings) -> list[Base]:
     bases = []
-    for folder in sorted((ROOT / "samples").glob("*/AOA and Contract")):
+    for folder in base_folders():
         acts = sorted(folder.glob("*Correct*.docx"))
         contracts = sorted(folder.glob("*ontract*.docx"))
         if not acts or not contracts:
@@ -2036,7 +2049,7 @@ def calibrate(settings: Settings, work: Path) -> list[dict[str, Any]]:
     print(
         "fragment classified by GOLD_SPEC s3 (+ the legacy samples/gold rule list) for the client set"
     )
-    for folder in sorted((ROOT / "samples").glob("*/AOA and Contract")):
+    for folder in base_folders():
         corrects = sorted(folder.glob("*Correct*.docx"))
         contracts = sorted(folder.glob("*ontract*.docx"))
         if not corrects or not contracts:

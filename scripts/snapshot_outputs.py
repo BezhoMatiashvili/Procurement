@@ -12,10 +12,14 @@ output nobody labelled shows up here, which is how a fix is kept from quietly br
 the gold does not cover.
 
 Sets are discovered by layout, never by file name (the client's file names are identifiers):
-an ``AOA and Contract`` folder holds one contract (``*ontract*``) and acts (``*AoA*``), the
-correct act being the one whose name says ``Correct``; a ``BOQ`` folder holds a template
-(``*BOQ.xlsx``) and bids. The output lands in ``eval_runs/`` (git-ignored): it contains the
-documents' contents.
+an ``AOA and Contract`` folder holds contracts (``*ontract*``) and acts (``*AoA*``), grouped in
+families by the name before ``_AoA_`` / ``_Contract`` (one family when the folder has one
+contract), the correct act being the one whose name says ``Correct``; a ``BOQ`` folder holds a
+template (``*BOQ.xlsx``) and bids. The output lands in ``eval_runs/`` (git-ignored): it
+contains the documents' contents.
+
+The held-out set (``HELD_OUT``) is left out unless ``--include-held-out`` asks for it: it is
+scored once, and looking at its outputs while fixing is tuning against it.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -57,89 +62,122 @@ def _skips(report: Any) -> list[str]:
     return sorted(s.rule_id for s in report.skipped)
 
 
-def _aoa_sets() -> list[Path]:
-    return sorted(p for p in SAMPLES.glob("*/AOA and Contract") if p.is_dir())
+#: The held-out set: evaluated once, never looked at while fixing.
+HELD_OUT = frozenset({"Test Set 3"})
+
+
+def _aoa_sets(include_held_out: bool) -> list[Path]:
+    return sorted(
+        p
+        for p in SAMPLES.glob("*/AOA and Contract")
+        if p.is_dir() and (include_held_out or p.parent.name not in HELD_OUT)
+    )
 
 
 def _r(value: float | None) -> float | None:
     return round(value, 2) if value is not None else None
 
 
-def _boq_sets() -> list[Path]:
-    return sorted(p for p in SAMPLES.glob("*/BOQ") if p.is_dir())
+def _boq_sets(include_held_out: bool) -> list[Path]:
+    return sorted(
+        p
+        for p in SAMPLES.glob("*/BOQ")
+        if p.is_dir() and (include_held_out or p.parent.name not in HELD_OUT)
+    )
 
 
-def _contract_of(folder: Path) -> Path | None:
-    found = sorted(folder.glob("*ontract*.docx"))
-    return found[0] if found else None
+def _family(path: Path) -> str:
+    """The name an act shares with its contract: what comes before ``_AoA_`` / ``_Contract``."""
+    stem = path.stem
+    for sep in ("_AoA_", "_AoA", "_Contract", "_contract"):
+        if sep in stem:
+            return stem.split(sep, 1)[0]
+    return stem
 
 
-def _acts_of(folder: Path) -> list[Path]:
-    return sorted(folder.glob("*AoA*.docx"))
+def _families(folder: Path) -> list[tuple[Path | None, list[Path]]]:
+    """Each contract with its acts. A folder with one contract is one family, whatever the
+    names say; with several, an act goes with the contract of its own family, or nowhere."""
+    contracts = sorted(folder.glob("*ontract*.docx"))
+    acts = sorted(folder.glob("*AoA*.docx"))
+    if len(contracts) <= 1:
+        return [(contracts[0] if contracts else None, acts)]
+    return [(c, [a for a in acts if _family(a) == _family(c)]) for c in contracts]
 
 
 def _correct_of(acts: list[Path]) -> Path | None:
     return next((a for a in acts if "correct" in a.stem.lower()), None)
 
 
-def snapshot(settings: Settings) -> dict[str, Any]:
+def _snapshot_family(
+    out: dict[str, Any],
+    set_name: str,
+    contract: Path | None,
+    acts: list[Path],
+    settings: Settings,
+    text: Callable[[Path], str],
+) -> None:
+    """One contract and its acts: each act checked against it, each mistake act compared with
+    the correct one, the correct act with the contract, and every document extracted."""
+    contract_text = text(contract) if contract else None
+    for act in acts:
+        rep = check_aoa(aoa_text=text(act), contract_text=contract_text)
+        out["aoa"][f"{set_name}/{act.stem}"] = {
+            "findings": [_finding(f) for f in rep.findings],
+            "skipped": _skips(rep),
+            "summary": dict(rep.summary),
+        }
+    correct = _correct_of(acts)
+    pairs: list[tuple[Path, Path]] = []
+    if correct is not None:
+        pairs = [(correct, a) for a in acts if a != correct]
+        if contract:
+            pairs.append((contract, correct))
+    for left, right in pairs:
+        rep = compare(
+            _segments_for(left, settings, CACHE),
+            _segments_for(right, settings, CACHE),
+            left_document_id="L",
+            right_document_id="R",
+            left_kind="docx",
+            right_kind="docx",
+        )
+        out["compare"][f"{set_name}/{left.stem} -> {right.stem}"] = {
+            "similarity": round(rep.similarity, 4),
+            "findings": [_finding(f) for f in rep.findings],
+            "skipped": _skips(rep),
+        }
+    for doc in ([contract] if contract else []) + acts:
+        res = run_extraction(
+            document_id="x",
+            chunks=load_chunks_for(doc, settings, CACHE),
+            settings=settings,
+            llm=None,
+        )
+        out["extraction"][f"{set_name}/{doc.stem}"] = [
+            {
+                "type": f.type.value,
+                "value": f.value,
+                "normalized": None if f.normalized is None else str(f.normalized),
+                "source": f.source,
+                "confidence": round(f.confidence, 3),
+                "conflict": f.conflict,
+            }
+            for f in res.facts
+        ]
+
+
+def snapshot(settings: Settings, *, include_held_out: bool = False) -> dict[str, Any]:
     out: dict[str, Any] = {"aoa": {}, "compare": {}, "boq": {}, "extraction": {}}
 
     def text(p: Path) -> str:
         return chunks_text(load_chunks_for(p, settings, CACHE))
 
-    for folder in _aoa_sets():
-        set_name = folder.parent.name
-        contract = _contract_of(folder)
-        acts = _acts_of(folder)
-        contract_text = text(contract) if contract else None
-        for act in acts:
-            rep = check_aoa(aoa_text=text(act), contract_text=contract_text)
-            out["aoa"][f"{set_name}/{act.stem}"] = {
-                "findings": [_finding(f) for f in rep.findings],
-                "skipped": _skips(rep),
-                "summary": dict(rep.summary),
-            }
-        correct = _correct_of(acts)
-        pairs: list[tuple[Path, Path]] = []
-        if correct is not None:
-            pairs = [(correct, a) for a in acts if a != correct]
-            if contract:
-                pairs.append((contract, correct))
-        for left, right in pairs:
-            rep = compare(
-                _segments_for(left, settings, CACHE),
-                _segments_for(right, settings, CACHE),
-                left_document_id="L",
-                right_document_id="R",
-                left_kind="docx",
-                right_kind="docx",
-            )
-            out["compare"][f"{set_name}/{left.stem} -> {right.stem}"] = {
-                "similarity": round(rep.similarity, 4),
-                "findings": [_finding(f) for f in rep.findings],
-                "skipped": _skips(rep),
-            }
-        for doc in ([contract] if contract else []) + acts:
-            res = run_extraction(
-                document_id="x",
-                chunks=load_chunks_for(doc, settings, CACHE),
-                settings=settings,
-                llm=None,
-            )
-            out["extraction"][f"{set_name}/{doc.stem}"] = [
-                {
-                    "type": f.type.value,
-                    "value": f.value,
-                    "normalized": None if f.normalized is None else str(f.normalized),
-                    "source": f.source,
-                    "confidence": round(f.confidence, 3),
-                    "conflict": f.conflict,
-                }
-                for f in res.facts
-            ]
+    for folder in _aoa_sets(include_held_out):
+        for contract, acts in _families(folder):
+            _snapshot_family(out, folder.parent.name, contract, acts, settings, text)
 
-    for folder in _boq_sets():
+    for folder in _boq_sets(include_held_out):
         set_name = folder.parent.name
         templates = sorted(folder.glob("*BOQ.xlsx"))
         if not templates:
@@ -205,9 +243,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--diff", type=Path, default=None, help="an earlier snapshot to diff")
+    parser.add_argument(
+        "--include-held-out",
+        action="store_true",
+        help=f"also snapshot the held-out set(s): {', '.join(sorted(HELD_OUT))}",
+    )
     args = parser.parse_args(argv)
     settings = Settings(env="dev", docling_artifacts_path=ROOT / "models" / "docling")
-    snap = snapshot(settings)
+    snap = snapshot(settings, include_held_out=args.include_held_out)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(snap, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"wrote {args.out}")
