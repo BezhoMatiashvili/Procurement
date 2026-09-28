@@ -610,3 +610,25 @@ def test_the_merged_sheets_keep_every_position_and_mark_the_exclusions(tmp_path:
     assert rows[("1.1", "A")] == "evaluated; common scope"
     added = [r for r in range(1, ws.max_row + 1) if ws.cell(r, 1).value == "1.4.1"]
     assert len(added) == 1 and ws.cell(added[0], 14).value == "EXCLUDED: added by the bidder"
+
+
+def _amount_fills(path: Path) -> dict[str, str]:
+    """Bidder -> the fill of their amount cell on the first line of the merged sheet."""
+    ws = load_workbook(path)[SECTION]
+    return {str(ws.cell(r, 5).value): str(ws.cell(r, 12).fill.fgColor.rgb) for r in (3, 4, 5)}
+
+
+def test_merged_line_colours_never_split_a_tie(tmp_path: Path) -> None:
+    """With every bidder equal on a line, max() and min() used to pick two different rows, so
+    identical amounts came out one red and one green."""
+    t = read_boq(_build(tmp_path / "t.xlsx", LINES), name="TEMPLATE")
+    same = [read_boq(_build(tmp_path / f"s{i}.xlsx", LINES), name=f"C{i}") for i in range(3)]
+    out = write_merged_workbook(t, same, compare_all(t, same), tmp_path / "same.xlsx")
+    assert set(_amount_fills(out).values()) == {"00000000"}
+
+    cheap = [(i, d, u, q, m / 2, lab / 2) for i, d, u, q, m, lab in LINES]
+    bids = [*same[:2], read_boq(_build(tmp_path / "c.xlsx", cheap), name="C2")]
+    out = write_merged_workbook(t, bids, compare_all(t, bids), tmp_path / "tie.xlsx")
+    fills = _amount_fills(out)
+    assert "F4CCCC" in fills["C0"] and "F4CCCC" in fills["C1"]
+    assert "D9EAD3" in fills["C2"]
