@@ -163,6 +163,21 @@ Policy (client BOQ rules 2, 3, 5, 6 and the user's decision of 2026-09-28):
   a unit: the client's template has a position whose amount formula is missing, everyone
   priced it, and it is a position. A bidder's price on a row that is not a position is listed
   (`BOQ.HEADING_PRICED`) and never evaluated.
+* **Placeholders** are optional. A placeholder is a position whose text, or whose heading's
+  text, invites the bidder's own items: "any other items", "to be listed here by the tenderer",
+  "other costs if necessary", "აღწერაში არ შეტანილი", "სხვა ხარჯები". It is not "სხვადასხვა
+  ხარჯები", which is sundry items the template describes. Left blank, a placeholder is nothing
+  missing: it is neither unpriced nor unfilled. Priced, it is the bidder's own additional work. Like
+  an added line (client rule 3), it is listed (`priced_optional`, `BOQ.OPTIONAL_PRICED`), kept out
+  of `evaluated_cost` and the common scope, and shown in the difference breakdown.
+* **Section groups.** A section row that is itself a position ("A8", with its own amount formula)
+  and the positions numbered under it ("8.1", "8.2") form one group. Bidders price either the
+  section or its items. The group is priced when any member is priced, and an unpriced member of a
+  priced group is not listed as unpriced. Each member still costs template quantity × its own
+  rate. The common scope is taken over groups: every member of a group that every evaluable bidder
+  priced.
+* A bid unit cell left blank where the template states a unit is a unit change (`bid_unit: ""`,
+  a warning); a unit written where the template left none is listed apart (`unit_filled`).
 * Unit rate `r` = the bidder's rate column ("Rate in USD"); when empty, the sum of the
   materials, labour and delivery rates; on a sheet with no rate column at all, amount ÷ the
   bidder's quantity. Text in a rate, amount or quantity cell is never read as 0: the position

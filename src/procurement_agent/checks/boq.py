@@ -1122,7 +1122,7 @@ def _unit_rate(line: BoqLine, columns: dict[str, int]) -> float | None:
 #: need not price it, and one who does has added work of their own.
 _PLACEHOLDER = re.compile(
     r"any other (?:items|works)|list(?:ed)? here|to be listed|undescribed|"
-    r"other costs if necessary|აღწერაში\s+არ\s+შეტანილ|სხვა\s+ხარჯ",
+    r"other costs if necessary|აღწერაში\s+არ\s+შეტანილ|(?<![ა-ჰ])სხვა\s+ხარჯ",
     re.IGNORECASE,
 )
 #: A section row that is itself priced ("A8 Progress and Final Photographs"), whose own items are
@@ -1175,6 +1175,20 @@ def _compare_sheet(out: BidComparison, t_sheet: BoqSheet, b_sheet: BoqSheet) -> 
                     f"{en}: unit changed {t_line.unit} -> {b_line.unit}",
                     expected=t_line.unit,
                     actual=b_line.unit,
+                )
+            )
+        elif t_unit and not b_unit and t_line.kind == "position":
+            # the unit cell cleared: most likely a slip, but the bid no longer says what its
+            # quantity counts
+            ka, en = _where(b_line)
+            out.findings.append(
+                _finding(
+                    "BOQ.UNIT_CHANGED",
+                    "warning",
+                    f"{ka}: ერთეული ცარიელია, შაბლონში {t_line.unit}",
+                    f"{en}: unit left blank, the template says {t_line.unit}",
+                    expected=t_line.unit,
+                    actual="",
                 )
             )
         for key, text in b_line.non_numeric:

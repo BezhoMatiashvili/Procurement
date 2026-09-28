@@ -670,3 +670,25 @@ def test_merged_line_colours_never_split_a_tie(tmp_path: Path) -> None:
     fills = _amount_fills(out)
     assert "F4CCCC" in fills["C0"] and "F4CCCC" in fills["C1"]
     assert "D9EAD3" in fills["C2"]
+
+
+def test_a_unit_left_blank_is_reported(tmp_path: Path) -> None:
+    """A bidder who clears the unit cell has not kept the template's unit: said, as a warning,
+    beside a different unit which stays an error."""
+    t = _real(tmp_path, "T")
+    bid = Bid(unit={(CIVIL, "1.1"): "", (DOORS, "1.1"): "pcs"})
+    changed = {
+        (f.actual, f.severity)
+        for f in compare_bid(t, _real(tmp_path, "B", bid)).findings
+        if f.rule_id == "BOQ.UNIT_CHANGED"
+    }
+    assert changed == {("", "warning"), ("pcs", "error")}
+
+
+def test_sundry_items_are_not_a_placeholder() -> None:
+    """"სხვადასხვა ხარჯები" (sundry items) is work the template describes; only "სხვა ხარჯები"
+    (other costs) invites the bidder's own."""
+    from procurement_agent.checks.boq import _PLACEHOLDER
+
+    assert _PLACEHOLDER.search("სხვადასხვა ხარჯები") is None
+    assert _PLACEHOLDER.search("სხვა ხარჯები, საჭიროების შემთხვევაში") is not None
