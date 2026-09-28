@@ -240,7 +240,7 @@ def test_the_api_merged_workbook_includes_rate_outliers(monkeypatch: pytest.Monk
 
     monkeypatch.setattr(checks_api, "write_merged_workbook", fake_write)
     outliers = [object()]
-    report = SimpleNamespace(bidders=[], rate_outliers=outliers)
+    report = SimpleNamespace(bidders=[], rate_outliers=outliers, template_findings=[])
     checks_api.merged_xlsx(
         object(),  # type: ignore[arg-type]
         [],

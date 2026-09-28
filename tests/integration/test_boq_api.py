@@ -19,7 +19,16 @@ from openpyxl import load_workbook
 from procurement_agent import db as dbmod
 from procurement_agent.config import Settings, get_settings
 from procurement_agent.main import create_app
-from tests.boq_factory import LINES, blank, build_boq
+from tests.boq_factory import (
+    CIVIL,
+    DOORS,
+    LINES,
+    Bid,
+    blank,
+    build_boq,
+    build_real_boq,
+    real_positions,
+)
 
 H = {"X-API-Key": "pa_devkey_for_tests_only"}
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -153,21 +162,51 @@ def test_bidders_are_named_after_the_upload_not_the_document_id(client: TestClie
     assert all(b["bidder"] != b["document_id"] for b in report["bidders"])
 
 
-def test_the_leaderboard_ranks_on_the_stated_total(client: TestClient) -> None:
-    template = _template(client)
+def test_the_leaderboard_ranks_on_the_common_scope_total(client: TestClient) -> None:
+    """Not on the stated total: the bidder who left the doors out states the lowest bottom
+    line, but on the positions everyone priced it is the most expensive."""
+    template = _upload(client, "Template.xlsx", build_real_boq(helper_sheet=True))
     bids = [
-        _bid(client, "Company-1", stated_total=1_500.0),
-        _bid(client, "Company-2", stated_total=900.0),
-        _bid(client, "Company-3", stated_total=1_200.0),
+        _upload(client, "Company-1.xlsx", build_real_boq(Bid())),
+        _upload(client, "Company-2.xlsx", build_real_boq(Bid(factor=0.9))),
+        _upload(
+            client,
+            "Company-3.xlsx",
+            build_real_boq(Bid(factor=1.02, unpriced_sheets={DOORS})),
+        ),
     ]
     report = _check(client, template, bids)
+    by_name = {b["bidder"]: b for b in report["bidders"]}
 
-    assert [b["bidder"] for b in report["leaderboard"]] == [
-        "Company-2",
-        "Company-3",
-        "Company-1",
-    ]
-    assert report["leaderboard"][0]["total_stated_incl_vat"] == 900.0
+    stated = sorted(report["bidders"], key=lambda b: b["total_stated_incl_vat"])
+    assert stated[0]["bidder"] == "Company-3"
+    assert [b["bidder"] for b in report["leaderboard"]] == ["Company-2", "Company-1", "Company-3"]
+    assert [b["colour"] for b in report["leaderboard"]] == ["green", None, "red"]
+    markup = 1.15 * 1.18
+    civil = sum((q or 0) * r for sheet, _, q, r in real_positions() if sheet == CIVIL)
+    everything = sum((q or 0) * r for _, _, q, r in real_positions())
+    assert by_name["Company-1"]["evaluated_total"] == pytest.approx(everything * markup, abs=0.01)
+    assert by_name["Company-3"]["common_scope_total"] == pytest.approx(
+        civil * 1.02 * markup, abs=0.01
+    )
+    assert by_name["Company-3"]["rank_basis"] == by_name["Company-3"]["common_scope_total"]
+    assert by_name["Company-3"]["comparable"] is False
+    assert by_name["Company-1"]["comparable"] is True
+    assert report["common_scope_positions"] == 5
+    assert report["template_positions"] == len(real_positions())
+    assert [f["rule_id"] for f in report["template_findings"]] == ["BOQ.SHEET_SKIPPED"]
+
+
+def test_a_bidder_without_a_total_cost_row_says_so(client: TestClient) -> None:
+    """The reason a bidder is not ranked is said as it is: a total incl. VAT with no TOTAL COST
+    to divide it by is not the same as no total at all."""
+    template = _template(client)
+    bids = [_bid(client, "Company-1"), _bid(client, "Company-2", stated_total=None)]
+    report = _check(client, template, bids)
+    notes = {s["reason_en"] for s in report["skipped"] if s["rule_id"] == "BOQ.TOTALS"}
+    assert notes == {
+        "Company-2: states no total including VAT on its Summary sheet, so it is not ranked"
+    }
 
 
 def test_a_bidder_stating_no_total_is_not_ranked_cheapest(client: TestClient) -> None:

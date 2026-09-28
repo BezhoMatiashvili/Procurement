@@ -37,9 +37,9 @@ from procurement_agent.checks.boq import (
     BoqWorkbook,
     LineDiff,
     compare_all,
-    grand_total,
     rate_outliers,
     read_boq,
+    template_findings,
     write_merged_workbook,
 )
 from procurement_agent.checks.compare import ComparisonReport, DocumentTooLargeError
@@ -553,22 +553,49 @@ class BoqLineRef(BaseModel):
     quantity: float | None = None
     template_qty: float | None = None
     bid_qty: float | None = None
+    #: the bidder's own amount on the line (a filled-in blank, a priced heading)
+    amount: float | None = None
+    #: why the position is listed: unpriced | not_filled | non_numeric | ...
+    status: str | None = None
+    #: the template's wording, where the bid reworded the position
+    template_description: str | None = None
 
 
 class BoqBidder(BaseModel):
     bidder: str
     document_id: str
-    #: The bidder's own bottom line, read off their Summary sheet - what the leaderboard ranks on.
+    #: The bidder's own bottom line, read off their Summary sheet. Shown, never ranked on: it
+    #: carries the bidder's own quantities, added lines and whatever their spreadsheet adds.
     total_stated_incl_vat: float | None = None
     total_stated_excl_vat: float | None = None
-    #: What the line items actually add up to. The gap between the two is the point.
+    #: The Summary's TOTAL COST (the sections, before overheads, profit and VAT).
+    total_stated_cost: float | None = None
+    #: What the bidder's own position amounts add up to, sheet by sheet (excl. overheads/VAT).
     total_recomputed: float | None = None
-    #: ``total_stated_incl_vat``, or None when the bidder stated no total. A bidder who states
-    #: nothing must never be ranked cheapest, so None sorts last and is never coloured.
+    #: stated incl. VAT / stated TOTAL COST - the bidder's own overheads, profit and VAT
+    markup_factor: float | None = None
+    #: Every template position at the template quantity x the bidder's rate (GOLD_SPEC 5);
+    #: added lines never count, removed and unpriced positions count nothing.
+    evaluated_cost: float | None = None
+    evaluated_total: float | None = None
+    #: The same over the positions every bidder priced: the like-for-like number.
+    common_scope_cost: float | None = None
+    common_scope_total: float | None = None
+    #: "red" (highest common-scope total), "green" (lowest) or None; ties share a colour
+    colour: str | None = None
+    #: stated incl. VAT - evaluated total, and the same by cause (each incl. the markup)
+    stated_minus_evaluated: float | None = None
+    difference: dict[str, float] = Field(default_factory=dict)
+    #: ``common_scope_total``, or None when it cannot be computed (no stated total, no TOTAL
+    #: COST, an unreadable workbook). A bidder with no basis is never ranked cheapest: None
+    #: sorts last and is never coloured.
     rank_basis: float | None = None
-    #: False when a section was left unpriced or a template sheet removed: the total exists but
-    #: is not like-for-like, so it gets a badge instead of a rank colour.
+    #: False when the bid leaves out or cannot be read for part of the template: its full
+    #: evaluated total is not like-for-like (the common-scope total still is).
     comparable: bool = True
+    #: False when the workbook could not be evaluated at all (saved without values)
+    evaluable: bool = True
+    positions_priced: int = 0
     quantity_changed: list[BoqLineRef] = Field(default_factory=list)
     filled_blank: list[BoqLineRef] = Field(default_factory=list)
     added: list[BoqLineRef] = Field(default_factory=list)
@@ -576,6 +603,14 @@ class BoqBidder(BaseModel):
     added_sheets: list[str] = Field(default_factory=list)
     removed_sheets: list[str] = Field(default_factory=list)
     unpriced_sheets: list[str] = Field(default_factory=list)
+    unreadable_sheets: list[str] = Field(default_factory=list)
+    #: template positions with a quantity the bid leaves unpriced (status says how)
+    unpriced_positions: list[BoqLineRef] = Field(default_factory=list)
+    #: template positions with a blank quantity ("bidder fills in") the bid left blank
+    unfilled_positions: list[BoqLineRef] = Field(default_factory=list)
+    #: rows priced in the bid where the template has no position; not evaluated
+    priced_headings: list[BoqLineRef] = Field(default_factory=list)
+    description_changed: list[BoqLineRef] = Field(default_factory=list)
     findings: list[Finding] = Field(default_factory=list)
 
 
@@ -583,8 +618,13 @@ class BoqCheckReport(BaseModel):
     template_document_id: str
     template_name: str
     bidders: list[BoqBidder]
-    #: Ascending by ``rank_basis``; unranked bidders last.
+    #: Ascending by ``rank_basis`` (the common-scope total); unranked bidders last.
     leaderboard: list[BoqBidder]
+    #: Positions in the template, and how many of them every bidder priced (the common scope).
+    template_positions: int = 0
+    common_scope_positions: int = 0
+    #: What is wrong with or skipped in the template itself - true for every bidder alike.
+    template_findings: list[Finding] = Field(default_factory=list)
     #: Top level on purpose. ``checks.boq.main`` appends these to ``comparisons[0]``, which
     #: attributes every bidder's outlier to whoever was listed first - a CLI wart, not a contract.
     rate_outliers: list[Finding] = Field(default_factory=list)
@@ -597,13 +637,14 @@ def _ref_from_diff(d: LineDiff) -> BoqLineRef:
         sheet=d.sheet,
         row=d.row,
         description=d.description,
-        item_no=item_no or None,
+        item_no=d.item_no or item_no or None,
         template_qty=d.template_qty,
         bid_qty=d.bid_qty,
+        amount=d.amount,
     )
 
 
-def _ref_from_line(line: BoqLine) -> BoqLineRef:
+def _ref_from_line(line: BoqLine, status: str | None = None) -> BoqLineRef:
     return BoqLineRef(
         sheet=line.sheet,
         row=line.row,
@@ -611,6 +652,39 @@ def _ref_from_line(line: BoqLine) -> BoqLineRef:
         item_no=line.item_no or None,
         unit=line.unit,
         quantity=line.quantity,
+        amount=line.amount,
+        status=status,
+    )
+
+
+def _round(value: float | None) -> float | None:
+    return round(value, 2) if value is not None else None
+
+
+def _no_basis_note(comp: BidComparison) -> SkipNote | None:
+    """Why a bidder has no common-scope total - each reason said as it is."""
+    if comp.common_scope_total is not None:
+        return None
+    if not comp.evaluable:
+        ka = "ფაილი ვერ შეფასდა (იხ. დასკვნები), ამიტომ რანჟირებაში არ მონაწილეობს"
+        en = "could not be evaluated (see its findings), so it is not ranked"
+    elif comp.stated_incl_vat is None:
+        ka = (
+            "Summary გვერდზე დღგ-ს ჩათვლით ჯამი მითითებული არ არის, ამიტომ რანჟირებაში "
+            "არ მონაწილეობს"
+        )
+        en = "states no total including VAT on its Summary sheet, so it is not ranked"
+    else:
+        ka = (
+            "Summary გვერდზე TOTAL COST (სექციების ჯამი) არ არის, ამიტომ ზედნადები, მოგება "
+            "და დღგ ვერ დადგინდა და რანჟირებაში არ მონაწილეობს"
+        )
+        en = (
+            "states a total incl. VAT but no TOTAL COST row, so its overheads, profit and VAT "
+            "cannot be applied and it is not ranked"
+        )
+    return SkipNote(
+        rule_id="BOQ.TOTALS", reason_ka=f"{comp.bidder}: {ka}", reason_en=f"{comp.bidder}: {en}"
     )
 
 
@@ -674,30 +748,34 @@ def run_boq(
 
     bidders: list[BoqBidder] = []
     for doc, book, comp in zip(bid_docs, books, comparisons, strict=True):
-        stated = grand_total(book, incl_vat=True)
-        if stated is None:
-            skipped.append(
-                SkipNote(
-                    rule_id="BOQ.TOTALS",
-                    reason_ka=(
-                        f"{comp.bidder}: Summary გვერდზე ჯამური ფასი მითითებული არ არის, "
-                        "ამიტომ რანჟირებაში არ მონაწილეობს"
-                    ),
-                    reason_en=(
-                        f"{comp.bidder}: states no grand total on its Summary sheet, "
-                        "so it is not ranked"
-                    ),
-                )
-            )
+        note = _no_basis_note(comp)
+        if note is not None:
+            skipped.append(note)
+        status = {p.ref: p.status for p in comp.positions}
         bidders.append(
             BoqBidder(
                 bidder=comp.bidder,
                 document_id=doc.id,
-                total_stated_incl_vat=stated,
-                total_stated_excl_vat=grand_total(book, incl_vat=False),
-                total_recomputed=round(book.total, 2),
-                rank_basis=stated,
-                comparable=not (comp.unpriced_sheets or comp.removed_sheets),
+                total_stated_incl_vat=comp.stated_incl_vat,
+                total_stated_excl_vat=comp.stated_excl_vat,
+                total_stated_cost=comp.stated_total_cost,
+                total_recomputed=round(book.total, 2) if comp.evaluable else None,
+                markup_factor=comp.markup_factor,
+                evaluated_cost=round(comp.evaluated_cost, 2) if comp.evaluable else None,
+                evaluated_total=_round(comp.evaluated_total),
+                common_scope_cost=_round(comp.common_scope_cost),
+                common_scope_total=_round(comp.common_scope_total),
+                colour=comp.colour,
+                stated_minus_evaluated=(
+                    round(comp.stated_incl_vat - comp.evaluated_total, 2) or 0.0
+                    if comp.stated_incl_vat is not None and comp.evaluated_total is not None
+                    else None
+                ),
+                difference=comp.difference,
+                rank_basis=_round(comp.common_scope_total),
+                comparable=comp.complete,
+                evaluable=comp.evaluable,
+                positions_priced=sum(1 for p in comp.positions if p.priced),
                 quantity_changed=[_ref_from_diff(d) for d in comp.quantity_changed],
                 filled_blank=[_ref_from_diff(d) for d in comp.filled_blank],
                 added=[_ref_from_line(line) for line in comp.added],
@@ -705,6 +783,18 @@ def run_boq(
                 added_sheets=comp.added_sheets,
                 removed_sheets=comp.removed_sheets,
                 unpriced_sheets=comp.unpriced_sheets,
+                unreadable_sheets=comp.unreadable_sheets,
+                unpriced_positions=[
+                    _ref_from_line(t, status.get((t.sheet, t.row))) for t in comp.unpriced_positions
+                ],
+                unfilled_positions=[
+                    _ref_from_line(t, status.get((t.sheet, t.row))) for t in comp.unfilled_positions
+                ],
+                priced_headings=[_ref_from_line(b, "priced_heading") for b in comp.priced_headings],
+                description_changed=[
+                    _ref_from_line(b).model_copy(update={"template_description": t.description})
+                    for t, b in comp.description_changed
+                ],
                 findings=comp.findings,
             )
         )
@@ -714,6 +804,11 @@ def run_boq(
         template_name=template.name,
         bidders=bidders,
         leaderboard=sorted(bidders, key=lambda b: (b.rank_basis is None, b.rank_basis or 0.0)),
+        template_positions=sum(len(s.leaf_lines) for s in template.sheets.values()),
+        common_scope_positions=next(
+            (c.common_scope_positions for c in comparisons if c.evaluable), 0
+        ),
+        template_findings=template_findings(template),
         rate_outliers=outliers,
         skipped=skipped,
     )
@@ -732,7 +827,11 @@ def merged_xlsx(
     A stored copy would be derived client data with no retention owner - ``sweep_expired`` only
     knows about ``Document`` rows - and regenerating it costs about two seconds.
     """
-    errors = sum(1 for b in report.bidders for f in b.findings if f.severity == "error")
+    errors = sum(
+        1
+        for f in (*report.template_findings, *(f for b in report.bidders for f in b.findings))
+        if f.severity == "error"
+    )
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "boq_merged.xlsx"
         write_merged_workbook(template, books, comparisons, out, outliers=report.rate_outliers)
@@ -766,7 +865,11 @@ def check_boq(
     """
     template_doc, bid_docs = boq_documents(session, principal, body)
     report, template, books, comparisons = run_boq(settings, template_doc, bid_docs)
-    errors = sum(1 for b in report.bidders for f in b.findings if f.severity == "error")
+    errors = sum(
+        1
+        for f in (*report.template_findings, *(f for b in report.bidders for f in b.findings))
+        if f.severity == "error"
+    )
 
     audit(
         session,

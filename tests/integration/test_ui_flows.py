@@ -29,7 +29,7 @@ from procurement_agent.db import session_scope
 from procurement_agent.main import create_app
 from procurement_agent.models import Job
 from procurement_agent.ui.routes import _env
-from tests.boq_factory import LINES, blank, build_boq
+from tests.boq_factory import DOORS, LINES, Bid, blank, build_boq, build_real_boq
 from tests.unit.test_aoa_llm import ReadingLLM
 from tests.unit.test_fx_invoice import USD_ACT
 
@@ -1171,21 +1171,42 @@ def test_the_upload_progress_keeps_list_semantics_inside_a_live_region(
     assert not re.search(r"<ol[^>]*role=", body)
 
 
-def test_the_headline_tiles_carry_the_not_comparable_caveat(client: TestClient) -> None:
-    """On the client's own set every bidder left a section unpriced; the "lowest" tile must say
-    so, and a spread between two not-comparable totals is not shown at all."""
+def test_the_headline_tiles_carry_the_incomplete_caveat(client: TestClient) -> None:
+    """On the client's own set every bidder left a section unpriced. The colours are decided on
+    the positions everyone priced, so the bidder who skipped a section is coloured fairly - and
+    its tile still says the bid is incomplete."""
+    template = _upload(client, "Template.xlsx", build_real_boq(), XLSX)
+    partial = _upload(
+        client,
+        "Company-1.xlsx",
+        build_real_boq(Bid(factor=0.9, unpriced_sheets={DOORS})),
+        XLSX,
+    )
+    full = _upload(client, "Company-2.xlsx", build_real_boq(Bid()), XLSX)
+    body = client.get(f"/ui/checks/boq?template={template}&bids={partial},{full}").text
+    assert 'class="card caveat"' in body  # the precondition: Company-1 is incomplete
+    stats = re.search(r'<ul class="stats">.*?</ul>', body, re.S)
+    assert stats
+    low_tile = re.search(r'<li class="stat ok">.*?</li>', stats.group(0), re.S)
+    assert low_tile and "Company-1" in low_tile.group(0) and "badge" in low_tile.group(0)
+    # both common-scope totals cover the same positions, so the spread is like-for-like
+    assert "სხვაობა უმაღლესსა" in stats.group(0)
+    board = re.search(r'<table class="list leaderboard">.*?</table>', body, re.S)
+    assert board and board.group(0).index("Company-1") < board.group(0).index("Company-2")
+
+
+def test_with_no_common_scope_nobody_is_coloured_and_the_page_says_why(
+    client: TestClient,
+) -> None:
     template = _upload(client, "Template.xlsx", build_boq(LINES, stated_total=None), XLSX)
     unpriced = _upload(
         client, "Company-1.xlsx", build_boq(LINES, priced=False, stated_total=500.0), XLSX
     )
     priced = _upload(client, "Company-2.xlsx", build_boq(LINES, stated_total=2000.0), XLSX)
     body = client.get(f"/ui/checks/boq?template={template}&bids={unpriced},{priced}").text
-    assert 'class="card caveat"' in body  # the precondition: Company-1 is not comparable
-    stats = re.search(r'<ul class="stats">.*?</ul>', body, re.S)
-    assert stats
-    low_tile = re.search(r'<li class="stat ok">.*?</li>', stats.group(0), re.S)
-    assert low_tile and "Company-1" in low_tile.group(0) and "badge" in low_tile.group(0)
-    assert "სხვაობა უმაღლესსა" not in stats.group(0)  # no spread between unlike totals
+    assert "rank-low" not in body and "rank-high" not in body
+    assert 'class="stat ok"' not in body
+    assert "საერთო მოცულობა არ არსებობს" in body
 
 
 def test_an_extraction_result_names_its_fields_in_georgian(client: TestClient) -> None:
