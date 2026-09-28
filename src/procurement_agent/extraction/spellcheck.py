@@ -24,7 +24,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from procurement_agent.extraction.normalize import edit_distance, names_match, normalize_name
+from procurement_agent.extraction.georgian import same_word
+from procurement_agent.extraction.normalize import edit_distance, normalize_name
 
 # Below this, two values are different things rather than one thing spelled two ways.
 _TYPO_MAX_DISTANCE = 2
@@ -55,6 +56,14 @@ def _similarity(a: str, b: str) -> float:
     return 1.0 - edit_distance(a, b, cap=longest) / longest
 
 
+def _same_words(a: str, b: str) -> bool:
+    """The same words in the same order, each in any grammatical form (``same_word``): "ნინო
+    კაპანაძის" is "ნინო კაპანაძე", "მთაწმინდიის" is not "მთაწმინდის". Stripping endings
+    (``names_match``) took the second for an inflection too."""
+    aw, bw = a.split(), b.split()
+    return len(aw) == len(bw) and all(same_word(x, y) for x, y in zip(aw, bw, strict=True))
+
+
 def classify_difference(actual: str, expected: str) -> Difference | None:
     """Compare two values that should be identical. Returns None when they are.
 
@@ -63,7 +72,7 @@ def classify_difference(actual: str, expected: str) -> Difference | None:
     client is told what the contract says, so the distinction only changes the wording.
     """
     a, b = normalize_name(actual), normalize_name(expected)
-    if not a or not b or a == b or names_match(a, b):
+    if not a or not b or a == b or _same_words(a, b):
         return None
 
     aw, bw = a.split(), b.split()

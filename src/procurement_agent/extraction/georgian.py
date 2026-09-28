@@ -288,15 +288,65 @@ def _stems_of(word: str) -> set[str]:
     return out
 
 
+def _syncopated(form: str) -> str | None:
+    """``form`` with the vowel before its stem's last consonant dropped, as some nouns do before
+    an ending: "მოედანის" -> "მოედნის", "სექტემბერის" -> "სექტემბრის". None when no such
+    vowel stands there."""
+    m = re.search(rf"([{GEORGIAN}])([აეო])([ნლრმ])(ის|ით|ად|ისთვის|იდან|ამდე)$", form)
+    if m is None or m.group(1) in _VOWELS:
+        return None
+    return form[: m.start(2)] + form[m.end(2) :]
+
+
+def word_lemmas(word: str) -> frozenset[str]:
+    """Every nominative ``word`` is a form of under the case model - each candidate lemma that
+    inflects back to it exactly (or with the vowel some nouns drop, ``_syncopated``) - with the
+    word itself, and the full form of a bare attributive stem ("ლაზურ" of "ლაზური")."""
+    if not is_georgian_word(word):
+        return frozenset({word})
+    word = _normal_postposition(word)
+    out = {word}
+    if word[-1] not in _VOWELS:
+        out.add(word + "ი")
+    case = case_of(word)
+    cases: tuple[Case, ...] = (case, "dat") if case == "gen" and word.endswith("ს") else (case,)
+    candidates = list(_lemma_candidates(word))
+    # a dropped vowel put back: "მოედნის" is a form of "მოედანი"
+    m = re.search(rf"([{GEORGIAN}])([ნლრმ])(ის|ით|ად|ისთვის|იდან|ამდე)$", word)
+    if m is not None and m.group(1) not in _VOWELS:
+        stem = word[: m.start(2)]
+        candidates += [f"{stem}{v}{m.group(2)}ი" for v in "აეო"]
+    if len(word) > 3 and word[-1] == "ს" and word[-2] not in _VOWELS:
+        # a consonant stem's dative: "უფლებებს" of "უფლებები", "ბერიშვილს" of "ბერიშვილი"
+        candidates.append(word[:-1] + "ი")
+        cases = (*cases, "dat")
+    for lemma_candidate in candidates:
+        for c in cases:
+            form = inflect_word(lemma_candidate, c)
+            if word in (form, _syncopated(form)):
+                out.add(lemma_candidate)
+    return frozenset(out)
+
+
+def _normal_postposition(word: str) -> str:
+    """The older full postposition as the modern one: "-ისათვის" is "-ისთვის"."""
+    for old, new in (("ისათვის", "ისთვის"), ("სათვის", "სთვის")):
+        if word.endswith(old) and len(word) - len(old) >= 3:
+            return word[: -len(old)] + new
+    return word
+
+
 def same_word(a: str, b: str) -> bool:
-    """Whether two words are one word in two grammatical forms: a case ending, a postposition,
-    or the bare stem an attribute takes ("ლაზურ რეზიდენსში"). The spelling of the stem must
-    agree - "ლაზუი" is not "ლაზური" - which a prefix test ("ლაზუ…") did not see."""
+    """Whether two words are one word in two grammatical forms: forms of a common nominative
+    under the case model (``word_lemmas``), a postposition or the bare stem an attribute takes
+    ("ლაზურ რეზიდენსში") included. The spelling must agree - "ლაზუი" is not "ლაზური", and
+    "მთაწმინდიის" is no form of "მთაწმინდა" - which stripping endings ("ლაზუ…",
+    "მთაწმინდი…") did not see."""
     if a == b:
         return True
     if not (is_georgian_word(a) and is_georgian_word(b)):
         return False
-    return bool(_stems_of(a) & _stems_of(b))
+    return bool(word_lemmas(a) & word_lemmas(b))
 
 
 def prefer_nominative(forms: list[str]) -> str | None:

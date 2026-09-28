@@ -227,3 +227,15 @@ def test_the_word_after_a_misspelled_month_decides_its_case() -> None:
 
     found = month_typo("სექტემბირს", following="ჩათვლით")
     assert found is not None and found.correction == "სექტემბრის"
+
+
+def test_a_letter_added_before_the_ending_is_no_inflection() -> None:
+    from procurement_agent.extraction.georgian import same_word
+    from procurement_agent.extraction.spellcheck import classify_difference
+
+    assert not same_word("მთაწმინდიის", "მთაწმინდის")
+    assert same_word("მოედნის", "მოედანი")  # the vowel some nouns drop
+    assert same_word("სექტემბრის", "სექტემბერი")
+    assert same_word("ლაზურ", "ლაზური")
+    assert classify_difference("ქ. თბილისი, ვაკიის რაიონი", "ქ. თბილისი, ვაკის რაიონი")
+    assert classify_difference("ნინო კაპანაძის", "ნინო კაპანაძე") is None
