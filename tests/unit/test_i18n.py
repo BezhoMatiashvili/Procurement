@@ -19,6 +19,7 @@ DYNAMIC_PREFIXES = (
     "contractor.",
     "report.severity.",
     "compare.kind.",
+    "boq.diff.",
     "compare.show.",
     "task.",
     "status.",

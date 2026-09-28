@@ -5,9 +5,11 @@
 {% set changed = report.bidders | selectattr("quantity_changed") | list %}
 {% set filled = report.bidders | selectattr("filled_blank") | list %}
 {% set excluded = report.bidders | selectattr("added") | list
-                + report.bidders | selectattr("removed") | list %}
-{% set low = report.leaderboard | selectattr("bidder", "equalto", lowest) | first if lowest else none %}
-{% set high = report.leaderboard | selectattr("bidder", "equalto", highest) | first if highest else none %}
+                + report.bidders | selectattr("removed") | list
+                + report.bidders | selectattr("priced_headings") | list %}
+{% set explained = report.bidders | selectattr("difference") | list %}
+{% set low = lowest | first if lowest else none %}
+{% set high = highest | first if highest else none %}
 
 <a class="back" href="/ui/">{{ icon("arrow-left") }}{{ t("nav.home") }}</a>
 <div class="result-head">
@@ -25,16 +27,25 @@
   </div>
 </div>
 
+{% if report.template_findings %}
+<h2 id="template">{{ t("boq.template_findings") }} <span class="count">{{ report.template_findings | length }}</span></h2>
+{{ f.finding_list(report.template_findings, t, msg) }}
+{% endif %}
+
 {% if caveats %}
-{# "Everyone skipped MEP" is the single most useful thing on this page; it must not be buried
+{# An incomplete bid is the single most useful thing on this page; it must not be buried
    inside a per-bidder <details>. #}
 <div class="card caveat">
   <p class="caveat-title">{{ icon("alert") }}<span><strong>{{ t("boq.not_comparable") }}</strong> — {{ t("boq.not_comparable.why") }}</span></p>
   <ul class="small">
     {% for b in caveats %}
     <li><strong>{{ b.bidder }}</strong>
+      {%- if not b.evaluable %} · {{ t("boq.not_evaluable") }}{% endif %}
       {%- if b.unpriced_sheets %} · {{ t("boq.unpriced") }}: {{ b.unpriced_sheets | join(", ") }}{% endif %}
       {%- if b.removed_sheets %} · {{ t("boq.removed_sheets") }}: {{ b.removed_sheets | join(", ") }}{% endif %}
+      {%- if b.unreadable_sheets %} · {{ t("boq.unreadable_sheets") }}: {{ b.unreadable_sheets | join(", ") }}{% endif %}
+      {%- if b.unpriced_positions %} · {{ t("boq.unpriced_positions") }}: {{ b.unpriced_positions | length }}{% endif %}
+      {%- if b.removed %} · {{ t("boq.removed") }}: {{ b.removed | length }}{% endif %}
       {%- if b.added_sheets %} · {{ t("boq.added_sheets") }}: {{ b.added_sheets | join(", ") }}{% endif %}
     </li>
     {% endfor %}
@@ -44,16 +55,16 @@
 
 <ul class="stats">
   <li class="stat"><span class="v">{{ report.bidders | length }}</span><span class="l">{{ t("boq.stat.bidders") }}</span></li>
-  {# The tiles repeat the leaderboard's claims, so they carry its caveat too: on a set where a
-     bidder left sections unpriced, "lowest" is exactly the claim that needs the badge. #}
+  <li class="stat"><span class="v">{{ report.common_scope_positions }}</span><span class="sub">/ {{ report.template_positions }}</span><span class="l">{{ t("boq.stat.common") }}</span></li>
+  {# Tiles repeat the colours compare_all decided on the common-scope total; ties share one. #}
   {% if low and high %}
-  <li class="stat ok"><span class="v sm">{{ low.bidder }}</span><span class="sub">{{ low.rank_basis | money }}</span><span class="l">{{ t("boq.lowest") }}</span>
+  <li class="stat ok"><span class="v sm">{{ lowest | map(attribute="bidder") | join(", ") }}</span><span class="sub">{{ low.common_scope_total | money }}</span><span class="l">{{ t("boq.lowest") }}</span>
     {%- if not low.comparable %} <span class="badge" title="{{ t('boq.not_comparable.why') }}">{{ t("boq.not_comparable") }}</span>{% endif %}</li>
-  <li class="stat error"><span class="v sm">{{ high.bidder }}</span><span class="sub">{{ high.rank_basis | money }}</span><span class="l">{{ t("boq.highest") }}</span>
+  <li class="stat error"><span class="v sm">{{ highest | map(attribute="bidder") | join(", ") }}</span><span class="sub">{{ high.common_scope_total | money }}</span><span class="l">{{ t("boq.highest") }}</span>
     {%- if not high.comparable %} <span class="badge" title="{{ t('boq.not_comparable.why') }}">{{ t("boq.not_comparable") }}</span>{% endif %}</li>
-  {# a spread between two totals that are not like-for-like is not a number anyone should quote #}
-  {% if low.rank_basis and low.comparable and high.comparable %}
-  <li class="stat"><span class="v">{{ "%.0f%%" | format((high.rank_basis - low.rank_basis) / low.rank_basis * 100) }}</span><span class="l">{{ t("boq.stat.spread") }}</span></li>
+  {# both totals cover the same positions, so the spread between them is like-for-like #}
+  {% if low.common_scope_total %}
+  <li class="stat"><span class="v">{{ "%.0f%%" | format((high.common_scope_total - low.common_scope_total) / low.common_scope_total * 100) }}</span><span class="l">{{ t("boq.stat.spread") }}</span></li>
   {% endif %}
   {% endif %}
   <li class="stat{% if not report.rate_outliers %} zero{% else %} warning{% endif %}"><span class="v">{{ report.rate_outliers | length }}</span><span class="l">{{ t("boq.outliers.title") }}</span></li>
@@ -61,36 +72,55 @@
 
 <ul class="toc" aria-label="{{ t('report.sections') }}">
   <li><a href="#totals">{{ t("boq.leaderboard") }}</a></li>
+  {% if explained %}<li><a href="#difference">{{ t("boq.diff.title") }}</a></li>{% endif %}
   {% if changed or filled %}<li><a href="#quantities">{{ t("boq.quantities.title") }}</a></li>{% endif %}
+  {% if caveats %}<li><a href="#incomplete">{{ t("boq.incomplete.title") }}</a></li>{% endif %}
   {% if excluded %}<li><a href="#excluded">{{ t("boq.excluded.title") }}</a></li>{% endif %}
   <li><a href="#outliers">{{ t("boq.outliers.title") }} <span class="count">{{ report.rate_outliers | length }}</span></a></li>
   {% if report.bidders | selectattr("findings") | list %}<li><a href="#per-bidder">{{ t("boq.per_bidder") }}</a></li>{% endif %}
 </ul>
 
 <h2 id="totals">{{ t("boq.leaderboard") }}</h2>
+<p class="muted small">{{ t("boq.basis.lead", n=report.common_scope_positions, m=report.template_positions) }}</p>
+{% if report.bidders | length > 1 and not report.common_scope_positions %}
+<p class="small"><strong>{{ t("boq.basis.empty") }}</strong></p>
+{% endif %}
 <table class="list leaderboard">
   <thead><tr>
-    <th>{{ t("boq.bidder") }}</th><th class="num">{{ t("boq.stated") }}</th>
-    <th class="num">{{ t("boq.stated.net") }}</th><th class="num">{{ t("boq.recomputed") }}</th>
+    <th>{{ t("boq.bidder") }}</th><th class="num">{{ t("boq.common") }}</th>
+    <th class="num">{{ t("boq.evaluated") }}</th><th class="num">{{ t("boq.stated") }}</th>
+    <th class="num">{{ t("boq.difference") }}</th>
   </tr></thead>
   <tbody>
   {% for b in report.leaderboard %}
-  <tr class="{% if b.bidder == lowest %}rank-low{% elif b.bidder == highest %}rank-high{% endif %}">
+  <tr class="{% if b.colour == 'green' %}rank-low{% elif b.colour == 'red' %}rank-high{% endif %}">
     <td class="primary">{% if b.rank_basis is not none %}<span class="rank" aria-hidden="true">{{ loop.index }}</span>{% endif %}{{ b.bidder }}
-      {%- if b.bidder == lowest %} <span class="rank-badge low">{{ t("boq.lowest") }}</span>
-      {%- elif b.bidder == highest %} <span class="rank-badge high">{{ t("boq.highest") }}</span>{% endif %}
+      {%- if b.colour == "green" %} <span class="rank-badge low">{{ t("boq.lowest") }}</span>
+      {%- elif b.colour == "red" %} <span class="rank-badge high">{{ t("boq.highest") }}</span>{% endif %}
       {%- if not b.comparable %} <span class="badge" title="{{ t('boq.not_comparable.why') }}">{{ t("boq.not_comparable") }}</span>{% endif %}
       {%- if b.rank_basis is none %} <span class="badge">{{ t("boq.no_total") }}</span>{% endif %}
     </td>
     {# an em dash, never an empty string: table.list td:empty is hidden on phones, which would
        drop the figure on exactly the device where it is hardest to notice #}
+    <td data-label="{{ t('boq.common') }}" class="num"><strong>{{ b.common_scope_total | money }}</strong></td>
+    <td data-label="{{ t('boq.evaluated') }}" class="num">{{ b.evaluated_total | money }}</td>
     <td data-label="{{ t('boq.stated') }}" class="num">{{ b.total_stated_incl_vat | money }}</td>
-    <td data-label="{{ t('boq.stated.net') }}" class="num">{{ b.total_stated_excl_vat | money }}</td>
-    <td data-label="{{ t('boq.recomputed') }}" class="num">{{ b.total_recomputed | money }}</td>
+    <td data-label="{{ t('boq.difference') }}" class="num">{{ b.stated_minus_evaluated | money }}</td>
   </tr>
   {% endfor %}
   </tbody>
 </table>
+
+{% if explained %}
+<h2 id="difference">{{ t("boq.diff.title") }}</h2>
+<p class="muted small">{{ t("boq.diff.lead") }}</p>
+<ul class="small">
+  {% for b in report.bidders %}{% if b.difference %}
+  <li><strong>{{ b.bidder }}</strong>:
+    {% for k, v in b.difference.items() %}{{ t("boq.diff." ~ k) }} {{ v | money }}{% if not loop.last %}; {% endif %}{% endfor %}</li>
+  {% endif %}{% endfor %}
+</ul>
+{% endif %}
 
 {% if changed or filled %}
 <h2 id="quantities">{{ t("boq.quantities.title") }}</h2>
@@ -109,7 +139,7 @@
     {% for title, attr in (("boq.quantities.changed", "quantity_changed"), ("boq.quantities.filled", "filled_blank")) %}
     {% for d in b[attr] %}
     <tr>
-      <td class="primary">{{ d.description }}</td>
+      <td class="primary">{% if d.item_no %}<code>{{ d.item_no }}</code> {% endif %}{{ d.description }}</td>
       <td data-label="{{ t('boq.change') }}"><span class="sev {{ 'sev-warning' if attr == 'quantity_changed' else 'sev-info' }}">{{ t(title ~ ".short") }}</span></td>
       <td data-label="{{ t('boq.sheet') }}">{{ d.sheet }}</td>
       <td data-label="{{ t('boq.row') }}" class="num">{{ d.row }}</td>
@@ -125,18 +155,38 @@
 {% endfor %}
 {% endif %}
 
-{% if excluded %}
-<h2 id="excluded">{{ t("boq.excluded.title") }}</h2>
-<p class="muted small">{{ t("boq.excluded.lead") }}</p>
-{% for b in report.bidders %}{% if b.added or b.removed %}
-<div class="card excluded">
-  <h3>{{ b.bidder }}</h3>
-  {% for group, items in (("boq.added", b.added), ("boq.removed", b.removed)) %}{% if items %}
+{% if caveats %}
+<h2 id="incomplete">{{ t("boq.incomplete.title") }}</h2>
+<p class="muted small">{{ t("boq.incomplete.lead") }}</p>
+{% for b in caveats %}
+{% set n = b.unpriced_positions | length + b.unfilled_positions | length %}
+<details class="card">
+  <summary>{{ b.bidder }} <span class="count">{{ n }}</span></summary>
+  {% for group, items in (("boq.unpriced_positions.title", b.unpriced_positions), ("boq.unfilled", b.unfilled_positions)) %}{% if items %}
   <p class="small">{{ t(group) }}</p>
   <ul class="small">
     {% for p in items %}
     <li><code>{{ p.item_no or "" }}</code> {{ p.description }}
-      <span class="muted">· {{ p.sheet }} · {{ t("boq.row") }} {{ p.row }}</span></li>
+      <span class="muted">· {{ p.sheet }} · {{ t("boq.row") }} {{ p.row }}{% if p.status == "non_numeric" %} · {{ t("boq.status.non_numeric") }}{% endif %}</span></li>
+    {% endfor %}
+  </ul>
+  {% endif %}{% endfor %}
+</details>
+{% endfor %}
+{% endif %}
+
+{% if excluded %}
+<h2 id="excluded">{{ t("boq.excluded.title") }}</h2>
+<p class="muted small">{{ t("boq.excluded.lead") }}</p>
+{% for b in report.bidders %}{% if b.added or b.removed or b.priced_headings %}
+<div class="card excluded">
+  <h3>{{ b.bidder }}</h3>
+  {% for group, items in (("boq.added", b.added), ("boq.removed", b.removed), ("boq.priced_headings", b.priced_headings)) %}{% if items %}
+  <p class="small">{{ t(group) }}</p>
+  <ul class="small">
+    {% for p in items %}
+    <li><code>{{ p.item_no or "" }}</code> {{ p.description }}
+      <span class="muted">· {{ p.sheet }} · {{ t("boq.row") }} {{ p.row }}{% if p.amount and group != "boq.removed" %} · {{ p.amount | money }}{% endif %}</span></li>
     {% endfor %}
   </ul>
   {% endif %}{% endfor %}

@@ -660,19 +660,17 @@ def boq_report(
         ip=client_ip(request),
         detail=f"{len(bid_docs)} bidder(s)",
     )
-    # Rank every bidder who stated a total. Excluding the not-comparable ones as well was too
-    # strict for real tenders: on the client's own set all four left a section unpriced, which
-    # suppressed the highest-red / lowest-green rule they explicitly asked for. The caveat
-    # belongs on the row as a badge, not in the silent removal of the ranking.
-    ranked = [b for b in report.leaderboard if b.rank_basis is not None]
+    # Red and green are decided by ``compare_all`` on the common-scope total - the positions
+    # every bidder priced - so a bid that left sections out is still coloured, fairly, and ties
+    # share a colour. The page only shows what was decided; it never ranks on its own.
     resp = _render(
         request,
         "check_boq.html",
         user=principal.user,
         report=report,
         query=request.url.query,
-        lowest=ranked[0].bidder if len(ranked) > 1 else None,
-        highest=ranked[-1].bidder if len(ranked) > 1 else None,
+        lowest=[b for b in report.leaderboard if b.colour == "green"],
+        highest=[b for b in report.leaderboard if b.colour == "red"],
         groups_for=lambda bidder: _by_severity(bidder.findings),
         caveats=[b for b in report.bidders if not b.comparable],
     )

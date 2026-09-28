@@ -159,9 +159,19 @@ Policy (client BOQ rules 2, 3, 5, 6 and the user's decision of 2026-09-28):
 
 * A **position** is a row of a priced sheet whose template amount cell holds a product of that
   row (`=O12*G12`) or a number - a leaf item. Rows whose amount is a sum of other rows are
-  subtotals; rows with no amount cell are headings or parents.
+  subtotals; rows with no amount cell are headings or parents - unless they carry a quantity or
+  a unit: the client's template has a position whose amount formula is missing, everyone
+  priced it, and it is a position. A bidder's price on a row that is not a position is listed
+  (`BOQ.HEADING_PRICED`) and never evaluated.
 * Unit rate `r` = the bidder's rate column ("Rate in USD"); when empty, the sum of the
-  materials, labour and delivery rates.
+  materials, labour and delivery rates; on a sheet with no rate column at all, amount ÷ the
+  bidder's quantity. Text in a rate, amount or quantity cell is never read as 0: the position
+  is not priced (`BOQ.NON_NUMERIC`).
+* A position whose template quantity is blank or 0 and which the bidder also left blank is
+  listed apart (`unfilled_positions`); it does not make the bid incomplete.
+* Positions match by item number and description (after folding); a position moved within its
+  sheet, or re-worded (same item number, descriptions ≥ 0.9 alike, `BOQ.DESCRIPTION_CHANGED`),
+  is still the position.
 * Position cost at template quantities = template quantity × `r`; where the template leaves the
   quantity blank or 0 (the bidder fills it, e.g. preliminaries), the bidder's own amount, and
   the position is listed under `filled_blank`.
@@ -171,8 +181,17 @@ Policy (client BOQ rules 2, 3, 5, 6 and the user's decision of 2026-09-28):
   overheads, profit and VAT); `evaluated_total = evaluated_cost × markup_factor`.
 * **Common scope** = positions every bidder priced (non-zero `r`). `common_scope_cost/total`
   are computed over it. **Red/green go on `common_scope_total`**: highest red, lowest green,
-  every tied bidder the same colour, no colour with a single bidder. The full evaluated total
-  and the stated total are shown beside it, and an incomplete bid lists what it left out.
+  every tied bidder the same colour (compared to the cent), no colour with a single bidder or
+  when all tie. A workbook that cannot be evaluated (saved without cached values,
+  `BOQ.NO_CACHED_VALUES`) takes no part in the common scope. The full evaluated total and the
+  stated total are shown beside it, with the difference broken down (own quantities, added
+  lines, priced non-positions, added sheets, Summary against the sheets), and an incomplete bid
+  lists what it left out.
+* The Summary is read as rows, never keyed by label. Every row that links to a sheet row must
+  state that row's amount, TOTAL COST must be the sum of the top-level sections, and the
+  overheads, profit, excl.-VAT, VAT and incl.-VAT rows must follow from each other
+  (`BOQ.RECONCILE`, naming the rows). The stated total incl. VAT is the row labelled so; there
+  is no fallback to another row.
 * `sheet_amounts` (Σ of the bidder's own position amounts) must equal `sheet_subtotals` (the
   sheet's own SUB-TOTAL row) to the cent; a difference is either the bidder's arithmetic
   (reported) or a reader bug (a defect).

@@ -210,26 +210,34 @@ STRINGS: dict[str, tuple[str, str]] = {
     "boq.template": ("Template", "შაბლონი"),
     "boq.leaderboard": ("Totals", "ჯამური ფასები"),
     "boq.bidder": ("Bidder", "კომპანია"),
-    "boq.stated": ("Stated total", "მითითებული ჯამი"),
+    "boq.stated": ("Stated total incl. VAT", "მითითებული ჯამი დღგ-ს ჩათვლით"),
     "boq.stated.net": ("Net of VAT", "დღგ-ს გარეშე"),
     "boq.recomputed": ("Recomputed from lines", "გადათვლილი პოზიციებით"),
     "boq.lowest": ("lowest", "ყველაზე დაბალი"),
     "boq.highest": ("highest", "ყველაზე მაღალი"),
-    "boq.not_comparable": ("not comparable", "არ არის შედარებადი"),
+    "boq.not_comparable": ("incomplete", "არასრული"),
     "boq.not_comparable.why": (
-        "A section was left unpriced or a template sheet removed, so this total is not "
-        "like-for-like.",
-        "სექცია ფასდაუდებელია ან შაბლონის გვერდი ამოღებულია, ამიტომ ეს ჯამი შედარებადი არაა.",
+        "The bid leaves part of the template unpriced or out, or part of it could not be read, "
+        "so its evaluated total is not like-for-like. Its common-scope total still is.",
+        "წინადადებაში შაბლონის ნაწილი ფასდაუდებელია, ამოღებულია ან ვერ წავიკითხეთ, ამიტომ "
+        "შეფასებული ჯამი შედარებადი არაა. საერთო მოცულობის ჯამი კი შედარებადია.",
     ),
-    "boq.no_total": ("states no total", "ჯამი მითითებული არ არის"),
+    "boq.no_total": ("not ranked (see why below)", "რანჟირების გარეშე (მიზეზი ქვემოთ)"),
     "boq.unpriced": ("left unpriced", "ფასდაუდებელი"),
     "boq.removed_sheets": ("sheets missing", "ამოღებული გვერდები"),
     "boq.added_sheets": ("sheets added", "დამატებული გვერდები"),
     "boq.excluded.title": ("Excluded from the comparison", "შედარებაში არ მონაწილეობს"),
     "boq.excluded.lead": (
-        "These positions exist in only one workbook, so they are listed here and left out of "
-        "the totals above.",
-        "ეს პოზიციები მხოლოდ ერთ ფაილშია, ამიტომ ცალკე ჩამოთვლილია და ჯამებში არ შედის.",
+        "Positions a bidder added, removed, or priced on a row that is not a position in the "
+        "template. Added and such priced rows never count in the evaluated or common-scope "
+        "totals; a removed position contributes nothing to that bidder's evaluated total and "
+        "takes the position out of the common scope. The stated total still includes whatever "
+        "the bidder put in it.",
+        "პოზიციები, რომლებიც კომპანიამ დაამატა, ამოიღო ან ფასი მიუთითა სტრიქონზე, რომელიც "
+        "შაბლონში პოზიცია არ არის. დამატებული და ასეთი სტრიქონები შეფასებულ და საერთო "
+        "მოცულობის ჯამებში არასოდეს შედის; ამოღებული პოზიცია კომპანიის შეფასებულ ჯამს არაფერს "
+        "მატებს და საერთო მოცულობიდან გამოდის. მითითებული ჯამი კი მოიცავს ყველაფერს, რაც "
+        "კომპანიამ მასში ჩადო.",
     ),
     "boq.added": ("Added by the bidder", "კომპანიის მიერ დამატებული"),
     "boq.removed": ("Missing from the bid", "წინადადებაში აკლია"),
@@ -247,6 +255,70 @@ STRINGS: dict[str, tuple[str, str]] = {
     "boq.template_qty": ("Template", "შაბლონში"),
     "boq.bid_qty": ("Bid", "წინადადებაში"),
     "boq.findings": ("Findings for {bidder}", "დასკვნები — {bidder}"),
+    "boq.common": ("Common-scope total", "საერთო მოცულობის ჯამი"),
+    "boq.evaluated": ("Evaluated total", "შეფასებული ჯამი"),
+    "boq.difference": ("Stated - evaluated", "მითითებული - შეფასებული"),
+    "boq.basis.lead": (
+        "Every bid is recomputed at the template's quantities with the bidder's own unit rates "
+        "and own markup (overheads, profit, VAT). Red and green go on the common-scope total: "
+        "the {n} of {m} template positions that every bidder priced. Added lines never count; "
+        "removed and unpriced positions count nothing. The stated total is shown beside it.",
+        "ყოველი წინადადება გადაითვლება შაბლონის მოცულობებით, კომპანიის ერთეულის ფასებითა და "
+        "მისივე დანამატით (ზედნადები, მოგება, დღგ). წითელი და მწვანე ფერი საერთო მოცულობის "
+        "ჯამით განისაზღვრება: შაბლონის {m} პოზიციიდან {n}, რომელსაც ყველა კომპანიამ დაადო "
+        "ფასი. დამატებული პოზიციები არასოდეს ითვლება; ამოღებული და ფასდაუდებელი პოზიციები "
+        "არაფერს მატებს. მითითებული ჯამი გვერდით არის ნაჩვენები.",
+    ),
+    "boq.basis.empty": (
+        "No position was priced by every bidder, so there is no common scope and nobody is "
+        "coloured.",
+        "არცერთ პოზიციას ყველა კომპანიამ არ დაადო ფასი, ამიტომ საერთო მოცულობა არ არსებობს "
+        "და ფერით არავინ აღინიშნება.",
+    ),
+    "boq.stat.common": ("Positions every bidder priced", "ყველას მიერ შეფასებული პოზიციები"),
+    "boq.template_findings": ("About the template", "შაბლონის შესახებ"),
+    "boq.not_evaluable": ("could not be evaluated", "ვერ შეფასდა"),
+    "boq.unreadable_sheets": ("sheets unreadable", "წაუკითხავი გვერდები"),
+    "boq.unpriced_positions": ("positions unpriced", "ფასდაუდებელი პოზიციები"),
+    "boq.unpriced_positions.title": (
+        "Template positions with a quantity that the bid leaves unpriced",
+        "შაბლონის პოზიციები მოცულობით, რომლებსაც წინადადებაში ფასი არ აქვს",
+    ),
+    "boq.unfilled": (
+        "Positions left blank where the template gives no quantity (the bidder fills these in)",
+        "ცარიელი პოზიციები, სადაც შაბლონში მოცულობა არ არის (მათ კომპანია ავსებს)",
+    ),
+    "boq.status.non_numeric": ("text instead of a number", "რიცხვის ნაცვლად ტექსტი"),
+    "boq.priced_headings": (
+        "Priced on a row that is not a position in the template",
+        "ფასი სტრიქონზე, რომელიც შაბლონში პოზიცია არ არის",
+    ),
+    "boq.incomplete.title": ("Incomplete bids", "არასრული წინადადებები"),
+    "boq.incomplete.lead": (
+        "What each incomplete bid leaves out. These positions are outside the common scope for "
+        "everyone, so the colours stay fair.",
+        "რას ტოვებს თითოეული არასრული წინადადება. ეს პოზიციები ყველასთვის საერთო მოცულობის "
+        "გარეთაა, ამიტომ ფერები სამართლიანია.",
+    ),
+    "boq.diff.title": ("Why the stated total differs", "რატომ განსხვავდება მითითებული ჯამი"),
+    "boq.diff.lead": (
+        "Stated total incl. VAT minus the evaluated total, by cause. Each part includes the "
+        "bidder's own markup.",
+        "მითითებულ ჯამს (დღგ-ს ჩათვლით) გამოკლებული შეფასებული ჯამი, მიზეზების მიხედვით. "
+        "თითოეული ნაწილი კომპანიის დანამატს მოიცავს.",
+    ),
+    "boq.diff.quantities": (
+        "own quantities and arithmetic",
+        "კომპანიის მოცულობები და არითმეტიკა",
+    ),
+    "boq.diff.added_lines": ("added lines", "დამატებული პოზიციები"),
+    "boq.diff.priced_headings": (
+        "priced rows that are not positions",
+        "ფასიანი სტრიქონები, რომლებიც პოზიცია არ არის",
+    ),
+    "boq.diff.added_sheets": ("added sheets", "დამატებული გვერდები"),
+    "boq.diff.summary": ("Summary against the sheets", "Summary გვერდებთან შედარებით"),
+    "boq.diff.other": ("other", "სხვა"),
     # --- expired ---
     "expired.title": (
         "These documents are no longer available",

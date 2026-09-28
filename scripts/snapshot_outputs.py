@@ -61,6 +61,10 @@ def _aoa_sets() -> list[Path]:
     return sorted(p for p in SAMPLES.glob("*/AOA and Contract") if p.is_dir())
 
 
+def _r(value: float | None) -> float | None:
+    return round(value, 2) if value is not None else None
+
+
 def _boq_sets() -> list[Path]:
     return sorted(p for p in SAMPLES.glob("*/BOQ") if p.is_dir())
 
@@ -154,6 +158,14 @@ def snapshot(settings: Settings) -> dict[str, Any]:
                 "recomputed_total": round(bid.total, 2),
                 "stated_incl_vat": grand_total(bid),
                 "stated_excl_vat": grand_total(bid, incl_vat=False),
+                "stated_total_cost": comp.stated_total_cost,
+                "markup_factor": comp.markup_factor,
+                "evaluated_cost": round(comp.evaluated_cost, 2),
+                "evaluated_total": _r(comp.evaluated_total),
+                "common_scope_cost": _r(comp.common_scope_cost),
+                "common_scope_total": _r(comp.common_scope_total),
+                "common_scope_positions": comp.common_scope_positions,
+                "colour": comp.colour,
                 "findings": [_finding(f) for f in comp.findings],
             }
         out["boq"][set_name] = entry
