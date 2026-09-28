@@ -128,7 +128,13 @@ def _hits_between(hits: list[RuleHit], starts: list[int], a: int, b: int) -> lis
 
 # --- the role an amount plays -------------------------------------------------------------------
 
-AmountRole = Literal["price", "advance", "remainder", "penalty", "guarantee", "tax"]
+AmountRole = Literal[
+    "price", "advance", "remainder", "penalty", "guarantee", "tax", "equivalent"
+]  # fmt: skip
+
+#: An amount restated in another currency beside the real one: "100 ლარი (ეკვივალენტი 37 აშშ
+#: დოლარი)". It is the same fee, not a second one, and not a price to compare.
+_EQUIVALENT = re.compile(r"ეკვივალენტ|ექვივალენტ|equivalent|equiv\.", re.IGNORECASE)
 
 #: What the words around an amount call it. At the same distance the longer keyword wins, so
 #: "მეორე ტრანშ" (the second tranche) is a remainder although "ტრანშ" alone is an advance; a
@@ -251,7 +257,14 @@ def amount_roles(text: str, *, sentences: list[tuple[int, int]] | None = None) -
         a, b = spans[i] if i is not None else (start, end)
         b = max(b, end)
         role: AmountRole | None
-        if _names_a_tax(text, (a, b), (start, end)):
+        opened = text.rfind("(", max(0, start - 40), start)
+        if (
+            opened >= 0
+            and ")" not in text[opened:start]
+            and _EQUIVALENT.search(text, opened, start)
+        ):
+            role = "equivalent"
+        elif _names_a_tax(text, (a, b), (start, end)):
             role = "tax"
         else:
             role = nearest_keyword_group(text[a:b], start - a, end - a, _ROLE_KEYWORDS)
@@ -318,6 +331,9 @@ _EN_TAX_RUN = (
     rf"(?:(?:all|any|applicable|the)\s+){{0,3}}{_EN_TAX}"
     rf"(?:\s*(?:,|and|or|&)\s*(?:the\s+)?{_EN_TAX}){{0,4}}(?![a-z])"
 )
+
+#: A quoted name, as the documents write parties and projects: „…“, "…", «…».
+_QUOTED_NAME = re.compile(r"[„“«\"][^„“”«»\"\n]{1,80}[“”»\"]")
 
 #: NET as a word: "NET", "NET-ით", "ნეტო", "ნეტოს" - not "network", "Netherlands", "ნეტარი" or
 #: the end of "ინტერნეტ", and not a part of a name or an address: "ASP.NET", "info@net.ge".
@@ -409,10 +425,13 @@ def tax_phrases(text: str) -> list[TaxPhrase]:
     number ("VAT No.", "საგადასახადო ნომერი") is a label, not wording at all.
     """
     labels = [m.span() for m in _TAX_ID_LABEL.finditer(text)]
+    # A company's name is quoted ("შპს „ნეტ ჯგუფი“"): a tax word in it is part of the name, and
+    # a contractor called "Net" states no NET amount by being named.
+    quoted = [m.span() for m in _QUOTED_NAME.finditer(text)]
     found: list[TaxPhrase] = []
 
     def add(kind: TaxKind, m: re.Match[str]) -> None:
-        if _inside(m.span(), labels):
+        if _inside(m.span(), labels) or _inside(m.span(), quoted):
             return
         phrase = m.group(0)
         names = frozenset(name for name, pattern in _NAMES if pattern.search(phrase))

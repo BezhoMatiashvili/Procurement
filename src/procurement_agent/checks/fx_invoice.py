@@ -60,7 +60,7 @@ _MAX_TEXT = 32
 #: The days an advance may have been paid on. Outside them the date is a typo.
 _EARLIEST, _LATEST = date(1990, 1, 1), date(2100, 12, 31)
 #: Amounts that are neither the fee nor a part of it (``contract_terms.amount_roles``).
-_NOT_THE_FEE = frozenset({"penalty", "guarantee", "tax"})
+_NOT_THE_FEE = frozenset({"penalty", "guarantee", "tax", "equivalent"})
 
 
 def to_money(value: float | Decimal) -> Decimal:

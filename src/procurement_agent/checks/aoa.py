@@ -204,7 +204,9 @@ _ROLE_NAME: dict[AmountRole, tuple[str, str]] = {
     "tax": ("გადასახადის თანხას", "the tax amount"),
 }
 #: Act amounts that are neither the fee nor a part of it.
-_NOT_THE_FEE: frozenset[AmountRole | None] = frozenset({"penalty", "guarantee", "tax"})
+_NOT_THE_FEE: frozenset[AmountRole | None] = frozenset(
+    {"penalty", "guarantee", "tax", "equivalent"}
+)
 
 _NO_CONTRACT = "this rule compares the act against its contract, and none was supplied"
 
@@ -343,6 +345,37 @@ class DocumentView:
 
     def id_codes(self) -> set[str]:
         return {p.id_code for p in self.parties if p.id_code}
+
+
+#: How far into a document its heading - and a date written in it - can reach.
+_HEADER_CHARS = 200
+_CONTRACT_WORD = re.compile(r"ხელშეკრულებ|contract", re.IGNORECASE)
+_ACT_WORD = re.compile(r"აქტ|\bact\b", re.IGNORECASE)
+
+
+_ID_LABELLED = re.compile(
+    r"(?:საიდენტიფიკაციო\s+(?:კოდი|ნომერი)|ს/კ|ს\.კ\.|პირადი\s+ნომერი|ID)\s*[:#N№]?\s*(\d{9}|\d{11})(?!\d)"
+)
+
+
+def _labelled_codes(text: str) -> set[str]:
+    """Identification codes read straight off their labels, for a document whose parties the
+    party parser could not make out (a name without quotes, say): the codes are still there."""
+    return {m.group(1) for m in _ID_LABELLED.finditer(text)}
+
+
+def _contract_is_subject(text: str, pos: int) -> bool:
+    """Whether the signing named at ``pos`` is the contract's: "ხელშეკრულება გაფორმდა",
+    "ხელშეკრულების გაფორმების თარიღი" - the contract named just before it, and no act after."""
+    before = text[max(0, pos - 40) : pos]
+    contract = [m.end() for m in _CONTRACT_WORD.finditer(before)]
+    if not contract:
+        return False
+    return _ACT_WORD.search(before, contract[-1]) is None
+
+
+#: A date that names the contract it belongs to: "2026 წლის 1 მარტის ხელშეკრულების ...".
+_CONTRACT_REFERENCE = re.compile(r"\s*[„“\"]?\s*(?:N\s*\S+\s*)?ხელშეკრულებ")
 
 
 def _date_hits_near(
@@ -495,13 +528,31 @@ class AoaChecker:
         text = self.aoa.text
         hits = find_dates(text)
         for m in _ACT_SIGNED.finditer(text):
+            if _contract_is_subject(text, m.start()):
+                continue  # "ხელშეკრულება გაფორმდა ..." dates the contract, not the act
             end = self._sentence_of(m.start())[1]
             hit = next((h for h in hits if m.end() <= h.start < end), None)
             if hit is not None and not _ADVANCE_WORDS.search(text, m.end(), hit.start):
                 return date.fromisoformat(str(hit.normalized)), hit
         for d, hit in _date_hits_near(text, _ACT_DATE_KEYS):
-            if not self._in_advance_clause(hit.start):
+            key_at = max(
+                (
+                    m.start()
+                    for k in _ACT_DATE_KEYS
+                    for m in re.finditer(re.escape(k), text)
+                    if m.start() <= hit.start
+                ),
+                default=hit.start,
+            )
+            if not self._in_advance_clause(hit.start) and not _contract_is_subject(text, key_at):
                 return d, hit
+        # An act dated only in its heading ("ქ. თბილისი, 31.08.2026"): the first date, when it
+        # opens the document and is not the contract's.
+        head = next((h for h in hits if h.start < _HEADER_CHARS), None)
+        if head is not None and not _CONTRACT_WORD.search(
+            text, max(0, head.start - 60), head.end + 30
+        ):
+            return date.fromisoformat(str(head.normalized)), head
         return None
 
     def _period_hits(self) -> list[tuple[date, RuleHit]]:
@@ -519,8 +570,13 @@ class AoaChecker:
         """
         text = self.aoa.text
         opens = sorted(m.end() for k in _PERIOD_KEYS for m in re.finditer(re.escape(k), text))
+        act = self._act_date()
         out: list[tuple[date, RuleHit]] = []
         for d, h in _date_hits_near(text, _PERIOD_KEYS):
+            if act is not None and h.start == act[1].start:
+                continue  # the act's own date written after the period is not part of it
+            if _CONTRACT_REFERENCE.match(text, h.end):
+                continue  # "... შესრულდა 2026 წლის 1 მარტის ხელშეკრულების შესაბამისად"
             i = bisect_right(opens, h.start)
             opened = opens[i - 1] if i else None
             a, b = self._sentence_of(h.start)
@@ -663,7 +719,7 @@ class AoaChecker:
             out[f"party_{i}"] = f"{p.role or '?'}: {p.name} ({p.id_code or 'no id'})"
         period = [d for d, _ in self._period_hits()]
         if period:
-            out["execution_period"] = f"{period[0]}..{period[-1]}"
+            out["execution_period"] = f"{min(period)}..{max(period)}"
         act = self._act_date()
         if act:
             out["act_date"] = str(act[0])
@@ -843,9 +899,9 @@ class AoaChecker:
         if act is None:
             self._add(
                 "AOA.ACT_DATE",
-                "error",
-                "აქტის გაფორმების თარიღი ვერ მოიძებნა",
-                "the act's date could not be found",
+                "warning",
+                "აქტის გაფორმების თარიღი ვერ მოიძებნა — შეამოწმეთ, დათარიღებულია თუ არა აქტი",
+                "the act's date could not be found - check that the act is dated",
             )
             return
         act_date, act_hit = act
@@ -1202,8 +1258,8 @@ class AoaChecker:
         """Client rule 1 and the contract cross-check: identify by code, then verify the rest."""
         if self.contract is None:  # run() calls the contract rules only with a contract
             raise RuntimeError(_NO_CONTRACT)
-        c_ids = self.contract.id_codes()
-        a_ids = self.aoa.id_codes()
+        c_ids = self.contract.id_codes() or _labelled_codes(self.contract.text)
+        a_ids = self.aoa.id_codes() or _labelled_codes(self.aoa.text)
         if not a_ids:
             self._add(
                 "AOA.ID_CODES",
@@ -1226,6 +1282,15 @@ class AoaChecker:
                     span=self._find_span(code),
                 )
 
+        if not self.contract.parties:
+            self._skip(
+                "AOA.PARTY_NAME",
+                "ხელშეკრულებაში მხარეები ვერ ამოიცნო (დასახელება ბრჭყალების გარეშე?), ამიტომ "
+                "დასახელება, მისამართი და დირექტორი არ შედარდა",
+                "the contract's parties could not be read (names without quotes?), so their "
+                "names, addresses and directors were not compared",
+            )
+            return
         for m in self._matched_parties():
             p, match = m.party, m.match
             if m.code_of is not None and match is not None:
@@ -1417,6 +1482,8 @@ class AoaChecker:
         *,
         against: Literal["contract", "registry"] = "contract",
     ) -> None:
+        # A side with no value is not compared: a signature block restates a party's name
+        # without its address, and that is how acts are written, not a gap in the act.
         if not actual or not expected:
             return
         diff = classify_difference(actual, expected)
@@ -1800,7 +1867,15 @@ class AoaChecker:
             raise RuntimeError(_NO_CONTRACT)
         act = [r for r in self.aoa.amounts() if r.role not in _NOT_THE_FEE]
         if not act:
-            self._add("AOA.FEE", "error", "აქტში საფასური ვერ მოიძებნა", "no fee found in the act")
+            # A fee whose currency stands in another table cell is not read as money: say that
+            # no fee could be read and let a person look, rather than call the act wrong.
+            self._add(
+                "AOA.FEE",
+                "warning",
+                "აქტში საფასური ვერ წაიკითხა — შეამოწმეთ, მითითებულია თუ არა თანხა ვალუტით",
+                "no fee could be read in the act - check that it states the amount with its "
+                "currency",
+            )
             return
         contract = self.contract.amounts()
         prices = [r.money for r in contract if r.role == "price"]
