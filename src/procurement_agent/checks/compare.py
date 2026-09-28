@@ -39,9 +39,17 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from procurement_agent.checks.amounts import NUM_IN_TEXT, number_of, word_amounts
+from procurement_agent.checks.amounts import NUM_IN_TEXT, looks_like_numeral, number_of
 from procurement_agent.checks.findings import Finding, Severity, SkipNote
 from procurement_agent.extraction.anchors import bic_is_well_formed, find_anchors
+from procurement_agent.extraction.georgian import (
+    lemma,
+    mixed_script_words,
+    month_typo,
+    number_words_typo,
+    parse_number_words,
+)
+from procurement_agent.extraction.georgian import words as georgian_words
 from procurement_agent.extraction.labels import LABELS
 from procurement_agent.extraction.normalize import (
     amounts_equal,
@@ -402,13 +410,18 @@ def _same_value(a: _Hit, b: _Hit) -> bool:
         x, y = as_number(a.value, a.normalized), as_number(b.value, b.normalized)
         if x is not None and y is not None:
             return amounts_equal(x, y)
-    if ft in _NAMES and names_match(a.value, b.value):
+    if ft in _NAMES and (names_match(a.value, b.value) or _same_lemma(a.value, b.value)):
         return True
     if ft in _BANK:
         return _bank_key(a.value) == _bank_key(b.value)
     if a.normalized is not None and b.normalized is not None:
         return str(a.normalized) == str(b.normalized)
     return normalize_name(a.value) == normalize_name(b.value)
+
+
+def _same_lemma(a: str, b: str) -> bool:
+    """Two forms of one name: "ლაზური რეზიდენსის" and "ლაზური რეზიდენსისთვის"."""
+    return normalize_name(lemma(a)) == normalize_name(lemma(b))
 
 
 #: Past this many left-by-right comparisons, equal values are found by key rather than by
@@ -615,7 +628,66 @@ def deltas_between(
             d = _delta(a, b)
             if d is not None:
                 out.append(d)
-    return out
+    return _without_relabels(out)
+
+
+#: Types a value keeps when only the word naming it changes: "ფასი" and "ღირებულება" read the
+#: same 100 as a unit price and as a total.
+_RELABEL_FAMILIES: tuple[frozenset[FactType], ...] = (
+    frozenset({FactType.price, FactType.total_amount, FactType.amount, FactType.penalty}),
+    frozenset(
+        {
+            FactType.contract_date,
+            FactType.act_date,
+            FactType.date,
+            FactType.delivery_deadline,
+            FactType.execution_period,
+            FactType.validity_period,
+        }
+    ),
+    frozenset(
+        {
+            FactType.duration,
+            FactType.payment_terms,
+            FactType.warranty_period,
+            FactType.delivery_deadline,
+            FactType.execution_period,
+            FactType.validity_period,
+        }
+    ),
+)
+
+
+def _without_relabels(deltas: list[ValueDelta]) -> list[ValueDelta]:
+    """Drop a removal and an addition that are one value relabelled.
+
+    Values are paired within a type, and the type comes from the nearest keyword: reworded
+    from "ფასი შეადგენს 100 ლარს" to "ღირებულება შეადგენს 100 ლარს", the same 100 was a unit
+    price removed and a total added - two critical changes for one changed word.
+    """
+    removed = [d for d in deltas if d.kind == "removed"]
+    added = [d for d in deltas if d.kind == "added"]
+    drop: set[int] = set()
+    for r in removed:
+        for a in added:
+            if id(a) in drop or id(r) in drop:
+                continue
+            if not any(r.type in fam and a.type in fam for fam in _RELABEL_FAMILIES):
+                continue
+            if _display_value(r.type, r.left) == _display_value(a.type, a.right):
+                drop.update({id(r), id(a)})
+                break
+    return [d for d in deltas if id(d) not in drop]
+
+
+def _display_value(ft: FactType, value: str | None) -> str | None:
+    if value is None:
+        return None
+    if ft in _NUMERIC or ft in (FactType.penalty,):
+        n = as_number(value)
+        if n is not None:
+            return f"n:{n:.4f}"
+    return normalize_name(value)
 
 
 # --- text-shape classification ------------------------------------------------------------------
@@ -703,49 +775,239 @@ def _numeric_reformat(left: str, right: str) -> bool:
     return bare_left == bare_right
 
 
-_WORD_AMOUNT_LABEL = ("Amount in words", "თანხა სიტყვიერად")
+_WORD_NUMBER_LABELS: dict[str, tuple[str, str]] = {
+    "amount": ("Amount in words", "თანხა სიტყვიერად"),
+    "duration": ("Period in words", "ვადა სიტყვიერად"),
+    "count": ("Number in words", "რიცხვი სიტყვიერად"),
+}
+_SPELLING_LABEL = ("Spelling", "მართლწერა")
+_PARENTHESIS = re.compile(r"\(([^()]{2,80})\)")
+_CURRENCY_WORDS = re.compile(r"ლარ|თეთრ|დოლარ|ევრო|gel|usd|eur|\$|€", re.IGNORECASE)
+_PERIOD_WORDS = re.compile(
+    r"^(?:სამუშაო|კალენდარულ[ა-ჰ]*|საბანკო)?\s*(?:დღ|თვ|წ[ელ]|კვირ|საათ|day|month|year|week)",
+    re.IGNORECASE,
+)
+_AFTER = 40
+
+
+def _numeral_kind(inner: str, after: str) -> str:
+    """What a number in words counts, from the words inside and right after it: money, a
+    period of time, or anything else (copies, pages)."""
+    if _CURRENCY_WORDS.search(inner) or _CURRENCY_WORDS.match(after.strip()):
+        return "amount"
+    if _PERIOD_WORDS.match(after.strip()):
+        return "duration"
+    return "count"
+
+
+def _spelled_numbers(text: str) -> list[tuple[str, str]]:
+    """Every bracketed number in words, with what follows it: [("ასი", "ლარს ..."), ...]."""
+    out: list[tuple[str, str]] = []
+    for m in _PARENTHESIS.finditer(text):
+        inner = m.group(1).strip()
+        if looks_like_numeral(inner):
+            out.append((inner, text[m.end() : m.end() + _AFTER]))
+    return out
 
 
 def word_amount_deltas(left: str, right: str) -> list[ValueDelta]:
-    """Differences between the amounts the two texts spell out in words."""
-    lw, rw = word_amounts(left), word_amounts(right)
-    if [v for v, _ in lw] == [v for v, _ in rw]:
+    """Differences between the numbers the two texts spell out in brackets.
+
+    Paired by content, not by position: a revision that misspelled "(ასი)" as "(ასოი)" used to
+    pair every later bracket with the one before it and report "ასი (100) → ხუთი (5)" - two
+    unrelated numbers. Aligned, the typo is one changed bracket, and it is reported as the
+    misspelling it is. Each number is labelled by what it counts: a fee, a period of days, or a
+    plain count - "5 (ხუთი) სამუშაო დღე" is no amount.
+    """
+    lp, rp = _spelled_numbers(left), _spelled_numbers(right)
+    if [x for x, _ in lp] == [x for x, _ in rp]:
         return []
-    en, ka = _WORD_AMOUNT_LABEL
+    sm = difflib.SequenceMatcher(None, [x for x, _ in lp], [x for x, _ in rp], autojunk=False)
     out: list[ValueDelta] = []
-    for i in range(max(len(lw), len(rw))):
-        a = lw[i] if i < len(lw) else None
-        b = rw[i] if i < len(rw) else None
-        if a is not None and b is not None:
-            if a[0] == b[0]:
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            continue
+        ls, rs = lp[i1:i2], rp[j1:j2]
+        for k in range(max(len(ls), len(rs))):
+            d = _spelled_delta(ls[k] if k < len(ls) else None, rs[k] if k < len(rs) else None)
+            if d is not None:
+                out.append(d)
+    return out
+
+
+def _spelled_delta(a: tuple[str, str] | None, b: tuple[str, str] | None) -> ValueDelta | None:
+    va = parse_number_words(a[0]) if a else None
+    vb = parse_number_words(b[0]) if b else None
+    kind = _numeral_kind(*(b or a))  # type: ignore[misc]
+    en, ka = _WORD_NUMBER_LABELS[kind]
+    severity: Severity = "error" if kind in ("amount", "duration") else "warning"
+    if a is not None and b is not None:
+        if va is not None and vb is not None:
+            if va == vb:
+                return None
+            return ValueDelta(
+                type=FactType.total_amount if kind == "amount" else FactType.duration,
+                kind="changed",
+                rule_id="CMP.AMOUNT_WORDS",
+                severity=severity,
+                label_en=en,
+                label_ka=ka,
+                left=f"{a[0]} ({va})",
+                right=f"{b[0]} ({vb})",
+                delta=float(vb - va),
+                delta_pct=round((vb - va) / abs(va) * 100, 2) if va else None,
+            )
+        # one side does not read as a number: the same number misspelled, or a changed one
+        known, other = (va, b[0]) if va is not None else (vb, a[0])
+        if known is not None and number_words_typo(other, known) is not None:
+            return _spelling(
+                a[0],
+                b[0],
+                note=("a number written out with a typo", "რიცხვი სიტყვიერად შეცდომით წერია"),
+            )
+        return ValueDelta(
+            type=FactType.total_amount if kind == "amount" else FactType.duration,
+            kind="changed",
+            rule_id="CMP.AMOUNT_WORDS",
+            severity=severity,
+            label_en=en,
+            label_ka=ka,
+            left=a[0] if va is None else f"{a[0]} ({va})",
+            right=b[0] if vb is None else f"{b[0]} ({vb})",
+        )
+    side = a or b
+    value = va if a is not None else vb
+    if side is None or value is None:
+        return None
+    return ValueDelta(
+        type=FactType.total_amount if kind == "amount" else FactType.duration,
+        kind="removed" if a is not None else "added",
+        rule_id="CMP.AMOUNT_WORDS",
+        severity=severity,
+        label_en=en,
+        label_ka=ka,
+        left=f"{side[0]} ({value})" if a is not None else None,
+        right=f"{side[0]} ({value})" if b is not None else None,
+    )
+
+
+def _spelling(left: str, right: str, *, note: tuple[str, str] | None = None) -> ValueDelta:
+    en, ka = _SPELLING_LABEL
+    return ValueDelta(
+        type=FactType.other,
+        kind="changed",
+        rule_id="CMP.SPELLING",
+        severity="warning",
+        label_en=en,
+        label_ka=ka,
+        left=left,
+        right=right,
+        note_en=note[0] if note else None,
+        note_ka=note[1] if note else None,
+    )
+
+
+def spelling_deltas(left: str, right: str) -> list[ValueDelta]:
+    """Words that changed into a misspelling of themselves, or back: a letter of another
+    alphabet inside a Georgian word ("მომიჯნავე" → "sმომიჯნავე"), a month name misspelled
+    ("აგვისტოდან" → "აგისტოდან"). Without this such a line reads only as "text changed", and
+    the reader has to find the one letter themselves.
+
+    Only these two kinds: a word that became another word one letter apart may just be the same
+    word in another case ("შემკვეთი" / "შემკვეთს"), which is not a spelling mistake.
+    """
+    lw = [w for w, _, _ in georgian_words(left)]
+    rw = [w for w, _, _ in georgian_words(right)]
+    out: list[ValueDelta] = []
+    sm = difflib.SequenceMatcher(None, lw, rw, autojunk=False)
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag != "replace" or i2 - i1 != j2 - j1:
+            continue
+        for a, b in zip(lw[i1:i2], rw[j1:j2], strict=True):
+            if a == b:
                 continue
-            out.append(
-                ValueDelta(
-                    type=FactType.total_amount,
-                    kind="changed",
-                    rule_id="CMP.AMOUNT_WORDS",
-                    severity="error",
-                    label_en=en,
-                    label_ka=ka,
-                    left=f"{a[1]} ({a[0]})",
-                    right=f"{b[1]} ({b[0]})",
-                    delta=float(b[0] - a[0]),
-                    delta_pct=round((b[0] - a[0]) / abs(a[0]) * 100, 2) if a[0] else None,
+            if bool(mixed_script_words(a)) != bool(mixed_script_words(b)):
+                out.append(
+                    _spelling(
+                        a,
+                        b,
+                        note=(
+                            "a letter of another alphabet inside a word",
+                            "სიტყვაში სხვა ანბანის ასოა",
+                        ),
+                    )
                 )
-            )
-        elif a is not None or b is not None:
-            out.append(
-                ValueDelta(
-                    type=FactType.total_amount,
-                    kind="removed" if a is not None else "added",
-                    rule_id="CMP.AMOUNT_WORDS",
-                    severity="error",
-                    label_en=en,
-                    label_ka=ka,
-                    left=f"{a[1]} ({a[0]})" if a is not None else None,
-                    right=f"{b[1]} ({b[0]})" if b is not None else None,
+                continue
+            ta, tb = month_typo(a), month_typo(b)
+            if (ta is None) != (tb is None) and (ta or tb) is not None:
+                out.append(
+                    _spelling(a, b, note=("a month name misspelled", "თვის დასახელება შეცდომითაა"))
                 )
+    return out
+
+
+def _numeral_run(words: list[tuple[str, int, int]], i1: int, i2: int) -> tuple[int, int]:
+    """Widen ``[i1, i2)`` to the whole numeral it is part of: "ოთხასი" in "ორი ათას ოთხასი"."""
+    while i1 > 0 and parse_number_words(words[i1 - 1][0]) is not None:
+        i1 -= 1
+    while i2 < len(words) and parse_number_words(words[i2][0]) is not None:
+        i2 += 1
+    return i1, i2
+
+
+def _in_brackets(text: str, pos: int) -> bool:
+    """Whether ``pos`` sits inside a "( ... )" - those numbers are ``word_amount_deltas``'s."""
+    opened = text.rfind("(", 0, pos)
+    return opened >= 0 and text.rfind(")", opened, pos) < 0
+
+
+def numeral_word_deltas(left: str, right: str) -> list[ValueDelta]:
+    """A number written only in words that changed: "ხუთი სამუშაო დღის" → "ოცდაათი სამუშაო
+    დღის". No digit moved, so the value rules see nothing, and a model asked about the line
+    may call it immaterial - a payment term that went from five days to thirty.
+
+    The whole numeral is compared, not the one word that changed in it, and a numeral inside
+    brackets is left to ``word_amount_deltas``.
+    """
+    lw = georgian_words(left)
+    rw = georgian_words(right)
+    sm = difflib.SequenceMatcher(None, [w for w, _, _ in lw], [w for w, _, _ in rw], autojunk=False)
+    out: list[ValueDelta] = []
+    seen: set[tuple[int, int, int, int]] = set()
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag != "replace":
+            continue
+        i1, i2 = _numeral_run(lw, i1, i2)
+        j1, j2 = _numeral_run(rw, j1, j2)
+        if (i1, i2, j1, j2) in seen or i1 >= i2 or j1 >= j2:
+            continue
+        seen.add((i1, i2, j1, j2))
+        if _in_brackets(left, lw[i1][1]) or _in_brackets(right, rw[j1][1]):
+            continue
+        a_words = " ".join(w for w, _, _ in lw[i1:i2])
+        b_words = " ".join(w for w, _, _ in rw[j1:j2])
+        va, vb = parse_number_words(a_words), parse_number_words(b_words)
+        if va is None or vb is None or va == vb:
+            continue
+        a_end, b_end = lw[i2 - 1][2], rw[j2 - 1][2]
+        kind = _numeral_kind(b_words, right[b_end : b_end + _AFTER])
+        if kind == "count":
+            kind = _numeral_kind(a_words, left[a_end : a_end + _AFTER])
+        en, ka = _WORD_NUMBER_LABELS[kind]
+        out.append(
+            ValueDelta(
+                type=FactType.total_amount if kind == "amount" else FactType.duration,
+                kind="changed",
+                rule_id="CMP.AMOUNT_WORDS",
+                severity="error" if kind in ("amount", "duration") else "warning",
+                label_en=en,
+                label_ka=ka,
+                left=f"{a_words} ({va})",
+                right=f"{b_words} ({vb})",
+                delta=float(vb - va),
+                delta_pct=round((vb - va) / abs(va) * 100, 2) if va else None,
             )
+        )
     return out
 
 
@@ -1018,7 +1280,26 @@ def _align_linear(left: list[Segment], right: list[Segment]) -> tuple[list[_Pair
             pairs.extend((None, b, None) for b in right[j1:j2])
         else:
             pairs.extend(_pair_replace(left[i1:i2], right[j1:j2]))
-    return pairs, _ratio(ops, len(lk) + len(rk))
+    return pairs, _similarity_of(ops, pairs, len(lk) + len(rk))
+
+
+def _similarity_of(ops: list[_Opcode], pairs: list[_Pair], total: int) -> float:
+    """How far the two documents are versions of one another, 0..1.
+
+    Identical lines count whole, and a line paired with its rewritten counterpart counts by how
+    alike the two are. Counting identical lines alone called a one-line document with one edit
+    "unrelated" - and two unrelated documents get no line-to-line findings at all.
+    """
+    if not total:
+        return 1.0
+    same = sum(i2 - i1 for tag, i1, i2, _j1, _j2 in ops if tag == "equal")
+    partial = 0.0
+    for a, b, _group in pairs:
+        if a is not None and b is not None and key_of(a.text) != key_of(b.text):
+            partial += difflib.SequenceMatcher(
+                None, key_of(a.text), key_of(b.text), autojunk=False
+            ).ratio()
+    return min(1.0, 2.0 * (same + partial) / total)
 
 
 def _by_sheet(segments: list[Segment]) -> dict[str, list[Segment]]:
@@ -1245,6 +1526,8 @@ def _classify(
     deltas = (
         deltas_between(a.text, b.text)
         + word_amount_deltas(a.text, b.text)
+        + numeral_word_deltas(a.text, b.text)
+        + spelling_deltas(a.text, b.text)
         + bare_number_delta(
             a.text,
             b.text,
@@ -1450,7 +1733,13 @@ _TEXT_MESSAGES: dict[str, tuple[str, str]] = {
 
 
 def _findings_of(
-    hunks: list[Hunk], field_deltas: list[ValueDelta], right_text: str, *, ocr: bool
+    hunks: list[Hunk],
+    field_deltas: list[ValueDelta],
+    right_text: str,
+    *,
+    ocr: bool,
+    left_text: str = "",
+    unrelated: bool = False,
 ) -> tuple[list[Finding], int]:
     """One finding per difference worth naming.
 
@@ -1463,6 +1752,26 @@ def _findings_of(
     seen: set[tuple[str, str | None, str | None]] = set()
     minor = 0
     suppressed = 0
+    everywhere = _value_keys(left_text), _value_keys(right_text)
+    all_deltas = [d for h in hunks for d in h.deltas] + list(field_deltas)
+    changed_sides = {
+        (d.rule_id, side)
+        for d in all_deltas
+        if d.kind == "changed"
+        for side in (_display_value(d.type, d.left), _display_value(d.type, d.right))
+    }
+
+    def superfluous(d: ValueDelta) -> bool:
+        """An addition or removal that is not one: the value is written in the other document
+        too (a paragraph moved with an edit), or it is the new or old side of a change already
+        reported ("director X → Y" makes "director Y added" a second report of one change)."""
+        if d.kind == "changed":
+            return False
+        value = d.right if d.kind == "added" else d.left
+        other = everywhere[0] if d.kind == "added" else everywhere[1]
+        if _value_key_of(d.type, value) in other:
+            return True
+        return (d.rule_id, _display_value(d.type, value)) in changed_sides
 
     def add(
         rule_id: str,
@@ -1514,7 +1823,10 @@ def _findings_of(
     def texts(h: Hunk) -> tuple[str | None, str | None]:
         return (h.left.text if h.left else None, h.right.text if h.right else None)
 
-    for h in hunks:
+    for h in hunks if not unrelated else []:
+        # Two documents that are not versions of one another have no line to line changes worth
+        # a finding: their positional diff is noise, and a value both carry was reported
+        # "removed" on one line and "added" on another. Only the field differences speak then.
         # Character substitutions are reported *as well as* whatever else changed on the line,
         # never instead of it — see hidden_character_rules.
         if "CMP.HOMOGLYPH" in h.rules:
@@ -1548,6 +1860,8 @@ def _findings_of(
 
         if h.deltas:
             for d in h.deltas:
+                if superfluous(d):
+                    continue
                 ka, en = _delta_message(d)
                 add(
                     d.rule_id,
@@ -1589,6 +1903,8 @@ def _findings_of(
             )
             continue
         rule = next((r for r in h.rules if r in _TEXT_MESSAGES), "CMP.TEXT_CHANGED")
+        if rule == "CMP.TEXT_CHANGED" and _explained_elsewhere(h, all_deltas):
+            continue
         ka, en = _TEXT_MESSAGES[rule]
         anchor = h.right or h.left
         where = anchor.path if anchor is not None else ""
@@ -1603,9 +1919,56 @@ def _findings_of(
         )
 
     for d in field_deltas:
+        if superfluous(d):
+            continue
         ka, en = _delta_message(d)
         add(d.rule_id, d.severity, ka, en, expected=d.left, actual=d.right, key=dedup_key(d))
     return out, suppressed
+
+
+def _explained_elsewhere(hunk: Hunk, deltas: list[ValueDelta]) -> bool:
+    """Whether every word this line changed is part of a change reported for another line.
+
+    A director's name typed wrong in the preamble and again in the signature table is one
+    change: the preamble's line names it ("Director / signatory: X → Y"), and the table cell,
+    where no label stands in front of the name, would otherwise add a bare "text changed".
+    """
+    changed = [
+        (normalize_name(op.left), normalize_name(op.right))
+        for op in hunk.inline
+        if op.tag != "equal" and (op.left.strip() or op.right.strip())
+    ]
+    if not changed:
+        return False
+    reported = [
+        (normalize_name(d.left or ""), normalize_name(d.right or ""))
+        for d in deltas
+        if d.kind == "changed"
+    ]
+    return all(
+        any(old in left and new in right for left, right in reported) for old, new in changed
+    )
+
+
+def _value_key_of(ft: FactType, value: str | None) -> tuple[FactType, str] | None:
+    if value is None:
+        return None
+    return (_family_of(ft), _display_value(ft, value) or "")
+
+
+def _family_of(ft: FactType) -> FactType:
+    """One representative per relabelling family, so a key survives a changed label."""
+    for fam in _RELABEL_FAMILIES:
+        if ft in fam:
+            return min(fam, key=lambda t: t.value)
+    return ft
+
+
+def _value_keys(text: str) -> set[tuple[FactType, str] | None]:
+    """Every typed value a document states anywhere, keyed like ``_value_key_of``."""
+    if not text:
+        return set()
+    return {_value_key_of(h.type, h.value) for h in hits_of(text)}
 
 
 # --- entry point ----------------------------------------------------------------------------
@@ -1692,7 +2055,14 @@ def compare(
     else:
         field_deltas = deltas_between(left_text, right_text, types=FIELD_TYPES)
 
-    findings, suppressed = _findings_of(hunks, field_deltas, right_text, ocr=ocr)
+    findings, suppressed = _findings_of(
+        hunks,
+        field_deltas,
+        right_text,
+        ocr=ocr,
+        left_text=left_text,
+        unrelated=alignment == "unrelated",
+    )
     if suppressed:
         skipped.append(
             SkipNote(

@@ -36,9 +36,9 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from procurement_agent.checks.compare import ComparisonReport, Counts, Hunk
-from procurement_agent.checks.findings import SkipNote
-from procurement_agent.extraction.normalize import normalize_spaces
+from procurement_agent.checks.compare import ComparisonReport, Counts, Hunk, _short
+from procurement_agent.checks.findings import Finding, SkipNote
+from procurement_agent.extraction.normalize import normalize_spaces, parse_georgian_number_words
 from procurement_agent.extraction.prompts import SYSTEM_COMPARE, compare_user_prompt
 from procurement_agent.llm.base import LLMClient, LLMError
 from procurement_agent.security.audit import log
@@ -155,6 +155,9 @@ def _changes_substance(hunk: Hunk) -> bool:
             if _DIGIT.search(part):
                 return True
             if any(w.lower() in _NEGATIONS for w in _WORD.findall(part)):
+                return True
+            # a number written in words is a figure too: "ხუთი" → "ოცდაათი" days
+            if any(parse_georgian_number_words(w) is not None for w in _WORD.findall(part)):
                 return True
     return False
 
@@ -334,6 +337,7 @@ def apply_explanations(report: ComparisonReport, stored: ExplanationSet) -> Comp
 
     hunks: list[Hunk] = []
     counts = report.counts.model_copy()
+    demoted: list[Hunk] = []
     for hunk in report.hunks:
         explained = accepted.get(hunk.id)
         if explained is None:
@@ -348,6 +352,7 @@ def apply_explanations(report: ComparisonReport, stored: ExplanationSet) -> Comp
         )
         if demote:
             _move(counts, "substantive", "cosmetic")
+            demoted.append(hunk)
         hunks.append(
             hunk.model_copy(
                 update={
@@ -366,8 +371,21 @@ def apply_explanations(report: ComparisonReport, stored: ExplanationSet) -> Comp
             "skipped": skipped,
             "llm_explained": sum(1 for h in hunks if h.explained_by == "llm"),
             "llm_model": stored.model,
+            # a change moved down to cosmetic keeps no "text changed" finding of its own: the
+            # list, the workbook and the Word comments must say what the diff says
+            "findings": [f for f in report.findings if not _is_finding_of(f, demoted)],
         }
     )
+
+
+def _is_finding_of(finding: Finding, hunks: list[Hunk]) -> bool:
+    if finding.rule_id != "CMP.TEXT_CHANGED":
+        return False
+    for h in hunks:
+        left, right = _texts(h)
+        if (finding.expected, finding.actual) == (_short(left or None), _short(right or None)):
+            return True
+    return False
 
 
 def _move(counts: Counts, src: str, dst: str) -> None:

@@ -217,3 +217,21 @@ def test_an_empty_summary_is_refused() -> None:
     report = report_with_one_rewrite()
     item = good_item(report.unexplained[0].id).model_copy(update={"summary_ka": "  "})
     assert explain(report, FakeLLM([item])).llm_explained == 0
+
+
+def test_a_number_written_in_words_is_substance_the_model_cannot_demote() -> None:
+    from procurement_agent.checks.compare import Hunk, InlineOp
+    from procurement_agent.checks.compare_llm import _changes_substance
+
+    hunk = Hunk(
+        id="h1",
+        kind="changed",
+        materiality="substantive",
+        rules=["CMP.TEXT_CHANGED"],
+        inline=[
+            InlineOp(tag="equal", left="გადახდა ", right="გადახდა "),
+            InlineOp(tag="replace", left="ხუთი", right="ოცდაათი"),
+            InlineOp(tag="equal", left=" დღეში", right=" დღეში"),
+        ],
+    )
+    assert _changes_substance(hunk)
