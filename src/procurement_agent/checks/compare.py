@@ -81,12 +81,14 @@ FIELD_TYPES: frozenset[FactType] = frozenset(
         FactType.validity_period,
         FactType.penalty,
         FactType.contract_date,
+        FactType.act_date,
         FactType.contract_number,
         FactType.party_name,
         FactType.party_id_code,
         FactType.party_director,
         FactType.party_address,
         FactType.bank_account,
+        FactType.bank_code,
         FactType.cadastral_code,
         FactType.project_name,
     }
@@ -107,9 +109,9 @@ CRITICAL_TYPES: frozenset[FactType] = FIELD_TYPES | frozenset(
 )
 
 _NUMERIC = frozenset({FactType.price, FactType.total_amount, FactType.amount, FactType.quantity})
-_DATES = frozenset({FactType.contract_date, FactType.date})
+_DATES = frozenset({FactType.contract_date, FactType.act_date, FactType.date})
 _NAMES = frozenset({FactType.party_name, FactType.party_director, FactType.project_name})
-_BANK = frozenset({FactType.bank_account})
+_BANK = frozenset({FactType.bank_account, FactType.bank_code})
 _DURATIONS = frozenset(
     {
         FactType.duration,
@@ -126,8 +128,10 @@ _RULE_FOR_TYPE: dict[FactType, str] = {
     FactType.amount: "CMP.AMOUNT",
     FactType.quantity: "CMP.QUANTITY",
     FactType.contract_date: "CMP.DATE",
+    FactType.act_date: "CMP.DATE",
     FactType.date: "CMP.DATE",
     FactType.bank_account: "CMP.BANK",
+    FactType.bank_code: "CMP.BANK",
     FactType.party_name: "CMP.PARTY",
     FactType.party_director: "CMP.PARTY",
     FactType.party_address: "CMP.PARTY",

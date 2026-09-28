@@ -95,6 +95,21 @@ KEYWORDS: dict[FactType, tuple[str, ...]] = {
         "fee",
     ),
     FactType.price: ("ერთეულის ფას", "ფას", "price", "unit price", "cost", "rate"),
+    # The act's own signing: "„აქტი“ გაფორმდა 2026 წლის 31 აგვისტო". These end where the bare
+    # "გაფორმ" of contract_date ends, and the longer keyword wins a tie, so the date an act was
+    # signed stops being reported as the contract's date. Every quote style is spelled out
+    # because Georgian stems match as plain substrings.
+    FactType.act_date: (
+        "აქტი გაფორმ",
+        "აქტი“ გაფორმ",
+        "აქტი” გაფორმ",
+        'აქტი" გაფორმ',
+        "აქტი» გაფორმ",
+        "აქტის გაფორმ",
+        "აქტის თარიღ",
+        "act was signed",
+        "act date",
+    ),
     FactType.contract_date: (
         "ხელშეკრულებ",
         "შეთანხმებ",
@@ -459,6 +474,7 @@ def find_dates(text: str) -> list[RuleHit]:
                 FactType.execution_period,
                 FactType.delivery_deadline,
                 FactType.validity_period,
+                FactType.act_date,
                 FactType.contract_date,
             ),
         )
@@ -679,7 +695,7 @@ def find_bank_accounts(text: str) -> list[RuleHit]:
             continue
         hits.append(
             RuleHit(
-                type=FactType.bank_account,
+                type=FactType.bank_code,
                 value=m.group(0),
                 raw_text=m.group(0),
                 start=m.start(),
@@ -776,7 +792,7 @@ def normalize_fact_value(ft: FactType, value: str) -> str | float | None:
     if ft in (FactType.party_id_code, FactType.id_code):
         ids = {m.group(1) for m in _ID_DIGITS.finditer(v)}
         return ids.pop() if len(ids) == 1 else None
-    if ft == FactType.bank_account:
+    if ft in (FactType.bank_account, FactType.bank_code):
         compact = re.sub(r"\s", "", v).upper()
         if _IBAN_SHAPE.fullmatch(compact) or _BIC_SHAPE.fullmatch(compact):
             return compact

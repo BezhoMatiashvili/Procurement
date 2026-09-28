@@ -360,7 +360,8 @@ class Worker:
         q = params.get("question")
         question = q if isinstance(q, str) else None
         fast = bool(params.get("fast", False))
-        use_llm = bool(params.get("use_llm", True))
+        # A job queued without the flag runs rules-only: the model is opt-in (api/extraction.py)
+        use_llm = bool(params.get("use_llm", False)) or question is not None
 
         notes: list[str] = []
         try:

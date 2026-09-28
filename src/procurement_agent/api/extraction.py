@@ -32,7 +32,11 @@ class ExtractRequest(BaseModel):
     targets: list[FactType] | None = Field(default=None, max_length=30)
     question: str | None = Field(default=None, min_length=3, max_length=500)
     fast: bool = False
-    use_llm: bool = True
+    #: Off unless asked for. Measured on the client's documents the model pass lowers precision
+    #: (84% rules-only against 66% with gemma3:4b) and costs minutes per document; it labelled a
+    #: cadastral code a contract number and a bank block payment terms. A question can only be
+    #: answered by the model, so asking one turns it on.
+    use_llm: bool = False
 
 
 class JobOut(BaseModel):
@@ -78,7 +82,7 @@ def start_extraction(
         msg = f"document is not ready (status: {doc.status.value})"
         raise HTTPException(status.HTTP_409_CONFLICT, msg)
     ensure_job_capacity(session, settings, principal)
-    params: dict[str, object] = {"fast": body.fast, "use_llm": body.use_llm}
+    params: dict[str, object] = {"fast": body.fast, "use_llm": body.use_llm or bool(body.question)}
     if body.targets:
         params["targets"] = [t.value for t in body.targets]
     if body.question:

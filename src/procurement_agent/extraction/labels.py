@@ -16,12 +16,14 @@ LABELS: dict[FactType, tuple[str, str]] = {
     FactType.validity_period: ("Validity period", "მოქმედების ვადა"),
     FactType.penalty: ("Penalty", "პირგასამტეხლო"),
     FactType.contract_date: ("Contract date", "ხელშეკრულების თარიღი"),
+    FactType.act_date: ("Act date", "აქტის თარიღი"),
     FactType.contract_number: ("Contract number", "ხელშეკრულების ნომერი"),
     FactType.party_name: ("Party name", "მხარის დასახელება"),
     FactType.party_id_code: ("Identification code", "საიდენტიფიკაციო კოდი"),
     FactType.party_director: ("Director / signatory", "დირექტორი / ხელმომწერი"),
     FactType.party_address: ("Legal address", "იურიდიული მისამართი"),
-    FactType.bank_account: ("Bank account", "საბანკო რეკვიზიტები"),
+    FactType.bank_account: ("Bank account", "საბანკო ანგარიში"),
+    FactType.bank_code: ("Bank code (BIC)", "ბანკის კოდი"),
     FactType.cadastral_code: ("Cadastral code", "საკადასტრო კოდი"),
     FactType.project_name: ("Project name", "პროექტის დასახელება"),
     FactType.subject: ("Subject", "ხელშეკრულების საგანი"),
@@ -48,14 +50,14 @@ PROMPT_DESCRIPTIONS: dict[FactType, str] = {
     FactType.validity_period: "offer/contract validity (მოქმედების ვადა, ძალაშია)",
     FactType.penalty: "penalties for delay or breach (პირგასამტეხლო, ჯარიმა, საურავი)",
     FactType.contract_date: "date the contract/offer was signed or issued (თარიღი)",
+    FactType.act_date: "date the act itself was signed (აქტი გაფორმდა, გაფორმების თარიღი)",
     FactType.contract_number: "contract/offer/tender reference number (№)",
     FactType.party_name: "legal name of a party/company (შპს, სს, LLC, Ltd)",
     FactType.party_id_code: "company identification/tax code, 9 or 11 digits (ს/კ)",
     FactType.party_director: "director or authorised signatory name (დირექტორი, წარმომადგენელი)",
     FactType.party_address: "registered legal address of a party (იურიდიული მისამართი)",
-    FactType.bank_account: (
-        "bank name, SWIFT/bank code and IBAN account number (საბანკო რეკვიზიტები, ა/ა)"
-    ),
+    FactType.bank_account: "IBAN account number of a party (ანგარიშის ნომერი, ა/ა)",
+    FactType.bank_code: "the bank's BIC/SWIFT code, 8 or 11 characters (ბანკის კოდი)",
     FactType.cadastral_code: (
         "cadastral code of the property/project, e.g. 01.02.03.456 (საკადასტრო კოდი)"
     ),

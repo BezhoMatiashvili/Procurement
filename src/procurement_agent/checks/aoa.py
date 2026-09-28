@@ -92,6 +92,9 @@ ContractorType = Literal[
 ]
 
 #: Roles that receive the payment an act releases, and roles that make it.
+#: Bank details: the account (IBAN) and the bank's code (BIC), told apart by ``unit``.
+_BANK_TYPES = frozenset({FactType.bank_account, FactType.bank_code})
+
 _PAYEE_ROLES = frozenset({"შემსრულებელი", "გამყიდველი", "მიმწოდებელი"})
 _PAYER_ROLES = frozenset({"დამკვეთი", "შემკვეთი", "მყიდველი"})
 
@@ -317,7 +320,7 @@ class DocumentView:
         return {h.value for h in self.bank_hits(unit)}
 
     def bank_hits(self, unit: str) -> list[AnchorHit]:
-        return [h for h in self.hits() if h.type == FactType.bank_account and h.unit == unit]
+        return [h for h in self.hits() if h.type in _BANK_TYPES and h.unit == unit]
 
     def id_codes(self) -> set[str]:
         return {p.id_code for p in self.parties if p.id_code}

@@ -787,7 +787,19 @@ def test_unticking_use_llm_is_respected(ui: TestClient) -> None:
     ui.post(f"/ui/documents/{doc_id}/extract", data={"use_llm": "true"}, headers=SAME_ORIGIN)
     assert [p["use_llm"] for p in _extract_params(doc_id)] == [False, True]
     page = ui.get(f"/ui/documents/{doc_id}").text
-    assert 'name="use_llm" value="true" checked' in page  # ticked by default on the form
+    # opt-in: the model measured as a precision regression on the client's documents
+    assert 'name="use_llm" value="true">' in page
+    assert 'name="use_llm" value="true" checked' not in page
+
+
+def test_the_model_is_off_unless_asked_for_and_a_question_turns_it_on(client: TestClient) -> None:
+    doc_id = _ready_doc(client)
+    _worker(client).stop()
+    client.post(f"/api/v1/documents/{doc_id}/extract", headers=H, json={})
+    client.post(
+        f"/api/v1/documents/{doc_id}/extract", headers=H, json={"question": "what is the fee?"}
+    )
+    assert [p["use_llm"] for p in _extract_params(doc_id)] == [False, True]
 
 
 def _is_page(r: Any) -> bool:

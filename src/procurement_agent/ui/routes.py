@@ -335,7 +335,8 @@ def extract(
     question: Annotated[str | None, Form(max_length=500)] = None,
     fast: Annotated[bool, Form()] = False,
     # False, not True: an unticked HTML checkbox sends nothing at all, so a True default made
-    # "don't use the model" impossible to choose. The form renders the box ticked instead.
+    # "don't use the model" impossible to choose. The box is unticked by default: the model is
+    # opt-in (api/extraction.py says why).
     use_llm: Annotated[bool, Form()] = False,
 ) -> Response:
     valid = [FactType(t) for t in (targets or []) if t in FactType.__members__]

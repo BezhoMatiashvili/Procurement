@@ -21,12 +21,16 @@ class FactType(StrEnum):
     validity_period = "validity_period"
     penalty = "penalty"
     contract_date = "contract_date"
+    #: the signing date of the document itself - an act's own date, never the contract's
+    act_date = "act_date"
     contract_number = "contract_number"
     party_name = "party_name"
     party_id_code = "party_id_code"
     party_director = "party_director"
     party_address = "party_address"
     bank_account = "bank_account"
+    #: the bank's BIC/SWIFT code, apart from the account number it identifies
+    bank_code = "bank_code"
     cadastral_code = "cadastral_code"
     project_name = "project_name"
     subject = "subject"
@@ -51,12 +55,14 @@ DEFAULT_TARGETS: tuple[FactType, ...] = (
     FactType.validity_period,
     FactType.penalty,
     FactType.contract_date,
+    FactType.act_date,
     FactType.contract_number,
     FactType.party_name,
     FactType.party_id_code,
     FactType.party_director,
     FactType.party_address,
     FactType.bank_account,
+    FactType.bank_code,
     FactType.cadastral_code,
     FactType.project_name,
     FactType.subject,

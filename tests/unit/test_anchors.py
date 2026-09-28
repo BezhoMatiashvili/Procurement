@@ -141,9 +141,11 @@ def test_a_role_word_before_project_is_not_the_project_name() -> None:
 
 
 def test_bank_details_carry_their_kind() -> None:
-    hits = {h.unit: h.value for h in find_anchors(CONTRACT) if h.type == FactType.bank_account}
-    assert hits["IBAN"] == "GE29NB0000000101904917"
-    assert hits["SWIFT"] == "AAAAGE22"
+    # the account and the bank's code are two facts: a BIC is not an account number
+    types = {FactType.bank_account, FactType.bank_code}
+    hits = {h.unit: (h.type, h.value) for h in find_anchors(CONTRACT) if h.type in types}
+    assert hits["IBAN"] == (FactType.bank_account, "GE29NB0000000101904917")
+    assert hits["SWIFT"] == (FactType.bank_code, "AAAAGE22")
 
 
 def test_cadastral_code_is_not_mistaken_for_an_id_code() -> None:

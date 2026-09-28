@@ -407,11 +407,11 @@ def find_anchors(text: str) -> list[AnchorHit]:
     for m in _SWIFT.finditer(text):
         if not unlabelled_bic_plausible(text, m.start(), m.end()):
             continue
-        add(FactType.bank_account, m.group(0), m, unit="SWIFT")
+        add(FactType.bank_code, m.group(0), m, unit="SWIFT")
     for m in _SWIFT_LABELLED.finditer(text):
         code = m.group(1).upper()
         note = None if bic_is_well_formed(code) else "bank code is not a well-formed BIC"
-        emit(FactType.bank_account, code, m.group(0), m.start(), m.end(), unit="SWIFT", note=note)
+        emit(FactType.bank_code, code, m.group(0), m.start(), m.end(), unit="SWIFT", note=note)
 
     # Directors come from the party parser rather than a bare regex: it knows which company a
     # signatory belongs to, cuts the trailing role noun off a genitive construction, and merges

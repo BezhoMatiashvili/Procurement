@@ -267,8 +267,21 @@ def test_dates_do_not_double_count_overlapping_matches() -> None:
 
 
 def test_act_date_keyword() -> None:
+    # the act's own signing is the act's date, not the contract's
     hits = find_dates("გაფორმების თარიღი: „აქტი“ გაფორმდა 2026 წლის 31 აგვისტო")
-    assert [(h.normalized, h.type) for h in hits] == [("2026-08-31", FactType.contract_date)]
+    assert [(h.normalized, h.type) for h in hits] == [("2026-08-31", FactType.act_date)]
+
+
+def test_the_contract_signing_mentioned_in_an_act_stays_the_contract_date() -> None:
+    text = (
+        "„მხარეებმა“ 2026 წლის 1 აგვისტოს გააფორმეს ხელშეკრულება. "
+        "„აქტი“ გაფორმდა 2026 წლის 31 აგვისტო"
+    )
+    hits = find_dates(text)
+    assert [(h.normalized, h.type) for h in hits] == [
+        ("2026-08-01", FactType.contract_date),
+        ("2026-08-31", FactType.act_date),
+    ]
 
 
 def test_bank_accounts() -> None:

@@ -384,8 +384,10 @@ STRINGS: dict[str, tuple[str, str]] = {
     ),
     "extract.fast": ("fast model (less accurate)", "სწრაფი მოდელი (ნაკლებად ზუსტი)"),
     "extract.use_llm": (
-        "use the model (uncheck for rules only, instant)",
-        "მოდელის გამოყენება (მოხსენით — მხოლოდ წესები, მყისიერი)",
+        "also ask the local model about fields the rules leave empty (slow; its answers are "
+        "marked unverified)",
+        "ლოკალური მოდელის დამატებით გამოყენება ველებისთვის, რომლებიც წესებმა ვერ იპოვა "
+        "(ნელია; მისი პასუხები გადაუმოწმებლად მოინიშნება)",
     ),
     "extract.start": ("Start extraction", "ამოღების დაწყება"),
     "extract.parsing": (

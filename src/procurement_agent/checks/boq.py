@@ -61,6 +61,10 @@ _MONEY_TOL = 0.01
 _RATE_OUTLIER_FACTOR = 3.0
 #: a real description contains letters; "2" is a column number
 _LETTER = re.compile(r"[A-Za-zა-ჰ]")
+#: What sits in an item-number column: a section code ("A", "A1") or a position ("1.1", "2.1.3").
+_ITEM_NO = re.compile(r"^(?:[A-Za-z]\d{0,3}|\d{1,3}(?:\.\d{1,3}){0,4})\.?$")
+#: The row that closes a priced sheet: "SUB-TOTAL 3. DOORS", "ქვეჯამი 3. კარები".
+_SUBTOTAL = re.compile(r"^\s*(?:sub[\s-]?total|ქვეჯამ)", re.IGNORECASE)
 
 
 def _norm_label(v: object) -> str:
@@ -123,6 +127,11 @@ class BoqSheet:
     columns: dict[str, int]
     header_row: int = 0
     lines: list[BoqLine] = field(default_factory=list)
+    #: The amount on the sheet's own closing SUB-TOTAL row, and that row, when there is one.
+    #: The positions read must add up to it: that is how a reader that silently skipped rows
+    #: is caught (``reconcile``) instead of shipping a total that looks right.
+    subtotal: float | None = None
+    subtotal_row: int | None = None
 
     @property
     def leaf_lines(self) -> list[BoqLine]:
@@ -152,24 +161,60 @@ def _cell_value(ws: object, cols: dict[str, int], row: int, key: str) -> float |
     return _num(ws.cell(row, column).value) if column else None  # type: ignore[attr-defined]
 
 
+def _label_key(value: object) -> str | None:
+    return _LABEL_TO_KEY.get(_norm_label(value))
+
+
+def _is_label_row(ws: object, row: int) -> bool:
+    """Whether ``row``, under a header row already found, is more of the header.
+
+    Mostly known labels ("Materials", "Labour Sum"), no numbers and no item number: a header
+    row. Anything else is the sheet's content. The unit "item" is itself a header label (the
+    Summary's "Item" column), so a data row whose unit reads "item" used to count as header too:
+    on every sheet whose first positions are counted in items, the "header" then ran on to row
+    14 and those positions were never read - an entire sheet of doors, gone from the quantities,
+    the totals and the merged workbook without a word.
+    """
+    values = [
+        ws.cell(row, c).value  # type: ignore[attr-defined]
+        for c in range(1, _HEADER_SCAN_COLS + 1)
+    ]
+    present = [v for v in values if v not in (None, "")]
+    if not present or any(isinstance(v, int | float) for v in present):
+        return False
+    if any(_ITEM_NO.match(str(v).strip()) for v in values[:3] if v not in (None, "")):
+        return False
+    labels = sum(1 for v in present if _label_key(v))
+    return labels > 0 and 2 * labels >= len(present)
+
+
 def _map_headers(ws: object) -> tuple[dict[str, int], int]:
-    """Locate columns by label anywhere in the header block, and where that block ends.
+    """Locate columns by label in the header block, and where that block ends.
 
     The template splits its header over three rows - group label, sub-label, and a row of bare
-    column numbers - so a single-row scan finds "Quantity" but not "Materials Sum". The last
-    header row matters just as much: the column-number row ("1", "2", "3"...) reads as a
-    perfectly good line item, and then 5 x 7 != 8 makes every sheet look like it cannot add up.
+    column numbers - so a single-row scan finds "Quantity" but not "Materials Sum". The block
+    starts at the first row naming at least two columns, one of them the description or the
+    quantity, and runs on only through rows that are themselves headers (``_is_label_row``),
+    then past a "1 2 3 ..." column-number row. That row reads as a perfectly good line item,
+    and then 5 x 7 != 8 makes every sheet look like it cannot add up.
     """
     cols: dict[str, int] = {}
     last_row = 0
-    for row in ws.iter_rows(  # type: ignore[attr-defined]
-        min_row=1, max_row=_HEADER_SCAN_ROWS, max_col=_HEADER_SCAN_COLS
-    ):
-        for cell in row:
-            key = _LABEL_TO_KEY.get(_norm_label(cell.value))
-            if key:
-                cols.setdefault(key, cell.column)
-                last_row = max(last_row, cell.row)
+    for r in range(1, _HEADER_SCAN_ROWS + 1):
+        found = [
+            (c, key)
+            for c in range(1, _HEADER_SCAN_COLS + 1)
+            if (key := _label_key(ws.cell(r, c).value))  # type: ignore[attr-defined]
+        ]
+        keys = {key for _, key in found}
+        if not cols:
+            if len(keys) < 2 or not keys & {"desc", "qty"}:
+                continue
+        elif not _is_label_row(ws, r):
+            break
+        for c, key in found:
+            cols.setdefault(key, c)
+        last_row = r
     if cols:
         last_row = max(last_row, _column_number_row(ws, last_row))
     return cols, last_row
@@ -276,6 +321,10 @@ def _read_boq(values: Workbook, formulas: Workbook, *, name: str) -> BoqWorkbook
                     hardcoded=tuple(hardcoded),
                 )
             )
+        for line in reversed(sheet.lines):
+            if _SUBTOTAL.match(line.description) and line.quantity is None:
+                sheet.subtotal, sheet.subtotal_row = line.amount, line.row
+                break
         book.sheets[sheet_name] = sheet
 
     # Matched the way SKIP_SHEETS is: a bidder's "Summary" is still the Summary.
@@ -483,6 +532,9 @@ def compare_bid(template: BoqWorkbook, bid: BoqWorkbook) -> BidComparison:
         priced = [line for line in b_sheet.lines if line.is_priced]
         if not priced and any(line.quantity for line in t_sheet.lines):
             out.unpriced_sheets.append(sheet_name)
+        gap = reconcile(b_sheet)
+        if gap is not None:
+            out.findings.append(gap)
 
     # Sheets only the bidder has: nothing to compare quantities against, but every line on
     # them still adds into the bidder's total.
@@ -585,6 +637,33 @@ def _arithmetic_findings(line: BoqLine) -> list[Finding]:
             )
         )
     return out
+
+
+def reconcile(sheet: BoqSheet) -> Finding | None:
+    """The positions read off a sheet must add up to the sheet's own SUB-TOTAL row.
+
+    Either the bidder's workbook does not add up, or this reader missed or misread a row; both
+    must be said out loud. A reader that dropped the first positions of four sheets once looked
+    exactly like a correct one, because nothing ever compared what it read with what the
+    workbook itself states.
+    """
+    if sheet.subtotal is None:
+        return None
+    lines_sum = sheet.total
+    diff = lines_sum - sheet.subtotal
+    if abs(diff) <= max(_MONEY_TOL, abs(sheet.subtotal) * 1e-6):
+        return None
+    return _finding(
+        "BOQ.RECONCILE",
+        "error",
+        f"{sheet.name}: პოზიციების ჯამი {lines_sum:,.2f}-ია, ხოლო გვერდის ქვეჯამი "
+        f"({sheet.subtotal_row} სტრიქონი) — {sheet.subtotal:,.2f}; სხვაობა {diff:,.2f}",
+        f"{sheet.name}: the positions add up to {lines_sum:,.2f}, but the sheet's SUB-TOTAL "
+        f"row (row {sheet.subtotal_row}) states {sheet.subtotal:,.2f} - a difference of "
+        f"{diff:,.2f}",
+        expected=f"{sheet.subtotal:,.2f}",
+        actual=f"{lines_sum:,.2f}",
+    )
 
 
 def compare_all(template: BoqWorkbook, bids: list[BoqWorkbook]) -> list[BidComparison]:

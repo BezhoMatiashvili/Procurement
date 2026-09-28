@@ -40,7 +40,8 @@ INVALID_IBAN = "GE94XY0000000123456789"
 
 def _bank(text: str, unit: str) -> list[str]:
     hits = find_anchors(text)
-    return [h.value for h in hits if h.type == FactType.bank_account and h.unit == unit]
+    bank = (FactType.bank_account, FactType.bank_code)
+    return [h.value for h in hits if h.type in bank and h.unit == unit]
 
 
 def _fact(

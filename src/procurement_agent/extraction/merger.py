@@ -18,6 +18,7 @@ SINGLE_VALUED: frozenset[FactType] = frozenset(
     {
         FactType.total_amount,
         FactType.contract_date,
+        FactType.act_date,
         FactType.contract_number,
         FactType.warranty_period,
         FactType.validity_period,
@@ -36,6 +37,7 @@ _GENERIC_FAMILY: dict[FactType, frozenset[FactType]] = {
     FactType.date: frozenset(
         {
             FactType.contract_date,
+            FactType.act_date,
             FactType.delivery_deadline,
             FactType.execution_period,
             FactType.validity_period,
