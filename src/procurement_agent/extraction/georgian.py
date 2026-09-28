@@ -288,15 +288,65 @@ def _stems_of(word: str) -> set[str]:
     return out
 
 
+def _syncopated(form: str) -> str | None:
+    """``form`` with the vowel before its stem's last consonant dropped, as some nouns do before
+    an ending: "მოედანის" -> "მოედნის", "სექტემბერის" -> "სექტემბრის". None when no such
+    vowel stands there."""
+    m = re.search(rf"([{GEORGIAN}])([აეო])([ნლრმ])(ის|ით|ად|ისთვის|იდან|ამდე)$", form)
+    if m is None or m.group(1) in _VOWELS:
+        return None
+    return form[: m.start(2)] + form[m.end(2) :]
+
+
+def word_lemmas(word: str) -> frozenset[str]:
+    """Every nominative ``word`` is a form of under the case model - each candidate lemma that
+    inflects back to it exactly (or with the vowel some nouns drop, ``_syncopated``) - with the
+    word itself, and the full form of a bare attributive stem ("ლაზურ" of "ლაზური")."""
+    if not is_georgian_word(word):
+        return frozenset({word})
+    word = _normal_postposition(word)
+    out = {word}
+    if word[-1] not in _VOWELS:
+        out.add(word + "ი")
+    case = case_of(word)
+    cases: tuple[Case, ...] = (case, "dat") if case == "gen" and word.endswith("ს") else (case,)
+    candidates = list(_lemma_candidates(word))
+    # a dropped vowel put back: "მოედნის" is a form of "მოედანი"
+    m = re.search(rf"([{GEORGIAN}])([ნლრმ])(ის|ით|ად|ისთვის|იდან|ამდე)$", word)
+    if m is not None and m.group(1) not in _VOWELS:
+        stem = word[: m.start(2)]
+        candidates += [f"{stem}{v}{m.group(2)}ი" for v in "აეო"]
+    if len(word) > 3 and word[-1] == "ს" and word[-2] not in _VOWELS:
+        # a consonant stem's dative: "უფლებებს" of "უფლებები", "ბერიშვილს" of "ბერიშვილი"
+        candidates.append(word[:-1] + "ი")
+        cases = (*cases, "dat")
+    for lemma_candidate in candidates:
+        for c in cases:
+            form = inflect_word(lemma_candidate, c)
+            if word in (form, _syncopated(form)):
+                out.add(lemma_candidate)
+    return frozenset(out)
+
+
+def _normal_postposition(word: str) -> str:
+    """The older full postposition as the modern one: "-ისათვის" is "-ისთვის"."""
+    for old, new in (("ისათვის", "ისთვის"), ("სათვის", "სთვის")):
+        if word.endswith(old) and len(word) - len(old) >= 3:
+            return word[: -len(old)] + new
+    return word
+
+
 def same_word(a: str, b: str) -> bool:
-    """Whether two words are one word in two grammatical forms: a case ending, a postposition,
-    or the bare stem an attribute takes ("ლაზურ რეზიდენსში"). The spelling of the stem must
-    agree - "ლაზუი" is not "ლაზური" - which a prefix test ("ლაზუ…") did not see."""
+    """Whether two words are one word in two grammatical forms: forms of a common nominative
+    under the case model (``word_lemmas``), a postposition or the bare stem an attribute takes
+    ("ლაზურ რეზიდენსში") included. The spelling must agree - "ლაზუი" is not "ლაზური", and
+    "მთაწმინდიის" is no form of "მთაწმინდა" - which stripping endings ("ლაზუ…",
+    "მთაწმინდი…") did not see."""
     if a == b:
         return True
     if not (is_georgian_word(a) and is_georgian_word(b)):
         return False
-    return bool(_stems_of(a) & _stems_of(b))
+    return bool(word_lemmas(a) & word_lemmas(b))
 
 
 def prefer_nominative(forms: list[str]) -> str | None:
@@ -387,13 +437,20 @@ class MonthTypo:
     correction: str | None
 
 
-def month_typo(word: str) -> MonthTypo | None:
+#: Words after a date that take the genitive: "30 სექტემბრის ჩათვლით" (inclusive).
+_GENITIVE_AFTER = ("ჩათვლით", "შემდეგ")
+
+
+def month_typo(word: str, *, following: str = "") -> MonthTypo | None:
     """``word`` as a misspelled month, or None when it is a correct month form or no month.
 
     Unlike a prefix test this sees a typo after the stem - "სექტემბრდან" for "სექტემბრიდან",
     "ოქტომბერის" for "ოქტომბრის" - because every correct form is listed. Callers look only at
-    words in a date, so "მარტო" (alone) is never read as a misspelled March.
+    words in a date, so "მარტო" (alone) is never read as a misspelled March. ``following`` is
+    the word after it: "ჩათვლით" asks for the genitive, which settles a typo one edit from two
+    forms ("სექტემბირს": "სექტემბრის" or "სექტემბერს").
     """
+    wants_genitive = following.startswith(_GENITIVE_AFTER)
     low = word.lower()
     if (
         len(low) < _MONTH_MIN_LEN
@@ -402,22 +459,24 @@ def month_typo(word: str) -> MonthTypo | None:
         or not is_georgian_word(low)
     ):
         return None
-    best: dict[int, tuple[int, int, str]] = {}
+    best: dict[int, tuple[int, int, int, str]] = {}
     for form, (month, _) in MONTH_FORMS.items():
         if abs(len(form) - len(low)) > _MONTH_TYPO_DISTANCE:
             continue
         d = damerau(low, form, cap=_MONTH_TYPO_DISTANCE)
         if d > _MONTH_TYPO_DISTANCE:
             continue
-        # At equal distance the form ending like the word wins: "ოქტომბერის" is one edit from
-        # both "ოქტომბერი" and "ოქტომბრის", and it was meant as the genitive.
-        rank = (d, -_common_suffix(low, form))
-        if month not in best or rank < best[month][:2]:
+        # At equal distance the form the next word asks for wins, then the form ending like the
+        # word: "ოქტომბერის" is one edit from both "ოქტომბერი" and "ოქტომბრის", and it was
+        # meant as the genitive.
+        fits = 0 if not wants_genitive or MONTH_FORMS[form][1] == "gen" else 1
+        rank = (d, fits, -_common_suffix(low, form))
+        if month not in best or rank < best[month][:3]:
             best[month] = (*rank, form)
     if not best:
         return None
-    ranked = sorted(best.items(), key=lambda kv: kv[1][:2])
-    month, (d, _, form) = ranked[0]
+    ranked = sorted(best.items(), key=lambda kv: kv[1][:3])
+    month, (d, _, _, form) = ranked[0]
     # A short month is within two edits of ordinary words: one edit only, and the word keeps
     # the month's first two letters.
     if len(_MONTH_NOMINATIVE[month]) <= 6 and (d > 1 or low[:2] != form[:2]):
@@ -611,10 +670,11 @@ def mixed_script_words(text: str, *, vocabulary: frozenset[str] = frozenset()) -
         # ("უფლeბები" for "უფლებები"), or a stray key pressed as well ("sმომიჯნავე")
         keyed = "".join(ch if _GEO.match(ch) else _KA_KEYS.get(ch, "") for ch in w)
         correction: str | None = stripped if len(stripped) >= 3 else None
-        attested = [
-            c
-            for c in dict.fromkeys((keyed, stripped))
-            if len(c) >= 3 and (c in vocabulary or any(same_word(c, v) for v in vocabulary))
+        candidates = [c for c in dict.fromkeys((keyed, stripped)) if len(c) >= 3]
+        # a word the documents write as it stands beats one they write in another form: the
+        # stray "i" in "დირექტორiი" is dropped, not doubled into "დირექტორიი"
+        attested = [c for c in candidates if c in vocabulary] or [
+            c for c in candidates if any(same_word(c, v) for v in vocabulary)
         ]
         if attested:
             correction = attested[0]

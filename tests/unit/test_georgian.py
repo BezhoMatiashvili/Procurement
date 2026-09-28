@@ -211,3 +211,31 @@ def test_a_common_noun_in_a_drops_it_before_the_genitive() -> None:
     assert lemma_word("ლომიას") == "ლომია"
     assert lemma_word("ტოგონიძის") == "ტოგონიძე"
     assert inflect_word("ტყებუჩავა", "gen") == "ტყებუჩავას"
+
+
+def test_a_stray_letter_that_doubles_one_beside_it_is_dropped() -> None:
+    from procurement_agent.extraction.georgian import mixed_script_words
+
+    [found] = mixed_script_words("დირექტორiი", vocabulary=frozenset({"დირექტორი"}))
+    assert found.correction == "დირექტორი"
+
+
+def test_the_word_after_a_misspelled_month_decides_its_case() -> None:
+    """ "სექტემბირს" is one edit from "სექტემბრის" and from "სექტემბერს"; before "ჩათვლით"
+    only the genitive fits."""
+    from procurement_agent.extraction.georgian import month_typo
+
+    found = month_typo("სექტემბირს", following="ჩათვლით")
+    assert found is not None and found.correction == "სექტემბრის"
+
+
+def test_a_letter_added_before_the_ending_is_no_inflection() -> None:
+    from procurement_agent.extraction.georgian import same_word
+    from procurement_agent.extraction.spellcheck import classify_difference
+
+    assert not same_word("მთაწმინდიის", "მთაწმინდის")
+    assert same_word("მოედნის", "მოედანი")  # the vowel some nouns drop
+    assert same_word("სექტემბრის", "სექტემბერი")
+    assert same_word("ლაზურ", "ლაზური")
+    assert classify_difference("ქ. თბილისი, ვაკიის რაიონი", "ქ. თბილისი, ვაკის რაიონი")
+    assert classify_difference("ნინო კაპანაძის", "ნინო კაპანაძე") is None

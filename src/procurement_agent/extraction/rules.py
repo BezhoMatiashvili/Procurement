@@ -361,14 +361,15 @@ def month_ka_is_misspelled(s: str) -> bool:
     return month_typo(s) is not None
 
 
-def month_ka_correction(word: str) -> str | None:
+def month_ka_correction(word: str, *, following: str = "") -> str | None:
     """How a misspelled Georgian month should be written: its correct form nearest to ``word``,
-    in the case the act meant ("აგვუისტას" becomes "აგვისტოს", "სექტემბრდან" "სექტემბრიდან").
+    in the case the act meant ("აგვუისტას" becomes "აგვისტოს", "სექტემბრდან" "სექტემბრიდან");
+    ``following`` is the word after it, which may ask for a case ("ჩათვლით": the genitive).
 
     None when the word is no month, when it is already correct, and when two months are equally
     close ("ივმისი"): a wrong correction is worse than none.
     """
-    found = month_typo(word)
+    found = month_typo(word, following=following)
     return found.correction if found else None
 
 

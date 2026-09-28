@@ -470,6 +470,12 @@ def _date_hits_near(
     return out
 
 
+def _next_word(text: str, pos: int) -> str:
+    """The word after ``pos``, for a correction whose case the next word decides."""
+    m = re.match(r"[\s,]*([ა-ჰ]+)", text[pos : pos + 40])
+    return m.group(1) if m else ""
+
+
 def _month_typos(text: str) -> list[tuple[str, int, int]]:
     return [
         (h.note or "", h.start, h.end) for h in find_dates(text) if h.note and "misspell" in h.note
@@ -1071,12 +1077,13 @@ class AoaChecker:
         for note, start, end in _month_typos(self.aoa.text):
             word = note.split(": ")[-1].strip("'\"")
             at = self.aoa.text.find(word, start, end)
+            after = at + len(word) if at >= 0 else end
             self._add(
                 "AOA.SPELLING",
                 "warning",
                 f"თვის დასახელება შეცდომითაა დაწერილი: {word}",
                 f"month name appears misspelled: {word}",
-                expected=month_ka_correction(word),
+                expected=month_ka_correction(word, following=_next_word(self.aoa.text, after)),
                 actual=word,
                 span=(at, at + len(word)) if at >= 0 else (start, end),
                 confidence=0.9,

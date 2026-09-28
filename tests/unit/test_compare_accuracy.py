@@ -425,6 +425,12 @@ def test_a_contract_against_its_act_compares_what_each_states_as_a_whole() -> No
         f for f in report.findings if f.rule_id == "CMP.PERCENT" and "0.1" in (f.expected or "")
     ]
     assert len(rates) == 1
+    # a value only one of two different documents states is what each is for: a warning; the
+    # period both state differently is the error
+    severity = {(f.rule_id, f.expected, f.actual): f.severity for f in report.findings}
+    assert severity[("CMP.DURATION", "2026-03-02/..", None)] == "warning"
+    assert rates[0].severity == "warning"
+    assert severity[("CMP.DURATION", "2026-03-02/2026-09-02", "2026-03-02/2026-03-31")] == "error"
 
 
 def test_a_whole_document_reader_that_fails_is_reported_not_swallowed(
