@@ -48,7 +48,8 @@ _DIGITS_THEN_WORDS = re.compile(
 )
 #: Currency words inside the brackets: "(ასი ლარი)", "(ათასი აშშ დოლარი)".
 _CURRENCY_WORD = re.compile(r"(?:აშშ\s+)?(?:ლარ|დოლარ|ევრო|ფუნტ|რუბლ)[ა-ჰ]*")
-_TETRI_PART = re.compile(r"(?:\s*,?\s*და)?\s*(\d{1,2}|[ა-ჰ ]+?)\s*(?:თეთრ|ცენტ)[ა-ჰ]*\s*$")
+#: The tetri word that ends a bracket: "… და 50 თეთრი", "… ორმოცდაათი თეთრს".
+_TETRI_WORD = re.compile(r"\s*(?:თეთრ|ცენტ)[ა-ჰ]*\s*$")
 #: Any short parenthetical. The comparison reads every one, because a revision that edits only
 #: the words leaves the digits beside them untouched.
 _PARENTHETICAL = re.compile(r"\(([^()]{2,80})\)")
@@ -153,12 +154,23 @@ _NUMERAL_WORDS = frozenset(
 )
 
 
+#: Two-letter words a bracket may hold that are words in their own right, not a numeral with a
+#: letter dropped: "(და სხვა)", "(ან …)".
+_SHORT_WORDS = frozenset(
+    {"და", "ან", "თუ", "ის", "ეს", "ამ", "იმ", "არ", "ნუ", "მე", "კი", "რა", "ოჰ", "ჰო", "აქ"}
+)
+
+
 def _is_numeral_word(word: str) -> bool:
     """A numeral word, or one garbled: one edit away, or two that keep its first two letters
     ("ხუთთთ" for "ხუთი") - enough to say "a number was meant here" without reading "ოფისი"
     (office) as one."""
     if word in _NUMERAL_WORDS or parse_georgian_number_words(word) is not None:
         return True
+    if len(word) == 2:  # "აი" for "ასი": a letter dropped from a short numeral
+        return word not in _SHORT_WORDS and any(
+            len(w) == 3 and damerau(word, w, cap=1) == 1 for w in _NUMERAL_WORDS
+        )
     if len(word) < 3:
         return False
     for w in _NUMERAL_WORDS:
@@ -177,22 +189,43 @@ def looks_like_numeral(words: str) -> bool:
     return bool(toks) and hits * 2 >= len(toks)
 
 
+def _split_tetri(inner: str) -> tuple[str, str] | None:
+    """A bracket's lari words and its tetri, apart: "ასი ლარი და ორმოცდაათი თეთრი" is ("ასი
+    ლარი", "ორმოცდაათი"). The tetri are what follows the currency word, or, with none, the
+    last "და"; None when the bracket names no tetri."""
+    m = _TETRI_WORD.search(inner)
+    if m is None:
+        return None
+    head = inner[: m.start()]
+    currencies = list(_CURRENCY_WORD.finditer(head))
+    if currencies:
+        cut = currencies[-1].end()
+    elif (conj := head.rfind(" და ")) >= 0:
+        cut = conj
+    else:
+        cut = 0
+    tetri = re.sub(r"^[\s,]*(?:და\s+)?", "", head[cut:]).strip()
+    return head[:cut], tetri
+
+
 def _read_words(inner: str) -> tuple[str, float | None]:
-    """The numeral part of a bracket and its value, tetri included: "ასი ლარი და 50 თეთრი" is
-    ("ასი", 100.5). A value that does not parse strictly is None."""
+    """The numeral part of a bracket and its value, tetri included: "ასი ლარი და 50 თეთრი" and
+    "ასი ლარი და ორმოცდაათი თეთრი" are ("ასი", 100.5). A value that does not parse strictly is
+    None, and so are tetri that are not 0-99."""
     tetri = 0.0
-    m = _TETRI_PART.search(inner)
-    if m and _CURRENCY_WORD.search(inner[: m.start()] or ""):
-        part = m.group(1).strip()
-        cents = float(part) if part.isdigit() else parse_number_words(part)
-        if cents is None:
-            return _CURRENCY_WORD.sub(" ", inner[: m.start()]).strip(), None
+    if (split := _split_tetri(inner)) is not None:
+        inner, part = split
+        cents = int(part) if part.isdigit() else parse_number_words(part)
+        words = " ".join(_CURRENCY_WORD.sub(" ", inner).replace(",", " ").split())
+        if cents is None or not 0 <= cents < 100:  # a lari has 100 tetri
+            return words, None
         tetri = cents / 100
-        inner = inner[: m.start()]
     words = " ".join(_CURRENCY_WORD.sub(" ", inner).replace(",", " ").split())
     words = re.sub(r"\s+და$", "", words)
+    if not words and split is not None:
+        return words, tetri  # tetri alone: "0.50 (ორმოცდაათი თეთრი)"
     value = parse_number_words(words)
-    return words, None if value is None else value + tetri
+    return words, None if value is None else round(value + tetri, 2)
 
 
 def digits_and_words(text: str) -> list[DigitsAndWords]:

@@ -32,7 +32,7 @@ from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
 from procurement_agent.checks.findings import Finding
-from procurement_agent.extraction.normalize import QUOTE_CHARS, normalize_spaces
+from procurement_agent.extraction.normalize import QUOTE_CHARS, fold_look_alikes, normalize_spaces
 
 AUTHOR = "Procurement Agent"
 INITIALS = "PA"
@@ -107,7 +107,9 @@ def _normalised_index(text: str) -> tuple[str, list[int]]:
             index.append(i)
             prev_space = True
         else:
-            out.append(ch)
+            # a check reads a text whose Cyrillic look-alikes are folded to Latin; the document
+            # keeps them, and a word with a stray Cyrillic letter must still be found to be marked
+            out.append(fold_look_alikes(ch))
             index.append(i)
             prev_space = False
     return "".join(out), index

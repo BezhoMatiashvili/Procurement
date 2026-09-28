@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import calendar
 import re
+import unicodedata
 from bisect import bisect_right
 from dataclasses import dataclass, field
 from datetime import date
@@ -81,20 +82,24 @@ from procurement_agent.checks.fx_invoice import (
 )
 from procurement_agent.extraction.anchors import AnchorHit, Party, find_anchors, find_parties
 from procurement_agent.extraction.georgian import (
+    GEORGIAN,
     in_case_of,
     is_georgian_word,
     lemma,
     mixed_script_words,
     number_words_typo,
     render_date_like,
+    same_word,
 )
 from procurement_agent.extraction.georgian import words as georgian_words
 from procurement_agent.extraction.normalize import (
     amounts_equal,
+    fold_look_alikes,
     iban_is_valid,
     name_stem,
     names_match,
     normalize_confusables,
+    normalize_layout,
     normalize_name,
 )
 from procurement_agent.extraction.rules import RuleHit, find_dates, month_ka_correction
@@ -272,6 +277,10 @@ class DocumentView:
     #: line breaks and the "- " bullets a list of services is written with; spans still index
     #: ``text``. Empty lines are left out. After ``parties``, so a positional build still works.
     lines: tuple[str, ...] = ()
+    #: ``text`` with the letters as the document writes them: a Cyrillic "o" that ``text``
+    #: folds to Latin stays Cyrillic here. The same length, so a span of ``text`` is a span of
+    #: this; empty on a view built by hand.
+    written: str = ""
     _hits: list[AnchorHit] | None = field(default=None, init=False, repr=False, compare=False)
     _sentences: list[tuple[int, int]] | None = field(
         default=None, init=False, repr=False, compare=False
@@ -286,10 +295,16 @@ class DocumentView:
     @classmethod
     def build(cls, doc_id: str, text: str) -> DocumentView:
         lines = tuple(line for line in map(normalize_confusables, text.split("\n")) if line)
-        text = normalize_confusables(text)
+        written = normalize_layout(text)
+        text = fold_look_alikes(written)
         # one code under two names stays two parties here: that is AOA.ID_CODE_PARTY's evidence
         parties = find_parties(text, split_conflicts=True)
-        return cls(doc_id=doc_id, text=text, parties=parties, lines=lines)
+        return cls(doc_id=doc_id, text=text, parties=parties, lines=lines, written=written)
+
+    def as_written(self, start: int, end: int) -> str:
+        """The text at a span of ``text``, in the letters the document writes."""
+        source = self.written if len(self.written) == len(self.text) else self.text
+        return source[start:end]
 
     def hits(self) -> list[AnchorHit]:
         """Every anchor in the document, computed once: the rules ask for them a dozen times."""
@@ -490,7 +505,7 @@ class AoaChecker:
         if any(_finding_key(f) == key for f in self.findings):
             return
         if quote is None and span is not None:
-            quote = self.aoa.text[span[0] : span[1]] or None
+            quote = self.aoa.as_written(*span) or None
         self.findings.append(
             Finding(
                 rule_id=rule_id,
@@ -964,13 +979,18 @@ class AoaChecker:
             if is_georgian_word(w)
         )
         for found in mixed_script_words(self.aoa.text, vocabulary=vocabulary):
+            # the word as the act writes it: the text read here has Cyrillic look-alikes folded
+            # to Latin, and a quote in the wrong alphabet is found neither by eye nor in Word
+            word = self.aoa.as_written(found.start, found.end)
+            stray_ka, stray_en = _stray_letters(word)
             self._add(
                 "AOA.SPELLING",
                 "warning",
-                f"ქართულ სიტყვაში სხვა ანბანის ასო ან ციფრია: „{found.word}“",
-                f"a Georgian word holds a letter of another alphabet or a digit: '{found.word}'",
+                f"ქართულ სიტყვაში ურევია {stray_ka}: „{word}“",
+                f"a Georgian word holds {stray_en}: '{word}'",
                 expected=found.correction,
-                actual=found.word,
+                actual=word,
+                quote=word,
                 span=(found.start, found.end),
                 confidence=0.95,
             )
@@ -1254,6 +1274,21 @@ class AoaChecker:
         a, b = span
         return span if 0 <= a < b <= len(self.aoa.text) and holds in self.aoa.text[a:b] else None
 
+    def _written_forms(self, name: str) -> list[tuple[str, tuple[int, int]]]:
+        """Each form in which the act writes ``name`` - its last word in any case, the words
+        before it as they are - with the first place of each, in the act's order. A person's
+        name is read once per party, but a preamble's genitive and a signature's nominative are
+        two spellings of it to correct."""
+        parts = name.split()
+        if len(parts) < 2 or not all(is_georgian_word(w) for w in parts):
+            return []
+        head = r"\s+".join(map(re.escape, parts[:-1]))
+        forms: dict[str, tuple[int, int]] = {}
+        for m in re.finditer(rf"(?<![{GEORGIAN}]){head}\s+([{GEORGIAN}]+)", self.aoa.text):
+            if same_word(m.group(1), parts[-1]):
+                forms.setdefault(self.aoa.as_written(*m.span()), m.span())
+        return list(forms.items())
+
     def rule_parties(self) -> None:
         """Client rule 1 and the contract cross-check: identify by code, then verify the rest."""
         if self.contract is None:  # run() calls the contract rules only with a contract
@@ -1327,21 +1362,26 @@ class AoaChecker:
                     continue
                 # compared on the nominative, so a genitive in either document is no mistake
                 guess = best_match(lemma(d), [lemma(c) for c in match.directors])
-                # the correction in the act's own grammar: a signature block writes the
-                # nominative where the contract's preamble had the genitive
-                expected = in_case_of(d, guess[0]) if guess else None
                 diff = guess[1] if guess else None
                 hint_ka = " (როგორც ჩანს, შეცდომაა)" if diff and diff.looks_like_typo else ""
                 hint_en = " (looks like a misspelling)" if diff and diff.looks_like_typo else ""
-                self._add(
-                    "AOA.DIRECTOR",
-                    "error",
-                    f"ხელმომწერი არ ემთხვევა ხელშეკრულებას: „{d}“, უნდა იყოს „{expected}“{hint_ka}",
-                    f"signatory does not match the contract: '{d}', expected '{expected}'{hint_en}",
-                    expected=expected,
-                    actual=d,
-                    span=self._find_span(d),
-                )
+                # the preamble writes the genitive, the signature block the nominative: the same
+                # wrong name, each form with its own correction and every place of it marked
+                forms: list[tuple[str, tuple[int, int] | None]] = [*self._written_forms(d)]
+                for form, span in forms or [(d, self._find_span(d))]:
+                    # the correction in the act's own grammar, form by form
+                    expected = in_case_of(form, guess[0]) if guess else None
+                    self._add(
+                        "AOA.DIRECTOR",
+                        "error",
+                        f"ხელმომწერი არ ემთხვევა ხელშეკრულებას: „{form}“, უნდა იყოს "
+                        f"„{expected}“{hint_ka}",
+                        f"signatory does not match the contract: '{form}', expected "
+                        f"'{expected}'{hint_en}",
+                        expected=expected,
+                        actual=form,
+                        span=span,
+                    )
 
     def _id_code_party(self, p: Party, match: Party, owner: Party) -> None:
         """AOA.ID_CODE_PARTY: the act gives ``p`` (the contract's ``match``) the code the contract
@@ -2715,32 +2755,39 @@ def _tax_wording_met(contractor_type: ContractorType, phrases: list[TaxPhrase]) 
     return "net" in kinds
 
 
-def _word_stems_match(a: str, b: str) -> bool:
-    """One word of a name against another, allowing a case ending or postposition on either.
-
-    ``name_stem`` removes the genitive and the nominative vowel, but a project name also turns
-    up with "-ისთვის", "-ში" and the like attached. The shorter stem being a prefix of the
-    longer one - and long enough to mean something - covers those without letting
-    "სკოლა" match "სასტუმრო".
-    """
-    if a == b:
-        return True
-    short, long_ = sorted((a, b), key=len)
-    return len(short) >= 4 and long_.startswith(short)
-
-
 def _project_names_match(a: str, b: str) -> bool:
-    """Two project names are the same when every word of the shorter one matches, in order.
+    """Two project names are the same when every word of the shorter one is a word of the
+    longer one, in order, in any grammatical form (``same_word``): "-ისთვის", "-ში" and the like
+    attach to a project's name, a misspelling does not.
 
     The check this replaced compared only the first word, so "ბათუმის სკოლა" and
-    "ბათუმის სასტუმრო" were the same project.
+    "ბათუმის სასტუმრო" were the same project; the one after it took any stem that began
+    another word for that word, so a letter dropped from the name ("ლაზუი" for "ლაზური") passed.
     """
-    wa, wb = name_stem(a).split(), name_stem(b).split()
+    wa, wb = normalize_name(a).split(), normalize_name(b).split()
     if not wa or not wb:
         return False
     short, long_ = sorted((wa, wb), key=len)
     it = iter(long_)
-    return all(any(_word_stems_match(w, x) for x in it) for w in short)
+    return all(any(same_word(w, x) for x in it) for w in short)
+
+
+def _stray_letters(word: str) -> tuple[str, str]:
+    """What the characters in ``word`` that are not Georgian letters are, in Georgian and in
+    English: "the Cyrillic letter 'o'" - which looks exactly like the Latin one."""
+    ka: list[str] = []
+    en: list[str] = []
+    for ch in dict.fromkeys(c for c in word if not is_georgian_word(c)):
+        if unicodedata.name(ch, "").startswith("CYRILLIC"):
+            ka.append(f"კირილიცის ასო „{ch}“")
+            en.append(f"the Cyrillic letter '{ch}'")
+        elif ch.isdigit():
+            ka.append(f"ციფრი „{ch}“")
+            en.append(f"the digit '{ch}'")
+        else:
+            ka.append(f"ლათინური ასო „{ch}“")
+            en.append(f"the Latin letter '{ch}'")
+    return ", ".join(ka) or "სხვა ანბანის ასო", " and ".join(en) or "a letter of another alphabet"
 
 
 def check_aoa(

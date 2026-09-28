@@ -59,12 +59,24 @@ def normalize_spaces(s: str) -> str:
     return _WS.sub(" ", _SPACE_RE.sub(" ", s)).strip()
 
 
-def normalize_confusables(s: str) -> str:
-    """NFC + fold homoglyphs and typographic punctuation. Safe to apply to any document text."""
+def normalize_layout(s: str) -> str:
+    """``normalize_confusables`` without the homoglyph fold: NFC, dashes and spaces, the letters
+    as written. Folding a homoglyph replaces one character with one, so the two texts have the
+    same length and an offset into one is the same place in the other - which is how a finding
+    computed over the folded text quotes the word the document actually has."""
     s = unicodedata.normalize("NFC", s)
-    s = s.translate(_CYRILLIC_TO_LATIN)
     s = _DASHES.sub("-", s)
     return normalize_spaces(s)
+
+
+def fold_look_alikes(s: str) -> str:
+    """Cyrillic letters that look like Latin ones, as the Latin ones; one character for one."""
+    return s.translate(_CYRILLIC_TO_LATIN)
+
+
+def normalize_confusables(s: str) -> str:
+    """NFC + fold homoglyphs and typographic punctuation. Safe to apply to any document text."""
+    return fold_look_alikes(normalize_layout(s))
 
 
 def confusable_chars(s: str) -> str:

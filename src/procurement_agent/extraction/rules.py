@@ -237,6 +237,13 @@ _AMOUNT_AFTER = re.compile(
     rf"(?<![\d.,])({_NUM_RE})\s*{_PAREN}({_CUR_RE})(?![A-Za-zა-ჰ])", re.IGNORECASE
 )
 _AMOUNT_BEFORE = re.compile(rf"({_CUR_BEFORE_RE})\s*({_NUM_RE})(?![\d])", re.IGNORECASE)
+#: "2 400.00 (ორი ათას ოთხასი ლარი და 00 თეთრი)": the currency is written inside the words,
+#: with tetri, and nothing after the bracket names it. The bracket must open with words.
+_AMOUNT_CUR_INSIDE = re.compile(
+    rf"(?<![\d.,])({_NUM_RE})\s*\(\s*([ა-ჰ][ა-ჰ ,]*?(?<![ა-ჰ])(?:{_CUR_RE})(?![A-Za-zა-ჰ])"
+    r"[^()]{0,60})\)",
+    re.IGNORECASE,
+)
 
 # A number whose only separators are spaces and which has no decimal part: "5 100". Written
 # after a quantity keyword it is far more likely a count followed by a price ("რაოდენობა 5
@@ -254,7 +261,8 @@ def _overlaps(a: tuple[int, int], b: tuple[int, int]) -> bool:
 def find_amounts(text: str) -> list[RuleHit]:
     hits: list[RuleHit] = []
     seen: set[tuple[int, int]] = set()
-    for pat, num_group, cur_group in ((_AMOUNT_AFTER, 1, 2), (_AMOUNT_BEFORE, 2, 1)):
+    patterns = ((_AMOUNT_AFTER, 1, 2), (_AMOUNT_CUR_INSIDE, 1, 2), (_AMOUNT_BEFORE, 2, 1))
+    for pat, num_group, cur_group in patterns:
         for m in pat.finditer(text):
             span = (m.start(), m.end())
             if any(_overlaps(span, other) for other in seen):

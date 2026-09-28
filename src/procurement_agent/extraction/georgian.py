@@ -248,6 +248,33 @@ def in_case_of(wrong: str, right: str) -> str:
     return inflect(lemma(right), phrase_case(wrong))
 
 
+#: Postpositions older or more formal texts write in full, beside the modern ``_ENDINGS``.
+_FORMAL_ENDINGS = ("ისათვის", "სათვის", "ისადმი", "სადმი")
+
+
+def _stems_of(word: str) -> set[str]:
+    """What ``word`` is left with once a case ending, a postposition or the nominative's final
+    vowel is taken off - every reading, since the ending alone cannot say which one is right."""
+    out = {word}
+    for ending in (*(e for e, _ in _ENDINGS), *_FORMAL_ENDINGS):
+        if word.endswith(ending) and len(word) - len(ending) >= 3:
+            out.add(word[: -len(ending)])
+    if len(word) >= 4 and word[-1] in f"{_VOWELS}ს":
+        out.add(word[:-1])  # "ლაზური" -> "ლაზურ", "ლომიას" -> "ლომია", "ტოგონიძე" -> "ტოგონიძ"
+    return out
+
+
+def same_word(a: str, b: str) -> bool:
+    """Whether two words are one word in two grammatical forms: a case ending, a postposition,
+    or the bare stem an attribute takes ("ლაზურ რეზიდენსში"). The spelling of the stem must
+    agree - "ლაზუი" is not "ლაზური" - which a prefix test ("ლაზუ…") did not see."""
+    if a == b:
+        return True
+    if not (is_georgian_word(a) and is_georgian_word(b)):
+        return False
+    return bool(_stems_of(a) & _stems_of(b))
+
+
 def prefer_nominative(forms: list[str]) -> str | None:
     """Of several forms of one name, the one a document writes in the nominative, if any."""
     for f in forms:
