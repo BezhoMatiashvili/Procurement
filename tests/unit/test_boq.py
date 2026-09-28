@@ -389,7 +389,8 @@ def test_text_in_a_number_cell_is_reported_and_never_read_as_zero(tmp_path: Path
     # the quantity in words is not "changed to 0"; the rate in words is not a price of 0
     assert "BOQ.QUANTITY_CHANGED" not in _rules(comp)
     status = {p.item_no: p.status for p in comp.positions if p.sheet == CIVIL}
-    assert status["1.3"] == "non_numeric" and status["1.1"] == "priced"
+    # GOLD_SPEC 5: text where a quantity or a rate belongs leaves the position not priced
+    assert status["1.3"] == "non_numeric" and status["1.1"] == "non_numeric"
     assert (CIVIL, "1.3") not in {
         (p.sheet, p.item_no) for p in comps[0].positions if p.in_common_scope
     }
@@ -686,9 +687,49 @@ def test_a_unit_left_blank_is_reported(tmp_path: Path) -> None:
 
 
 def test_sundry_items_are_not_a_placeholder() -> None:
-    """"სხვადასხვა ხარჯები" (sundry items) is work the template describes; only "სხვა ხარჯები"
+    """ "სხვადასხვა ხარჯები" (sundry items) is work the template describes; only "სხვა ხარჯები"
     (other costs) invites the bidder's own."""
     from procurement_agent.checks.boq import _PLACEHOLDER
 
     assert _PLACEHOLDER.search("სხვადასხვა ხარჯები") is None
     assert _PLACEHOLDER.search("სხვა ხარჯები, საჭიროების შემთხვევაში") is not None
+
+
+def test_a_quantity_header_written_short_is_still_read(tmp_path: Path) -> None:
+    """ "Qty." is the quantity: a sheet whose header abbreviates it is read, not dropped."""
+    t = _real(tmp_path, "T")
+    comp = compare_bid(t, _real(tmp_path, "B", Bid(header_rename={CIVIL: "Qty."})))
+    assert "BOQ.SHEET_UNREADABLE" not in _rules(comp)
+    assert comp.evaluated_cost == pytest.approx(_cost(), abs=0.005)
+
+
+def test_an_amount_formula_pointing_at_another_row_is_still_a_position() -> None:
+    """``=O23*G19`` on row 23 is a position's amount with its arithmetic wrong (BOQ.ARITHMETIC),
+    not a subtotal: counted as one, the row vanished from the sheet's sum and the SUB-TOTAL
+    seemed not to add up."""
+    from openpyxl import Workbook
+
+    from procurement_agent.checks.boq import _line_kind
+
+    values, formulas = Workbook(), Workbook()
+    formulas.active.cell(23, 16, "=O23*G19")  # type: ignore[union-attr]
+    formulas.active.cell(30, 16, "=SUM(P13:P29)")  # type: ignore[union-attr]
+    cols = {"desc": 3, "qty": 7, "amount": 16}
+    assert _line_kind(values.active, formulas.active, cols, 23, "Door stopper", True) == "position"
+    assert _line_kind(values.active, formulas.active, cols, 30, "Group total", False) == "subtotal"
+
+
+def test_text_in_a_component_rate_matters_only_without_a_total_rate() -> None:
+    from procurement_agent.checks.boq import BoqLine, _rate_text_blocks
+
+    def line(**kw: object) -> BoqLine:
+        return BoqLine(  # type: ignore[arg-type]
+            sheet="S", row=12, item_no="1.1", description="x", unit="m2", quantity=1.0, **kw
+        )
+
+    labour_dash = (("rate_labor", "-"),)
+    # the bidder's rate is stated: the dash under labour means no labour cost
+    assert not _rate_text_blocks(line(rate_total=150.0, non_numeric=labour_dash))
+    # the rate must be built from the parts, and one part is text: not priced
+    assert _rate_text_blocks(line(rate_materials=100.0, non_numeric=labour_dash))
+    assert _rate_text_blocks(line(rate_total=150.0, non_numeric=(("qty", "incl."),)))

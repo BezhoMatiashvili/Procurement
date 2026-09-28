@@ -56,7 +56,7 @@ _SUMMARY = "SUMMARY"
 _HEADER_SYNONYMS: dict[str, tuple[str, ...]] = {
     "no": ("no", "no.", "item", "item no", "№", "#"),
     "desc": ("description", "descriptions", "description of works", "work description"),
-    "qty": ("quantity", "qty", "quantities", "amount of work", "რაოდენობა"),
+    "qty": ("quantity", "qty", "q-ty", "qnt", "quant", "quantities", "amount of work", "რაოდენობა"),
     "unit": ("unit", "units", "unit of measure", "uom", "ერთეული"),
     "rate_materials": ("materials", "material"),
     "sum_materials": ("materials sum", "material sum"),
@@ -129,7 +129,8 @@ _UNIT_ALIASES: dict[str, str] = {
 
 
 def _norm_label(v: object) -> str:
-    return normalize_spaces(str(v or "")).strip().lower().rstrip(":")
+    """A header label as compared: "Qty." and "Unit:" are "qty" and "unit"."""
+    return normalize_spaces(str(v or "")).strip().lower().rstrip(":.").strip()
 
 
 def _num(v: object) -> float | None:
@@ -438,6 +439,10 @@ def _own_row_formula(formula: str, row: int) -> bool:
     return {int(m.group(2)) for m in _CELL_REF.finditer(body)} <= {row}
 
 
+#: A quantity times a rate, "=O23*G23": a position's amount, whatever rows it points at. One
+#: that points at another row ("=O23*G19") is the bidder's arithmetic gone wrong - reported by
+#: BOQ.ARITHMETIC - never a subtotal, which adds rows up.
+_PRODUCT_OF_CELLS = re.compile(r"=\s*\$?[A-Z]{1,3}\$?\d+\s*\*\s*\$?[A-Z]{1,3}\$?\d+\s*")
 #: A formula adding up other rows: "=SUM(G13:G19)", "=G13+G14".
 _SUM_OF_ROWS = re.compile(r"^=\s*(?:SUM\s*\(|[A-Z]{1,3}\d+\s*\+)", re.IGNORECASE)
 
@@ -463,7 +468,9 @@ def _line_kind(
     if column:
         formula = _formula_text(wf.cell(row, column))  # type: ignore[attr-defined]
         if formula is not None:
-            return "position" if _own_row_formula(formula, row) else "subtotal"
+            if _own_row_formula(formula, row) or _PRODUCT_OF_CELLS.fullmatch(formula):
+                return "position"
+            return "subtotal"
         if ws.cell(row, column).value not in (None, ""):  # type: ignore[attr-defined]
             # a typed number: a leaf when it has a quantity or a unit, otherwise a section total
             return "position" if has_measure else "subtotal"
@@ -1102,6 +1109,19 @@ def compare_bid(template: BoqWorkbook, bid: BoqWorkbook) -> BidComparison:
     return out
 
 
+def _rate_text_blocks(line: BoqLine) -> bool:
+    """Whether text in the line's number cells leaves it without a price (GOLD_SPEC 5).
+
+    Text in the quantity, the amount or the rate ("incl.", "N/A", "-") is never read as a
+    number: the position is not priced. Text in one component of the rate ("-" under labour)
+    matters only when the rate itself is not stated and would have to be built from the parts -
+    beside a stated rate it says the part costs nothing."""
+    keys = {key for key, _ in line.non_numeric}
+    if keys & {"qty", "amount", "rate_total"}:
+        return True
+    return not line.rate_total and bool(keys & set(_RATE_KEYS))
+
+
 def _unit_rate(line: BoqLine, columns: dict[str, int]) -> float | None:
     """The bidder's unit rate: the rate column, else the sum of the component rates.
 
@@ -1253,13 +1273,12 @@ def _compare_sheet(out: BidComparison, t_sheet: BoqSheet, b_sheet: BoqSheet) -> 
             )
             continue
         if t.quantity:
-            cost = t.quantity * rate if rate else 0.0
-            if rate:
-                status = "priced"
-            elif text_cols & {*_RATE_KEYS, "amount"}:
-                status = "non_numeric"
+            if _rate_text_blocks(b):
+                cost, status = 0.0, "non_numeric"
+            elif rate:
+                cost, status = t.quantity * rate, "priced"
             else:
-                status = "unpriced"
+                cost, status = 0.0, "unpriced"
             if status != "priced":
                 out.unpriced_positions.append(t)
         else:
@@ -1470,9 +1489,12 @@ def _list_findings(out: BidComparison) -> None:
             )
         )
     unpriced_sheets = set(out.unpriced_sheets)
+    # a position priced in words is still unpriced, but BOQ.NON_NUMERIC already names it: one
+    # finding per mistake
+    in_words = {(p.sheet, p.row) for p in out.positions if p.status == "non_numeric"}
     by_sheet: dict[str, list[BoqLine]] = {}
     for t in out.unpriced_positions:
-        if t.sheet not in unpriced_sheets:
+        if t.sheet not in unpriced_sheets and (t.sheet, t.row) not in in_words:
             by_sheet.setdefault(t.sheet, []).append(t)
     for sheet, lines in by_sheet.items():
         items = [line.item_no or f"row {line.row}" for line in lines]
