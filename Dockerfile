@@ -16,6 +16,17 @@ FROM ${PYTHON_IMAGE} AS builder
 COPY --from=uv /uv /usr/local/bin/uv
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never
 WORKDIR /app
+# The hunspell ka_GE dictionary for the act's prose spelling check (AOA.SPELLING): one upstream
+# commit, checked against its SHA-256 by the build itself, so the running image never fetches it.
+# MIT; generated from word lists under MIT and CC-BY 4.0 (docs/ACCURACY.md). It goes under /app,
+# not /models, which docker-compose.yml mounts over. scripts/fetch_spelling_dictionary.py pins the
+# same URLs and hashes, and a unit test fails when the two differ.
+ADD --checksum=sha256:80d04afc4319209882a6e9be3bcb8d41543e79d94a8057c1e08b07d5e805352d https://raw.githubusercontent.com/gamag/ka_GE.spell/26d33614360c3784c199e3a6766eb5b095a134b8/dictionaries/ka_GE.aff /app/dictionaries/hunspell/ka_GE.aff
+ADD --checksum=sha256:5963f268e996f1e27e17163873b4d32f41fae2a1e5bef0117126caefe62f5857 https://raw.githubusercontent.com/gamag/ka_GE.spell/26d33614360c3784c199e3a6766eb5b095a134b8/dictionaries/ka_GE.dic /app/dictionaries/hunspell/ka_GE.dic
+# A downloaded file arrives mode 600 and ADD --chmod would set the directory's mode too, leaving
+# nobody able to enter it: readable by the unprivileged app user, explicitly.
+RUN chmod 0755 /app/dictionaries /app/dictionaries/hunspell \
+ && chmod 0644 /app/dictionaries/hunspell/ka_GE.aff /app/dictionaries/hunspell/ka_GE.dic
 COPY pyproject.toml uv.lock README.md ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project
@@ -38,6 +49,7 @@ RUN apt-get update \
  && mkdir -p /data && chown app:app /data && chmod 700 /data
 WORKDIR /app
 COPY --from=builder --chown=app:app /app/.venv /app/.venv
+COPY --from=builder /app/dictionaries /app/dictionaries
 COPY --chown=app:app src ./src
 # The root filesystem is read-only in docker-compose.yml and HOME (/app) is not writable, so
 # every library that keeps a cache (HuggingFace, torch, matplotlib, generic XDG users) is
@@ -63,6 +75,7 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PA_ENV=prod \
     PA_DATA_DIR=/data \
     PA_DOCLING_ARTIFACTS_PATH=/models/docling \
+    PA_SPELLING_DICTIONARY_PATH=/app/dictionaries/hunspell \
     OMP_NUM_THREADS=12
 USER app
 VOLUME /data

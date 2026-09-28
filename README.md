@@ -158,7 +158,7 @@ optionally Tesseract with `kat` + `eng` data for OCR on the host.
 ```bash
 uv sync --all-groups                      # deps (CPU-only torch wheels)
 cp .env.example .env                      # set PA_DEV_API_KEY=pa_something for local use
-./scripts/prefetch_models.sh              # Docling models (once, online) + Ollama models
+./scripts/prefetch_models.sh              # Docling + spelling dictionary (once, online) + Ollama
 docker run -d --name ollama -p 127.0.0.1:11434:11434 -v ollama:/root/.ollama ollama/ollama:0.34.2
 docker exec ollama ollama pull gemma3:12b && docker exec ollama ollama pull gemma3:4b
 

@@ -46,6 +46,12 @@ from procurement_agent.checks.aoa_llm import (
     service_id,
 )
 from procurement_agent.checks.aoa_scope import MATCH_SHARE, Alignment, ScopeReading, read_scope
+from procurement_agent.checks.aoa_spelling import (
+    NOT_SUPPLIED,
+    Lexicon,
+    SpellingUnavailable,
+    prose_typos,
+)
 from procurement_agent.checks.contract_terms import _ADVANCE as _ADVANCE_NAMED
 from procurement_agent.checks.contract_terms import (
     AdvanceTerms,
@@ -458,9 +464,13 @@ class AoaChecker:
         rates: RateProvider | None = None,
         advance: AdvanceInput | None = None,
         review: ScopeReviewSet | None = None,
+        speller: Lexicon | SpellingUnavailable | None = None,
     ) -> None:
         self.aoa = aoa
         self.contract = contract
+        #: the dictionary for the prose spelling rule (``aoa_spelling.open_speller``), or why
+        #: there is none; None skips that rule with a note
+        self.speller = speller
         self.registry = registry
         self.contractor_type = contractor_type
         #: the NBG rates for a foreign-currency act's invoice (``rule_fx_invoice``)
@@ -695,6 +705,7 @@ class AoaChecker:
         self.rule_act_date()
         self.rule_month_spelling()
         self.rule_script_spelling()
+        self.rule_prose_spelling()
         self.rule_iban_format()
         self.rule_bank_code_format()
         self.rule_tax_wording()
@@ -993,6 +1004,34 @@ class AoaChecker:
                 quote=word,
                 span=(found.start, found.end),
                 confidence=0.95,
+            )
+
+    def rule_prose_spelling(self) -> None:
+        """A word the dictionary does not know, one letter from one it does: "ეთმანეთის".
+
+        The gates are ``aoa_spelling``'s. It runs after the month, number-word and stray-letter
+        rules, and a word one of them reported is not reported again.
+        """
+        if self.speller is None or isinstance(self.speller, SpellingUnavailable):
+            why = self.speller or NOT_SUPPLIED
+            self._skip("AOA.SPELLING", why.reason_ka, why.reason_en)
+            return
+        taken = [f.span for f in self.findings if f.span is not None]
+        reading = prose_typos(self.aoa, self.contract, self.speller, taken=taken)
+        if (short := reading.shortfall()) is not None:
+            self._skip("AOA.SPELLING", short.reason_ka, short.reason_en)
+        for typo in reading.typos:
+            word = self.aoa.as_written(typo.start, typo.end)
+            self._add(
+                "AOA.SPELLING",
+                "warning",
+                f"სიტყვა შეცდომითაა დაწერილი: „{word}“",
+                f"word appears misspelled: '{word}'",
+                expected=typo.correction,
+                actual=word,
+                quote=word,
+                span=(typo.start, typo.end),
+                confidence=0.8,
             )
 
     def rule_iban_format(self) -> None:
@@ -2840,6 +2879,7 @@ def check_aoa(
     rates: RateProvider | None = None,
     advance: AdvanceInput | None = None,
     review: ScopeReviewSet | None = None,
+    speller: Lexicon | SpellingUnavailable | None = None,
 ) -> CheckReport:
     return AoaChecker(
         aoa=DocumentView.build(aoa_id, aoa_text),
@@ -2849,6 +2889,7 @@ def check_aoa(
         rates=rates,
         advance=advance,
         review=review,
+        speller=speller,
     ).run()
 
 

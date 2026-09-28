@@ -89,10 +89,14 @@ def test_the_fixture_rewrites_took() -> None:
 
 def test_a_correct_act_restating_subject_and_services_has_no_findings() -> None:
     """Both rules run here and neither fires - no error, no warning, not even a note - and
-    nothing is skipped but the two inputs this pair does not supply."""
+    nothing is skipped but the three inputs this pair does not supply."""
     report = _check()
     assert report.findings == []
-    assert [s.rule_id for s in report.skipped] == ["AOA.TAX_WORDING", "AOA.REGISTRY"]
+    assert [s.rule_id for s in report.skipped] == [
+        "AOA.SPELLING",
+        "AOA.TAX_WORDING",
+        "AOA.REGISTRY",
+    ]
 
 
 def test_the_subject_restated_in_other_case_forms_still_matches() -> None:

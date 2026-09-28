@@ -31,6 +31,7 @@ from procurement_agent.api.deps import (
 from procurement_agent.api.extraction import JobOut, _job_out
 from procurement_agent.checks.aoa import ContractorType, check_aoa, scope_review_items
 from procurement_agent.checks.aoa_llm import ScopeReviewSet, review_digest
+from procurement_agent.checks.aoa_spelling import open_speller
 from procurement_agent.checks.boq import (
     BidComparison,
     BoqLine,
@@ -134,6 +135,7 @@ def run_aoa(
                 rates=rates,
                 advance=advance,
                 review=review,
+                speller=open_speller(settings),
             )
         finally:
             rates.close()

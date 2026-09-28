@@ -100,12 +100,13 @@ def _skip_reasons(report: CheckReport, rule_id: str) -> list[str]:
 
 def test_a_correct_act_under_a_full_contract_has_no_findings() -> None:
     """Every term and payment rule runs here, and none of them fires: no errors, no warnings,
-    not even a note - and nothing is skipped but the two inputs this pair does not supply and
-    the subject clause and list of services it does not state (``test_aoa_scope`` has a pair
-    that states them)."""
+    not even a note - and nothing is skipped but the three inputs this pair does not supply (a
+    spelling dictionary, the contractor type, a registry) and the subject clause and list of
+    services it does not state (``test_aoa_scope`` has a pair that states them)."""
     report = _check()
     assert report.findings == []
     assert [s.rule_id for s in report.skipped] == [
+        "AOA.SPELLING",
         "AOA.TAX_WORDING",
         "AOA.SUBJECT",
         "AOA.SERVICES",

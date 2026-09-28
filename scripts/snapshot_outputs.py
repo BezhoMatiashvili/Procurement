@@ -35,6 +35,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 from procurement_agent.checks.aoa import check_aoa  # noqa: E402
+from procurement_agent.checks.aoa_spelling import open_speller  # noqa: E402
 from procurement_agent.checks.boq import compare_all, grand_total, read_boq  # noqa: E402
 from procurement_agent.checks.compare import compare  # noqa: E402
 from procurement_agent.config import Settings  # noqa: E402
@@ -121,7 +122,9 @@ def _snapshot_family(
     the correct one, the correct act with the contract, and every document extracted."""
     contract_text = text(contract) if contract else None
     for act in acts:
-        rep = check_aoa(aoa_text=text(act), contract_text=contract_text)
+        rep = check_aoa(
+            aoa_text=text(act), contract_text=contract_text, speller=open_speller(settings)
+        )
         out["aoa"][f"{set_name}/{act.stem}"] = {
             "findings": [_finding(f) for f in rep.findings],
             "skipped": _skips(rep),
