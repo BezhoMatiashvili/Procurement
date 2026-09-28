@@ -180,8 +180,13 @@ the Docker build pins the same URLs and hashes (`ADD --checksum`), and a unit te
 the two differ. Upstream calls the list "automatically created by crawling the internet": it
 lacks words (`დარიცხვა`) and may hold misspellings, which it would then accept.
 
+**On a scanned act** a misread letter looks exactly like a typo, so the rule's warnings there
+carry the scan's "possibly misread - check the paper original" and need review, the form
+GOLD_SPEC section 6 allows on OCR input. A scanned contract changes nothing about the act's.
+
 **Not measured.** How the dictionary covers other document families; this corpus is two
-templates of one kind of act. Real typos seen: four in the acts, eleven in the contracts.
+templates of one kind of act. Real typos seen: four in the acts, eleven in the contracts. Nor
+how many words a scan's misreadings add: OCR runs only inside the Docker image.
 
 ### IBAN checksums are information, never errors
 
