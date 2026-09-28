@@ -19,6 +19,7 @@ import calendar
 import re
 import unicodedata
 from bisect import bisect_right
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -88,8 +89,10 @@ from procurement_agent.checks.fx_invoice import (
 )
 from procurement_agent.extraction.anchors import AnchorHit, Party, find_anchors, find_parties
 from procurement_agent.extraction.georgian import (
+    CASES,
     GEORGIAN,
     in_case_of,
+    inflect,
     is_georgian_word,
     lemma,
     mixed_script_words,
@@ -108,6 +111,7 @@ from procurement_agent.extraction.normalize import (
     normalize_layout,
     normalize_name,
 )
+from procurement_agent.extraction.ocr import misread_explains, repair_codes
 from procurement_agent.extraction.rules import RuleHit, find_dates, month_ka_correction
 from procurement_agent.extraction.schemas import FactType
 from procurement_agent.extraction.spellcheck import best_match, classify_difference
@@ -120,6 +124,23 @@ ContractorType = Literal[
 #: Rules whose value is a name, which the act may write in any case: a correction is given in
 #: the case the act used (``georgian.in_case_of``).
 _NAME_RULES = frozenset({"AOA.PARTY_NAME", "AOA.REGISTRY_NAME"})
+
+#: Rules comparing a value the act writes with the one the contract (or the registry) writes.
+#: On a scan, a difference scanning explains is a misreading to check, not a mistake.
+_OCR_COMPARED = frozenset(
+    {
+        "AOA.DIRECTOR", "AOA.PARTY_NAME", "AOA.PARTY_ADDRESS", "AOA.PROJECT_NAME", "AOA.BANK",
+        "AOA.ID_CODES", "AOA.CADASTRAL", "AOA.REGISTRY_NAME", "AOA.REGISTRY_ADDRESS",
+        "AOA.REGISTRY_DIRECTOR",
+    }
+)  # fmt: skip
+#: Of those, the ones whose value is a name that takes case endings.
+_NAME_VALUED = frozenset(
+    {"AOA.DIRECTOR", "AOA.PARTY_NAME", "AOA.PROJECT_NAME", "AOA.REGISTRY_NAME",
+     "AOA.REGISTRY_DIRECTOR"}
+)  # fmt: skip
+_MISREAD_KA = "შესაძლოა, სკანირებისას არასწორად წაიკითხა — გადაამოწმეთ ქაღალდის ორიგინალთან. "
+_MISREAD_EN = "Possibly misread from the scan - check the paper original. "
 
 #: Bank details: the account (IBAN) and the bank's code (BIC), told apart by ``unit``.
 _BANK_TYPES = frozenset({FactType.bank_account, FactType.bank_code})
@@ -245,7 +266,18 @@ _ACT_DATE_KEYS = ("გაფორმდა", "გაფორმების �
 _ACT_SIGNED = re.compile(r"გაფორმდა|გაფორმების\s+თარიღი(?![ა-ჰ])")
 #: An advance or prepayment clause: a date there is a payment's, never the act's.
 _ADVANCE_WORDS = re.compile(r"ავანს|წინასწარ|advance|prepay", re.IGNORECASE)
-_PERIOD_KEYS = ("შესრულდა", "შესრულების თარიღი", "შესრულების პერიოდი")
+#: What opens the service period: "შესრულდა …", a "შესრულების თარიღი" heading, and the other
+#: ways acts say it - "გაწეულია 01.11.2026 - 30.11.2026 პერიოდში" (the services rendered), a
+#: "საანგარიშო პერიოდი" (reporting period) heading.
+_PERIOD_KEYS = (
+    "შესრულდა",
+    "შესრულების თარიღი",
+    "შესრულების პერიოდი",
+    "გაწეულია",
+    "გაიწია",
+    "საანგარიშო პერიოდ",
+    "მომსახურების პერიოდ",
+)
 
 #: The window a service period is held to (``_term_window``), as the messages name it: (Georgian,
 #: in the dative "სცდება" takes; English).
@@ -299,10 +331,15 @@ class DocumentView:
     )
 
     @classmethod
-    def build(cls, doc_id: str, text: str) -> DocumentView:
-        lines = tuple(line for line in map(normalize_confusables, text.split("\n")) if line)
+    def build(cls, doc_id: str, text: str, *, ocr: bool = False) -> DocumentView:
+        """``ocr`` says the text came from a scan: its IBANs and bank codes are put back in shape
+        (``repair_codes``, which keeps the length), and ``written`` keeps what the scan read."""
+        fix = repair_codes if ocr else (lambda t: t)
+        lines = tuple(
+            line for line in (fix(normalize_confusables(x)) for x in text.split("\n")) if line
+        )
         written = normalize_layout(text)
-        text = fold_look_alikes(written)
+        text = fold_look_alikes(fix(written))
         # one code under two names stays two parties here: that is AOA.ID_CODE_PARTY's evidence
         parties = find_parties(text, split_conflicts=True)
         return cls(doc_id=doc_id, text=text, parties=parties, lines=lines, written=written)
@@ -400,9 +437,16 @@ _CONTRACT_REFERENCE = re.compile(r"\s*[„“\"]?\s*(?:N\s*\S+\s*)?ხელშ�
 
 
 def _date_hits_near(
-    text: str, keys: tuple[str, ...], window: int = 160
+    text: str,
+    keys: tuple[str, ...],
+    window: int = 160,
+    *,
+    skip: Callable[[RuleHit], bool] | None = None,
 ) -> list[tuple[date, RuleHit]]:
-    """Dates that follow one of the given keywords, in document order, with where each was read.
+    """Dates that follow one of the given keywords, in document order, with where each was read,
+    each date once. ``skip`` drops a hit before that: a date set aside must not take the place
+    of the same date written where it counts - an act dated the day its period ends, read first
+    under the period's heading and dropped as the act's, took the period's end with it.
 
     Anchoring on the section wording is far more reliable than the generic keyword-proximity
     classifier, because these documents put each date under its own numbered heading.
@@ -414,6 +458,8 @@ def _date_hits_near(
     out: list[tuple[date, RuleHit]] = []
     for h in hits:
         if any(s <= h.start <= s + window for s in starts):
+            if skip is not None and skip(h):
+                continue
             d = date.fromisoformat(str(h.normalized))
             if all(d != seen for seen, _ in out):
                 out.append((d, h))
@@ -464,10 +510,14 @@ class AoaChecker:
         rates: RateProvider | None = None,
         advance: AdvanceInput | None = None,
         review: ScopeReviewSet | None = None,
+        ocr: bool = False,
         speller: Lexicon | SpellingUnavailable | None = None,
     ) -> None:
         self.aoa = aoa
         self.contract = contract
+        #: either document was read from a scan: a difference scanning explains is reported as a
+        #: misreading to check against the paper, not as a mistake (``_misread``)
+        self.ocr = ocr
         #: the dictionary for the prose spelling rule (``aoa_spelling.open_speller``), or why
         #: there is none; None skips that rule with a note
         self.speller = speller
@@ -508,6 +558,9 @@ class AoaChecker:
         needs_review: bool = False,
         reviewed_by: Literal["llm"] | None = None,
     ) -> None:
+        if severity == "error" and self._misread(rule_id, actual, expected):
+            severity, needs_review = "warning", True
+            ka, en = _MISREAD_KA + ka, _MISREAD_EN + en
         # One finding per mistake. The same text can be read twice - a clause repeated in an
         # annex, a table cell the parser emits in two places - and each copy sits at another
         # offset, so the key leaves the span out: with it, no copy would ever match.
@@ -531,6 +584,19 @@ class AoaChecker:
                 reviewed_by=reviewed_by,
             )
         )
+
+    def _misread(self, rule_id: str, actual: str | None, expected: str | None) -> bool:
+        """On a scanned document, whether a value's difference from the contract's is one that
+        scanning makes (``ocr.misread_explains``) - for a name, in any of its case forms, since a
+        misread act may inflect it differently from the correction it was given."""
+        if not (self.ocr and actual and expected and rule_id in _OCR_COMPARED):
+            return False
+        if misread_explains(actual, expected):
+            return True
+        if rule_id not in _NAME_VALUED:
+            return False
+        meant = lemma(expected)
+        return any(misread_explains(actual, inflect(meant, case)) for case in CASES)
 
     def _skip(self, rule_id: str, why_ka: str, why_en: str) -> None:
         note = SkipNote(rule_id=rule_id, reason_ka=why_ka, reason_en=why_en)
@@ -596,10 +662,10 @@ class AoaChecker:
         text = self.aoa.text
         opens = sorted(m.end() for k in _PERIOD_KEYS for m in re.finditer(re.escape(k), text))
         act = self._act_date()
+        # the act's own date written after the period is not part of it
+        is_act = (lambda h: h.start == act[1].start) if act is not None else None
         out: list[tuple[date, RuleHit]] = []
-        for d, h in _date_hits_near(text, _PERIOD_KEYS):
-            if act is not None and h.start == act[1].start:
-                continue  # the act's own date written after the period is not part of it
+        for d, h in _date_hits_near(text, _PERIOD_KEYS, skip=is_act):
             if _CONTRACT_REFERENCE.match(text, h.end):
                 continue  # "... შესრულდა 2026 წლის 1 მარტის ხელშეკრულების შესაბამისად"
             i = bisect_right(opens, h.start)
@@ -824,9 +890,11 @@ class AoaChecker:
             if spelled is None:
                 fix = number_words_typo(words, int(digits)) if digits.is_integer() else None
                 if fix is not None:
+                    # the amount in words is the fee's operative statement: misspelled, it must be
+                    # corrected before the act is signed, however plain the intended number is
                     self._add(
                         "AOA.AMOUNT_WORDS",
-                        "warning",
+                        "error",
                         f"თანხა სიტყვიერად შეცდომითაა დაწერილი: „{words}“, უნდა იყოს „{fix}“",
                         f"the amount in words is misspelled: '{words}', should be '{fix}'",
                         expected=fix,
@@ -913,13 +981,24 @@ class AoaChecker:
         same day; for a partial month (1-15 August) this rule follows the instruction's wording
         and expects the month's end. The messages say so, rather than "end of the period".
         """
-        period = [d for d, _ in self._period_hits()]
+        hits = self._period_hits()
+        period = [d for d, _ in hits]
         act = self._act_date()
         if not period:
             self._skip(
                 "AOA.ACT_DATE",
                 "აქტში ვერ მოიძებნა მომსახურების შესრულების პერიოდი",
                 "execution period not found in the act",
+            )
+            return
+        if len(hits) == 1 and hits[0][1].raw_text.rstrip().endswith("დან"):
+            # "from 1 April" and no end: the end is there but was not read (a scan garbled it),
+            # and a start is no date to sign the act on
+            self._skip(
+                "AOA.ACT_DATE",
+                "მომსახურების პერიოდის დასასრული ვერ წაიკითხა, ამიტომ აქტის თარიღი არ შემოწმდა",
+                "the end of the service period could not be read, so the act's date was not "
+                "checked against it",
             )
             return
         if act is None:
@@ -936,6 +1015,22 @@ class AoaChecker:
         if act_date == expected:
             return
         window = _term_window(self.contract.term()) if self.contract is not None else None
+        if window is None and (act_date.month, act_date.day) == (expected.month, expected.day):
+            # a year apart, and no contract term to say which year is right: one of the two is
+            # mistyped, and the report asks rather than corrects
+            self._add(
+                "AOA.ACT_DATE",
+                "warning",
+                f"აქტის თარიღი ({act_date}) და მომსახურების პერიოდი ({end}) სხვადასხვა წელსაა — "
+                "ერთ-ერთში წელი შეცდომითაა; ხელშეკრულების ვადა ვერ წაიკითხა, ამიტომ ვერ "
+                "დადგინდა, რომელში",
+                f"the act's date ({act_date}) and the service period ({end}) are a year apart - "
+                "one of them has the year wrong; the contract's term could not be read, so which "
+                "one cannot be told",
+                actual=act_hit.raw_text,
+                span=(act_hit.start, act_hit.end),
+            )
+            return
         if window is not None and _within(act_date, window) and not _within(expected, window):
             # The act is dated inside the contract's term and the period is not: the period is
             # the odd one out (a year typed wrong), and AOA.PERIOD_IN_TERM names it. Moving the
@@ -1389,6 +1484,7 @@ class AoaChecker:
                 p.address,
                 match.address,
             )
+            self._proxies(p, match)
             for d in p.directors:
                 if any(names_match(d, cd) for cd in match.directors):
                     continue
@@ -1421,6 +1517,31 @@ class AoaChecker:
                         actual=form,
                         span=span,
                     )
+
+    def _proxies(self, p: Party, match: Party) -> None:
+        """AOA.DIRECTOR, as a warning: the act is signed for ``p`` under a power of attorney by
+        someone the contract does not name. Not provably wrong - the client's rule says the
+        authority must be checked - so the report asks for the power of attorney, at every place
+        the attorney is named, and proposes no name to write instead."""
+        named = [*match.directors, *match.proxies]
+        for proxy in p.proxies:
+            if any(names_match(proxy, n) for n in named):
+                continue
+            director = match.directors[0] if match.directors else None
+            ka_dir = f"; ხელშეკრულებით ხელმომწერია {director}" if director else ""
+            en_dir = f"; the contract names {director}" if director else ""
+            forms: list[tuple[str, tuple[int, int] | None]] = [*self._written_forms(proxy)]
+            for form, span in forms or [(proxy, self._find_span(proxy))]:
+                self._add(
+                    "AOA.DIRECTOR",
+                    "warning",
+                    f"აქტს {match.name}-ის სახელით ხელს აწერს მინდობილობით მოქმედი პირი „{form}“"
+                    f"{ka_dir} — გადაამოწმეთ მინდობილობა",
+                    f"the act is signed for {match.name} under a power of attorney by '{form}'"
+                    f"{en_dir} - check the power of attorney",
+                    actual=form,
+                    span=span,
+                )
 
     def _id_code_party(self, p: Party, match: Party, owner: Party) -> None:
         """AOA.ID_CODE_PARTY: the act gives ``p`` (the contract's ``match``) the code the contract
@@ -2879,16 +3000,24 @@ def check_aoa(
     rates: RateProvider | None = None,
     advance: AdvanceInput | None = None,
     review: ScopeReviewSet | None = None,
+    aoa_ocr: bool = False,
+    contract_ocr: bool = False,
     speller: Lexicon | SpellingUnavailable | None = None,
 ) -> CheckReport:
+    """``aoa_ocr`` / ``contract_ocr`` say a document's text came from a scan (OCR)."""
     return AoaChecker(
-        aoa=DocumentView.build(aoa_id, aoa_text),
-        contract=DocumentView.build(contract_id, contract_text) if contract_text else None,
+        aoa=DocumentView.build(aoa_id, aoa_text, ocr=aoa_ocr),
+        contract=(
+            DocumentView.build(contract_id, contract_text, ocr=contract_ocr)
+            if contract_text
+            else None
+        ),
         registry=registry,
         contractor_type=contractor_type,
         rates=rates,
         advance=advance,
         review=review,
+        ocr=aoa_ocr or contract_ocr,
         speller=speller,
     ).run()
 

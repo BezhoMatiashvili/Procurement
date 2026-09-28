@@ -92,7 +92,9 @@ strict_findings: true             # anything else reported (any severity) is a f
   comments whose anchored text contains `text`.
 * Which rule owns which mistake:
   * wrong digits and/or words of the fee → `AOA.FEE` (+ `AOA.AMOUNT_WORDS` when digits and words
-    disagree); words misspelled (`ასოი`) → `AOA.AMOUNT_WORDS` with the correct words;
+    disagree); words misspelled (`ასოი`) → `AOA.AMOUNT_WORDS`, an error, with the correct words
+    (words that read as no number and as no misspelling of the figure are a warning: the reader
+    may be at fault);
   * a month name, a Latin/Cyrillic letter inside a Georgian word, or a prose typo →
     `AOA.SPELLING` with the corrected word;
   * the service period's year outside the contract term → `AOA.PERIOD_IN_TERM` (text = the

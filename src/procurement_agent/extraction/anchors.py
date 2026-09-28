@@ -40,6 +40,12 @@ _QUOTED = rf"[{_Q}]([^{_Q}]{{2,90}}?)[{_Q}]"
 _LEGAL_FORM = r"შპს|სს|ააიპ|სსიპ|ი\s*/\s*მ|ინდ(?:\.|ივიდუალური)?\s*მეწარმ[ეის]*"
 
 _PARTY_NAME = re.compile(rf"(?<![ა-ჰ])({_LEGAL_FORM})\s*{_QUOTED}")
+#: An individual entrepreneur or a natural person is named, not quoted: "ი/მ ირაკლი სულაძე",
+#: "ფ/პ ანა ბერიძე" - a first name and a surname after the abbreviation.
+_PERSON_PARTY = re.compile(
+    r"(?<![ა-ჰ])(ი\s*/\s*მ|ფ\s*/\s*პ|ინდ(?:\.|ივიდუალური)?\s*მეწარმე)\s+"
+    r"([ა-ჰ]{2,20}\s+[ა-ჰ]{2,25})(?![ა-ჰ])"
+)
 _ID_CODE = re.compile(
     r"(?:ს\s*/\s*კ|საიდენტიფიკაციო\s*(?:კოდი|ნომერი)?|პირადი\s*ნომერი)\s*[:№#-]?\s*(\d{9}|\d{11})(?!\d)",
     re.IGNORECASE,
@@ -72,8 +78,15 @@ _DIRECTOR = re.compile(
     r"(?!მოადგილ|მოვალეობ|შემსრულებ)"
     r"([ა-ჰ]{2,20}(?:\s+[ა-ჰ]{2,25}){1,2})"
 )
+# "წარმოდგენილი მინდობილობით მოქმედი პირის, ლევან გელაშვილის სახით", "მინდობილობით: ლევან
+# გელაშვილი": a signatory acting under a power of attorney, not the party's director
+_PROXY = re.compile(
+    r"(?:მინდობილობით(?:\s+მოქმედი\s+პირ(?:ი|ის|მა)?)?|რწმუნებულ(?:ი|ის|მა))(?![ა-ჰ])"
+    r"\s*[:,]?\s*([ა-ჰ]{2,20}\s+[ა-ჰ]{2,25})(?![ა-ჰ])"
+)
 _PROJECT_WORD = r"პრო[ეა]{1,3}ქტ[ა-ჰ]*"
-_PROJECT = re.compile(rf"{_PROJECT_WORD}\s*{_QUOTED}")
+# "პროექტ „ზღვის რეზიდენსი“", and after a dash or a colon: "პროექტის - „ზღვის რეზიდენსი“"
+_PROJECT = re.compile(rf"{_PROJECT_WORD}\s*(?:[-\u2013\u2014:]\s*)?{_QUOTED}")
 _PROJECT_REV = re.compile(rf"{_QUOTED}\s*{_PROJECT_WORD}")
 _IBAN = re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b")
 # An IBAN is also printed in groups of four ("GE29 NB00 0000 ..."). The grouped form can run
@@ -162,6 +175,8 @@ class Party:
     id_code: str | None = None
     address: str | None = None
     directors: list[str] = field(default_factory=list)
+    #: who signs for the party under a power of attorney, in its place of a director
+    proxies: list[str] = field(default_factory=list)
     role: str | None = None
     is_bank: bool = False
     #: IBANs stated inside this party's block of requisites, in document order
@@ -249,7 +264,14 @@ def find_parties(text: str, *, split_conflicts: bool = False) -> list[Party]:
     extraction pipeline does not, so what it reads is unchanged.
     """
     text = _prepare(text)
-    matches = list(_PARTY_NAME.finditer(text))
+    quoted = list(_PARTY_NAME.finditer(text))
+    people = [
+        m
+        for m in _PERSON_PARTY.finditer(text)
+        if not any(w in _NOT_A_NAME for w in m.group(2).split())
+        and not any(q.start() <= m.start() < q.end() for q in quoted)
+    ]
+    matches = sorted([*quoted, *people], key=lambda m: m.start())
     if not matches:
         return []
 
@@ -260,7 +282,9 @@ def find_parties(text: str, *, split_conflicts: bool = False) -> list[Party]:
         window = text[start:end]
         before = text[max(0, start - 40) : start]
 
-        party = Party(name=_clean(f"{m.group(1)} {m.group(2)}"), span=m.span())
+        # "ი / მ" and "ი/მ" are one legal form
+        legal = re.sub(r"\s*/\s*", "/", m.group(1))
+        party = Party(name=_clean(f"{legal} {m.group(2)}"), span=m.span())
         # "ბანკი: სს „საქართველოს ბანკი“" and "...გადარიცხვით: სს „საქართველოს ბანკი“,
         # ბანკის კოდი:" are payment details, not contracting parties. A real party always
         # brings an identification code with it, so require one before believing the name.
@@ -283,6 +307,12 @@ def find_parties(text: str, *, split_conflicts: bool = False) -> list[Party]:
                 cand = " ".join(words[:2])
                 if not any(names_match(cand, d) for d in party.directors):
                     party.directors.append(cand)
+        for pm in _PROXY.finditer(window):
+            cand = _clean(pm.group(1))
+            if cand.split()[0] not in _NOT_A_NAME and not any(
+                names_match(cand, p) for p in party.proxies
+            ):
+                party.proxies.append(cand)
         if rm := _ROLE.search(window):
             party.role = _clean(rm.group(1) or rm.group(2) or "")
             # "(შემდგომში „მომსახურება“)" after a name in a clause defines the service, not the
@@ -326,6 +356,9 @@ def find_parties(text: str, *, split_conflicts: bool = False) -> list[Party]:
         for d in p.directors:
             if not any(names_match(d, e) for e in existing.directors):
                 existing.directors.append(d)
+        for d in p.proxies:
+            if not any(names_match(d, e) for e in existing.proxies):
+                existing.proxies.append(d)
         last = existing
     return merged
 

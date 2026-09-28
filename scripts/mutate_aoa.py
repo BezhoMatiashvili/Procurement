@@ -2310,7 +2310,9 @@ def main(argv: list[str] | None = None) -> int:
     logging.disable(logging.WARNING)
     settings = Settings(env="dev", docling_artifacts_path=ROOT / "models" / "docling")
     keep = (
-        Path(args.keep_failures).resolve()
+        # absolute, not resolved: samples/ may be a symlink (a worktree), and a resolved path
+        # would no longer sit under ROOT
+        Path(args.keep_failures).absolute()
         if args.keep_failures
         else ROOT / "samples" / "mutations" / "aoa" / f"seed-{args.seed}"
     )

@@ -54,3 +54,6 @@ eval_runs/
 .idea/
 .vscode/
 *.swp
+
+# --- Local tool state (agent worktrees, editor settings) ---
+.claude/

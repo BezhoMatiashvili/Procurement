@@ -26,6 +26,7 @@ __all__ = [
     "money_amounts",
     "money_hits",
     "number_of",
+    "read_words",
     "render_figure_like",
     "word_amounts",
     "words_for",
@@ -44,7 +45,10 @@ FIGURE = r"\d{1,3}(?:[ \u00a0.,]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?"
 #: "100 (ასი) ლარს" - a figure, then the same number written out. Digits may appear inside the
 #: brackets only for tetri ("ლარი და 50 თეთრი").
 _DIGITS_THEN_WORDS = re.compile(
-    rf"(?<![\d.,])({FIGURE})(?!\d)\s*\(\s*([ა-ჰ][ა-ჰ0-9 ,.]{{1,80}}?)\s*\)"
+    rf"(?<![\d.,])({FIGURE})(?!\d)\s*\(\s*([ა-ჰ][ა-ჰ0-9 ,.]{{1,80}}?)\s*"
+    # a scan reads the closing bracket as ":" or "|" now and then; before a currency word
+    # nothing else can be meant
+    r"(?:\)|[:;|\]}](?=\s*(?:აშშ\s+)?(?:ლარ|დოლარ|ევრო)))"
 )
 #: Currency words inside the brackets: "(ასი ლარი)", "(ათასი აშშ დოლარი)".
 _CURRENCY_WORD = re.compile(r"(?:აშშ\s+)?(?:ლარ|დოლარ|ევრო|ფუნტ|რუბლ)[ა-ჰ]*")
@@ -208,7 +212,7 @@ def _split_tetri(inner: str) -> tuple[str, str] | None:
     return head[:cut], tetri
 
 
-def _read_words(inner: str) -> tuple[str, float | None]:
+def read_words(inner: str) -> tuple[str, float | None]:
     """The numeral part of a bracket and its value, tetri included: "ასი ლარი და 50 თეთრი" and
     "ასი ლარი და ორმოცდაათი თეთრი" are ("ასი", 100.5). A value that does not parse strictly is
     None, and so are tetri that are not 0-99."""
@@ -236,7 +240,7 @@ def digits_and_words(text: str) -> list[DigitsAndWords]:
         if digits is None:
             continue
         inner = m.group(2).strip()
-        words, spelled = _read_words(inner)
+        words, spelled = read_words(inner)
         at = text.find(words, m.start(2), m.end(2) + 1) if words else -1
         words_span = (at, at + len(words)) if at >= 0 else m.span(2)
         out.append(

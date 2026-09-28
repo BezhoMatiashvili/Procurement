@@ -39,10 +39,18 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from procurement_agent.checks.amounts import NUM_IN_TEXT, looks_like_numeral, number_of
+from procurement_agent.checks.amounts import (
+    FIGURE,
+    NUM_IN_TEXT,
+    looks_like_numeral,
+    number_of,
+    read_words,
+)
 from procurement_agent.checks.findings import Finding, Severity, SkipNote
-from procurement_agent.extraction.anchors import bic_is_well_formed, find_anchors
+from procurement_agent.extraction.anchors import bic_is_well_formed, find_anchors, find_parties
 from procurement_agent.extraction.georgian import (
+    MixedWord,
+    is_georgian_word,
     lemma,
     mixed_script_words,
     month_typo,
@@ -55,6 +63,7 @@ from procurement_agent.extraction.normalize import (
     amounts_equal,
     confusable_chars,
     iban_is_valid,
+    name_stem,
     names_match,
     normalize_confusables,
     normalize_name,
@@ -62,7 +71,7 @@ from procurement_agent.extraction.normalize import (
     parse_number,
     strip_quotes,
 )
-from procurement_agent.extraction.rules import run_rules
+from procurement_agent.extraction.rules import RuleHit, find_dates, run_rules
 from procurement_agent.extraction.schemas import FactType
 from procurement_agent.extraction.spellcheck import classify_difference
 from procurement_agent.ingestion.segmenter import Segment, document_text, key_of
@@ -369,7 +378,7 @@ def _value_key(ft: FactType, value: str, normalized: str | float | None) -> str:
     return f"s:{normalize_name(value)}"
 
 
-def hits_of(text: str) -> list[_Hit]:
+def hits_of(text: str, *, reference: str = "") -> list[_Hit]:
     """Every typed value in ``text``, anchors first, deduplicated by type and value.
 
     Anchors before rules is the ordering ``merger.merge`` already uses: a value read from behind
@@ -379,23 +388,145 @@ def hits_of(text: str) -> list[_Hit]:
     passes must agree about what the document says or typography starts inventing differences:
     a revision that replaced every hyphen with an en dash reported the contract number changing
     from "PR-2026/017" to "PR", because the number pattern stopped matching at the dash while
-    the line itself was correctly called formatting-only.
+    the line itself was correctly called formatting-only. For the same reason a stray letter of
+    another alphabet inside a Georgian word is read past (``_as_meant``); ``reference``, the
+    text this one is compared with, says which word it was meant to be.
     """
-    text = normalize_confusables(text)
+    text = _as_meant(normalize_confusables(text), reference)
     out: list[_Hit] = []
     seen: set[tuple[FactType, str]] = set()
+
+    def keep(hit: _Hit) -> None:
+        k = (hit.type, _value_key(hit.type, hit.value, hit.normalized))
+        if k not in seen:
+            seen.add(k)
+            out.append(hit)
+
     for a in find_anchors(text):
-        k = (a.type, _value_key(a.type, a.value, a.normalized))
-        if k in seen:
+        keep(_Hit(a.type, a.value, a.normalized, a.unit, None, "anchor"))
+    for hit in _rule_hits(text):
+        keep(hit)
+    return out
+
+
+#: A Latin or Cyrillic letter: inside a Georgian word, a slip of the keyboard layout.
+_FOREIGN_LETTER = re.compile(r"[A-Za-zЀ-ӿ]")
+#: A slip is a letter or two. A word with more is a name written in two alphabets, "ABCჯგუფი",
+#: and is read as written.
+_MAX_SLIP = 2
+
+
+def _slips(text: str, vocabulary: frozenset[str] = frozenset()) -> list[MixedWord]:
+    """The Georgian words of ``text`` with a Latin or Cyrillic letter or two typed into them."""
+    return [
+        w
+        for w in mixed_script_words(text, vocabulary=vocabulary)
+        if 0 < len(_FOREIGN_LETTER.findall(w.word)) <= _MAX_SLIP
+    ]
+
+
+def _as_meant(text: str, reference: str = "") -> str:
+    """``text`` with every Georgian word that has a Latin or Cyrillic letter typed into it read
+    as the word it was meant to be.
+
+    The slip is reported once, by ``spelling_deltas``, as the misspelling it is. Read literally,
+    the same one letter was also a second, false change: a stray letter in "სამუშაო" (working)
+    turned "five working days" into a payment term removed, and one in "დირექტორის" (director)
+    removed the director, whose label no longer read as one. The meant word is the one
+    ``reference`` writes one letter away, else the word without the stray letters. A word with
+    a digit inside it and no foreign letter is left as it is.
+    """
+    if not _slips(text):
+        return text
+    vocabulary = frozenset(
+        w for w, _, _ in georgian_words(normalize_confusables(reference)) if is_georgian_word(w)
+    )
+    out: list[str] = []
+    pos = 0
+    for word in _slips(text, vocabulary):
+        out.append(text[pos : word.start])
+        out.append(word.correction or _FOREIGN_LETTER.sub("", word.word))
+        pos = word.end
+    out.append(text[pos:])
+    return "".join(out)
+
+
+#: A period as ``docs/GOLD_SPEC.md`` writes it, "start/end"; ".." for an end not stated.
+_ISO_RANGE = re.compile(r"^(?:\d{4}-\d{2}-\d{2}|\.\.)/(?:\d{4}-\d{2}-\d{2}|\.\.)$")
+#: What stands between the two dates of one period: "1 მარტიდან 31 მარტის ჩათვლით" (the
+#: first date in the "from" form), "01.03.2026-დან 30.04.2026-მდე", "01.03.2026 - 30.04.2026",
+#: "1 March 2026 to 31 March 2026". Two dates joined by "და" (and) are two dates.
+_RANGE_GAP = re.compile(r"-?დან[\s,]*|\s*-\s*|\s+(?:to|until|till|through)\s+", re.IGNORECASE)
+_RANGE_AFTER_FROM = re.compile(r"[\s,]*")
+
+
+def _rule_hits(text: str) -> list[_Hit]:
+    """``run_rules``'s values, with a period written from one date to another read as one value.
+
+    A period is one entity: moved a year, it is one change. Read as two dates it was two
+    findings ("start 2026-03-01 → 2027-03-01", "end 2026-03-31 → 2027-03-31"), and a reader
+    could not tell whether one period moved or two unrelated dates did. The range is written
+    "start/end", the form the gold and the extraction use (docs/GOLD_SPEC.md).
+    """
+    rules = run_rules(text)
+    out: list[_Hit] = []
+    i = 0
+    while i < len(rules):
+        r = rules[i]
+        end = _range_end(text, rules, i)
+        if end is None:
+            out.append(_Hit(r.type, r.value, r.normalized, r.unit, r.currency, "rules"))
+            i += 1
             continue
-        seen.add(k)
-        out.append(_Hit(a.type, a.value, a.normalized, a.unit, None, "anchor"))
-    for r in run_rules(text):
-        k = (r.type, _value_key(r.type, r.value, r.normalized))
-        if k in seen:
+        j, ft = end
+        span = f"{r.normalized}/{rules[j].normalized}"
+        out.append(_Hit(ft, span, span, None, None, "rules"))
+        i = j + 1
+    return out
+
+
+def _range_end(text: str, rules: list[RuleHit], i: int) -> tuple[int, FactType] | None:
+    """The hit that closes a period opened by ``rules[i]``, and the period's type, if any."""
+    first = rules[i]
+    if not _ISO_DATE.match(str(first.normalized)):
+        return None
+    j = i + 1
+    while j < len(rules) and rules[j].start < first.end:  # a hit read inside the first date
+        j += 1
+    if j == len(rules):
+        return None
+    second = rules[j]
+    if not _ISO_DATE.match(str(second.normalized)) or str(first.normalized) > str(
+        second.normalized
+    ):
+        return None
+    if first.type == second.type or second.type is FactType.date:
+        ft = first.type
+    elif first.type is FactType.date:
+        ft = second.type
+    else:
+        return None
+    gap = text[first.end : second.start]
+    marked = _RANGE_GAP.fullmatch(gap) is not None or (
+        text[first.start : first.end].endswith("დან") and _RANGE_AFTER_FROM.fullmatch(gap)
+    )
+    return (j, ft) if marked else None
+
+
+def _is_range(hit: _Hit) -> bool:
+    return isinstance(hit.normalized, str) and _ISO_RANGE.match(hit.normalized) is not None
+
+
+def _endpoints(hits: list[_Hit]) -> list[_Hit]:
+    """The hits with every period read back as the dates it states."""
+    out: list[_Hit] = []
+    for hit in hits:
+        if not _is_range(hit):
+            out.append(hit)
             continue
-        seen.add(k)
-        out.append(_Hit(r.type, r.value, r.normalized, r.unit, r.currency, "rules"))
+        for day in str(hit.normalized).split("/"):
+            if day != "..":
+                out.append(_Hit(hit.type, day, day, None, None, hit.source))
     return out
 
 
@@ -576,6 +707,8 @@ def _delta(a: _Hit | None, b: _Hit | None) -> ValueDelta | None:
             d1, d2 = _iso_to_date(a.normalized), _iso_to_date(b.normalized)
             if d1 and d2:
                 days = (d2 - d1).days
+        if _is_range(a) and _is_range(b):
+            note = _range_note(str(a.normalized), str(b.normalized))
         if ft in _BANK:
             note = _bank_note(a.value, b.value)
         if ft in _NAMES and note is None:
@@ -589,8 +722,8 @@ def _delta(a: _Hit | None, b: _Hit | None) -> ValueDelta | None:
             severity=severity,
             label_en=en,
             label_ka=ka,
-            left=a.value,
-            right=b.value,
+            left=_as_reported(ft, a.value),
+            right=_as_reported(ft, b.value),
             delta=delta,
             delta_pct=pct,
             days=days,
@@ -605,17 +738,119 @@ def _delta(a: _Hit | None, b: _Hit | None) -> ValueDelta | None:
         severity=severity,
         label_en=en,
         label_ka=ka,
-        left=a.value if a is not None else None,
-        right=b.value if b is not None else None,
+        left=_as_reported(ft, a.value) if a is not None else None,
+        right=_as_reported(ft, b.value) if b is not None else None,
     )
+
+
+#: Names a document inflects, and a finding states in the nominative (docs/GOLD_SPEC.md).
+_NOMINATIVE = frozenset({FactType.party_director, FactType.project_name})
+
+
+def _as_reported(ft: FactType, value: str) -> str:
+    """A value the way a finding states it: a director or a project by name, in the nominative.
+
+    The preamble names the director in the genitive ("დირექტორის ნინო კაპანაძის სახით"), the
+    signature block in the nominative; a project is "„ქარვის კოშკისთვის“" in one clause and
+    "„ქარვის კოშკის“" in the next. Taken as written, one misspelled name was one finding per case
+    form, each in a grammar the reader then had to undo; the name itself is what changed.
+    """
+    if ft in _NOMINATIVE:
+        return lemma(value)
+    return value
+
+
+def _range_note(left: str, right: str) -> tuple[str, str] | None:
+    """How far each end of a period moved: "start +365 days, end +365 days"."""
+    ends = [
+        (_iso_to_date(a), _iso_to_date(b))
+        for a, b in zip(left.split("/"), right.split("/"), strict=True)
+    ]
+    parts_en: list[str] = []
+    parts_ka: list[str] = []
+    for (d1, d2), en, ka in zip(ends, ("start", "end"), ("დასაწყისი", "დასასრული"), strict=True):
+        if d1 is None or d2 is None or d1 == d2:
+            continue
+        parts_en.append(f"{en} {(d2 - d1).days:+d} days")
+        parts_ka.append(f"{ka} {(d2 - d1).days:+d} დღე")
+    return (", ".join(parts_en), ", ".join(parts_ka)) if parts_en else None
 
 
 def deltas_between(
     left_text: str, right_text: str, *, types: frozenset[FactType] | None = None
 ) -> list[ValueDelta]:
     """Typed differences between two pieces of text, paired per fact type."""
-    left_hits = hits_of(left_text) if left_text else []
-    right_hits = hits_of(right_text) if right_text else []
+    left_hits = hits_of(left_text, reference=right_text) if left_text else []
+    right_hits = hits_of(right_text, reference=left_text) if right_text else []
+    return _deltas(left_hits, right_hits, types=types)
+
+
+#: What a document states as a whole rather than on a line: a contract's term and its
+#: performance window, an act's service period, a penalty and the period it counts per.
+_WHOLE_DOCUMENT_TYPES = frozenset(
+    {FactType.execution_period, FactType.validity_period, FactType.penalty}
+)
+
+
+def document_deltas(left_text: str, right_text: str) -> tuple[list[ValueDelta], list[SkipNote]]:
+    """The document-wide field differences: every specific value, compared wherever it is.
+
+    The facts a document states as a whole are read the way ``checks.document_facts`` reads
+    them for the extraction. Date by date, a contract's performance window "from signing until
+    2026-12-31" against its act's service period "2026-03-01 to 2026-03-31" came out as "an
+    execution period of 2026-03-31 added", its term "in force from signing" not at all, and its
+    "0.1% per day" penalty as a bare "0.1%".
+
+    When those readers fail on either document, both are compared line by line and the note
+    says so: a comparison is never lost to one reader, and the failure is not hidden either.
+    """
+    left_hits = hits_of(left_text, reference=right_text)
+    right_hits = hits_of(right_text, reference=left_text)
+    try:
+        left_facts, right_facts = _document_facts(left_text), _document_facts(right_text)
+    except Exception as e:  # one reader failing must not cost the comparison; it is reported
+        note = SkipNote(
+            rule_id="CMP.FIELDS",
+            reason_ka="ვადების, პერიოდებისა და პირგასამტეხლოს მთლიანი დოკუმენტიდან წაკითხვა "
+            f"ვერ მოხერხდა ({type(e).__name__}); ისინი სტრიქონ-სტრიქონ შედარდა",
+            reason_en="the whole-document reading of the term, the periods and the penalties "
+            f"failed ({type(e).__name__}); they were compared line by line",
+        )
+        return _deltas(left_hits, right_hits, types=FIELD_TYPES), [note]
+    return (
+        _deltas(
+            _in_place_of(left_hits, left_facts),
+            _in_place_of(right_hits, right_facts),
+            types=FIELD_TYPES,
+        ),
+        [],
+    )
+
+
+def _document_facts(text: str) -> list[_Hit]:
+    """The whole-document facts ``text`` states, as values."""
+    # imported here: document_facts reads through checks.aoa, which imports compare_llm and so
+    # this module
+    from procurement_agent.checks.document_facts import document_facts
+
+    if not text:
+        return []
+    return [
+        _Hit(f.type, f.normalized, f.normalized, None, None, "document")
+        for f in document_facts(text)
+        if f.type in _WHOLE_DOCUMENT_TYPES
+    ]
+
+
+def _in_place_of(hits: list[_Hit], facts: list[_Hit]) -> list[_Hit]:
+    """``hits`` with ``facts`` in place of the line-level hits of the same types."""
+    stated = {f.type for f in facts}
+    return [h for h in hits if h.type not in stated] + facts
+
+
+def _deltas(
+    left_hits: list[_Hit], right_hits: list[_Hit], *, types: frozenset[FactType] | None
+) -> list[ValueDelta]:
     if types is not None:
         left_hits = [h for h in left_hits if h.type in types]
         right_hits = [h for h in right_hits if h.type in types]
@@ -624,6 +859,10 @@ def deltas_between(
     for ft in sorted(present, key=lambda t: t.value):
         ls = [h for h in left_hits if h.type == ft]
         rs = [h for h in right_hits if h.type == ft]
+        if ls and rs and any(map(_is_range, ls)) != any(map(_is_range, rs)):
+            # one side writes the period from one date to the other, the other names its dates
+            # apart: compare the dates, as a range against a single date means nothing
+            ls, rs = _endpoints(ls), _endpoints(rs)
         for a, b in _pair_hits(ls, rs):
             d = _delta(a, b)
             if d is not None:
@@ -687,7 +926,15 @@ def _display_value(ft: FactType, value: str | None) -> str | None:
         n = as_number(value)
         if n is not None:
             return f"n:{n:.4f}"
+    if ft in _NAMES:
+        return _name_key(value)
     return normalize_name(value)
+
+
+def _name_key(value: str) -> str:
+    """One key for every case form of a name: "ქარვის კოშკისთვის", "ქარვის კოშკის" and
+    "ქარვის კოშკი" are one project, "ნინო კაპანაძის" and "ნინო კაპანაძე" one person."""
+    return name_stem(lemma(value))
 
 
 # --- text-shape classification ------------------------------------------------------------------
@@ -731,14 +978,31 @@ def hidden_character_rules(left: str, right: str) -> list[str]:
     into a bank code in the same paragraph as a plausible wording change was reported as
     neither a banking difference nor a substitution — only as "text changed". That is exactly
     the case where the swap would be deliberate, so it is checked on its own here.
+
+    A Cyrillic letter typed into a Georgian word is not a lookalike of anything around it: it is
+    a stray letter a reader can see, and ``spelling_deltas`` names the word it is in. Counted
+    here as well, the one slip was two findings, one of them quoting the whole paragraph.
     """
     out: list[str] = []
-    if confusable_chars(left) != confusable_chars(right):
+    if confusable_chars(_outside_georgian_words(left)) != confusable_chars(
+        _outside_georgian_words(right)
+    ):
         out.append("CMP.HOMOGLYPH")
     # counted, not collected: a second zero-width space where there was one is still a change
     if Counter(_INVISIBLE.findall(left)) != Counter(_INVISIBLE.findall(right)):
         out.append("CMP.INVISIBLE_CHARS")
     return out
+
+
+def _outside_georgian_words(text: str) -> str:
+    """``text`` without the Georgian words that have a stray letter of another alphabet in them."""
+    out: list[str] = []
+    pos = 0
+    for word in _slips(text):
+        out.append(text[pos : word.start])
+        pos = word.end
+    out.append(text[pos:])
+    return " ".join(out)
 
 
 def inline_ops(left: str, right: str) -> list[InlineOp]:
@@ -775,6 +1039,60 @@ def _numeric_reformat(left: str, right: str) -> bool:
     return bare_left == bare_right
 
 
+#: What a text says once its layout is set aside: its words, its numbers with the separators
+#: inside them, and the signs that carry meaning (the multiplication sign as its code point).
+_MULTIPLY = chr(0x00D7)
+_LAYOUT_TOKEN = re.compile(rf"\d+(?:[.,/:-]\d+)*|[^\W\d_]+|[%№#$€£₾§&+=<>*/{_MULTIPLY}]")
+
+
+def _layout_key(text: str) -> str:
+    """``text`` without its layout: spacing, quotes, dashes, sentence and list punctuation, and
+    where one paragraph or table cell ends and the next begins.
+
+    A table of numbered sections rewritten as numbered paragraphs ("1 | მომსახურება" →
+    "1. მომსახურება"), a paragraph broken before its currency word, a full stop added: the same
+    words and numbers in the same order, and nothing a reader needs to check. A separator
+    between digits is kept - "12.5" is not "125" - and so are %, №, # and currency signs.
+    """
+    return " ".join(_LAYOUT_TOKEN.findall(normalize_confusables(text).lower()))
+
+
+#: The word for "year" a date may be followed by: "2026 წ.", "2026 წელი".
+_YEAR_AFTER = re.compile(r"\s*(?:წლის|წელი|წ\.?)(?![ა-ჰ])")
+
+
+def _same_dates_rewritten(left: str, right: str) -> bool:
+    """True when the only difference is how the same dates are written.
+
+    "2026 წლის 31 მარტი", "31 მარტი, 2026 წ." and "31.03.2026" are one date: its
+    value is compared as a date and has not changed, so the line has nothing else to report.
+    """
+    left_rest, left_dates = _without_dates(left)
+    right_rest, right_dates = _without_dates(right)
+    return (
+        bool(left_dates)
+        and left_dates == right_dates
+        and _layout_key(left_rest) == _layout_key(right_rest)
+    )
+
+
+def _without_dates(text: str) -> tuple[str, list[str]]:
+    """``text`` with its dates cut out, and the dates in ISO form, in order."""
+    folded = normalize_confusables(text)
+    kept: list[str] = []
+    dates: list[str] = []
+    pos = 0
+    for hit in sorted(find_dates(folded), key=lambda h: h.start):
+        if hit.start < pos or not _ISO_DATE.match(str(hit.normalized)):
+            continue
+        kept.append(folded[pos : hit.start])
+        dates.append(str(hit.normalized))
+        year = _YEAR_AFTER.match(folded, hit.end)
+        pos = year.end() if year else hit.end
+    kept.append(folded[pos:])
+    return " ".join(kept), dates
+
+
 _WORD_NUMBER_LABELS: dict[str, tuple[str, str]] = {
     "amount": ("Amount in words", "თანხა სიტყვიერად"),
     "duration": ("Period in words", "ვადა სიტყვიერად"),
@@ -801,13 +1119,47 @@ def _numeral_kind(inner: str, after: str) -> str:
 
 
 def _spelled_numbers(text: str) -> list[tuple[str, str]]:
-    """Every bracketed number in words, with what follows it: [("ასი", "ლარს ..."), ...]."""
+    """Every bracketed number in words, with what follows it: [("ასი", "ლარს ..."), ...].
+
+    The bracket right after a figure holds that figure written out, so it is read as a number in
+    words even misspelled out of recognition - "100 (აი)" - as long as it is a misspelling of
+    the figure's own words: "დანართი 1 (ტექნიკური დავალება)" is not. Missed, such a typo was
+    read as the words removed, and as the amount is still written beside it, not reported at all.
+    """
     out: list[tuple[str, str]] = []
     for m in _PARENTHESIS.finditer(text):
         inner = m.group(1).strip()
-        if looks_like_numeral(inner):
+        if (
+            looks_like_numeral(inner)
+            or _spelled_value(inner) is not None  # "ასი ლარი და 00 თეთრი": currency and tetri
+            or _misspells_figure(text[: m.start()], inner)
+        ):
             out.append((inner, text[m.end() : m.end() + _AFTER]))
     return out
+
+
+_FIGURE_BEFORE = re.compile(rf"(?<![\d.,])({FIGURE})\s*$")
+
+
+def _misspells_figure(before: str, words: str) -> bool:
+    """Whether ``words`` are the figure that ends ``before``, written out with a typo."""
+    m = _FIGURE_BEFORE.search(before[-60:])
+    figure = parse_number(m.group(1)) if m else None
+    if figure is None or figure < 1 or figure != int(figure):
+        return False
+    return number_words_typo(words, int(figure)) is not None
+
+
+def _spelled_display(words: str, value: float) -> str:
+    """A number in words as a finding shows it: "ორი ათას ოთხასი (2400)"."""
+    shown = str(int(value)) if float(value).is_integer() else f"{value:.2f}"
+    return f"{words} ({shown})"
+
+
+def _spelled_value(inner: str) -> float | None:
+    """What a bracket's words say, currency words and tetri read with them: "ასი ლარი და 00
+    თეთრი" is 100, like "ასი" - restating an amount with its tetri changes nothing."""
+    return read_words(inner)[1]
 
 
 def word_amount_deltas(left: str, right: str) -> list[ValueDelta]:
@@ -819,11 +1171,19 @@ def word_amount_deltas(left: str, right: str) -> list[ValueDelta]:
     misspelling it is. Each number is labelled by what it counts: a fee, a period of days, or a
     plain count - "5 (ხუთი) სამუშაო დღე" is no amount.
     """
+    return [d for d, _read in _word_number_changes(left, right)]
+
+
+#: A number in words that changed, and what it read as before and after when both sides read.
+_WordChange = tuple[ValueDelta, tuple[float, float] | None]
+
+
+def _word_number_changes(left: str, right: str) -> list[_WordChange]:
     lp, rp = _spelled_numbers(left), _spelled_numbers(right)
     if [x for x, _ in lp] == [x for x, _ in rp]:
         return []
     sm = difflib.SequenceMatcher(None, [x for x, _ in lp], [x for x, _ in rp], autojunk=False)
-    out: list[ValueDelta] = []
+    out: list[_WordChange] = []
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == "equal":
             continue
@@ -835,9 +1195,9 @@ def word_amount_deltas(left: str, right: str) -> list[ValueDelta]:
     return out
 
 
-def _spelled_delta(a: tuple[str, str] | None, b: tuple[str, str] | None) -> ValueDelta | None:
-    va = parse_number_words(a[0]) if a else None
-    vb = parse_number_words(b[0]) if b else None
+def _spelled_delta(a: tuple[str, str] | None, b: tuple[str, str] | None) -> _WordChange | None:
+    va = _spelled_value(a[0]) if a else None
+    vb = _spelled_value(b[0]) if b else None
     kind = _numeral_kind(*(b or a))  # type: ignore[misc]
     en, ka = _WORD_NUMBER_LABELS[kind]
     severity: Severity = "error" if kind in ("amount", "duration") else "warning"
@@ -845,50 +1205,78 @@ def _spelled_delta(a: tuple[str, str] | None, b: tuple[str, str] | None) -> Valu
         if va is not None and vb is not None:
             if va == vb:
                 return None
-            return ValueDelta(
+            changed = ValueDelta(
                 type=FactType.total_amount if kind == "amount" else FactType.duration,
                 kind="changed",
                 rule_id="CMP.AMOUNT_WORDS",
                 severity=severity,
                 label_en=en,
                 label_ka=ka,
-                left=f"{a[0]} ({va})",
-                right=f"{b[0]} ({vb})",
+                left=_spelled_display(a[0], va),
+                right=_spelled_display(b[0], vb),
                 delta=float(vb - va),
                 delta_pct=round((vb - va) / abs(va) * 100, 2) if va else None,
             )
+            return changed, (va, vb)
         # one side does not read as a number: the same number misspelled, or a changed one
         known, other = (va, b[0]) if va is not None else (vb, a[0])
-        if known is not None and number_words_typo(other, known) is not None:
-            return _spelling(
+        if (
+            known is not None
+            and float(known).is_integer()
+            and number_words_typo(other, int(known)) is not None
+        ):
+            typo = _spelling(
                 a[0],
                 b[0],
                 note=("a number written out with a typo", "რიცხვი სიტყვიერად შეცდომით წერია"),
             )
-        return ValueDelta(
+            return typo, None
+        unreadable = ValueDelta(
             type=FactType.total_amount if kind == "amount" else FactType.duration,
             kind="changed",
             rule_id="CMP.AMOUNT_WORDS",
             severity=severity,
             label_en=en,
             label_ka=ka,
-            left=a[0] if va is None else f"{a[0]} ({va})",
-            right=b[0] if vb is None else f"{b[0]} ({vb})",
+            left=a[0] if va is None else _spelled_display(a[0], va),
+            right=b[0] if vb is None else _spelled_display(b[0], vb),
         )
+        return unreadable, None
     side = a or b
     value = va if a is not None else vb
     if side is None or value is None:
         return None
-    return ValueDelta(
+    gone_or_new = ValueDelta(
         type=FactType.total_amount if kind == "amount" else FactType.duration,
         kind="removed" if a is not None else "added",
         rule_id="CMP.AMOUNT_WORDS",
         severity=severity,
         label_en=en,
         label_ka=ka,
-        left=f"{side[0]} ({value})" if a is not None else None,
-        right=f"{side[0]} ({value})" if b is not None else None,
+        left=_spelled_display(side[0], value) if a is not None else None,
+        right=_spelled_display(side[0], value) if b is not None else None,
     )
+    return gone_or_new, None
+
+
+def _restated(read: tuple[float, float] | None, values: list[ValueDelta]) -> bool:
+    """Whether a number in words that changed is its figure's change told a second time.
+
+    "1 200 (ათას ორასი) ლარს" rewritten as "1 700 (ათას შვიდასი) ლარს" is one new fee, and
+    the amount already says so; the words changed with the digits and still agree with them. A
+    change of the words alone, or of a count no rule reads ("2 (ორი) ეგზემპლარად"), has no
+    such twin and is reported on its own.
+    """
+    if read is None:
+        return False
+    before, after = read
+    for d in values:
+        if d.kind != "changed" or d.left is None or d.right is None:
+            continue
+        x, y = as_number(d.left), as_number(d.right)
+        if x is not None and y is not None and amounts_equal(x, before) and amounts_equal(y, after):
+            return True
+    return False
 
 
 def _spelling(left: str, right: str, *, note: tuple[str, str] | None = None) -> ValueDelta:
@@ -1064,17 +1452,30 @@ def dedup_key(delta: ValueDelta) -> tuple[str, str | None, str | None]:
     The same money can arrive as "48 750,00" from the line it sits on and as "48,750.00 GEL"
     from the document-wide pass. Comparing the strings would list it twice; comparing the
     numbers only works for the numeric types, which is why the text types keep their own rule.
+    A name is one change in whichever case each line writes it (``_name_key``), a penalty
+    whether its line says "0.1%" or its clause "0.1% per day", and a period whether a line
+    reads it as two dates or the document-wide pass as the contract's performance window.
     """
 
     def side(value: str | None) -> str | None:
         if value is None:
             return None
-        if delta.type in _NUMERIC:
+        if delta.type in _NUMERIC or delta.type is FactType.penalty:
             number = as_number(value)
             return f"n:{number:.4f}" if number is not None else normalize_name(value)
+        if delta.type in _NAMES:
+            return _name_key(value)
         return normalize_name(value)
 
-    return (delta.rule_id, side(delta.left), side(delta.right))
+    return (_kind_of_change(delta), side(delta.left), side(delta.right))
+
+
+def _kind_of_change(delta: ValueDelta) -> str:
+    """A delta's rule, except that a period is a period whichever rule typed it: a line reads
+    a contract's performance window as a range of dates, the document-wide pass as the
+    execution period."""
+    ends = [v for v in (delta.left, delta.right) if v is not None]
+    return "period" if ends and all(_ISO_RANGE.match(v) for v in ends) else delta.rule_id
 
 
 # --- alignment ----------------------------------------------------------------------------------
@@ -1278,9 +1679,35 @@ def _align_linear(left: list[Segment], right: list[Segment]) -> tuple[list[_Pair
             pairs.extend((a, None, None) for a in left[i1:i2])
         elif tag == "insert":
             pairs.extend((None, b, None) for b in right[j1:j2])
+        elif i2 - i1 + j2 - j1 > 2 and _laid_out_anew(left[i1:i2], right[j1:j2]):
+            group = f"{_LAYOUT}{i1}"
+            ls, rs = left[i1:i2], right[j1:j2]
+            pairs.extend(
+                (ls[k] if k < len(ls) else None, rs[k] if k < len(rs) else None, group)
+                for k in range(max(len(ls), len(rs)))
+            )
         else:
             pairs.extend(_pair_replace(left[i1:i2], right[j1:j2]))
     return pairs, _similarity_of(ops, pairs, len(lk) + len(rk))
+
+
+#: The group of a block of lines that says the same as before, laid out anew.
+_LAYOUT = "layout:"
+
+
+def _laid_out_anew(left: Sequence[Segment], right: Sequence[Segment]) -> bool:
+    """Whether a rewritten block is the same text in another layout.
+
+    Docling reads a table of numbered sections as one line per cell, "1" and "მომსახურება";
+    written as paragraphs the same rows are "1. მომსახურება". A paragraph broken in two before
+    its currency word is two lines where there was one. Paired line by line, the first came out
+    as twelve removed and rewritten lines, the second as a fee's words "added"; taken as a
+    block, the words and numbers are the same in the same order (``_layout_key``). A character
+    substitution is never layout, so hidden characters are checked first.
+    """
+    before = "\n".join(s.text for s in left)
+    after = "\n".join(s.text for s in right)
+    return not hidden_character_rules(before, after) and _layout_key(before) == _layout_key(after)
 
 
 def _similarity_of(ops: list[_Opcode], pairs: list[_Pair], total: int) -> float:
@@ -1294,7 +1721,11 @@ def _similarity_of(ops: list[_Opcode], pairs: list[_Pair], total: int) -> float:
         return 1.0
     same = sum(i2 - i1 for tag, i1, i2, _j1, _j2 in ops if tag == "equal")
     partial = 0.0
-    for a, b, _group in pairs:
+    for a, b, group in pairs:
+        if group is not None and group.startswith(_LAYOUT):
+            # the same text laid out anew counts whole, line for line on each side
+            partial += 0.5 * ((a is not None) + (b is not None))
+            continue
         if a is not None and b is not None and key_of(a.text) != key_of(b.text):
             partial += difflib.SequenceMatcher(
                 None, key_of(a.text), key_of(b.text), autojunk=False
@@ -1478,6 +1909,20 @@ def _ref(segment: Segment | None) -> SegmentRef | None:
     )
 
 
+def _joined(segments: list[Segment]) -> SegmentRef | None:
+    """One side of a block of lines, as the one reference its hunk carries."""
+    if not segments:
+        return None
+    first = segments[0]
+    return SegmentRef(
+        index=first.index,
+        text="\n".join(s.text for s in segments),
+        kind=first.kind,
+        path=first.path,
+        heading=first.heading,
+    )
+
+
 def _pair_equal(a: Segment, b: Segment) -> bool:
     if a.kind == "sheet_cell" and b.kind == "sheet_cell":
         return _cells_equal(a, b)
@@ -1523,23 +1968,32 @@ def _classify(
         return "changed", "cosmetic", [], ["CMP.FORMATTING"], inline
 
     hidden = hidden_character_rules(a.text, b.text)
+    values = deltas_between(a.text, b.text)
+    bare = bare_number_delta(
+        a.text,
+        b.text,
+        critical=a.kind != "sheet_cell",
+        left_number=a.number,
+        right_number=b.number,
+    )
+    words = [
+        d for d, read in _word_number_changes(a.text, b.text) if not _restated(read, values + bare)
+    ]
     deltas = (
-        deltas_between(a.text, b.text)
-        + word_amount_deltas(a.text, b.text)
+        values
+        + words
         + numeral_word_deltas(a.text, b.text)
         + spelling_deltas(a.text, b.text)
-        + bare_number_delta(
-            a.text,
-            b.text,
-            critical=a.kind != "sheet_cell",
-            left_number=a.number,
-            right_number=b.number,
-        )
+        + bare
     )
     if deltas:
         mat = "critical" if any(d.is_critical for d in deltas) else "substantive"
         return "changed", mat, deltas, sorted({d.rule_id for d in deltas} | set(hidden)), inline
-    if _numeric_reformat(a.text, b.text) and not hidden:
+    if not hidden and (
+        _numeric_reformat(a.text, b.text)
+        or _layout_key(a.text) == _layout_key(b.text)
+        or _same_dates_rewritten(a.text, b.text)
+    ):
         return "changed", "cosmetic", [], ["CMP.FORMATTING"], inline
     return "changed", "substantive", [], sorted({*hidden, "CMP.TEXT_CHANGED"}), inline
 
@@ -1560,6 +2014,33 @@ def _build(
     i = 0
     while i < len(pairs):
         a, b, group = pairs[i]
+
+        if group is not None and group.startswith(_LAYOUT):
+            end = i
+            while end < len(pairs) and pairs[end][2] == group:
+                end += 1
+            run = pairs[i:end]
+            made += 1
+            hid = f"h{made}"
+            hunks.append(
+                Hunk(
+                    id=hid,
+                    kind="changed",
+                    materiality="cosmetic",
+                    rules=["CMP.FORMATTING"],
+                    left=_joined([ra for ra, _rb, _g in run if ra is not None]),
+                    right=_joined([rb for _ra, rb, _g in run if rb is not None]),
+                )
+            )
+            counts.cosmetic += 1
+            counts.changed += 1
+            for ra, rb, _g in run:
+                shape: Literal["replace", "delete", "insert"] = (
+                    "insert" if ra is None else "delete" if rb is None else "replace"
+                )
+                rows.append(DiffRow(tag=shape, left=_ref(ra), right=_ref(rb), hunk_id=hid))
+            i = end
+            continue
 
         if group is not None:
             end = i
@@ -1753,9 +2234,10 @@ def _findings_of(
     minor = 0
     suppressed = 0
     everywhere = _value_keys(left_text), _value_keys(right_text)
+    written = _Written(left_text), _Written(right_text)
     all_deltas = [d for h in hunks for d in h.deltas] + list(field_deltas)
     changed_sides = {
-        (d.rule_id, side)
+        (_kind_of_change(d), side)
         for d in all_deltas
         if d.kind == "changed"
         for side in (_display_value(d.type, d.left), _display_value(d.type, d.right))
@@ -1764,14 +2246,21 @@ def _findings_of(
     def superfluous(d: ValueDelta) -> bool:
         """An addition or removal that is not one: the value is written in the other document
         too (a paragraph moved with an edit), or it is the new or old side of a change already
-        reported ("director X → Y" makes "director Y added" a second report of one change)."""
+        reported ("director X → Y" makes "director Y added" a second report of one change).
+
+        "Written" is read in the other document's words as well as in the values its rules
+        found there: without their quotes, "შპს ნიმუში" and its director are no longer found as
+        a party by the rules, and were reported removed while the document still names them.
+        """
         if d.kind == "changed":
             return False
         value = d.right if d.kind == "added" else d.left
-        other = everywhere[0] if d.kind == "added" else everywhere[1]
-        if _value_key_of(d.type, value) in other:
+        other = 0 if d.kind == "added" else 1
+        if _value_key_of(d.type, value) in everywhere[other]:
             return True
-        return (d.rule_id, _display_value(d.type, value)) in changed_sides
+        if value is not None and written[other].states(d, value):
+            return True
+        return (_kind_of_change(d), _display_value(d.type, value)) in changed_sides
 
     def add(
         rule_id: str,
@@ -1859,9 +2348,8 @@ def _findings_of(
             continue
 
         if h.deltas:
-            for d in h.deltas:
-                if superfluous(d):
-                    continue
+            shown = [d for d in h.deltas if not superfluous(d)]
+            for d in shown:
                 ka, en = _delta_message(d)
                 add(
                     d.rule_id,
@@ -1872,7 +2360,11 @@ def _findings_of(
                     actual=d.right,
                     key=dedup_key(d),
                 )
-            continue
+            if shown or _rewrapped(h, written):
+                continue
+            # Every value on the line is written in the other document too, but words of it are
+            # not: the text change itself is still reported - a paragraph removed whose amount
+            # is restated elsewhere is a paragraph removed.
         if h.kind == "moved":
             add(
                 "CMP.MOVED",
@@ -1932,6 +2424,7 @@ def _explained_elsewhere(hunk: Hunk, deltas: list[ValueDelta]) -> bool:
     A director's name typed wrong in the preamble and again in the signature table is one
     change: the preamble's line names it ("Director / signatory: X → Y"), and the table cell,
     where no label stands in front of the name, would otherwise add a bare "text changed".
+    The name is matched in any case form, as the finding states it in the nominative.
     """
     changed = [
         (normalize_name(op.left), normalize_name(op.right))
@@ -1946,8 +2439,104 @@ def _explained_elsewhere(hunk: Hunk, deltas: list[ValueDelta]) -> bool:
         if d.kind == "changed"
     ]
     return all(
-        any(old in left and new in right for left, right in reported) for old, new in changed
+        any(_within(old, left) and _within(new, right) for left, right in reported)
+        for old, new in changed
     )
+
+
+def _within(part: str, whole: str) -> bool:
+    return part in whole or name_stem(part) in name_stem(whole)
+
+
+_ROLES_LABEL = ("Party roles", "მხარეთა როლები")
+#: The word that opens a party's definition of its side: "(შემდგომში „შემკვეთი“)".
+_DEFINITION = "შემდგომში"
+
+#: One party whose defined side changed: (name or code, side before, side after).
+_Reassigned = tuple[str, str, str]
+
+
+def _sides_reassigned(left_text: str, right_text: str) -> list[_Reassigned]:
+    """The parties that now hold a side another party held: the customer defined as the
+    contractor, and back.
+
+    Each party is defined with its side - "(შემდგომში „შემკვეთი“)" - and a revision that swaps
+    the two words changes who pays whom while every name, code and account stays where it was.
+    Only a side another party held before counts: a side renamed with a synonym ("მიმწოდებელი"
+    for "შემსრულებელი") is wording, and stays the text change it is.
+    """
+    before = {p.key: p for p in find_parties(left_text) if p.role_source == "defined" and p.role}
+    after = {p.key: p for p in find_parties(right_text) if p.role_source == "defined" and p.role}
+    out: list[_Reassigned] = []
+    for key, p in before.items():
+        q = after.get(key)
+        if q is None or q.role == p.role:
+            continue
+        if any(o.role == q.role for other, o in before.items() if other != key):
+            out.append((p.name or key, p.role or "", q.role or ""))
+    return out
+
+
+def _role_delta(roles: list[_Reassigned]) -> ValueDelta:
+    """The reassignment as one critical change, naming the side each party now holds.
+
+    Line by line a swap read as two "text changed" lines about a word each, and a reader had to
+    work out from them that the customer and the contractor had traded places.
+    """
+    swapped = len(roles) > 1 and {old for _, old, _ in roles} == {new for _, _, new in roles}
+    note = (
+        ("the parties swapped sides", "მხარეებმა როლები გაცვალეს")
+        if swapped
+        else ("a party now holds another party's side", "მხარეს სხვა მხარის როლი მიენიჭა")
+    )
+    en, ka = _ROLES_LABEL
+    return ValueDelta(
+        type=FactType.party_name,
+        kind="changed",
+        rule_id="CMP.PARTY",
+        severity="error",
+        label_en=en,
+        label_ka=ka,
+        left="; ".join(f"{name} — „{old}“" for name, old, _ in roles),
+        right="; ".join(f"{name} — „{new}“" for name, _, new in roles),
+        note_en=note[0],
+        note_ka=note[1],
+    )
+
+
+def _carry_role_change(
+    hunks: list[Hunk], counts: Counts, change: ValueDelta, roles: list[_Reassigned]
+) -> list[Hunk]:
+    """The definitions whose side word changed carry the role change as their value, so each
+    line says what changed on it and the change is reported once."""
+    words = {(normalize_name(old), normalize_name(new)) for _, old, new in roles}
+    out: list[Hunk] = []
+    for h in hunks:
+        carries = (
+            h.kind == "changed"
+            and h.right is not None
+            and _DEFINITION in h.right.text
+            and any(
+                op.tag != "equal" and (normalize_name(op.left), normalize_name(op.right)) in words
+                for op in h.inline
+            )
+        )
+        if not carries:
+            out.append(h)
+            continue
+        setattr(counts, h.materiality, getattr(counts, h.materiality) - 1)
+        counts.critical += 1
+        rules = {r for r in h.rules if r != "CMP.TEXT_CHANGED"} | {change.rule_id}
+        out.append(
+            h.model_copy(
+                update={
+                    "deltas": [*h.deltas, change],
+                    "rules": sorted(rules),
+                    "materiality": "critical",
+                }
+            )
+        )
+    return out
 
 
 def _value_key_of(ft: FactType, value: str | None) -> tuple[FactType, str] | None:
@@ -1964,11 +2553,110 @@ def _family_of(ft: FactType) -> FactType:
     return ft
 
 
+#: Values that are words or codes, not quantities: a document states one when its text says it,
+#: in any case form, with or without quotes. A number is never looked for this way - "5" is
+#: written somewhere in every document.
+_WRITTEN_TYPES = frozenset(
+    {
+        FactType.party_name,
+        FactType.party_director,
+        FactType.party_address,
+        FactType.project_name,
+        FactType.party_id_code,
+        FactType.id_code,
+        FactType.bank_account,
+        FactType.bank_code,
+        FactType.cadastral_code,
+        FactType.contract_number,
+    }
+)
+_WORD = re.compile(r"\w+")
+
+
+class _Written:
+    """What a document says in so many words, read only when a finding asks."""
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self._stems: str | None = None
+        self._spelled: set[str] | None = None
+        self._words: set[str] | None = None
+
+    def states(self, delta: ValueDelta, value: str) -> bool:
+        if delta.type in _WRITTEN_TYPES:
+            key = _stems(value)
+            return bool(key.strip()) and key in self.stems
+        if delta.rule_id == "CMP.AMOUNT_WORDS":
+            return value in self.spelled
+        return False
+
+    @property
+    def stems(self) -> str:
+        if self._stems is None:
+            self._stems = _stems(self._text)
+        return self._stems
+
+    @property
+    def words(self) -> set[str]:
+        if self._words is None:
+            self._words = _words_of(self._text)
+        return self._words
+
+    @property
+    def spelled(self) -> set[str]:
+        if self._spelled is None:
+            self._spelled = {
+                _spelled_display(words, value)
+                for words, _after in _spelled_numbers(self._text)
+                if (value := parse_number_words(words)) is not None
+            }
+        return self._spelled
+
+
+def _words_of(text: str) -> set[str]:
+    """The words and numbers of ``text`` as ``_layout_key`` reads them, a lone letter ("ს" of
+    "ს/კ") left out."""
+    return {w for w in _layout_key(text).split() if len(w) > 1 or w.isdigit()}
+
+
+def _rewrapped(hunk: Hunk, written: tuple[_Written, _Written]) -> bool:
+    """Whether a line whose values are all written in the other document says nothing new.
+
+    Every word it lost is still written in the newer document and every word it gained was
+    already in the older one: the text was re-flowed around a change reported on its own line
+    ("(ს/კ: 01.02.03.456)" cut out of a line that then merged with the next), split, or read
+    twice by the layout - a table cell whose two paragraphs come out once each and once as the
+    cell. A line that lost words the newer document no longer has is reported as the text
+    change it is.
+    """
+    lost: set[str] = set()
+    gained: set[str] = set()
+    if hunk.kind == "removed" and hunk.left is not None:
+        lost = _words_of(hunk.left.text)
+    elif hunk.kind == "added" and hunk.right is not None:
+        gained = _words_of(hunk.right.text)
+    else:
+        for op in hunk.inline:
+            if op.tag in ("delete", "replace"):
+                lost |= _words_of(op.left)
+            if op.tag in ("insert", "replace"):
+                gained |= _words_of(op.right)
+    return lost <= written[1].words and gained <= written[0].words
+
+
+def _stems(text: str) -> str:
+    """``text`` as a line of word stems between spaces - quotes, punctuation and case endings
+    gone - so a name is found in whichever form and quotes a document writes it."""
+    return " " + " ".join(name_stem(w) for w in _WORD.findall(normalize_name(text))) + " "
+
+
 def _value_keys(text: str) -> set[tuple[FactType, str] | None]:
-    """Every typed value a document states anywhere, keyed like ``_value_key_of``."""
+    """Every typed value a document states anywhere, keyed like ``_value_key_of``: a period
+    both as the range and as its two dates, which is how the other document may name it."""
     if not text:
         return set()
-    return {_value_key_of(h.type, h.value) for h in hits_of(text)}
+    hits = hits_of(text)
+    return {_value_key_of(h.type, h.value) for h in hits + _endpoints(hits)}
 
 
 # --- entry point ----------------------------------------------------------------------------
@@ -2052,8 +2740,17 @@ def compare(
                 reason_en="the documents are too large for the document-wide field comparison",
             )
         )
-    else:
+    elif l_sheet or r_sheet:
+        # a workbook states no term, period or penalty clause to read as a whole
         field_deltas = deltas_between(left_text, right_text, types=FIELD_TYPES)
+    else:
+        field_deltas, notes = document_deltas(left_text, right_text)
+        skipped.extend(notes)
+        roles = _sides_reassigned(left_text, right_text)
+        if roles:
+            change = _role_delta(roles)
+            hunks = _carry_role_change(hunks, counts, change, roles)
+            field_deltas.append(change)
 
     findings, suppressed = _findings_of(
         hunks,

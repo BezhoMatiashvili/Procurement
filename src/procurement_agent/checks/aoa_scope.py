@@ -49,7 +49,8 @@ _Q = re.escape(QUOTE_CHARS)
 #: Where a subject clause starts: a contract's heading "ხელშეკრულების საგანი", or an act's
 #: "(რომლის) საგანს / საგანსაც წარმოადგენს". Case forms only: "საგანგებო" is not a subject.
 _SUBJECT_START = re.compile(
-    r"ხელშეკრულების\s+საგან(?:ი|ია)(?![ა-ჰ])|საგან(?:ს|საც|ი)\s+წარმოადგენს(?![ა-ჰ])"
+    r"(?:ხელშეკრულების|რომლის|მისი)\s+საგან(?:ი|ია)(?![ა-ჰ])"
+    r"|საგან(?:ს|საც|ი)\s+წარმოადგენს(?![ა-ჰ])"
 )
 #: Where it ends: the term it defines, "(შემდგომში „მომსახურება“)" or the works or the goods.
 _SUBJECT_END = re.compile(
