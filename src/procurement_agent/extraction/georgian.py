@@ -387,13 +387,20 @@ class MonthTypo:
     correction: str | None
 
 
-def month_typo(word: str) -> MonthTypo | None:
+#: Words after a date that take the genitive: "30 სექტემბრის ჩათვლით" (inclusive).
+_GENITIVE_AFTER = ("ჩათვლით", "შემდეგ")
+
+
+def month_typo(word: str, *, following: str = "") -> MonthTypo | None:
     """``word`` as a misspelled month, or None when it is a correct month form or no month.
 
     Unlike a prefix test this sees a typo after the stem - "სექტემბრდან" for "სექტემბრიდან",
     "ოქტომბერის" for "ოქტომბრის" - because every correct form is listed. Callers look only at
-    words in a date, so "მარტო" (alone) is never read as a misspelled March.
+    words in a date, so "მარტო" (alone) is never read as a misspelled March. ``following`` is
+    the word after it: "ჩათვლით" asks for the genitive, which settles a typo one edit from two
+    forms ("სექტემბირს": "სექტემბრის" or "სექტემბერს").
     """
+    wants_genitive = following.startswith(_GENITIVE_AFTER)
     low = word.lower()
     if (
         len(low) < _MONTH_MIN_LEN
@@ -402,22 +409,24 @@ def month_typo(word: str) -> MonthTypo | None:
         or not is_georgian_word(low)
     ):
         return None
-    best: dict[int, tuple[int, int, str]] = {}
+    best: dict[int, tuple[int, int, int, str]] = {}
     for form, (month, _) in MONTH_FORMS.items():
         if abs(len(form) - len(low)) > _MONTH_TYPO_DISTANCE:
             continue
         d = damerau(low, form, cap=_MONTH_TYPO_DISTANCE)
         if d > _MONTH_TYPO_DISTANCE:
             continue
-        # At equal distance the form ending like the word wins: "ოქტომბერის" is one edit from
-        # both "ოქტომბერი" and "ოქტომბრის", and it was meant as the genitive.
-        rank = (d, -_common_suffix(low, form))
-        if month not in best or rank < best[month][:2]:
+        # At equal distance the form the next word asks for wins, then the form ending like the
+        # word: "ოქტომბერის" is one edit from both "ოქტომბერი" and "ოქტომბრის", and it was
+        # meant as the genitive.
+        fits = 0 if not wants_genitive or MONTH_FORMS[form][1] == "gen" else 1
+        rank = (d, fits, -_common_suffix(low, form))
+        if month not in best or rank < best[month][:3]:
             best[month] = (*rank, form)
     if not best:
         return None
-    ranked = sorted(best.items(), key=lambda kv: kv[1][:2])
-    month, (d, _, form) = ranked[0]
+    ranked = sorted(best.items(), key=lambda kv: kv[1][:3])
+    month, (d, _, _, form) = ranked[0]
     # A short month is within two edits of ordinary words: one edit only, and the word keeps
     # the month's first two letters.
     if len(_MONTH_NOMINATIVE[month]) <= 6 and (d > 1 or low[:2] != form[:2]):
@@ -611,10 +620,11 @@ def mixed_script_words(text: str, *, vocabulary: frozenset[str] = frozenset()) -
         # ("უფლeბები" for "უფლებები"), or a stray key pressed as well ("sმომიჯნავე")
         keyed = "".join(ch if _GEO.match(ch) else _KA_KEYS.get(ch, "") for ch in w)
         correction: str | None = stripped if len(stripped) >= 3 else None
-        attested = [
-            c
-            for c in dict.fromkeys((keyed, stripped))
-            if len(c) >= 3 and (c in vocabulary or any(same_word(c, v) for v in vocabulary))
+        candidates = [c for c in dict.fromkeys((keyed, stripped)) if len(c) >= 3]
+        # a word the documents write as it stands beats one they write in another form: the
+        # stray "i" in "დირექტორiი" is dropped, not doubled into "დირექტორიი"
+        attested = [c for c in candidates if c in vocabulary] or [
+            c for c in candidates if any(same_word(c, v) for v in vocabulary)
         ]
         if attested:
             correction = attested[0]

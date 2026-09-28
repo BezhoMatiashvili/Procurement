@@ -211,3 +211,19 @@ def test_a_common_noun_in_a_drops_it_before_the_genitive() -> None:
     assert lemma_word("ლომიას") == "ლომია"
     assert lemma_word("ტოგონიძის") == "ტოგონიძე"
     assert inflect_word("ტყებუჩავა", "gen") == "ტყებუჩავას"
+
+
+def test_a_stray_letter_that_doubles_one_beside_it_is_dropped() -> None:
+    from procurement_agent.extraction.georgian import mixed_script_words
+
+    [found] = mixed_script_words("დირექტორiი", vocabulary=frozenset({"დირექტორი"}))
+    assert found.correction == "დირექტორი"
+
+
+def test_the_word_after_a_misspelled_month_decides_its_case() -> None:
+    """ "სექტემბირს" is one edit from "სექტემბრის" and from "სექტემბერს"; before "ჩათვლით"
+    only the genitive fits."""
+    from procurement_agent.extraction.georgian import month_typo
+
+    found = month_typo("სექტემბირს", following="ჩათვლით")
+    assert found is not None and found.correction == "სექტემბრის"

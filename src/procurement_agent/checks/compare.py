@@ -2262,6 +2262,19 @@ def _findings_of(
     minor = 0
     suppressed = 0
     everywhere = _value_keys(left_text), _value_keys(right_text)
+    # an act against the contract it closes: two kinds of document, however alike their words
+    from procurement_agent.checks.document_facts import is_act  # checks import compare
+
+    cross_kind = bool(left_text and right_text) and is_act(left_text) != is_act(right_text)
+
+    def _one_sided(d: ValueDelta) -> Severity:
+        """Across two documents of different kinds - a contract and its act - a value only one
+        of them states is what each is for (the act's own date, the contract's penalties):
+        worth a look, not an error. A value both state differently stays the error it is."""
+        if (unrelated or cross_kind) and d.kind != "changed" and d.severity == "error":
+            return "warning"
+        return d.severity
+
     written = _Written(left_text), _Written(right_text)
     all_deltas = [d for h in hunks for d in h.deltas] + list(field_deltas)
     changed_sides = {
@@ -2381,7 +2394,7 @@ def _findings_of(
                 ka, en = _delta_message(d)
                 add(
                     d.rule_id,
-                    d.severity,
+                    _one_sided(d),
                     ka,
                     en,
                     expected=d.left,
@@ -2442,7 +2455,7 @@ def _findings_of(
         if superfluous(d):
             continue
         ka, en = _delta_message(d)
-        add(d.rule_id, d.severity, ka, en, expected=d.left, actual=d.right, key=dedup_key(d))
+        add(d.rule_id, _one_sided(d), ka, en, expected=d.left, actual=d.right, key=dedup_key(d))
     return out, suppressed
 
 
