@@ -686,7 +686,7 @@ def test_a_unit_left_blank_is_reported(tmp_path: Path) -> None:
 
 
 def test_sundry_items_are_not_a_placeholder() -> None:
-    """"სხვადასხვა ხარჯები" (sundry items) is work the template describes; only "სხვა ხარჯები"
+    """ "სხვადასხვა ხარჯები" (sundry items) is work the template describes; only "სხვა ხარჯები"
     (other costs) invites the bidder's own."""
     from procurement_agent.checks.boq import _PLACEHOLDER
 
