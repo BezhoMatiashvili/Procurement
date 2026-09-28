@@ -510,13 +510,38 @@ def finding_matches_entry(entry: ExpectedFinding, finding: Finding, label: str |
         return False
     if entry.label is not None and (label is None or fold(label) != fold(entry.label)):
         return False
-    if entry.before is not None and (
-        finding.expected is None or fold(finding.expected) != fold(entry.before)
-    ):
+    if entry.before is not None and not same_value(entry.before, finding.expected):
         return False
-    return entry.after is None or (
-        finding.actual is not None and fold(finding.actual) == fold(entry.after)
-    )
+    return entry.after is None or same_value(entry.after, finding.actual)
+
+
+#: A reading added after a value for the reader: "ორი ათას ოთხასი (2400)".
+_GLOSS = re.compile(r"\s*\([^()]*\)\s*$")
+#: A figure as a finding writes it, grouped with commas: "2,400.00 GEL".
+_FIGURE = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
+
+
+def _figure(s: str) -> float | None:
+    m = _FIGURE.search(s)
+    return float(m.group(0).replace(",", "")) if m else None
+
+
+def same_value(gold: str, reported: str | None) -> bool:
+    """A compare finding's value against the gold's (GOLD_SPEC section 4): the same text after
+    folding, the same text once the finding's gloss is set aside ("ორი ათას ოთხასი (2400)"),
+    or - where the gold states a bare number - the same number ("2,400.00 GEL" is 2400)."""
+    if reported is None:
+        return False
+    want, got = fold(gold), fold(reported)
+    if want in (got, fold(_GLOSS.sub("", reported))):
+        return True
+    bare = _LEADING_NUMBER.fullmatch(want)
+    if bare is None or bare.group(3).strip():
+        return False
+    number = _figure(got)
+    if number is None or abs(number - float(bare.group(1))) > _NUMBER_TOLERANCE:
+        return False
+    return (bare.group(2) == "%") == ("%" in got)  # 50% is not 50 GEL
 
 
 def _assign(candidates: list[list[int]], n_findings: int) -> list[int | None]:

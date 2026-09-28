@@ -152,13 +152,18 @@ def test_the_same_mistake_read_twice_is_reported_once() -> None:
     """A clause restated in an annex, or a table cell the parser emits twice, is one mistake."""
     act = ACT.replace("100 (ასი)", "100 (ორასი)") + "დანართი: საფასური 100 (ორასი) ლარი.\n"
     report = check_aoa(aoa_text=act, contract_text=CONTRACT)
-    assert [f.rule_id for f in report.findings] == ["AOA.AMOUNT_WORDS"]
+    # the words disagree with the figure and state a fee the contract does not: one each
+    assert sorted(f.rule_id for f in report.findings) == ["AOA.AMOUNT_WORDS", "AOA.FEE"]
 
 
 def test_two_different_mistakes_of_one_rule_are_both_reported() -> None:
     act = ACT.replace("100 (ასი)", "100 (ორასი)") + "დანართი: საფასური 100 (სამასი) ლარი.\n"
     report = check_aoa(aoa_text=act, contract_text=CONTRACT)
-    assert [f.rule_id for f in report.findings] == ["AOA.AMOUNT_WORDS", "AOA.AMOUNT_WORDS"]
+    assert [f.actual for f in report.findings if f.rule_id == "AOA.AMOUNT_WORDS"] == [
+        "ორასი",
+        "სამასი",
+    ]
+    assert [f.actual for f in report.findings if f.rule_id == "AOA.FEE"] == ["ორასი", "სამასი"]
 
 
 _SIGNED = "4. გაფორმების თარიღი\nაქტი გაფორმდა 2026 წლის 30 აპრილი\n"

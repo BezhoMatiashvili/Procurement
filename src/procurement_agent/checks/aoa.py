@@ -1942,6 +1942,45 @@ class AoaChecker:
             ]
         for r in sorted(wrong, key=lambda r: r.money.span):
             self._fee_finding(r, prices, contract)
+        for r in fees:
+            if r not in wrong:
+                self._fee_words_finding(r, prices)
+
+    def _fee_words_finding(self, r: RoledAmount, prices: list[Money]) -> None:
+        """A fee whose figure is the contract's price while its words state another amount: the
+        act states two fees, and the one in words is not the contract's. Marked on the words,
+        with the contract's price in words to write there. Words that do not read as a number
+        are a misspelling, AOA.AMOUNT_WORDS's to report."""
+        m = r.money
+        pair = next(
+            (
+                p
+                for p in digits_and_words(self.aoa.text)
+                if m.span[0] <= p.span[0] and p.span[1] <= m.span[1]
+            ),
+            None,
+        )
+        if pair is None or not pair.numeral or pair.spelled is None:
+            return
+        same = [p for p in prices if p.currency == m.currency]
+        if any(amounts_equal(p.value, pair.spelled) for p in same):
+            return
+        price = next((p for p in same if amounts_equal(p.value, m.value)), None)
+        if price is None:
+            return
+        name_ka, _, name_en = _FEE_LABEL[r.role]
+        stated, shown = _plain(pair.spelled), _money_text(price)
+        self._add(
+            "AOA.FEE",
+            "error",
+            f"{name_ka} სიტყვიერად „{pair.words}“ ({stated}) არ ემთხვევა ხელშეკრულებით "
+            f"განსაზღვრულ ღირებულებას ({shown})",
+            f"the {name_en} in words '{pair.words}' ({stated}) matches no price in the contract "
+            f"({shown})",
+            expected=words_for(price.value),
+            actual=pair.words,
+            span=pair.words_span,
+        )
 
     def _fee_finding(
         self, r: RoledAmount, prices: list[Money], contract: list[RoledAmount]

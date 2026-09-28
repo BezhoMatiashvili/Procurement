@@ -456,3 +456,18 @@ class TestGoldAndRunner:
             cache_dir=tmp_path / "cache",
         )
         assert doc_score.strict is None and doc_score.strict_findings is None
+
+
+def test_a_compare_value_matches_as_a_value() -> None:
+    from procurement_agent.eval.score import same_value
+
+    assert same_value("2400", "2,400.00 GEL")
+    assert same_value("ორი ათას ოთხასი", "ორი ათას ოთხასი (2400)")
+    assert same_value("TBCBGE22", "TBCBGE22")
+    assert not same_value("2400", "2,600.00 GEL")
+    assert not same_value("2400 USD", "2,400.00 GEL")
+    assert not same_value("ორი ათას ოთხასი", "ორი ათას ხუთასი (2500)")
+    assert not same_value("2400", None)
+    assert same_value("50%", "50%")
+    assert not same_value("50%", "50.00 GEL")
+    assert not same_value("50", "50%")

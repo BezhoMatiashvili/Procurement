@@ -175,3 +175,20 @@ def test_same_word_allows_case_endings_but_not_a_missing_letter() -> None:
     assert same_word("რეზიდენსისათვის", "რეზიდენსი")
     assert not same_word("ლაზუი", "ლაზური")
     assert not same_word("რეზდენსი", "რეზიდენსი")
+
+
+# --- the fee in words ----------------------------------------------------------------------------
+
+
+def test_the_fee_in_words_is_checked_against_the_contract_too() -> None:
+    """The figure is the contract's price, the words state another: the act states two fees and
+    the one in words is wrong. Both rules say so, on the words, with the words to write."""
+    act = ACT.replace("100 (ასი)", "100 (ორასი)")
+    fee = [(f.actual, f.expected) for f in _of("AOA.FEE", act)]
+    words = [(f.actual, f.expected) for f in _of("AOA.AMOUNT_WORDS", act)]
+    assert fee == [("ორასი", "ასი")]
+    assert words == [("ორასი", "ასი")]
+
+
+def test_a_misspelled_fee_in_words_is_not_a_second_fee() -> None:
+    assert _of("AOA.FEE", ACT.replace("100 (ასი)", "100 (ასოი)")) == []

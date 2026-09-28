@@ -371,7 +371,9 @@ def run_document(
         fast=config.fast,
     )
     score = score_extraction(result, gold.fields, gold.name)
-    if config.strict:
+    # a comparison's gold describes the pair, not what the newer document states: its fields
+    # are scored only when it lists some
+    if config.strict and (gold.check != "compare" or gold.fields):
         score.strict = score_extraction_strict(
             result,
             gold.fields,

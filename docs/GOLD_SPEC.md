@@ -36,8 +36,8 @@ letters upper-cased. Nothing else - no stemming, no substring match, no case-end
 | `project_name` | **nominative**, no quotes, no postposition | `ზღვის ხედი` (not `ზღვის ხედისთვის`) |
 | `contract_date` | ISO date of the *contract's* signing | `2026-08-01` |
 | `act_date` | ISO date of the act's *own* signing | `2026-08-31` |
-| `execution_period` | ISO range `start/end` (inclusive), or ISO duration when only a length is stated | `2026-08-01/2026-08-31`, `P6M` |
-| `validity_period` | the contract's term: ISO range, or ISO duration | `2026-08-01/2027-02-01` |
+| `execution_period` | the period the work is performed in - an act's service period, a contract's performance window ("შეასრულოს მომსახურება … -დან … ჩათვლით"): ISO range `start/end` (inclusive), or ISO duration when only a length is stated | `2026-08-01/2026-08-31`, `P6M` |
+| `validity_period` | the contract's own validity ("ძალაში შედის … და მოქმედებს …", usually under "ხელშეკრულების მოქმედების ვადა"): ISO range, `..` for an open end ("until the obligations are fulfilled"), or ISO duration | `2026-08-01/..`, `2026-08-01/2027-02-01` |
 | `delivery_deadline` | ISO date, or ISO duration | `2026-04-30`, `P30D` |
 | `warranty_period` | ISO duration | `P24M` |
 | `payment_terms` | ISO duration + ` working`/` calendar`, plus `advance N%` when stated | `P5D working` |
