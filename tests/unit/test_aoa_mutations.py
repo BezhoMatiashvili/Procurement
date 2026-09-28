@@ -192,3 +192,14 @@ def test_the_fee_in_words_is_checked_against_the_contract_too() -> None:
 
 def test_a_misspelled_fee_in_words_is_not_a_second_fee() -> None:
     assert _of("AOA.FEE", ACT.replace("100 (ასი)", "100 (ასოი)")) == []
+
+
+# --- a stray letter is one finding, not two ------------------------------------------------------
+
+
+def test_a_stray_letter_in_a_service_line_does_not_make_it_another_service() -> None:
+    from procurement_agent.checks.aoa_scope import scope_part, share
+
+    meant = scope_part("სერვისის გვერდის აღწერა")
+    assert share(scope_part("სერვისის გkვერდის აღწერა"), meant) == 1.0
+    assert share(scope_part("სერვისის გ" + CYRILLIC_O + "ვერდის აღწერა"), meant) == 1.0

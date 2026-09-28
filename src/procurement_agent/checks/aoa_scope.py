@@ -67,6 +67,8 @@ _QUOTED = re.compile(rf"[{_Q}][^{_Q}]{{0,90}}[{_Q}]")
 _CADASTRAL_NOTE = re.compile(r"\(\s*ს\s*/\s*კ[^()]*\)")
 _BRACKETED = re.compile(r"\(([^()]{1,80})\)")
 _CLAUSE_NUMBER = re.compile(r"^\s*\d+(?:\.\d+)*\.(?=\s)")
+_GEORGIAN_LETTER = re.compile("[\u10d0-\u10fa]")
+_FOREIGN_LETTER = re.compile("[A-Za-z\u0400-\u04ff]")
 _NUMBER = re.compile(r"(?<![\w.,])(?:\d{1,3}(?: \d{3})+|\d+)(?:[.,]\d+)?(?!\w)")
 _YEAR = r"(?:19|20)\d{2}(?!\d)"
 #: A year named as one, which ``find_dates`` leaves, since it names no day: "2026 წელი", "2026
@@ -132,10 +134,21 @@ class ScopeReading:
     services: tuple[Alignment, ...]
 
 
+def _as_meant(word: re.Match[str]) -> str:
+    """A Georgian word without the letters of another alphabet a slip put in it."""
+    w = word.group(0)
+    if _GEORGIAN_LETTER.search(w) and _FOREIGN_LETTER.search(w):
+        return _FOREIGN_LETTER.sub("", w)
+    return w
+
+
 def _clean(text: str) -> str:
     """The words worth comparing. Quoted names - the project, the parties' defined terms - and
     the cadastral code go, since the project-name and cadastral rules compare those; so do a
-    clause number and a number's words in brackets, "4 (ოთხი)", which only repeat it."""
+    clause number and a number's words in brackets, "4 (ოთხი)", which only repeat it. A Latin or
+    Cyrillic letter inside a Georgian word ("გkვერდის") is dropped: AOA.SPELLING reports it, and
+    the line is still the contract's line."""
+    text = re.sub(r"\w+", _as_meant, text)
     text = _CLAUSE_NUMBER.sub(" ", text)
     text = _CADASTRAL_NOTE.sub(" ", text)
     text = _QUOTED.sub(" ", text)
