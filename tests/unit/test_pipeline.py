@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TypeVar
 
+import pytest
 from pydantic import BaseModel
 
 from procurement_agent.config import Settings
@@ -309,6 +310,22 @@ def test_choice_pass_is_off_unless_asked_for() -> None:
     assert res.llm_choice_calls == 0
 
 
+@pytest.fixture
+def no_document_readers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The choice pass on its own: the document-level readers would state the VAT wording of
+    ``VAT_DOC`` themselves ("დღგ-ს ჩათვლით" is an inclusion), leaving nothing to choose."""
+    monkeypatch.setattr(
+        "procurement_agent.extraction.pipeline.document_level_facts", lambda chunks, warnings: []
+    )
+
+
+def test_the_vat_wording_is_read_without_the_model() -> None:
+    res = run_extraction(document_id="d", chunks=VAT_DOC, settings=SETTINGS, llm=None)
+    [vat] = [f for f in res.facts if f.type is FactType.vat_status]
+    assert (vat.normalized, vat.source) == ("incl", "rules")
+
+
+@pytest.mark.usefixtures("no_document_readers")
 def test_vat_status_is_decided_by_picking_not_by_writing() -> None:
     llm = FakeLLM(facts=[TOTAL_FACT], choices={"vat": "incl", "state that": "yes"})
     res = run_extraction(document_id="d", chunks=VAT_DOC, settings=CHOICE_SETTINGS, llm=llm)
@@ -321,6 +338,7 @@ def test_vat_status_is_decided_by_picking_not_by_writing() -> None:
     assert res.llm_choice_calls > 0
 
 
+@pytest.mark.usefixtures("no_document_readers")
 def test_a_silent_document_produces_no_vat_fact() -> None:
     """'not stated' is a real answer, and must not be recorded as a finding."""
     llm = FakeLLM(facts=[TOTAL_FACT], choices={"vat": "none", "state that": "yes"})
@@ -328,6 +346,7 @@ def test_a_silent_document_produces_no_vat_fact() -> None:
     assert [f for f in res.facts if f.type is FactType.vat_status] == []
 
 
+@pytest.mark.usefixtures("no_document_readers")
 def test_low_coverage_is_an_abstention_not_an_answer() -> None:
     """If the model spent its mass outside the option set, nothing is recorded."""
     llm = FakeLLM(facts=[TOTAL_FACT], choices={"vat": "incl"}, covered=0.1)

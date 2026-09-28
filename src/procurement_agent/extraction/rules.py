@@ -561,8 +561,10 @@ _REFERENCED_DOC = (
 # letter must not be the start of a word - the old "N[oº]?\.?" read the n of "number" as a
 # marker and returned "umber" - and the reference itself must contain a digit.
 _NUMBER_MARKER = r"(?:№|#|(?<![A-Za-z])N(?:[oº°]\.?|\.|:)?(?![A-Za-z]))"
+# The document word must start a word: "act" inside "Contact" and "აქტ" inside "კონტაქტი" named
+# a phone number a contract number.
 _CONTRACT_NO = re.compile(
-    rf"(?:{_REFERENCED_DOC})\s*{_NUMBER_MARKER}\s*"
+    rf"(?<![A-Za-zა-ჰ])(?:{_REFERENCED_DOC})\s*{_NUMBER_MARKER}\s*"
     r"((?=[A-Za-z0-9\-/_.]*\d)[A-Za-z0-9][A-Za-z0-9\-/_.]{0,30}[A-Za-z0-9])",
     re.IGNORECASE,
 )

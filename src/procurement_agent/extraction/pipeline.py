@@ -12,8 +12,10 @@ from procurement_agent.checks.findings import SkipNote
 from procurement_agent.config import Settings
 from procurement_agent.extraction import weights
 from procurement_agent.extraction.anchors import AnchorHit, find_anchors
+from procurement_agent.extraction.labels import LABELS
 from procurement_agent.extraction.llm_extractor import run_llm_extraction
 from procurement_agent.extraction.merger import anchor_hits_to_facts, merge, rule_hits_to_facts
+from procurement_agent.extraction.normalize import normalize_confusables
 from procurement_agent.extraction.prompts import PROMPT_VERSION
 from procurement_agent.extraction.rules import RuleHit, run_rules
 from procurement_agent.extraction.schemas import (
@@ -142,6 +144,66 @@ def compare_stored(
     return report
 
 
+def document_level_facts(chunks: Sequence[Chunk], warnings: list[str]) -> list[ExtractedFact]:
+    """``checks.document_facts`` over the whole document, as facts cited to the chunk that holds
+    each one's words."""
+    from procurement_agent.checks.document_facts import document_facts  # checks import us
+
+    if not chunks:
+        return []
+    try:
+        found = document_facts(chunks_text(chunks))
+    except Exception as e:  # one reader failing must not cost the rest of the extraction
+        warnings.append(f"document-level readers failed: {type(e).__name__}")
+        return []
+    out: list[ExtractedFact] = []
+    for f in found:
+        chunk = _chunk_holding(chunks, f.raw_text) or chunks[0]
+        out.append(
+            ExtractedFact(
+                type=f.type,
+                label=LABELS[f.type][0],
+                value=f.value,
+                normalized=f.normalized,
+                unit=f.unit,
+                raw_text=f.raw_text,
+                provenance=chunk.provenance,
+                source="rules",
+                confidence=f.confidence,
+            )
+        )
+    return out
+
+
+def _chunk_holding(chunks: Sequence[Chunk], words: str) -> Chunk | None:
+    needle = normalize_confusables(words)[:60]
+    if not needle:
+        return None
+    return next((c for c in chunks if needle in normalize_confusables(c.body or c.text)), None)
+
+
+#: Unclassified leftovers a document-level fact accounts for: the "5 working days" duration is
+#: the payment deadline once the payment reader has named it.
+_GENERIC_OF = {FactType.payment_terms: FactType.duration}
+
+
+def _superseded(fact: ExtractedFact, doc_facts: list[ExtractedFact]) -> bool:
+    """Whether a chunk-level rule fact is replaced by a document-level one."""
+    if fact.source != "rules":
+        return False
+    for d in doc_facts:
+        if fact.type == d.type:
+            return True
+        generic = _GENERIC_OF.get(d.type)
+        if (
+            generic is not None
+            and fact.type == generic
+            and str(d.normalized).startswith(str(fact.normalized))
+        ):
+            return True
+    return False
+
+
 def run_extraction(
     *,
     document_id: str,
@@ -179,6 +241,16 @@ def run_extraction(
         if hits:
             rule_hits[ch.id] = hits
     rule_facts = rule_hits_to_facts(rule_hits, chunks)
+
+    # 2b. what the document states as a whole - its term, the service period, how it is paid,
+    #     VAT, the subject, penalties - read once over the whole text by the readers the AOA
+    #     check uses. Each replaces the chunk-by-chunk guesses of its type: those split a period
+    #     into two dates and read a performance window's end as a second contract date.
+    report(10, "document")
+    doc_facts = document_level_facts(chunks, warnings)
+    if doc_facts:
+        rule_facts = [f for f in rule_facts if not _superseded(f, doc_facts)]
+        rule_facts.extend(doc_facts)
 
     # 2. the LLM is only asked for targets the deterministic passes did not fill. On templated
     #    documents that is often nothing at all, which turns minutes of CPU into milliseconds.

@@ -6,6 +6,7 @@ import re
 
 from procurement_agent.extraction import weights
 from procurement_agent.extraction.anchors import AnchorHit
+from procurement_agent.extraction.georgian import lemma
 from procurement_agent.extraction.labels import LABELS
 from procurement_agent.extraction.normalize import names_match, normalize_name
 from procurement_agent.extraction.rules import RuleHit
@@ -55,6 +56,10 @@ _GENERIC_FAMILY: dict[FactType, frozenset[FactType]] = {
     FactType.percentage: frozenset({FactType.penalty, FactType.vat_status, FactType.payment_terms}),
     FactType.id_code: frozenset({FactType.party_id_code}),
 }
+
+
+#: Names stated in the nominative (``anchor_hits_to_facts``).
+_NOMINATIVE_TYPES = frozenset({FactType.party_director, FactType.project_name})
 
 
 def _key(f: ExtractedFact) -> str:
@@ -149,18 +154,26 @@ def rule_hits_to_facts(hits: dict[str, list[RuleHit]], chunks: list[Chunk]) -> l
 def anchor_hits_to_facts(
     hits: dict[str, list[AnchorHit]], chunks: list[Chunk]
 ) -> list[ExtractedFact]:
-    """Label-anchored values as facts. Highest confidence of any automatic source."""
+    """Label-anchored values as facts. Highest confidence of any automatic source.
+
+    A director or a project is stated in the nominative whatever case the label put it in:
+    "დირექტორის ნინო კაპანაძის სახით" names "ნინო კაპანაძე", and "„მზის ქალაქისთვის“" the project
+    "მზის ქალაქი". The quote keeps the document's own words.
+    """
     by_id = {c.id: c for c in chunks}
     facts: list[ExtractedFact] = []
     for cid, hs in hits.items():
         chunk = by_id[cid]
         for h in hs:
+            value, normalized = h.value, h.normalized
+            if h.type in _NOMINATIVE_TYPES:
+                value = normalized = lemma(h.value)
             facts.append(
                 ExtractedFact(
                     type=h.type,
                     label=LABELS[h.type][0],
-                    value=h.value,
-                    normalized=h.normalized,
+                    value=value,
+                    normalized=normalized,
                     unit=h.unit,
                     raw_text=h.raw_text,
                     provenance=chunk.provenance,

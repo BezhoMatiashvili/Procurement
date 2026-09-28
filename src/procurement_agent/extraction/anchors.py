@@ -20,6 +20,7 @@ from typing import Literal
 
 from procurement_agent.extraction.normalize import (
     QUOTE_CHARS,
+    bic_has_country,
     iban_is_valid,
     name_stem,
     names_match,
@@ -64,8 +65,11 @@ _ADDRESS = re.compile(
 )
 # "დირექტორი ნინო კაპანაძე", "დირექტორი: დავით მელაძე",
 # "წარმოდგენილი გენერალური დირექტორის, დავით მელაძის სახით"
+# The label must end its word ("დირექტორთან შეთანხმებით" is "in agreement with the director",
+# no name), and a deputy or an acting director is not the director.
 _DIRECTOR = re.compile(
-    r"(?:გენერალური\s+)?დირექტორ(?:ი|ის|მა)?\s*[:,]?\s*"
+    r"(?:გენერალური\s+)?დირექტორ(?:ი|ის|მა)?(?![ა-ჰ])\s*[:,]?\s*"
+    r"(?!მოადგილ|მოვალეობ|შემსრულებ)"
     r"([ა-ჰ]{2,20}(?:\s+[ა-ჰ]{2,25}){1,2})"
 )
 _PROJECT_WORD = r"პრო[ეა]{1,3}ქტ[ა-ჰ]*"
@@ -83,9 +87,11 @@ _SWIFT = re.compile(r"\b[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b")
 # above only matches a well-formed BIC, which means a wrong code like "AAAGE22" (seven
 # characters, TBC Bank instead of Bank of Georgia) produced no value at all and the
 # comparison against the contract had nothing to compare.
+# The label in any case, the code as written: a code is capitals, so "Payment by SWIFT transfer"
+# names no code - read case-blind it gave the bank code "TRANSFER".
 _SWIFT_LABELLED = re.compile(
-    r"(?:ბანკის\s*კოდი|ბანკის\s*BIC|SWIFT(?:\s*/\s*BIC)?|BIC)\s*[:\uff1a]?\s*([A-Z0-9]{6,11})\b",
-    re.IGNORECASE,
+    r"(?i:ბანკის\s*კოდი|ბანკის\s*BIC|SWIFT(?:\s*/\s*BIC)?|BIC)\s*[:\uff1a]?\s*"
+    r"([A-Z0-9]{6,11})\b"
 )
 # "(შემდგომში „შემკვეთი“)", "(შემდგომში - ,,შემსრულებელი”)"
 _ROLE = re.compile(rf"შემდგომში[\s\-\u2013\u2014]*(?:{_QUOTED}|[,\s]*([ა-ჰ]{{4,20}}))")
@@ -409,7 +415,12 @@ def find_anchors(text: str) -> list[AnchorHit]:
             continue
         add(FactType.bank_code, m.group(0), m, unit="SWIFT")
     for m in _SWIFT_LABELLED.finditer(text):
-        code = m.group(1).upper()
+        code = m.group(1)
+        # a code, even a mistyped one, has a digit or a real country code: "ADDRESS" has neither
+        if not any(ch.isdigit() for ch in code) and not (
+            len(code) in (8, 11) and bic_has_country(code)
+        ):
+            continue
         note = None if bic_is_well_formed(code) else "bank code is not a well-formed BIC"
         emit(FactType.bank_code, code, m.group(0), m.start(), m.end(), unit="SWIFT", note=note)
 
