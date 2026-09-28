@@ -255,6 +255,8 @@ _NOT_APPLICABLE: tuple[tuple[str, frozenset[str]], ...] = (
 )
 
 _ACT_DATE_KEYS = ("გაფორმდა", "გაფორმების თარიღი")
+#: The words that date the act, right before a date: "აქტი გაფორმდა 30.11.2026".
+_ACT_DATED_BEFORE = re.compile(r"(?:აქტი[\s„“”\"']*გაფორმდა|გაფორმების\s+თარიღი)[\s:,]*$")
 #: The act's own signing, "აქტი გაფორმდა <date>" / "გაფორმების თარიღი: <date>". The label must
 #: stand as a word: "გაფორმების თარიღიდან 5 დღეში" counts a deadline from the date instead.
 _ACT_SIGNED = re.compile(r"გაფორმდა|გაფორმების\s+თარიღი(?![ა-ჰ])")
@@ -652,8 +654,16 @@ class AoaChecker:
         text = self.aoa.text
         opens = sorted(m.end() for k in _PERIOD_KEYS for m in re.finditer(re.escape(k), text))
         act = self._act_date()
-        # the act's own date written after the period is not part of it
-        is_act = (lambda h: h.start == act[1].start) if act is not None else None
+
+        def is_act(h: RuleHit) -> bool:
+            """The act's own date is not part of the period, nor is any date written right
+            after the words that date the act: a table whose first row the parser took for
+            its header repeats "„აქტი“ გაფორმდა 30.11.2026" beside every row, the period's
+            among them."""
+            if act is not None and h.start == act[1].start:
+                return True
+            return _ACT_DATED_BEFORE.search(text, max(0, h.start - 30), h.start) is not None
+
         out: list[tuple[date, RuleHit]] = []
         for d, h in _date_hits_near(text, _PERIOD_KEYS, skip=is_act):
             if _CONTRACT_REFERENCE.match(text, h.end):

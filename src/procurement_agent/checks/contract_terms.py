@@ -487,8 +487,12 @@ _VALIDITY = re.compile(
     re.IGNORECASE,
 )
 #: A clause on when the work is to be done.
+#: The clause that sets when the work is done: "შეასრულოს …", "გასწიოს მომსახურება …" (render),
+#: "მომსახურება გაიწევა …" (will be rendered), "შესრულების / გაწევის ვადა".
 _PERFORMANCE = re.compile(
-    r"შეასრულოს|(?:შესრულების|გაწევის)\s+(?:ვადა|პერიოდ)|(?<![a-z])perform", re.IGNORECASE
+    r"შეასრულოს|გასწიოს|გაიწევა|გაეწევა|(?:შესრულების|გაწევის)\s+(?:ვადა|პერიოდ)"
+    r"|(?<![a-z])perform",
+    re.IGNORECASE,
 )
 #: A guarantee's clause dates the guarantee, not the contract: "the bank guarantee is valid until
 #: ...". A payment clause is left out the same way (``_PAYMENT``, below).
@@ -518,7 +522,7 @@ _TERM_LABEL_BEFORE = re.compile(
 )
 #: ... and one that runs from the signing, with no date: "ხელმოწერის მომენტიდან", "from signing".
 _FROM_SIGNING = re.compile(
-    r"ხელმოწერ[ა-ჰ]*\s+(?:მომენტ|დღ|თარიღ)[ა-ჰ]*დან|ხელმოწერიდან"
+    r"ხელმოწერ[ა-ჰ]*\s+(?:მომენტ|დღ|თარიღ)[ა-ჰ]*დან|ხელმოწერიდან|ხელმოწერისთანავე"
     r"|(?<![a-z])(?:from|upon|on)\s+(?:the\s+(?:date|day|moment)\s+of\s+)?(?:its\s+)?"
     r"sign(?:ing|ature)",
     re.IGNORECASE,

@@ -34,6 +34,17 @@ _PENALTY_WORDS = re.compile(r"პირგასამტეხლო|ჯარ�
 _UNIT_CODES = {"day": "D", "week": "W", "month": "M", "year": "Y"}
 #: How a range reads: an en dash with a space either side, built from its code point.
 _DASH = f" {chr(0x2013)} "
+_Q = "\u201e\u201c\u201d\"'"
+#: An act names the contract it closes by its date: "მხარეებმა 01.09.2026 გააფორმეს
+#: ხელშეკრულება" - the date, then the contract signed - ...
+_CONTRACT_SIGNED_AFTER = re.compile(
+    rf"[\s,]*(?:გააფორმეს|გაფორმებული|დადებული|დადეს)?[\s{_Q}]*(?:N\s*\S+\s*)?ხელშეკრულებ"
+)
+#: ... or the contract, then its signing: "ხელშეკრულება გაფორმდა 2026 წლის 1 მარტს",
+#: "ხელშეკრულების თარიღი: 01.03.2026".
+_CONTRACT_DATED_BEFORE = re.compile(
+    rf"ხელშეკრულებ[ა-ჰ]*[{_Q}]*\s+(?:გაფორმდა|დაიდო|(?:გაფორმების\s+)?თარიღი)[\s:,-]*$"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +77,16 @@ def document_facts(text: str) -> list[DocumentFact]:
         if act_date is not None:
             d, hit = act_date
             out.append(_date_fact(FactType.act_date, d, hit.raw_text))
+        # the contract the act closes, by its date: stated here, it takes the place of every
+        # date the chunk rules guessed a contract date from a keyword nearby - the act's own,
+        # the period's, the advance's
+        for h in find_dates(folded):
+            if _CONTRACT_SIGNED_AFTER.match(folded, h.end) or _CONTRACT_DATED_BEFORE.search(
+                folded, max(0, h.start - 60), h.start
+            ):
+                signed = date.fromisoformat(str(h.normalized))
+                out.append(_date_fact(FactType.contract_date, signed, h.raw_text))
+                break
         period = checker._period_hits()
         if period:
             dates = [d for d, _ in period]
@@ -128,8 +149,11 @@ def document_facts(text: str) -> list[DocumentFact]:
 
 
 #: What a subject clause says before the service itself: the clause number, and the project
-#: it is for up to its cadastral code - "1.1. ... „ნიმუში“ პროექტისთვის (ს/კ: 01.02.03.456)".
-_BEFORE_THE_SERVICE = re.compile(r"^.*?\(\s*ს/კ[^)]*\)\s*", re.DOTALL)
+#: it is for up to its cadastral code - "1.1. ... „ნიმუში“ პროექტისთვის (ს/კ: 01.02.03.456)",
+#: "... პროექტის - „ნიმუში“ (საკადასტრო კოდი: 01.02.03.456) ფარგლებში".
+_BEFORE_THE_SERVICE = re.compile(
+    r"^.*?\(\s*(?:ს\s*/\s*კ|საკადასტრო\s+კოდი)[^)]*\)\s*(?:ფარგლებში\s*)?", re.DOTALL
+)
 _CLAUSE_NUMBER = re.compile(r"^\s*\d+(?:\.\d+)*\.?\s*")
 
 

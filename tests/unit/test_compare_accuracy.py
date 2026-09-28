@@ -50,8 +50,9 @@ def test_an_identical_copy_gives_nothing() -> None:
 
 
 def test_a_misspelled_number_is_a_typo_not_another_amount() -> None:
-    # "(ასოი)" used to be paired with the next bracket and read as "ასი (100) → ხუთი (5)"
-    assert found(ACT, edit(2, "(ასი)", "(ასოი)")) == [("CMP.SPELLING", "ასი", "ასოი")]
+    # "(ასოი)" used to be paired with the next bracket and read as "ასი (100) → ხუთი (5)";
+    # it is the fee's words misspelled - wrong as the fee would be wrong, so an amount error
+    assert found(ACT, edit(2, "(ასი)", "(ასოი)")) == [("CMP.AMOUNT_WORDS", "ასი", "ასოი")]
 
 
 def test_a_changed_number_in_words_is_labelled_by_what_it_counts() -> None:
@@ -184,8 +185,9 @@ def test_a_range_of_plain_dates_is_one_change_but_two_listed_dates_stay_two() ->
     left = ["სამუშაოები შესრულდება 01.03.2026-დან 30.04.2026-მდე."]
     right = ["სამუშაოები შესრულდება 01.03.2027-დან 30.04.2027-მდე."]
     [f] = substantive(run(left, right))
+    # two dates written as a range are a period: the time the works are done
     assert (f.rule_id, f.expected, f.actual) == (
-        "CMP.DATE",
+        "CMP.DURATION",
         "2026-03-01/2026-04-30",
         "2027-03-01/2027-04-30",
     )
@@ -319,7 +321,7 @@ def test_a_stray_letter_next_to_a_value_does_not_change_the_value() -> None:
 
 
 def test_a_number_word_misspelled_into_a_shorter_word_is_reported() -> None:
-    assert found(ACT, edit(2, "(ასი)", "(აი)")) == [("CMP.SPELLING", "ასი", "აი")]
+    assert found(ACT, edit(2, "(ასი)", "(აი)")) == [("CMP.AMOUNT_WORDS", "ასი", "აი")]
 
 
 def test_a_line_reflowed_around_a_removed_code_is_one_removal() -> None:
@@ -466,3 +468,14 @@ def test_an_amount_restated_with_its_tetri_is_no_change() -> None:
         "საფასური შეადგენს 100.50 (ასი ლარი და ორმოცდაათი თეთრი).",
     )
     assert delta.right == "ასი ლარი და ორმოცდაათი თეთრი (100.50)"
+
+
+def test_a_range_of_plain_dates_named_by_no_keyword_is_the_period() -> None:
+    """ "გაწეულია 01.04.2026 - 30.04.2026 პერიოდში": a period in figures that no "შესრულება"
+    word names is still the execution period, and a year typed wrong in it is one change."""
+    text = "„მომსახურება“ გაწეულია 01.04.{0} - 30.04.{0} პერიოდში."
+    report = run([text.format("2026")], [text.format("2025")])
+    changed = [f for f in report.findings if f.rule_id in ("CMP.DATE", "CMP.DURATION")]
+    assert [(f.rule_id, f.expected, f.actual) for f in changed] == [
+        ("CMP.DURATION", "2026-04-01/2026-04-30", "2025-04-01/2025-04-30")
+    ]

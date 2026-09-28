@@ -122,7 +122,10 @@ allowed_findings: [CMP.FORMATTING]
 ```
 
 A value both documents carry must never be reported "added" or "removed"; one entity change is
-one finding.
+one finding. An amount's words misspelled ("(ასი)" -> "(ასოი)") are `CMP.AMOUNT_WORDS`, an error,
+as the act check grades the same slip; a count's or a period's words misspelled are
+`CMP.SPELLING`, a warning. Two dates written as a range are one period (`CMP.DURATION`, label
+"Execution period", or "Validity period" when validity words precede it).
 
 ## 5. BOQ gold (per set, JSON) and the evaluation policy
 
