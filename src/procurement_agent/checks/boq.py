@@ -438,6 +438,10 @@ def _own_row_formula(formula: str, row: int) -> bool:
     return {int(m.group(2)) for m in _CELL_REF.finditer(body)} <= {row}
 
 
+#: A formula adding up other rows: "=SUM(G13:G19)", "=G13+G14".
+_SUM_OF_ROWS = re.compile(r"^=\s*(?:SUM\s*\(|[A-Z]{1,3}\d+\s*\+)", re.IGNORECASE)
+
+
 def _line_kind(
     ws: object, wf: object, cols: dict[str, int], row: int, description: str, has_measure: bool
 ) -> str:
@@ -448,6 +452,13 @@ def _line_kind(
     """
     if _SUBTOTAL.match(description):
         return "subtotal"
+    qty_col = cols.get("qty")
+    if qty_col:
+        qty_formula = _formula_text(wf.cell(row, qty_col))  # type: ignore[attr-defined]
+        if qty_formula is not None and _SUM_OF_ROWS.search(qty_formula):
+            # "=SUM(G13:G19)": the quantity adds up the items under it - a parent, whose items
+            # are the positions. As a position it was always "unpriced", its items being priced.
+            return "heading"
     column = cols.get("amount")
     if column:
         formula = _formula_text(wf.cell(row, column))  # type: ignore[attr-defined]
@@ -754,9 +765,11 @@ class PositionEval:
     #: template quantity x rate, or the bidder's own amount where the template quantity is blank
     cost: float
     #: priced | filled_blank | unpriced | not_filled | non_numeric | removed | sheet_missing |
-    #: sheet_unreadable
+    #: sheet_unreadable | optional | optional_priced
     status: str
     in_common_scope: bool = False
+    #: the positions priced as one: a section row ("A8") and the rows numbered under it ("8.1")
+    group: str = ""
 
     @property
     def priced(self) -> bool:
@@ -765,6 +778,10 @@ class PositionEval:
     @property
     def ref(self) -> tuple[str, int]:
         return (self.sheet, self.row)
+
+    @property
+    def group_ref(self) -> tuple[str, str]:
+        return (self.sheet, self.group or f"r{self.row}")
 
 
 @dataclass(slots=True)
@@ -787,6 +804,9 @@ class BidComparison:
     unpriced_positions: list[BoqLine] = field(default_factory=list)
     #: template positions with a blank quantity ("bidder fills in") that the bid left blank
     unfilled_positions: list[BoqLine] = field(default_factory=list)
+    #: bid lines priced on the template's placeholder for "any other items": the bidder's own
+    #: additions, listed and left out of the evaluation like an added line
+    priced_optional: list[BoqLine] = field(default_factory=list)
     #: (bid line, column key, text) - text in a number cell, never read as 0
     non_numeric: list[tuple[BoqLine, str, str]] = field(default_factory=list)
     #: template sheets present in the bid whose columns could not be recognised
@@ -1097,6 +1117,43 @@ def _unit_rate(line: BoqLine, columns: dict[str, int]) -> float | None:
     return None
 
 
+#: The template's invitation to list what it does not describe: "The tender is to list here
+#: below any other items", "Other costs if necessary", "სხვა, აღწერაში არ შეტანილი". A bidder
+#: need not price it, and one who does has added work of their own.
+_PLACEHOLDER = re.compile(
+    r"any other (?:items|works)|list(?:ed)? here|to be listed|undescribed|"
+    r"other costs if necessary|აღწერაში\s+არ\s+შეტანილ|სხვა\s+ხარჯ",
+    re.IGNORECASE,
+)
+#: A section row that is itself priced ("A8 Progress and Final Photographs"), whose own items are
+#: numbered under it ("8.1").
+_SECTION_POSITION = re.compile(r"^[A-Z](\d+)$")
+
+
+def _position_groups(lines: list[BoqLine]) -> dict[int, str]:
+    """Each position's group: a priced section row and the positions numbered under it are one.
+
+    The client's preliminaries price some sections on their own row and some on the item under
+    it ("A8" and "8.1" both carry an amount formula); bidders price one or the other. Counted
+    apart, every bidder "left unpriced" whichever they did not price, and both rows fell out of
+    the common scope.
+    """
+    groups: dict[int, str] = {}
+    parent: tuple[str, str] | None = None
+    for line in lines:
+        if line.kind != "position":
+            continue
+        item = line.item_no.strip()
+        if m := _SECTION_POSITION.match(item):
+            parent = (item, m.group(1))
+            groups[line.row] = item
+        elif parent is not None and item.startswith(parent[1] + "."):
+            groups[line.row] = parent[0]
+        else:
+            groups[line.row] = f"r{line.row}"
+    return groups
+
+
 def _compare_sheet(out: BidComparison, t_sheet: BoqSheet, b_sheet: BoqSheet) -> None:
     matched, added, removed = _align(t_sheet.lines, b_sheet.lines)
     out.matched.extend(matched)
@@ -1164,6 +1221,23 @@ def _compare_sheet(out: BidComparison, t_sheet: BoqSheet, b_sheet: BoqSheet) -> 
             continue
         rate = _unit_rate(b, b_sheet.columns)
         text_cols = {key for key, _ in b.non_numeric}
+        if _PLACEHOLDER.search(t.description):
+            if b.amount or rate:
+                out.priced_optional.append(b)
+            out.positions.append(
+                PositionEval(
+                    t.sheet,
+                    t.row,
+                    t.item_no,
+                    t.description,
+                    t.quantity,
+                    b.row,
+                    rate,
+                    0.0,
+                    "optional_priced" if (b.amount or rate) else "optional",
+                )
+            )
+            continue
         if t.quantity:
             cost = t.quantity * rate if rate else 0.0
             if rate:
@@ -1203,6 +1277,19 @@ def _compare_sheet(out: BidComparison, t_sheet: BoqSheet, b_sheet: BoqSheet) -> 
             )
         )
 
+    # a group is priced when any of its rows is: a position is unpriced only when its whole
+    # group is
+    groups = _position_groups(t_sheet.lines)
+    sheet_positions = [p for p in out.positions if p.sheet == t_sheet.name]
+    for pos in sheet_positions:
+        pos.group = groups.get(pos.row, f"r{pos.row}")
+    priced_groups = {pos.group for pos in sheet_positions if pos.priced}
+    out.unpriced_positions = [
+        t
+        for t in out.unpriced_positions
+        if t.sheet != t_sheet.name or groups.get(t.row, f"r{t.row}") not in priced_groups
+    ]
+
     priced = [line for line in b_sheet.lines if line.is_priced]
     if not priced and any(line.quantity for line in t_sheet.lines):
         out.unpriced_sheets.append(t_sheet.name)
@@ -1232,6 +1319,7 @@ def _evaluate(out: BidComparison, bid: BoqWorkbook) -> None:
     parts = {
         "quantities": quantities,
         "added_lines": sum(b.amount or 0.0 for b in out.added if b.kind == "position"),
+        "optional_items": sum(b.amount or 0.0 for b in out.priced_optional),
         "priced_headings": sum(b.amount or 0.0 for b in out.priced_headings),
         "added_sheets": sum(bid.sheets[s].total for s in out.added_sheets if s in bid.sheets),
         "summary": (out.stated_total_cost or 0.0) - bid.total,
@@ -1351,6 +1439,20 @@ def _list_findings(out: BidComparison) -> None:
                 f"section left unpriced: {s} - the full total is not like-for-like; the "
                 "colours are decided on the common scope",
                 actual=s,
+            )
+        )
+    for b in out.priced_optional:
+        ka, en = _where(b)
+        out.findings.append(
+            _finding(
+                "BOQ.OPTIONAL_PRICED",
+                "info",
+                f"{ka}: კომპანიამ „სხვა სამუშაოების“ ველში საკუთარი პოზიცია დაამატა "
+                f"({_money(b.amount or 0.0)}) — შეფასებაში არ შედის, როგორც დამატებული პოზიცია",
+                f"{en}: the bidder priced the placeholder for other items "
+                f"({_money(b.amount or 0.0)}) - its own addition, left out of the evaluation "
+                "like an added position",
+                actual=_money(b.amount or 0.0),
             )
         )
     unpriced_sheets = set(out.unpriced_sheets)
@@ -1620,12 +1722,12 @@ def compare_all(template: BoqWorkbook, bids: list[BoqWorkbook]) -> list[BidCompa
     evaluable = [c for c in comparisons if c.evaluable]
     if not evaluable:
         return comparisons
-    common = set.intersection(*({p.ref for p in c.positions if p.priced} for c in evaluable))
+    common = set.intersection(*({p.group_ref for p in c.positions if p.priced} for c in evaluable))
     for comp in evaluable:
         comp.common_scope_positions = len(common)
         comp.common_scope_cost = 0.0
         for p in comp.positions:
-            p.in_common_scope = p.ref in common
+            p.in_common_scope = p.group_ref in common
             if p.in_common_scope:
                 comp.common_scope_cost += p.cost
         if comp.markup_factor is not None:
@@ -1744,6 +1846,8 @@ _STATUS_TEXT = {
     "removed": "EXCLUDED: removed by the bidder",
     "sheet_missing": "EXCLUDED: sheet missing",
     "sheet_unreadable": "EXCLUDED: sheet unreadable",
+    "optional": "optional (placeholder for other items)",
+    "optional_priced": "EXCLUDED: the bidder's own additional items",
 }
 
 

@@ -302,10 +302,10 @@ def test_a_filled_in_blank_quantity_is_evaluated_at_the_bidders_amount(tmp_path:
     """Where the template leaves the quantity blank the bidder's own amount counts, and the line
     is listed - an info, not an error."""
     t = _real(tmp_path, "T")
-    bid = Bid(qty={(CIVIL, "2.1"): 3}, rates={(CIVIL, "2.1"): 100.0})
+    bid = Bid(qty={(CIVIL, "1.6"): 3}, rates={(CIVIL, "1.6"): 100.0})
     comp = compare_bid(t, _real(tmp_path, "B", bid))
     [filled] = comp.filled_blank
-    assert (filled.item_no, filled.bid_qty, filled.amount) == ("2.1", 3.0, 300.0)
+    assert (filled.item_no, filled.bid_qty, filled.amount) == ("1.6", 3.0, 300.0)
     assert comp.evaluated_cost == pytest.approx(_cost() + 300.0, abs=0.005)
     finding = next(f for f in comp.findings if f.rule_id == "BOQ.FILLED_BLANK")
     assert finding.severity == "info"
@@ -330,7 +330,45 @@ def test_a_partly_unpriced_section_lists_its_positions(tmp_path: Path) -> None:
     assert CIVIL in finding.message_en and "1.3" in finding.message_en
     assert [line.item_no for line in comp.unpriced_positions] == ["1.3"]
     assert "BOQ.SECTION_UNPRICED" not in _rules(comp)
-    assert [line.item_no for line in comp.unfilled_positions] == ["2.1", "2.1"]
+    # the placeholders for "other items" are optional; the fill-in quantity left blank is listed
+    assert [line.item_no for line in comp.unfilled_positions] == ["1.6"]
+
+
+def test_a_priced_placeholder_is_the_bidders_own_addition(tmp_path: Path) -> None:
+    """ "Other works to be listed here by the tenderer": what a bidder lists there is work the
+    template does not describe - listed, and kept out of the evaluation like an added line."""
+    t = _real(tmp_path, "T")
+    bid = Bid(qty={(CIVIL, "2.1"): 3}, rates={(CIVIL, "2.1"): 100.0})
+    comp = compare_bid(t, _real(tmp_path, "B", bid))
+    assert [line.item_no for line in comp.priced_optional] == ["2.1"]
+    assert comp.evaluated_cost == pytest.approx(_cost(), abs=0.005)
+    assert comp.difference["optional_items"] == pytest.approx(300.0 * MARKUP, abs=0.01)
+    finding = next(f for f in comp.findings if f.rule_id == "BOQ.OPTIONAL_PRICED")
+    assert finding.severity == "info"
+    assert "BOQ.POSITIONS_UNPRICED" not in _rules(comp)
+
+
+def test_a_section_row_and_its_items_are_priced_as_one() -> None:
+    from procurement_agent.checks.boq import BoqLine, _position_groups
+
+    def line(row: int, item: str) -> BoqLine:
+        return BoqLine(sheet="S", row=row, item_no=item, description="x", unit="item", quantity=1.0)
+
+    groups = _position_groups([line(10, "7.1"), line(11, "A8"), line(12, "8.1"), line(13, "9.1")])
+    assert groups[11] == groups[12] == "A8"
+    assert groups[10] != groups[13] and "A8" not in (groups[10], groups[13])
+
+
+def test_a_quantity_that_adds_up_the_rows_below_is_a_parent_not_a_position() -> None:
+    from openpyxl import Workbook
+
+    from procurement_agent.checks.boq import _line_kind
+
+    values, formulas = Workbook(), Workbook()
+    formulas.active.cell(12, 7, "=SUM(G13:G19)")  # type: ignore[union-attr]
+    cols = {"desc": 3, "qty": 7, "amount": 16}
+    kind = _line_kind(values.active, formulas.active, cols, 12, "Lighting fixtures", True)
+    assert kind == "heading"
 
 
 # --- defects the reader used to hide ---------------------------------------------------------

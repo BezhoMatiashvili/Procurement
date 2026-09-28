@@ -140,6 +140,8 @@ REAL_SHEETS: dict[str, list[Row]] = {
         ("1.4", "Aluminium edge trim for wall ends", "lm", 55, 17.0),
         ("H", "Floor works"),
         ("1.5", "Levelling screed 60 mm", "m2", 250, 41.0),
+        # a quantity the template leaves to the bidder, like the client's staffing lines
+        ("1.6", "Site supervision, months as proposed by the tenderer", "month", None, 0.0),
         ("A2", "Other items"),
         ("2.1", "Other works to be listed here by the tenderer", "item", None, 0.0),
     ],
