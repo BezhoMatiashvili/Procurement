@@ -138,8 +138,20 @@ _TRUNCATED: frozenset[Case] = frozenset({"gen", "ins", "gen_tvis", "gen_gan", "g
 _VOWELS = "აეიოუ"
 
 
+#: Surname endings in "-ა" that keep it in every case ("ტყებუჩავა", "ტყებუჩავას").
+_KEPT_A = ("ავა", "ევა", "ოვა", "უვა")
+
+
 def _stem_class(lemma: str) -> Literal["consonant", "bare", "truncating", "vowel"]:
     if lemma.endswith("ძე"):
+        return "truncating"
+    if (
+        len(lemma) > 3
+        and lemma[-1] in "აე"
+        and lemma[-2] not in _VOWELS
+        and not lemma.endswith(_KEPT_A)
+    ):
+        # a common noun's final vowel drops before "-ის" and "-ით": "ხეობა" -> "ხეობის"
         return "truncating"
     if lemma.endswith("ი") and lemma not in _I_VOWEL_NAMES and len(lemma) > 2:
         return "consonant"
@@ -181,8 +193,11 @@ def lemma_word(word: str) -> str:
     """
     if not is_georgian_word(word):
         return word
+    case = case_of(word)
+    # "-ას" is a vowel stem's genitive and a common noun's dative alike: "ლომიას", "ხეობას"
+    cases: tuple[Case, ...] = (case, "dat") if case == "gen" and word.endswith("ს") else (case,)
     for lemma_candidate in _lemma_candidates(word):
-        if inflect_word(lemma_candidate, case_of(word)) == word:
+        if any(inflect_word(lemma_candidate, c) == word for c in cases):
             return lemma_candidate
     return word
 
@@ -197,8 +212,15 @@ def _lemma_candidates(word: str) -> list[str]:
         if c != case or not word.endswith(ending) or len(word) - len(ending) < 3:
             continue
         stem = word[: len(word) - len(ending)]
-        # consonant stem ("ბერიშვილ" + "ი"), truncating ("ტოგონიძ" + "ე"), vowel stem as is
-        out.extend([stem + "ე", stem + "ი", stem] if stem.endswith("ძ") else [stem + "ი", stem])
+        # consonant stem ("ბერიშვილ" + "ი"), truncating ("ტოგონიძ" + "ე", "ხეობ" + "ა"), vowel
+        # stem as is. "-ობის"/"-ების" is far more often "-ობა"/"-ება" ("ხეობა", "საზოგადოება")
+        # than "-ობი"/"-ები"; a plural ("სახლების") is the price of that guess.
+        if stem.endswith("ძ"):
+            out.extend([stem + "ე", stem + "ი", stem])
+        elif stem.endswith(("ობ", "ებ")):
+            out.extend([stem + "ა", stem + "ი", stem])
+        else:
+            out.extend([stem + "ი", stem, stem + "ა", stem + "ე"])
     if case == "gen" and word.endswith("ს"):
         out.append(word[:-1])  # vowel stem + "-ს"
     return list(dict.fromkeys(out))
@@ -585,14 +607,36 @@ def mixed_script_words(text: str, *, vocabulary: frozenset[str] = frozenset()) -
         if not foreign and not inner_digit:
             continue
         stripped = "".join(ch for ch in w if _GEO.match(ch))
+        # the letter typed on the wrong keyboard layout, in place of the Georgian one on its key
+        # ("უფლeბები" for "უფლებები"), or a stray key pressed as well ("sმომიჯნავე")
+        keyed = "".join(ch if _GEO.match(ch) else _KA_KEYS.get(ch, "") for ch in w)
         correction: str | None = stripped if len(stripped) >= 3 else None
-        near = [v for v in vocabulary if abs(len(v) - len(stripped)) <= 1]
-        if near:
-            best = min(near, key=lambda v: damerau(v, stripped, cap=2))
-            if damerau(best, stripped, cap=2) <= 1:
-                correction = best
+        attested = [
+            c
+            for c in dict.fromkeys((keyed, stripped))
+            if len(c) >= 3 and (c in vocabulary or any(same_word(c, v) for v in vocabulary))
+        ]
+        if attested:
+            correction = attested[0]
+        else:
+            near = [v for v in vocabulary if abs(len(v) - len(stripped)) <= 1]
+            if near:
+                best = min(near, key=lambda v: damerau(v, stripped, cap=2))
+                if damerau(best, stripped, cap=2) <= 1:
+                    correction = best
         out.append(MixedWord(word=w, start=m.start(), end=m.end(), correction=correction))
     return out
+
+
+#: The Georgian keyboard layout: the Georgian letter on each Latin key. A letter typed with the
+#: wrong layout active is this key's Latin letter.
+_KA_KEYS = dict(
+    zip(
+        "abgdevzTiklmnopJrstufqRySCcZwWxjh",
+        "აბგდევზთიკლმნოპჟრსტუფქღყშჩცძწჭხჯჰ",
+        strict=True,
+    )
+)
 
 
 # --- legal forms ---------------------------------------------------------------------------------

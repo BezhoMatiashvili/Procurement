@@ -19,6 +19,7 @@ import calendar
 import re
 import unicodedata
 from bisect import bisect_right
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -430,9 +431,16 @@ _CONTRACT_REFERENCE = re.compile(r"\s*[„“\"]?\s*(?:N\s*\S+\s*)?ხელშ�
 
 
 def _date_hits_near(
-    text: str, keys: tuple[str, ...], window: int = 160
+    text: str,
+    keys: tuple[str, ...],
+    window: int = 160,
+    *,
+    skip: Callable[[RuleHit], bool] | None = None,
 ) -> list[tuple[date, RuleHit]]:
-    """Dates that follow one of the given keywords, in document order, with where each was read.
+    """Dates that follow one of the given keywords, in document order, with where each was read,
+    each date once. ``skip`` drops a hit before that: a date set aside must not take the place
+    of the same date written where it counts - an act dated the day its period ends, read first
+    under the period's heading and dropped as the act's, took the period's end with it.
 
     Anchoring on the section wording is far more reliable than the generic keyword-proximity
     classifier, because these documents put each date under its own numbered heading.
@@ -444,6 +452,8 @@ def _date_hits_near(
     out: list[tuple[date, RuleHit]] = []
     for h in hits:
         if any(s <= h.start <= s + window for s in starts):
+            if skip is not None and skip(h):
+                continue
             d = date.fromisoformat(str(h.normalized))
             if all(d != seen for seen, _ in out):
                 out.append((d, h))
@@ -642,10 +652,10 @@ class AoaChecker:
         text = self.aoa.text
         opens = sorted(m.end() for k in _PERIOD_KEYS for m in re.finditer(re.escape(k), text))
         act = self._act_date()
+        # the act's own date written after the period is not part of it
+        is_act = (lambda h: h.start == act[1].start) if act is not None else None
         out: list[tuple[date, RuleHit]] = []
-        for d, h in _date_hits_near(text, _PERIOD_KEYS):
-            if act is not None and h.start == act[1].start:
-                continue  # the act's own date written after the period is not part of it
+        for d, h in _date_hits_near(text, _PERIOD_KEYS, skip=is_act):
             if _CONTRACT_REFERENCE.match(text, h.end):
                 continue  # "... შესრულდა 2026 წლის 1 მარტის ხელშეკრულების შესაბამისად"
             i = bisect_right(opens, h.start)

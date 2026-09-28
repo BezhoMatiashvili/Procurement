@@ -182,3 +182,32 @@ def test_legal_form_kind() -> None:
     assert legal_form_kind("ფ/პ ნინო კაპანაძე") == "natural_person"
     assert legal_form_kind("Example Trading LLC") == "foreign"
     assert legal_form_kind("ნინო კაპანაძე") is None
+
+
+def test_a_letter_typed_on_the_wrong_layout_is_put_back_on_its_key() -> None:
+    """A Latin "e" where the Georgian "ე" belongs - the same key on the Georgian layout - is a
+    substitution, and the correction restores the letter when the documents write the word."""
+    from procurement_agent.extraction.georgian import mixed_script_words
+
+    vocabulary = frozenset({"უფლებებს", "მოვალეობები"})
+    [found] = mixed_script_words("მხარეების უფლeბები", vocabulary=vocabulary)
+    assert found.correction == "უფლებები"
+    # a stray key pressed as well is dropped, as before
+    [stray] = mixed_script_words("და sმომიჯნავე", vocabulary=frozenset({"მომიჯნავე"}))
+    assert stray.correction == "მომიჯნავე"
+
+
+def test_a_common_noun_in_a_drops_it_before_the_genitive() -> None:
+    from procurement_agent.extraction.georgian import inflect_word, lemma, lemma_word
+
+    assert inflect_word("ხეობა", "gen") == "ხეობის"
+    assert inflect_word("ხეობა", "dat") == "ხეობას"
+    assert inflect_word("ხეობა", "gen_tvis") == "ხეობისთვის"
+    assert lemma_word("ხეობისთვის") == "ხეობა"
+    assert lemma_word("ხეობას") == "ხეობა"
+    assert lemma("„თოვლის ხეობისთვის“") == "„თოვლის ხეობა“"
+    # the "-ი" nouns and the surnames keep their forms
+    assert lemma_word("ველის") == "ველი"
+    assert lemma_word("ლომიას") == "ლომია"
+    assert lemma_word("ტოგონიძის") == "ტოგონიძე"
+    assert inflect_word("ტყებუჩავა", "gen") == "ტყებუჩავას"

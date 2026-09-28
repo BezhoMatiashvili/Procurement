@@ -115,3 +115,14 @@ def test_a_signatory_by_power_of_attorney_is_a_warning_to_check_the_authority() 
         ("warning", "ლევან გელაშვილი", None),
     ]
     assert report.errors == []
+
+
+def test_an_act_dated_the_day_its_period_ends_keeps_the_period_whole() -> None:
+    """The act's date, repeated under the period's heading, is the period's end date too: set
+    aside as the act's, it must not take the period's end with it."""
+    act = _in_figures(
+        "„აქტი“ გაფორმდა 30.04.2026. „მომსახურება“ გაწეულია 01.04.2026 - 30.04.2026 პერიოდში."
+    )
+    report = check_aoa(aoa_text=act, contract_text=CONTRACT)
+    assert report.summary["execution_period"] == "2026-04-01..2026-04-30"
+    assert report.errors == []
