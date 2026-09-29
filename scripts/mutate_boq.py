@@ -1570,7 +1570,8 @@ def main(argv: list[str] | None = None) -> int:
     if unknown:
         ap.error(f"unknown classes: {', '.join(unknown)}")
     keep_root = args.keep_failures.resolve()
-    if ROOT / "samples" not in (keep_root, *keep_root.parents):
+    # resolved on both sides: in a git worktree ``samples`` is a symlink to the main checkout's
+    if (ROOT / "samples").resolve() not in (keep_root, *keep_root.parents):
         ap.error("--keep-failures must be under samples/ (mutants carry client values)")
     work = keep_root / f"seed-{args.seed}"
     if work.exists():
@@ -1817,9 +1818,11 @@ def main(argv: list[str] | None = None) -> int:
         ),
         encoding="utf-8",
     )
+    samples = (ROOT / "samples").resolve()
+    shown = f"samples/{work.relative_to(samples)}"
     print(
-        f"\nwrote {out.relative_to(ROOT)} (aggregates) and {work.relative_to(ROOT)}/details.json (per case); "
-        f"{len(failed_paths)} failing mutant(s) kept in {work.relative_to(ROOT)}/"
+        f"\nwrote {out.relative_to(ROOT)} (aggregates) and {shown}/details.json (per case); "
+        f"{len(failed_paths)} failing mutant(s) kept in {shown}/"
     )
     print(f"total {time.time() - t_start:.0f}s")
     return 0
