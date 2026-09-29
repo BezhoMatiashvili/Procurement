@@ -305,12 +305,25 @@ def find_amounts(text: str) -> list[RuleHit]:
 # --- dates -------------------------------------------------------------------------------------
 
 _DATE_NUMERIC = re.compile(r"(?<!\d)(\d{1,2})[./-](\d{1,2})[./-](\d{4})(?!\d)")
+#: A two-digit year, only where the word for "year" says it is one: "12.05.26 წ.".
+_DATE_NUMERIC_SHORT_YEAR = re.compile(
+    r"(?<![\d./-])(\d{1,2})[./-](\d{1,2})[./-](\d{2})(?![\d./-])(?=\s*წ(?:ლის|ელი|\.))"
+)
 _DATE_ISO = re.compile(r"(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)")
+#: The day of a Georgian date: "30", in quotes as a contract heads its date ("„30“ ივნისი",
+#: ",,30'' ივნისი" - the closing quote required, so a quoted name before a date is not taken
+#: in), or as an ordinal ("1-ლი მაისი", the first).
+_KA_DAY = (
+    r"(?P<q>„|,,|\"|“|«)?(?P<d>\d{1,2})(?(q)(?:“|”|\"|''|»))"
+    r"(?:\s*-\s*(?:ლი|ე)(?![ა-ჰ]))?"
+)
 _DATE_KA_YMD = re.compile(
-    rf"(?<!\d)(\d{{4}})[.,\s]*წ(?:ლის|\.)?\s*(\d{{1,2}})\.?\s*({_KA_MONTH_FUZZY})", re.IGNORECASE
+    rf"(?<!\d)(?P<y>\d{{4}})[.,\s]*წ(?:ლის|\.)?\s*{_KA_DAY}\.?\s*(?P<m>{_KA_MONTH_FUZZY})",
+    re.IGNORECASE,
 )
 _DATE_KA_DMY = re.compile(
-    rf"(?<!\d)(\d{{1,2}})\.?\s*({_KA_MONTH_FUZZY}),?\s*(\d{{4}})\s*(?:წ(?:ელი|ლის|\.)?)?",
+    rf"(?<!\d){_KA_DAY}\.?\s*(?P<m>{_KA_MONTH_FUZZY}),?\s*(?P<y>\d{{4}})\s*"
+    r"(?:წ(?:ელი|ლის|\.)?)?",
     re.IGNORECASE,
 )
 _DATE_EN_DMY = re.compile(
@@ -388,12 +401,11 @@ def find_dates(text: str) -> list[RuleHit]:
             note = f"month name appears misspelled: {month_word!r}"
         found[(m.start(), m.end())] = (dt, m.group(0), note)
 
-    for m in _DATE_KA_YMD.finditer(text):
-        mo = _month_ka(m.group(3))
-        add(m, _safe_date(int(m.group(1)), mo, int(m.group(2))) if mo else None, m.group(3))
-    for m in _DATE_KA_DMY.finditer(text):
-        mo = _month_ka(m.group(2))
-        add(m, _safe_date(int(m.group(3)), mo, int(m.group(1))) if mo else None, m.group(2))
+    for pattern in (_DATE_KA_YMD, _DATE_KA_DMY):
+        for m in pattern.finditer(text):
+            mo = _month_ka(m.group("m"))
+            dt = _safe_date(int(m.group("y")), mo, int(m.group("d"))) if mo else None
+            add(m, dt, m.group("m"))
     for m in _DATE_EN_DMY.finditer(text):
         mo = _month_en(m.group(2))
         add(m, _safe_date(int(m.group(3)), mo, int(m.group(1))) if mo else None)
@@ -404,6 +416,8 @@ def find_dates(text: str) -> list[RuleHit]:
         add(m, _safe_date(int(m.group(1)), int(m.group(2)), int(m.group(3))))
     for m in _DATE_NUMERIC.finditer(text):
         add(m, _safe_date(int(m.group(3)), int(m.group(2)), int(m.group(1))))
+    for m in _DATE_NUMERIC_SHORT_YEAR.finditer(text):
+        add(m, _safe_date(2000 + int(m.group(3)), int(m.group(2)), int(m.group(1))))
 
     hits: list[RuleHit] = []
     last_end = -1
