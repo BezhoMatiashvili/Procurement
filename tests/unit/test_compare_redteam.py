@@ -120,6 +120,100 @@ def test_a_director_renamed_in_the_preamble_and_the_signature_table_is_one_chang
     assert [r[0] for r in rules(run(left, right))] == ["CMP.PARTY"]
 
 
+# --- COMPARE-02: whether the price includes VAT is a value -------------------------------------
+
+
+def test_vat_included_changed_to_excluded_is_a_vat_change() -> None:
+    right = edit(CONTRACT, "დღგ-ს ჩათვლით", "დღგ-ს გარეშე")
+    assert rules(run(CONTRACT, right)) == [("CMP.VAT", "incl", "excl", "error")]
+    act = edit(ACT, "გადასახადების ჩათვლით", "გადასახადების გარეშე")
+    assert rules(run(ACT, act)) == [("CMP.VAT", "incl", "excl", "error")]
+    english = ["The fee is GEL 5,400.00 (five thousand four hundred lari), VAT included."]
+    changed = [english[0].replace("VAT included", "VAT excluded")]
+    assert rules(run(english, changed)) == [("CMP.VAT", "incl", "excl", "error")]
+
+
+def test_a_contract_and_its_act_that_disagree_on_taxes_report_it() -> None:
+    act = edit(ACT, "გადასახადების ჩათვლით", "გადასახადების გარეშე")
+    found = [f for f in run(CONTRACT, act).findings if f.rule_id == "CMP.VAT"]
+    assert [(f.expected, f.actual, f.severity) for f in found] == [("incl", "excl", "error")]
+    assert not [f for f in run(CONTRACT, ACT).findings if f.rule_id == "CMP.VAT"]
+
+
+# --- COMPARE-03, 04, 25: a payment term is read whole, in its canonical form ------------------
+
+
+def test_working_days_changed_to_calendar_days_is_a_payment_change() -> None:
+    right = edit(CONTRACT, "5 (ხუთი) სამუშაო დღის", "5 (ხუთი) კალენდარული დღის")
+    assert rules(run(CONTRACT, right)) == [("CMP.PAYMENT", "P5D working", "P5D calendar", "error")]
+    english = ["Payment is made within 10 (ten) working days of the invoice."]
+    changed = [english[0].replace("working", "calendar")]
+    assert rules(run(english, changed)) == [
+        ("CMP.PAYMENT", "P10D working", "P10D calendar", "error")
+    ]
+
+
+def test_the_days_a_deadline_counts_are_part_of_it() -> None:
+    left = ["მიწოდება განხორციელდება ხელშეკრულების გაფორმებიდან 30 სამუშაო დღის ვადაში."]
+    right = [left[0].replace("სამუშაო", "კალენდარული")]
+    assert rules(run(left, right)) == [
+        ("CMP.DURATION", "P30D working", "P30D calendar", "error")
+    ]
+
+
+def test_a_payment_term_change_is_stated_in_canonical_form() -> None:
+    right = edit(CONTRACT, "5 (ხუთი) სამუშაო", "10 (ათი) სამუშაო")
+    report = run(CONTRACT, right)
+    assert rules(report) == [("CMP.PAYMENT", "P5D working", "P10D working", "error")]
+    assert "5 working days → 10 working days" in report.findings[0].message_en
+
+
+def test_warranty_and_delivery_changes_are_stated_as_iso_durations() -> None:
+    left = [
+        "საგარანტიო ვადა შეადგენს 12 (თორმეტი) თვეს.",
+        "მიწოდება განხორციელდება ხელშეკრულების გაფორმებიდან 30 კალენდარული დღის ვადაში.",
+    ]
+    right = [
+        left[0].replace("12 (თორმეტი)", "24 (ოცდაოთხი)"),
+        left[1].replace("30 კალენდარული", "45 კალენდარული"),
+    ]
+    report = run(left, right)
+    assert rules(report) == [
+        ("CMP.DURATION", "P12M", "P24M", "error"),
+        ("CMP.DURATION", "P30D", "P45D", "error"),
+    ]
+    # the finding still says it the way the document does
+    assert "12 months" in report.findings[0].message_en
+
+
+# --- COMPARE-18: a quantity in prose is a value --------------------------------------------------
+
+SCOPE = ["2.2. მომსახურება მოიცავს 6 (ექვსი) ცალი სავენტილაციო დანადგარის გაწმენდას."]
+
+
+def test_a_quantity_changed_in_prose_is_a_quantity_change() -> None:
+    right = [SCOPE[0].replace("6 (ექვსი)", "8 (რვა)")]
+    assert rules(run(SCOPE, right)) == [("CMP.QUANTITY", "6 item", "8 item", "error")]
+    bare = [SCOPE[0].replace(" (ექვსი)", "")]
+    assert rules(run(bare, [bare[0].replace("6 ცალი", "7 ცალი")])) == [
+        ("CMP.QUANTITY", "6 item", "7 item", "error")
+    ]
+
+
+def test_a_quantity_whose_unit_changed_is_a_quantity_change() -> None:
+    right = [SCOPE[0].replace("ცალი", "კომპლექტი")]
+    assert rules(run(SCOPE, right)) == [("CMP.QUANTITY", "6 item", "6 set", "error")]
+    labelled = ["რაოდენობა: 3 pcs"]
+    assert rules(run(labelled, ["რაოდენობა: 4 pcs"])) == [
+        ("CMP.QUANTITY", "3 item", "4 item", "error")
+    ]
+
+
+def test_copies_of_a_document_are_no_quantity() -> None:
+    right = edit(ACT, "2 (ორი) იდენტურ", "3 (სამი) იდენტურ")
+    assert [r[0] for r in rules(run(ACT, right))] == ["CMP.AMOUNT_WORDS"]
+
+
 # --- COMPARE-05: the kind of document is read from folded text ----------------------------------
 
 
@@ -170,10 +264,13 @@ def test_a_changed_validity_end_is_one_period_change() -> None:
     assert found == [("CMP.DURATION", "2026-04-09/2026-12-31", "2026-04-09/2026-11-30", "error")]
 
 
-def test_a_validity_only_the_contract_states_is_removed_once() -> None:
-    report = run(CONTRACT, ACT)
-    gone = [f for f in report.findings if f.rule_id == "CMP.DURATION" and f.actual is None]
-    assert [f.expected for f in gone] == ["2026-04-09/2026-12-31"]
+def test_a_removed_validity_clause_is_one_period_removed() -> None:
+    right = [t for t in CONTRACT if not t.startswith("5.1.")]
+    report = run(CONTRACT, right)
+    assert report.alignment == "versions"
+    # one finding, the period as the whole-document reader states it (its end no longer stated)
+    [gone] = [f for f in report.findings if f.rule_id == "CMP.DURATION"]
+    assert gone.expected == "2026-04-09/2026-12-31"
 
 
 # --- COMPARE-17: a total price is a total --------------------------------------------------------

@@ -367,6 +367,8 @@ def _bank_key(value: str) -> str:
 
 
 def _value_key(ft: FactType, value: str, normalized: str | float | None) -> str:
+    if ft is FactType.quantity and isinstance(normalized, str):
+        return f"z:{normalized}"  # "4 item" is not "4 set"
     if ft in _NUMERIC:
         n = parse_number(value)
         if n is not None:
@@ -403,9 +405,104 @@ def hits_of(text: str, *, reference: str = "") -> list[_Hit]:
             out.append(hit)
 
     for a in find_anchors(text):
-        keep(_Hit(a.type, a.value, a.normalized, a.unit, None, "anchor"))
+        keep(_canonical(_Hit(a.type, a.value, a.normalized, a.unit, None, "anchor")))
     for hit in _rule_hits(text):
+        keep(_canonical(hit))
+    for hit in _vat_hits(text):
         keep(hit)
+    for hit in _quantity_hits(text):
+        keep(hit)
+    return out
+
+
+#: The units a procured quantity is counted in, and the name ``docs/GOLD_SPEC.md`` gives each.
+#: A closed list: copies of the document ("2 ეგზემპლარად"), pages, trips and months are counts
+#: or periods, not quantities, and stay what the other rules make of them.
+_UNITS: tuple[tuple[str, str], ...] = (
+    (r"ცალ[ა-ჰ]*|(?<![a-z])(?:pcs|pieces?|items?)(?![a-z])", "item"),
+    (r"კომპლექტ[ა-ჰ]*|(?<![a-z])sets?(?![a-z])", "set"),
+    (r"კვ\.?\s*მ(?:ეტრ[ა-ჰ]*)?(?![ა-ჰ])|მ²|(?<![a-z])(?:m²|m2|sq\.?\s*m)(?![a-z0-9])", "m2"),
+    (r"კუბ\.?\s*მ(?:ეტრ[ა-ჰ]*)?(?![ა-ჰ])|მ³|(?<![a-z])(?:m³|m3|cu\.?\s*m)(?![a-z0-9])", "m3"),
+    (r"კგ(?![ა-ჰ])|კილოგრამ[ა-ჰ]*|(?<![a-z])kg(?![a-z])", "kg"),
+    (r"ტონ[ა-ჰ]*|(?<![a-z])(?:tons?|tonnes?)(?![a-z])", "t"),
+    (r"ლიტრ[ა-ჰ]*|(?<![a-z])(?:litres?|liters?)(?![a-z])", "l"),
+)
+_QUANTITY = re.compile(
+    r"(?<![\d.,])(\d+(?:[.,]\d+)?)\s*(?:\(\s*[ა-ჰa-z\s-]+\s*\)\s*)?(?:"
+    + "|".join(f"(?P<u{i}>{pattern})" for i, (pattern, _unit) in enumerate(_UNITS))
+    + ")",
+    re.IGNORECASE,
+)
+
+
+def _quantity_hits(text: str) -> list[_Hit]:
+    """Quantities a text states: a number, its words in brackets if written, and a unit -
+    "4 (ოთხი) ცალი", "12 კომპლექტი", "3 pcs" - as "4 item", the form of ``docs/GOLD_SPEC.md``.
+
+    The extraction reads quantities with the model only, so a count of what is procured that
+    changed from four to five, or from pieces to sets, was "text changed", or a warning about
+    a number in words.
+    """
+    out: list[_Hit] = []
+    for m in _QUANTITY.finditer(text):
+        number = parse_number(m.group(1))
+        unit = next(
+            (u for i, (_p, u) in enumerate(_UNITS) if m.group(f"u{i}") is not None), None
+        )
+        if number is None or unit is None:
+            continue
+        canonical = f"{number:g} {unit}"
+        out.append(_Hit(FactType.quantity, m.group(0), canonical, unit, None, "rules"))
+    return out
+
+
+#: Which days a term counts, as ``docs/GOLD_SPEC.md`` writes them: business and banking days
+#: are working days (``contract_terms`` reads them the same way).
+_DAY_BASIS = {"working": "working", "business": "working", "banking": "working"}
+_DAY_BASIS["calendar"] = "calendar"
+
+
+def _canonical(hit: _Hit) -> _Hit:
+    """A payment term in the form ``docs/GOLD_SPEC.md`` fixes: its length and the days it
+    counts, "P5D working". Both terms of "7 working days" → "7 calendar days" read "P7D", and
+    the one thing that changed was compared away."""
+    if hit.type is not FactType.payment_terms or not isinstance(hit.normalized, str):
+        return hit
+    if not _ISO_COUNT.match(hit.normalized) or " " in hit.normalized:
+        return hit
+    basis = _basis(hit)
+    if basis is None:
+        return hit
+    return _Hit(
+        hit.type, hit.value, f"{hit.normalized} {basis}", hit.unit, hit.currency, hit.source
+    )
+
+
+def _basis(hit: _Hit) -> str | None:
+    """Which days a duration counts, "working" or "calendar", when it says: its value reads
+    "7 working days" or "7 days"."""
+    words = hit.value.lower().split()
+    return _DAY_BASIS.get(words[1]) if len(words) == 3 else None
+
+
+_VAT_STATUS = {"inclusion": "incl", "exclusion": "excl", "net": "net"}
+
+
+def _vat_hits(text: str) -> list[_Hit]:
+    """Whether the price includes VAT, read by the reader the tax-wording rule and the
+    whole-document pass use: "დღგ-ს ჩათვლით" is ``incl``, "გადასახადების გარეშე" ``excl``.
+
+    Without it a price that stopped including VAT was a line of "text changed", and a contract
+    and its act that disagreed about taxes were not told apart at all.
+    """
+    # imported here: contract_terms imports compare_llm, which imports this module
+    from procurement_agent.checks.contract_terms import tax_phrases
+
+    out: list[_Hit] = []
+    for phrase in tax_phrases(text):
+        status = _VAT_STATUS.get(phrase.kind)
+        if status is not None:
+            out.append(_Hit(FactType.vat_status, status, status, None, None, "rules"))
     return out
 
 
@@ -573,6 +670,8 @@ as_number = number_of
 
 def _same_value(a: _Hit, b: _Hit) -> bool:
     ft = a.type
+    if ft is FactType.quantity and a.unit != b.unit:
+        return False  # four pieces are not four sets
     if ft in _NUMERIC:
         x, y = as_number(a.value, a.normalized), as_number(b.value, b.normalized)
         if x is not None and y is not None:
@@ -581,6 +680,8 @@ def _same_value(a: _Hit, b: _Hit) -> bool:
         return True
     if ft in _BANK:
         return _bank_key(a.value) == _bank_key(b.value)
+    if ft in _DURATIONS and None not in (_basis(a), _basis(b)) and _basis(a) != _basis(b):
+        return False  # 30 working days are not 30 calendar days
     if a.normalized is not None and b.normalized is not None:
         return str(a.normalized) == str(b.normalized)
     return normalize_name(a.value) == normalize_name(b.value)
@@ -751,6 +852,11 @@ def _delta(a: _Hit | None, b: _Hit | None) -> ValueDelta | None:
             diff = classify_difference(b.value, a.value)
             if diff is not None and diff.looks_like_typo:
                 note = ("looks like a misspelling", "ჰგავს მართლწერის შეცდომას")
+        if note is None:
+            note = _as_written_note(a, b)
+        left, right = _as_reported(a), _as_reported(b)
+        if left == right and ft in _DURATIONS:  # only the days they count changed
+            left, right = f"{left} {_basis(a)}", f"{right} {_basis(b)}"
         return ValueDelta(
             type=ft,
             kind="changed",
@@ -758,8 +864,8 @@ def _delta(a: _Hit | None, b: _Hit | None) -> ValueDelta | None:
             severity=severity,
             label_en=en,
             label_ka=ka,
-            left=_as_reported(ft, a.value),
-            right=_as_reported(ft, b.value),
+            left=left,
+            right=right,
             delta=delta,
             delta_pct=pct,
             days=days,
@@ -774,8 +880,10 @@ def _delta(a: _Hit | None, b: _Hit | None) -> ValueDelta | None:
         severity=severity,
         label_en=en,
         label_ka=ka,
-        left=_as_reported(ft, a.value) if a is not None else None,
-        right=_as_reported(ft, b.value) if b is not None else None,
+        left=_as_reported(a) if a is not None else None,
+        right=_as_reported(b) if b is not None else None,
+        note_en=note_one[0] if (note_one := _as_written_note(a, b)) else None,
+        note_ka=note_one[1] if note_one else None,
     )
 
 
@@ -783,17 +891,37 @@ def _delta(a: _Hit | None, b: _Hit | None) -> ValueDelta | None:
 _NOMINATIVE = frozenset({FactType.party_director, FactType.project_name})
 
 
-def _as_reported(ft: FactType, value: str) -> str:
-    """A value the way a finding states it: a director or a project by name, in the nominative.
+#: Values a finding states in their canonical form (docs/GOLD_SPEC.md section 2): a payment
+#: term "P5D working", a warranty "P24M", a delivery deadline "P30D" or its date, a quantity
+#: "4 item".
+_CANONICAL = _DURATIONS | {FactType.payment_terms, FactType.quantity}
+
+
+def _as_reported(hit: _Hit) -> str:
+    """A value the way a finding states it: a director or a project by name, in the nominative,
+    and a term in its canonical form.
 
     The preamble names the director in the genitive ("დირექტორის ნინო კაპანაძის სახით"), the
     signature block in the nominative; a project is "„ქარვის კოშკისთვის“" in one clause and
     "„ქარვის კოშკის“" in the next. Taken as written, one misspelled name was one finding per case
-    form, each in a grammar the reader then had to undo; the name itself is what changed.
+    form, each in a grammar the reader then had to undo; the name itself is what changed. A
+    payment term stated as "7 working days" could never be matched against "P7D working", the
+    form the gold and the extraction write; the words stay in the finding's note.
     """
-    if ft in _NOMINATIVE:
-        return lemma(value)
-    return value
+    if hit.type in _NOMINATIVE:
+        return lemma(hit.value)
+    if hit.type in _CANONICAL and isinstance(hit.normalized, str) and hit.normalized:
+        return hit.normalized
+    return hit.value
+
+
+def _as_written_note(a: _Hit | None, b: _Hit | None) -> tuple[str, str] | None:
+    """The values as the documents write them, when the finding states them otherwise."""
+    shown = [(h, _as_reported(h)) for h in (a, b) if h is not None and h.type in _CANONICAL]
+    if not shown or all(h.value == value for h, value in shown):
+        return None
+    words = " → ".join(h.value for h, _ in shown)
+    return (f"as written: {words}", f"როგორც წერია: {words}")
 
 
 def _range_note(left: str, right: str) -> tuple[str, str] | None:
@@ -822,9 +950,11 @@ def deltas_between(
 
 
 #: What a document states as a whole rather than on a line: a contract's term and its
-#: performance window, an act's service period, a penalty and the period it counts per.
+#: performance window, an act's service period, a penalty and the period it counts per, and
+#: whether its price includes VAT - read from the tax wording around the fee, not from every
+#: tax word the document holds.
 _WHOLE_DOCUMENT_TYPES = frozenset(
-    {FactType.execution_period, FactType.validity_period, FactType.penalty}
+    {FactType.execution_period, FactType.validity_period, FactType.penalty, FactType.vat_status}
 )
 
 
@@ -958,6 +1088,8 @@ def _without_relabels(deltas: list[ValueDelta]) -> list[ValueDelta]:
 def _display_value(ft: FactType, value: str | None) -> str | None:
     if value is None:
         return None
+    if ft is FactType.quantity:
+        return normalize_name(value)  # "4 item": the unit is part of it
     if ft in _NUMERIC or ft in (FactType.penalty,):
         n = as_number(value)
         if n is not None:
@@ -1519,6 +1651,8 @@ def dedup_key(delta: ValueDelta) -> tuple[str, str | None, str | None]:
     def side(value: str | None) -> str | None:
         if value is None:
             return None
+        if delta.type is FactType.quantity:
+            return normalize_name(value)
         if delta.type in _NUMERIC or delta.type is FactType.penalty:
             number = as_number(value)
             return _number_key(number, value) if number is not None else normalize_name(value)
@@ -2618,13 +2752,20 @@ def _as_period(d: ValueDelta, field_deltas: list[ValueDelta]) -> ValueDelta:
     if d.type not in _PERIODS or any(v is not None and "/" in v for v in (d.left, d.right)):
         return d
 
-    def ends(value: str | None) -> set[str | None]:
-        return set(value.split("/")) if value is not None else {None}
+    def ends(value: str | None) -> set[str]:
+        return set(value.split("/")) if value is not None else set()
 
     for f in field_deltas:
-        if f.type is d.type and f.kind == d.kind and d.left in ends(f.left) and d.right in ends(
-            f.right
-        ):
+        if f.type is not d.type:
+            continue
+        before, after = ends(f.left), ends(f.right)
+        if d.kind == "changed":
+            same = d.left in before and d.right in after
+        elif d.kind == "removed":  # the end this line stated is gone from the period
+            same = d.left in before and d.left not in after
+        else:
+            same = d.right in after and d.right not in before
+        if same:
             return f
     return d
 
@@ -2922,7 +3063,10 @@ def _value_keys(text: str) -> set[tuple[FactType, str] | None]:
     if not text:
         return set()
     hits = hits_of(text)
-    return {_value_key_of(h.type, h.value) for h in hits + _endpoints(hits)}
+    return {
+        _value_key_of(h.type, _as_reported(h) if h.type in _CANONICAL else h.value)
+        for h in hits + _endpoints(hits)
+    }
 
 
 # --- entry point ----------------------------------------------------------------------------
