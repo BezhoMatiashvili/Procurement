@@ -290,6 +290,10 @@ def test_a_plural_nominative_is_a_form_of_its_singular() -> None:
     )
     assert _typos("მიწოდებულია ქაღალდის ხელსახოცები.", lexicon) == []
     assert _typos("დაზიანდა ორი შეკვრები.", lexicon) == []
+    # a plural that keeps the vowel its noun drops ("მხარი" makes "მხრები") is no plural of it
+    lexicon = Lexicon(words={"მხარი", "მხრები", "მხარეები"}, unknown={"მხარები"})
+    act = "მხარეები შეთანხმდნენ. მხარები ადასტურებენ."
+    assert _typos(act, lexicon) == [("მხარები", "მხარეები")]
 
 
 def test_an_adjective_is_the_full_form_of_the_stem_the_dictionary_knows() -> None:

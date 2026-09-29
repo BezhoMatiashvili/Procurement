@@ -481,7 +481,7 @@ def _lacked_form(word: str, lexicon: Lexicon) -> bool:
             return True
     if word.endswith("ისას") and _spelled(word[:-2], lexicon):
         return True  # "შენიშვნისას", "at the time of the remark": the genitive and "-ას"
-    if any(lexicon.known(s) for s in _singulars(word)):
+    if any(lexicon.known(s) for s in _singulars(word)) and not _drops_vowel(word, lexicon):
         return True  # a plural: "ხელსახოცები" of "ხელსახოცი", "შეკვრები" of "შეკვრა"
     if word.endswith("ი") and word[:-1].endswith(_ADJECTIVE_STEMS) and lexicon.known(word[:-1]):
         return True  # an adjective whose attributive the dictionary lists: "ანტივირუსული"
@@ -540,6 +540,18 @@ def _case_form(word: str, lexicon: Lexicon) -> bool:
         if any(lexicon.known(s) for s in (lemma, *_singulars(lemma))):
             return True
     return False
+
+
+def _drops_vowel(plural: str, lexicon: Lexicon) -> bool:
+    """Whether the dictionary knows ``plural`` without the vowel before its stem's last
+    consonant, the plural a noun that drops it takes: "მხრები" for "მხარი", so "მხარები" is
+    none."""
+    m = re.search(r"([ა-ჰ])[აეო]([ნლრმ])ები$", plural)
+    return (
+        m is not None
+        and m.group(1) not in _VOWELS
+        and lexicon.known(plural[: m.start() + 1] + plural[m.start(2) :])
+    )
 
 
 def _singulars(lemma: str) -> tuple[str, ...]:
