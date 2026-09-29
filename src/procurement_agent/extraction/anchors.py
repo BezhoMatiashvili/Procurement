@@ -367,10 +367,41 @@ def first_party_start(text: str) -> int | None:
     """Where the first party's name starts, or None when no party is named.
 
     A contract's preamble - its title, the place and the date it was signed - is everything
-    before it, which is how a reader tells the signing date from every other date.
+    before it, which is how a reader tells the signing date from every other date. A party is
+    named as ``find_parties`` names one: a legal form and a quoted name, or a person or an
+    individual entrepreneur by first name and surname ("ფ/პ ანა ბერიძე").
     """
-    m = _PARTY_NAME.search(text)
-    return m.start() if m else None
+    quoted = _PARTY_NAME.search(text)
+    person = next(
+        (
+            m
+            for m in _PERSON_PARTY.finditer(text)
+            if not any(w in _NOT_A_NAME for w in m.group(2).split())
+        ),
+        None,
+    )
+    starts = [m.start() for m in (quoted, person) if m is not None]
+    return min(starts, default=None)
+
+
+#: A document's first numbered clause: "1.", "1.1." or "მუხლი 1" opening a line or a sentence,
+#: or following the year of a heading's date in text flattened to one line ("... 2026 1. ...").
+_FIRST_CLAUSE = re.compile(
+    r"(?:^|(?<=\n)|(?<=[.;:!?)“”\"]\s)|(?<=\d{4}\s))[ \t]*"
+    r"(?:1\.(?:1\.?)?[ \t]*(?=[^\W\d_])|(?:მუხლი|article)[ \t]+1(?!\d))",
+    re.IGNORECASE,
+)
+
+
+def preamble_end(text: str) -> int | None:
+    """Where a document's preamble ends: at its first party (``first_party_start``) or at its
+    first numbered clause, whichever comes first; None when it names neither. A date before it
+    is the document's own; a date after it belongs to a clause."""
+    clause = _FIRST_CLAUSE.search(text)
+    ends = [
+        e for e in (first_party_start(text), clause.start() if clause else None) if e is not None
+    ]
+    return min(ends, default=None)
 
 
 def find_anchors(text: str) -> list[AnchorHit]:
