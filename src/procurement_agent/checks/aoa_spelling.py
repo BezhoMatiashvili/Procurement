@@ -106,6 +106,9 @@ class ProseTypo:
     start: int
     end: int
     correction: str
+    #: the act or the contract writes the correction, or another form of a word it is a form
+    #: of: the reading is evidenced, not only the dictionary's (which lacks words and forms)
+    attested: bool = False
 
 
 #: Distinct words one document may send to the correction search, the costly step (20-200 ms a
@@ -413,6 +416,21 @@ def prose_typos(
     written = contract_words | {w for w, _, _ in words(text)}
     names = _name_words(aoa)
     fenced = _Spans([*_protected_spans(aoa), *taken])
+    written_lemmas: set[str] | None = None
+
+    def evidence(correction: str) -> bool:
+        """The documents write ``correction``, or a form of a word the dictionary knows that it
+        is a form of too ("ერთმანეთს" for "ერთმანეთის")."""
+        nonlocal written_lemmas
+        if correction in written:
+            return True
+        if written_lemmas is None:
+            written_lemmas = {lemma for w in written for lemma in word_lemmas(w)}
+        return any(
+            lemma in written_lemmas and lexicon.known(lemma)
+            for lemma in word_lemmas(correction) - {correction}
+        )
+
     corrections: dict[str, str | None] = {}
     unsearched: set[str] = set()
     out: list[ProseTypo] = []
@@ -434,7 +452,7 @@ def prose_typos(
             corrections[word] = _correction(word, lexicon, written)
         correction = corrections[word]
         if correction is not None:
-            out.append(ProseTypo(word, start, end, correction))
+            out.append(ProseTypo(word, start, end, correction, evidence(correction)))
     return ProseReading(out, len(unsearched))
 
 
@@ -463,7 +481,16 @@ def _lacked_form(word: str, lexicon: Lexicon) -> bool:
             return True
     if word.endswith("ისას") and _spelled(word[:-2], lexicon):
         return True  # "შენიშვნისას", "at the time of the remark": the genitive and "-ას"
+    if any(lexicon.known(s) for s in _singulars(word)):
+        return True  # a plural: "ხელსახოცები" of "ხელსახოცი", "შეკვრები" of "შეკვრა"
+    if word.endswith("ი") and word[:-1].endswith(_ADJECTIVE_STEMS) and lexicon.known(word[:-1]):
+        return True  # an adjective whose attributive the dictionary lists: "ანტივირუსული"
     return _case_form(word, lexicon) or _full_form(word, lexicon)
+
+
+#: How the stem of an adjective or a participle ends, the form it takes before its noun:
+#: "ანტივირუსულ", "შედგენილ", "იდენტურ", "შედარებად". A dative's "-ს" is none of them.
+_ADJECTIVE_STEMS = ("ულ", "ილ", "ელ", "ალ", "ურ", "ად")
 
 
 def _spelled(word: str, lexicon: Lexicon) -> bool:

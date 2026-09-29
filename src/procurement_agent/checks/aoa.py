@@ -1173,20 +1173,25 @@ class AoaChecker:
             self._skip("AOA.SPELLING", short.reason_ka, short.reason_en)
         for typo in reading.typos:
             word = self.aoa.as_written(typo.start, typo.end)
-            ka, en = f"სიტყვა შეცდომითაა დაწერილი: „{word}“", f"word appears misspelled: '{word}'"
+            if typo.attested:
+                ka = f"სიტყვა შეცდომითაა დაწერილი: „{word}“"
+                en = f"word appears misspelled: '{word}'"
+            else:  # the dictionary's reading alone: it lacks words and forms, so check it
+                ka = f"სიტყვა შესაძლოა შეცდომითაა დაწერილი: „{word}“ — გადაამოწმეთ"
+                en = f"word may be misspelled: '{word}' - check it"
             if self.aoa.ocr:  # on a scan, a misread letter looks just like a typo
                 ka, en = _MISREAD_KA + ka, _MISREAD_EN + en
             self._add(
                 "AOA.SPELLING",
-                "warning",
+                "warning" if typo.attested else "info",
                 ka,
                 en,
                 expected=typo.correction,
                 actual=word,
                 quote=word,
                 span=(typo.start, typo.end),
-                confidence=0.8,
-                needs_review=self.aoa.ocr,
+                confidence=0.8 if typo.attested else 0.6,
+                needs_review=self.aoa.ocr or not typo.attested,
             )
 
     def rule_iban_format(self) -> None:

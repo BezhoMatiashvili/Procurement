@@ -96,7 +96,9 @@ strict_findings: true             # anything else reported (any severity) is a f
     (words that read as no number and as no misspelling of the figure are a warning: the reader
     may be at fault);
   * a month name, a Latin/Cyrillic letter inside a Georgian word, or a prose typo →
-    `AOA.SPELLING` with the corrected word;
+    `AOA.SPELLING` with the corrected word, a warning. A prose typo whose correction neither
+    the act nor the contract writes rests on the dictionary alone, which lacks words and forms:
+    it is `info` with `needs_review` ("may be misspelled - check it");
   * the service period's year outside the contract term → `AOA.PERIOD_IN_TERM` (text = the
     period as written, correction = with the in-term year); `AOA.ACT_DATE` only when the act's
     own date is the odd one out;

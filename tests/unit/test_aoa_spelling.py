@@ -282,6 +282,24 @@ def test_between_two_corrections_the_one_a_hand_makes_wins() -> None:
     assert _typos("ხელშეკრულება, რომილს საგანია მომსახურება.", lexicon) == [("რომილს", "რომლის")]
 
 
+def test_a_plural_nominative_is_a_form_of_its_singular() -> None:
+    # "ხელსახოცები" of "ხელსახოცი", "შეკვრები" of "შეკვრა": each one letter from a known word
+    lexicon = Lexicon(
+        words={"ხელსახოცი", "ხელსახოცებით", "შეკვრა", "შეკრები"},
+        unknown={"ხელსახოცები", "შეკვრები"},
+    )
+    assert _typos("მიწოდებულია ქაღალდის ხელსახოცები.", lexicon) == []
+    assert _typos("დაზიანდა ორი შეკვრები.", lexicon) == []
+
+
+def test_an_adjective_is_the_full_form_of_the_stem_the_dictionary_knows() -> None:
+    # the dictionary lists the attributive "ანტივირუსულ" and not the nominative
+    lexicon = Lexicon(words={"ანტივირუსულ", "სახლს", "სახლში"}, unknown={"ანტივირუსული", "სახლსი"})
+    assert _typos("განახლდა ანტივირუსული პროგრამა.", lexicon) == []
+    # a dative with a letter added is no adjective: "-ს" is no adjective's stem
+    assert _typos("მივედით სახლსი დროულად.", lexicon) == [("სახლსი", "სახლში")]
+
+
 def test_a_letter_added_to_a_verb_ending_in_a_is_no_case_form() -> None:
     # an aorist ("შესრულდა") looks like a noun ending in "-ა"; an ending added to it is a slip
     lexicon = Lexicon(words={"შესრულდა"}, unknown={"შესრულდას", "შესრულდაა"})
@@ -422,11 +440,13 @@ def test_a_stray_letter_at_the_edge_of_a_word_was_a_key_pressed_as_well() -> Non
 # --- inside the act check -----------------------------------------------------------------------
 
 _TYPO_ACT = ACT.replace("მომსახურების გაწევა.", "მომსახურების გაწევა. მხარეებს ეთმანეთის მიმართ.")
-_LEXICON = Lexicon(words={"ერთმანეთის"}, unknown={"ეთმანეთის"}).reading(_TYPO_ACT, CONTRACT)
+#: the contract writes the word the typo meant, so the correction is evidenced: a warning
+_TYPO_CONTRACT = CONTRACT + "\nმხარეები ერთმანეთის წინაშე პასუხს აგებენ.\n"
+_LEXICON = Lexicon(words={"ერთმანეთის"}, unknown={"ეთმანეთის"}).reading(_TYPO_ACT, _TYPO_CONTRACT)
 
 
 def test_the_act_check_reports_a_prose_typo_where_it_is_written() -> None:
-    report = check_aoa(aoa_text=_TYPO_ACT, contract_text=CONTRACT, speller=_LEXICON)
+    report = check_aoa(aoa_text=_TYPO_ACT, contract_text=_TYPO_CONTRACT, speller=_LEXICON)
     found = [f for f in report.findings if f.rule_id == "AOA.SPELLING"]
     assert len(found) == 1
     f = found[0]
@@ -444,15 +464,45 @@ def test_the_act_check_reports_a_prose_typo_where_it_is_written() -> None:
     assert not [s for s in report.skipped if s.rule_id == "AOA.SPELLING"]
 
 
+def test_a_correction_the_documents_do_not_write_is_a_note_for_review() -> None:
+    """The dictionary lacks words and forms; a correction no document writes is less certain
+    than one they do, so it is a note to check, not a warning."""
+    act = _TYPO_ACT.replace("მიმართ.", "მიმართ. შემსრულებელმა სამუშაო დაასრულა დროულდ.")
+    lexicon = Lexicon(words={"ერთმანეთის", "დროულად"}, unknown={"ეთმანეთის", "დროულდ"}).reading(
+        act, CONTRACT + " ერთმანეთის"
+    )
+    report = check_aoa(aoa_text=act, contract_text=CONTRACT + " ერთმანეთის", speller=lexicon)
+    found = {
+        f.actual: (f.severity, f.needs_review)
+        for f in report.findings
+        if f.rule_id == "AOA.SPELLING"
+    }
+    assert found == {"ეთმანეთის": ("warning", False), "დროულდ": ("info", True)}
+
+
+def test_a_correction_the_documents_write_in_another_form_is_evidenced() -> None:
+    # the contract writes "ერთმანეთს", a form of the "ერთმანეთი" the correction is a form of
+    act = _TYPO_ACT
+    contract = CONTRACT + "\nმხარეები ერთმანეთს ატყობინებენ.\n"
+    lexicon = Lexicon(words={"ერთმანეთის", "ერთმანეთი"}, unknown={"ეთმანეთის"}).reading(
+        act, contract
+    )
+    report = check_aoa(aoa_text=act, contract_text=contract, speller=lexicon)
+    [f] = [f for f in report.findings if f.rule_id == "AOA.SPELLING"]
+    assert (f.severity, f.expected) == ("warning", "ერთმანეთის")
+
+
 def test_on_a_scanned_act_a_prose_typo_may_be_a_misreading() -> None:
     # a misread letter looks exactly like a typo: said so, and left for a person to check
-    scanned = check_aoa(aoa_text=_TYPO_ACT, contract_text=CONTRACT, speller=_LEXICON, aoa_ocr=True)
+    scanned = check_aoa(
+        aoa_text=_TYPO_ACT, contract_text=_TYPO_CONTRACT, speller=_LEXICON, aoa_ocr=True
+    )
     [f] = [f for f in scanned.findings if f.rule_id == "AOA.SPELLING"]
     assert (f.severity, f.expected, f.needs_review) == ("warning", "ერთმანეთის", True)
     assert f.message_en.startswith("Possibly misread from the scan")
     # a scanned contract says nothing about how the act was read
     typed = check_aoa(
-        aoa_text=_TYPO_ACT, contract_text=CONTRACT, speller=_LEXICON, contract_ocr=True
+        aoa_text=_TYPO_ACT, contract_text=_TYPO_CONTRACT, speller=_LEXICON, contract_ocr=True
     )
     [g] = [g for g in typed.findings if g.rule_id == "AOA.SPELLING"]
     assert not g.needs_review
@@ -462,8 +512,8 @@ def test_on_a_scanned_act_a_prose_typo_may_be_a_misreading() -> None:
 def test_the_correct_act_stays_clean_and_a_rerun_reports_the_same() -> None:
     checker_input = {"aoa_text": ACT, "contract_text": CONTRACT, "speller": _LEXICON}
     assert not [f for f in check_aoa(**checker_input).findings if f.rule_id == "AOA.SPELLING"]
-    first = check_aoa(aoa_text=_TYPO_ACT, contract_text=CONTRACT, speller=_LEXICON)
-    second = check_aoa(aoa_text=_TYPO_ACT, contract_text=CONTRACT, speller=_LEXICON)
+    first = check_aoa(aoa_text=_TYPO_ACT, contract_text=_TYPO_CONTRACT, speller=_LEXICON)
+    second = check_aoa(aoa_text=_TYPO_ACT, contract_text=_TYPO_CONTRACT, speller=_LEXICON)
     assert first.findings == second.findings
 
 
