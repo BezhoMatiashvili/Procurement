@@ -391,6 +391,8 @@ STRINGS: dict[str, tuple[str, str]] = {
     "compare.changed": ("changed", "შეცვლილი"),
     "compare.moved": ("moved", "გადატანილი"),
     "compare.kind.critical": ("critical", "კრიტიკული"),
+    # the tile counts lines; the headline above it counts the critical values that changed
+    "compare.stat.critical": ("critical lines", "კრიტიკული სტრიქონი"),
     "compare.kind.substantive": ("substantive", "არსებითი"),
     "compare.kind.cosmetic": ("formatting", "ფორმატირება"),
     "compare.nothing_here": (

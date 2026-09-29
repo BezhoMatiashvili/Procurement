@@ -45,7 +45,7 @@
   <p>{{ t("compare.verdict.noline.lead") }}</p></div></div>
 {% elif c.critical %}
 <div class="verdict is-bad">{{ icon("alert") }}<div>
-  <h2>{{ t("compare.verdict.bad", n=c.critical) }}</h2>
+  <h2>{{ t("compare.verdict.bad", n=report.errors | length) }}</h2>
   <p>{{ t("compare.verdict.bad.lead") }}</p></div></div>
 {% elif c.substantive or c.moved %}
 <div class="verdict is-warn">{{ icon("info") }}<div>
@@ -61,7 +61,7 @@
 {% endif %}
 
 <ul class="stats">
-  <li class="stat error{% if not c.critical %} zero{% endif %}"><span class="v">{{ c.critical }}</span><span class="l">{{ t("compare.kind.critical") }}</span></li>
+  <li class="stat error{% if not c.critical %} zero{% endif %}"><span class="v">{{ c.critical }}</span><span class="l">{{ t("compare.stat.critical") }}</span></li>
   <li class="stat warning{% if not c.substantive %} zero{% endif %}"><span class="v">{{ c.substantive }}</span><span class="l">{{ t("compare.stat.other") }}</span></li>
   <li class="stat{% if not c.cosmetic %} zero{% endif %}"><span class="v">{{ c.cosmetic }}</span><span class="l">{{ t("compare.kind.cosmetic") }}</span></li>
   <li class="stat{% if not c.moved %} zero{% endif %}"><span class="v">{{ c.moved }}</span><span class="l">{{ t("compare.moved") }}</span></li>
@@ -87,7 +87,7 @@
   <tbody>
   {% for m in matters %}
   <tr>
-    <td class="primary">{{ m.label }}
+    <td class="primary">{{ m.label_ka if lang == "ka" else m.label_en }}
       <span class="sev sev-{{ m.severity }}">{{ t("report.severity." ~ m.severity) }}</span></td>
     <td data-label="{{ t('compare.in_a') }}" class="was">{%- if m.left -%}<span class="was-v">{{ m.left }}</span>{%- endif -%}</td>
     <td data-label="{{ t('compare.in_b') }}"><strong>{%- if m.right -%}{{ m.right }}{%- endif -%}</strong></td>

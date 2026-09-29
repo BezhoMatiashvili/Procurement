@@ -272,6 +272,26 @@ def test_findings_and_skip_reasons_both_follow_the_language(client: TestClient) 
     assert "no contract supplied" not in ka
 
 
+def test_the_compare_report_counts_critical_values_and_labels_them_in_its_language(
+    client: TestClient,
+) -> None:
+    """Two critical values changed on one line: the headline counts the two changes (it
+    counted lines), and the values table names them in the page's language (it was always
+    Georgian)."""
+    left = "საფასური შეადგენს 100 (ასი) ლარს; ბანკის კოდი: TBCBGE22.\nსხვა პუნქტი უცვლელია."
+    right = left.replace("100 (ასი)", "150 (ას ორმოცდაათი)").replace("TBCBGE22", "BAGAGE22")
+    a = _word(client, "v1.docx", left)
+    b = _word(client, "v2.docx", right)
+    client.post("/ui/lang", data={"lang": "en", "next": "/ui/"}, headers=SAME_ORIGIN)
+    en = client.get(f"/ui/checks/compare?left={a}&right={b}").text
+    table = re.search(r'<table class="list deltas">.*?</table>', en, re.S)
+    assert table is not None
+    assert "Bank code" in table.group(0)
+    assert "ბანკის კოდი" not in table.group(0)
+    assert "2 critical change(s)" in en
+    assert "1 critical line" in en or ">1</span><span class=\"l\">critical lines<" in en
+
+
 # --- the AOA report ------------------------------------------------------------------------
 
 

@@ -802,7 +802,8 @@ def _matters(report: ComparisonReport, delta_msg: object) -> list[dict[str, obje
             where = ref.path if ref is not None else None
         out.append(
             {
-                "label": delta.label_ka,
+                "label_ka": delta.label_ka,
+                "label_en": delta.label_en,
                 "left": delta.left,
                 "right": delta.right,
                 "change": _change_text(delta),
