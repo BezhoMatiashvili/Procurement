@@ -106,3 +106,46 @@ class TestNearestCorrection:
         [finding] = _of(_check(act, contract), "AOA.CADASTRAL")
         assert finding.expected is None
         assert "01.02.03.456" in finding.message_en and "01.02.03.457" in finding.message_en
+
+
+# --- AOA-13: a director misspelt in the final vowel ----------------------------------------------
+
+
+class TestDirectorFinalVowel:
+    def test_a_signature_ending_in_the_wrong_vowel_is_an_error(self) -> None:
+        act = ACT.replace("დირექტორი: დავით მელაძე", "დირექტორი: დავით მელაძი")
+        [finding] = _of(_check(act), "AOA.DIRECTOR")
+        assert (finding.severity, finding.actual, finding.expected) == (
+            "error",
+            "დავით მელაძი",
+            "დავით მელაძე",
+        )
+
+    def test_the_slip_is_found_beside_the_same_name_written_right(self) -> None:
+        """The preamble's genitive is right and the signature's nominative is not: the two are
+        read as one director, and the slip must not hide behind the right form."""
+        act = ACT.replace("დირექტორი ნინო კაპანაძე", "დირექტორი ნინო კაპანაძი")
+        [finding] = _of(_check(act), "AOA.DIRECTOR")
+        assert (finding.actual, finding.expected) == ("ნინო კაპანაძი", "ნინო კაპანაძე")
+
+    def test_a_shvili_surname_ending_in_e_is_an_error(self) -> None:
+        contract = CONTRACT.replace("დავით მელაძის", "დავით ცქვიტინაშვილის")
+        act = ACT.replace("დირექტორი: დავით მელაძე", "დირექტორი: დავით ცქვიტინაშვილე")
+        [finding] = _of(_check(act, contract), "AOA.DIRECTOR")
+        assert (finding.actual, finding.expected) == (
+            "დავით ცქვიტინაშვილე",
+            "დავით ცქვიტინაშვილი",
+        )
+
+    def test_every_case_form_of_the_contract_s_name_is_the_same_person(self) -> None:
+        from procurement_agent.checks.aoa import _same_person
+        from procurement_agent.extraction.georgian import CASES, inflect
+
+        for name in ("დავით მელაძე", "ნინო ცქვიტინაშვილი", "ლია ქობულია", "გელა ჯაფარიძე"):
+            for written in {inflect(name, c) for c in CASES}:
+                assert _same_person(written, inflect(name, "gen")), (written, name)
+        assert _same_person("ნოდარი მელაძე", "ნოდარ მელაძის")  # the first name's two nominatives
+        assert not _same_person("დავით მელაძი", "დავით მელაძის")
+        assert not _same_person("ნინო ცქვიტინაშვილე", "ნინო ცქვიტინაშვილის")
+        assert not _same_person("დავით მელაძე", "გიორგი მელაძე")
+

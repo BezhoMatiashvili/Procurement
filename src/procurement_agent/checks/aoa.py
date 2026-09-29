@@ -23,6 +23,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
+from itertools import pairwise
 from typing import Literal
 
 from procurement_agent.checks.amounts import (
@@ -105,10 +106,12 @@ from procurement_agent.extraction.georgian import (
     inflect,
     is_georgian_word,
     lemma,
+    lemma_word,
     mixed_script_words,
     number_words_typo,
     render_date_like,
     same_word,
+    word_lemmas,
 )
 from procurement_agent.extraction.georgian import words as georgian_words
 from procurement_agent.extraction.normalize import (
@@ -1484,6 +1487,28 @@ class AoaChecker:
                 forms.setdefault(self.aoa.as_written(*m.span()), m.span())
         return list(forms.items())
 
+    def _person_forms(self, name: str) -> list[tuple[str, tuple[int, int]]]:
+        """Each form in which the act writes the person ``name``, spelled right or one slip away
+        (``_near_word``), with the first place of each, in the act's order.
+
+        The party reader keeps one form of a signatory and takes another that differs only in
+        its ending for the same person, a slip in the ending included ("მელაძის" and "მელაძი");
+        the rule compares each form found here on its own (``_same_person``)."""
+        parts = normalize_name(name).split()
+        if len(parts) < 2 or not all(is_georgian_word(w) for w in parts):
+            return self._written_forms(name)
+        found = georgian_words(self.aoa.text)
+        forms: dict[str, tuple[int, int]] = {}
+        for i in range(len(found) - len(parts) + 1):
+            window = found[i : i + len(parts)]
+            # the words of one name stand side by side, spaces between them and nothing else
+            if any(self.aoa.text[a[2] : b[1]].strip() for a, b in pairwise(window)):
+                continue
+            if all(_near_word(w, p) for (w, _, _), p in zip(window, parts, strict=True)):
+                span = (window[0][1], window[-1][2])
+                forms.setdefault(self.aoa.as_written(*span), span)
+        return list(forms.items())
+
     def rule_parties(self) -> None:
         """Client rule 1 and the contract cross-check: identify by code, then verify the rest."""
         if self.contract is None:  # run() calls the contract rules only with a contract
@@ -1547,8 +1572,6 @@ class AoaChecker:
             )
             self._proxies(p, match)
             for d in p.directors:
-                if any(names_match(d, cd) for cd in match.directors):
-                    continue
                 if not match.directors:
                     self._skip(
                         "AOA.DIRECTOR",
@@ -1556,15 +1579,21 @@ class AoaChecker:
                         f"contract names no director for {match.name}",
                     )
                     continue
-                # compared on the nominative, so a genitive in either document is no mistake
-                guess = best_match(lemma(d), [lemma(c) for c in match.directors])
-                diff = guess[1] if guess else None
-                hint_ka = " (როგორც ჩანს, შეცდომაა)" if diff and diff.looks_like_typo else ""
-                hint_en = " (looks like a misspelling)" if diff and diff.looks_like_typo else ""
-                # the preamble writes the genitive, the signature block the nominative: the same
-                # wrong name, each form with its own correction and every place of it marked
-                forms: list[tuple[str, tuple[int, int] | None]] = [*self._written_forms(d)]
+                # The preamble writes the genitive, the signature block the nominative, and the
+                # party reader keeps one of them: every form the act writes of this person is
+                # compared, so a slip in one ("მელაძი") does not hide behind the other written
+                # right. Each wrong form has its own correction and every place of it marked.
+                forms: list[tuple[str, tuple[int, int] | None]] = [*self._person_forms(d)]
                 for form, span in forms or [(d, self._find_span(d))]:
+                    # an inflection of the contract's name, and nothing else, is the same name
+                    if any(_same_person(form, cd) for cd in match.directors):
+                        continue
+                    # compared on the nominative, so a genitive in either document is no mistake
+                    guess = best_match(lemma(form), [lemma(c) for c in match.directors])
+                    diff = guess[1] if guess else None
+                    typo = diff is not None and diff.looks_like_typo
+                    hint_ka = " (როგორც ჩანს, შეცდომაა)" if typo else ""
+                    hint_en = " (looks like a misspelling)" if typo else ""
                     # the correction in the act's own grammar, form by form
                     expected = in_case_of(form, guess[0]) if guess else None
                     self._add(
@@ -2738,7 +2767,7 @@ class AoaChecker:
             )
             return
         for d in p.directors:
-            if not any(names_match(d, x) for x in registered):
+            if not any(_same_person(d, x) for x in registered):
                 self._add(
                     "AOA.REGISTRY_DIRECTOR",
                     "error",
@@ -2790,6 +2819,34 @@ def _is_party(p: Party, q: Party) -> bool:
         (p.id_code and p.id_code == q.id_code)
         or (p.name and q.name and names_match(p.name, q.name))
     )
+
+
+def _same_person(written: str, named: str) -> bool:
+    """Whether the act's ``written`` is the contract's (or registry's) ``named``: the same words,
+    each in some grammatical form of the other's - the surname an inflection of the nominative
+    ``named`` stands for, the first name one of its forms ("ნოდარ" and "ნოდარი" alike).
+
+    ``names_match`` strips a final "ე" or "ი" as an ending, so it takes "მელაძი" for "მელაძე";
+    neither is a form of the other: "-ძე" gives "-ძის", "-ძეს", "-ძემ", and "-შვილი" gives
+    "-შვილის", "-შვილმა". A name in another script is compared as ``names_match`` does."""
+    a, b = normalize_name(written).split(), normalize_name(named).split()
+    if not a or len(a) != len(b):
+        return False
+    if not all(is_georgian_word(w) for w in (*a, *b)):
+        return names_match(written, named)
+    if not all(same_word(x, y) for x, y in zip(a[:-1], b[:-1], strict=True)):
+        return False
+    return lemma_word(b[-1]) in word_lemmas(a[-1])
+
+
+def _near_word(word: str, target: str) -> bool:
+    """``word`` is ``target`` in another form, or one slip from it once both are put in the
+    nominative: "მელაძი" beside "მელაძის". Short words must be forms of each other."""
+    if same_word(word, target):
+        return True
+    if len(target) < 4 or not is_georgian_word(word):
+        return False
+    return damerau(lemma_word(word), lemma_word(target), cap=1) <= 1
 
 
 def _agreement(p: Party, q: Party) -> int:
