@@ -475,7 +475,8 @@ def _rule_hits(text: str) -> list[_Hit]:
         r = rules[i]
         end = _range_end(text, rules, i)
         if end is None:
-            out.append(_Hit(r.type, r.value, r.normalized, r.unit, r.currency, "rules"))
+            ft = _total_if_said(text, r)
+            out.append(_Hit(ft, r.value, r.normalized, r.unit, r.currency, "rules"))
             i += 1
             continue
         j, ft = end
@@ -483,6 +484,29 @@ def _rule_hits(text: str) -> list[_Hit]:
         out.append(_Hit(ft, span, span, None, None, "rules"))
         i = j + 1
     return out
+
+
+#: A price the words before it call the whole: "the total price", "სულ ღირებულება".
+_TOTAL_WORDS = re.compile(r"(?<![a-z])total(?![a-z])|(?<![ა-ჰ])(?:სულ|ჯამურ|საერთო)", re.I)
+#: ... unless they call it the price of one unit.
+_UNIT_WORDS = re.compile(r"(?<![a-z])unit\s+(?:price|rate|cost)|ერთეულის\s+ფას", re.I)
+#: Where the sentence a value is in begins: a full stop, semicolon or line break.
+_CLAUSE_START = re.compile(r"[;\n]|\.(?!\d)")
+
+
+def _total_if_said(text: str, hit: RuleHit) -> FactType:
+    """A price the sentence calls the total, as the total amount.
+
+    The nearest keyword types an amount, and in "The total price of the services is GEL
+    9,600.00" that is "price": the contract's whole fee was labelled a unit price.
+    """
+    if hit.type is not FactType.price:
+        return hit.type
+    starts = [m.end() for m in _CLAUSE_START.finditer(text, 0, hit.start)]
+    before = text[starts[-1] if starts else 0 : hit.start]
+    if _TOTAL_WORDS.search(before) and not _UNIT_WORDS.search(before):
+        return FactType.total_amount
+    return hit.type
 
 
 def _range_end(text: str, rules: list[RuleHit], i: int) -> tuple[int, FactType] | None:
@@ -937,10 +961,17 @@ def _display_value(ft: FactType, value: str | None) -> str | None:
     if ft in _NUMERIC or ft in (FactType.penalty,):
         n = as_number(value)
         if n is not None:
-            return f"n:{n:.4f}"
+            return _number_key(n, value)
     if ft in _NAMES:
         return _name_key(value)
     return normalize_name(value)
+
+
+def _number_key(number: float, value: str) -> str:
+    """A figure's key with its unit: "10%" is not "10 GEL", as a penalty of a tenth of the
+    price is not a ten-lari fee - keyed by the number alone, a new 10% penalty counted as
+    written in a document that charged a 10 GEL bank fee, and was never reported."""
+    return f"n:{number:.4f}{'%' if '%' in value else ''}"
 
 
 def _name_key(value: str) -> str:
@@ -1490,7 +1521,7 @@ def dedup_key(delta: ValueDelta) -> tuple[str, str | None, str | None]:
             return None
         if delta.type in _NUMERIC or delta.type is FactType.penalty:
             number = as_number(value)
-            return f"n:{number:.4f}" if number is not None else normalize_name(value)
+            return _number_key(number, value) if number is not None else normalize_name(value)
         if delta.type in _NAMES:
             return _name_key(value)
         return normalize_name(value)
@@ -1699,6 +1730,12 @@ def _align_linear(left: list[Segment], right: list[Segment]) -> tuple[list[_Pair
     lk = [key_of(s.text) for s in left]
     rk = [key_of(s.text) for s in right]
     ops = _opcodes(lk, rk)
+    # the lines each side has that the other side does not have where they stand: a line of one
+    # side written, unchanged, among them on the other has moved
+    unmatched_left = {lk[i] for tag, i1, i2, _j1, _j2 in ops if tag != "equal" for i in range(i1, i2)}
+    unmatched_right = {
+        rk[j] for tag, _i1, _i2, j1, j2 in ops if tag != "equal" for j in range(j1, j2)
+    }
     pairs: list[_Pair] = []
     for tag, i1, i2, j1, j2 in ops:
         if tag == "equal":
@@ -1715,8 +1752,39 @@ def _align_linear(left: list[Segment], right: list[Segment]) -> tuple[list[_Pair
                 for k in range(max(len(ls), len(rs)))
             )
         else:
-            pairs.extend(_pair_replace(left[i1:i2], right[j1:j2]))
+            pairs.extend(
+                _pair_replace_with_moves(left[i1:i2], right[j1:j2], unmatched_left, unmatched_right)
+            )
     return pairs, _similarity_of(ops, pairs, len(lk) + len(rk))
+
+
+def _pair_replace_with_moves(
+    left: Sequence[Segment],
+    right: Sequence[Segment],
+    unmatched_left: set[str],
+    unmatched_right: set[str],
+) -> list[_Pair]:
+    """``_pair_replace``, with the lines that moved taken out first.
+
+    A list reordered - the same five items in another order - leaves a block where one item
+    stands in for another. Paired as a rewrite, an item 0.3 alike to the one it replaced was
+    reported "changed" into it, and as it was then no longer a line removed, the move it was
+    part of was not seen: one item added, one rewritten, one removed, for a list that lost and
+    gained nothing. A line whose text the other side has, unchanged, among its own unmatched
+    lines is left unpaired here, for ``_detect_moves`` to pair.
+    """
+    moved_out = [a for a in left if _movable(a) and key_of(a.text) in unmatched_right]
+    moved_in = [b for b in right if _movable(b) and key_of(b.text) in unmatched_left]
+    if not moved_out and not moved_in:
+        return _pair_replace(left, right)
+    rest_left = [a for a in left if not any(a is m for m in moved_out)]
+    rest_right = [b for b in right if not any(b is m for m in moved_in)]
+    paired = _pair_replace(rest_left, rest_right) if rest_left and rest_right else []
+    if not rest_right:
+        paired = [(a, None, None) for a in rest_left]
+    elif not rest_left:
+        paired = [(None, b, None) for b in rest_right]
+    return [*((a, None, None) for a in moved_out), *paired, *((None, b, None) for b in moved_in)]
 
 
 #: The group of a block of lines that says the same as before, laid out anew.
@@ -2323,7 +2391,11 @@ def _findings_of(
     # an act against the contract it closes: two kinds of document, however alike their words
     from procurement_agent.checks.document_facts import is_act  # checks import compare
 
-    cross_kind = bool(left_text and right_text) and is_act(left_text) != is_act(right_text)
+    # read from the text folded as ``document_facts`` reads it: an act titled with an en dash
+    # ("მიღება – ჩაბარების") is an act to both passes, or none of its values is graded right
+    cross_kind = bool(left_text and right_text) and is_act(
+        normalize_confusables(left_text)
+    ) != is_act(normalize_confusables(right_text))
 
     def _one_sided(d: ValueDelta) -> Severity:
         """Across two documents of different kinds - a contract and its act - a value only one
@@ -2358,6 +2430,8 @@ def _findings_of(
         if _value_key_of(d.type, value) in everywhere[other]:
             return True
         if value is not None and written[other].states(d, value):
+            return True
+        if _retells(d, all_deltas):
             return True
         return (_kind_of_change(d), _display_value(d.type, value)) in changed_sides
 
@@ -2450,7 +2524,7 @@ def _findings_of(
             continue
 
         if h.deltas:
-            shown = [d for d in h.deltas if not superfluous(d)]
+            shown = [_as_period(d, field_deltas) for d in h.deltas if not superfluous(d)]
             for d in shown:
                 ka, en = _delta_message(d)
                 add(
@@ -2527,6 +2601,76 @@ def _findings_of(
         ka, en = _delta_message(d)
         add(d.rule_id, _one_sided(d), ka, en, expected=d.left, actual=d.right, key=dedup_key(d))
     return out, suppressed
+
+
+_PERIODS = frozenset({FactType.execution_period, FactType.validity_period})
+
+
+def _as_period(d: ValueDelta, field_deltas: list[ValueDelta]) -> ValueDelta:
+    """A line's change of one end of a period, as the change of the period the document-wide
+    pass states.
+
+    "მოქმედებს 2026 წლის 31 დეკემბრამდე" on its own line reads as the validity's end date; the
+    document-wide pass reads the whole term, from signing to that date. Moved a month, the one
+    term was two findings, "2026-12-31 → 2026-11-30" and "2026-02-12/2026-12-31 →
+    2026-02-12/2026-11-30". The period is what changed, and is what is reported.
+    """
+    if d.type not in _PERIODS or any(v is not None and "/" in v for v in (d.left, d.right)):
+        return d
+
+    def ends(value: str | None) -> set[str | None]:
+        return set(value.split("/")) if value is not None else {None}
+
+    for f in field_deltas:
+        if f.type is d.type and f.kind == d.kind and d.left in ends(f.left) and d.right in ends(
+            f.right
+        ):
+            return f
+    return d
+
+
+#: The figure a number in words is shown with: "ოთხი ათას რვაასი (4800)".
+_SHOWN_FIGURE = re.compile(r"\((\d+(?:\.\d+)?)\)\s*$")
+#: The count of an ISO duration: "P7D working" counts 7.
+_ISO_COUNT = re.compile(r"^P(\d+)[DWMY]\b")
+#: Which reported changes a number in words can retell: an amount's words its amount, a
+#: period's or a count's words a period, a payment term or a quantity.
+_RETOLD_BY: dict[FactType, frozenset[str]] = {
+    FactType.total_amount: frozenset({"CMP.AMOUNT"}),
+    FactType.duration: frozenset({"CMP.DURATION", "CMP.PAYMENT", "CMP.QUANTITY"}),
+}
+
+
+def _figure(value: str | None) -> float | None:
+    """The number a reported value states: an amount, a count, the length of a period."""
+    if value is None or _ISO_RANGE.match(value):
+        return None
+    m = _ISO_COUNT.match(value)
+    return float(m.group(1)) if m else as_number(value)
+
+
+def _retells(d: ValueDelta, deltas: list[ValueDelta]) -> bool:
+    """Whether a number in words removed or added is the old or the new side of a figure's
+    change reported anyway - ``_restated`` for words the diff could not pair.
+
+    A fee clause moved to another article and raised, digits and words together, is a line
+    removed and a line added; the amount's change is reported from both, and its old words
+    "removed" and its new words "added" were two more errors for the one new fee.
+    """
+    if d.rule_id != "CMP.AMOUNT_WORDS" or d.kind == "changed":
+        return False
+    shown = _SHOWN_FIGURE.search((d.left if d.kind == "removed" else d.right) or "")
+    rules = _RETOLD_BY.get(d.type)
+    if shown is None or rules is None:
+        return False
+    number = float(shown.group(1))
+    for other in deltas:
+        if other.kind != "changed" or other.rule_id not in rules:
+            continue
+        figure = _figure(other.left if d.kind == "removed" else other.right)
+        if figure is not None and amounts_equal(figure, number):
+            return True
+    return False
 
 
 def _explained_elsewhere(hunk: Hunk, deltas: list[ValueDelta]) -> bool:
