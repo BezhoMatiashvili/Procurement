@@ -100,6 +100,7 @@ from procurement_agent.extraction.anchors import AnchorHit, Party, find_anchors,
 from procurement_agent.extraction.georgian import (
     CASES,
     GEORGIAN,
+    damerau,
     in_case_of,
     inflect,
     is_georgian_word,
@@ -1785,15 +1786,17 @@ class AoaChecker:
             return
         # an act with no code at all needs no note here: CADASTRAL_PRESENT already reports it
         extra = sorted(x for x in a if not any(_cadastral_covers(x, y) for y in c))
-        if extra:
+        for x in extra:
+            # the one plot this code stands for, as AOA.ID_CODES corrects a code; none when two
+            # are as near, and the message lists them all
             self._add(
                 "AOA.CADASTRAL",
                 "error",
                 f"საკადასტრო კოდი განსხვავდება: {extra} vs ხელშეკრულება {sorted(c)}",
                 f"cadastral code differs: {extra} vs contract {sorted(c)}",
-                expected=", ".join(sorted(c)),
-                actual=", ".join(extra),
-                span=self._find_span(extra[0]),
+                expected=_closest(x, sorted(c)),
+                actual=x,
+                span=self._find_span(x),
             )
 
     def rule_project(self) -> None:
@@ -2000,9 +2003,11 @@ class AoaChecker:
             ("SWIFT", "ბანკის კოდი", "bank code"),
         ):
             a, c = self.aoa.bank(unit), self.contract.bank(unit)
-            if a and c and not a <= c:
+            # a BIC and its "XXX" branch form name one office (ISO 9362): compared as one code
+            known = {_bank_key(x) for x in c}
+            extra = sorted(x for x in a if _bank_key(x) not in known)
+            if a and c and extra:
                 mismatched = True
-                extra = sorted(a - c)
                 hint_ka = hint_en = ""
                 if (
                     unit == "IBAN"
@@ -2013,15 +2018,19 @@ class AoaChecker:
                         " (აქტის IBAN არავალიდურია)",
                         " (the act's IBAN is not valid)",
                     )
-                self._add(
-                    "AOA.BANK",
-                    "error",
-                    f"{ka} განსხვავდება: {sorted(a)} vs ხელშეკრულება {sorted(c)}{hint_ka}",
-                    f"{en} differs: {sorted(a)} vs contract {sorted(c)}{hint_en}",
-                    expected=", ".join(sorted(c)),
-                    actual=", ".join(extra),
-                    span=self._find_span(extra[0]),
-                )
+                payee = self._payee_bank(unit)
+                for x in extra:
+                    # the one contract value this one stands for - a slip in the contractor's
+                    # account is not corrected to a list that holds the customer's own
+                    self._add(
+                        "AOA.BANK",
+                        "error",
+                        f"{ka} განსხვავდება: {sorted(a)} vs ხელშეკრულება {sorted(c)}{hint_ka}",
+                        f"{en} differs: {sorted(a)} vs contract {sorted(c)}{hint_en}",
+                        expected=_closest(x, sorted(c), preferred=payee),
+                        actual=x,
+                        span=self._find_span(x),
+                    )
             elif not a and unit == "IBAN":
                 self._add(
                     "AOA.BANK",
@@ -2032,6 +2041,20 @@ class AoaChecker:
         if not mismatched:
             self._bank_owner()
             self._bank_pairing()
+
+    def _payee_bank(self, unit: str) -> frozenset[str]:
+        """The contract's bank details the contractor is paid on: the accounts in a paid party's
+        requisites block, and the bank codes a block pairs with them. Empty when none can be
+        attributed."""
+        if self.contract is None:  # the bank rules run only with a contract
+            return frozenset()
+        accounts = frozenset(
+            a for q in self.contract.parties if q.role in _PAYEE_ROLES for a in q.accounts
+        )
+        if unit == "IBAN":
+            return accounts
+        pairs = _bank_pairs_with_hits(self.contract) or []
+        return frozenset(code for iban, code, _ in pairs if iban in accounts)
 
     def _bank_owner(self) -> None:
         """The act's account must be the contractor's, not the customer's.
@@ -2087,7 +2110,7 @@ class AoaChecker:
         """
         if self.contract is None:  # run() calls the contract rules only with a contract
             raise RuntimeError(_NO_CONTRACT)
-        if len(self.contract.bank("SWIFT")) < 2:
+        if len({_bank_key(x) for x in self.contract.bank("SWIFT")}) < 2:
             return
         contract_pairs = _bank_pairs_with_hits(self.contract)
         act_pairs = _bank_pairs_with_hits(self.aoa)
@@ -2103,7 +2126,7 @@ class AoaChecker:
         c_pairs = {iban: code for iban, code, _ in contract_pairs}
         for iban, code, hit in act_pairs:
             want = c_pairs.get(iban)
-            if want is None or want == code:
+            if want is None or _bank_key(want) == _bank_key(code):
                 continue
             self._add(
                 "AOA.BANK",
@@ -2851,6 +2874,40 @@ def _fee_like(value: float, written: str) -> str:
     else:
         out += rest
     return out.strip()
+
+
+def _bank_key(code: str) -> str:
+    """A bank detail as it is compared: a BIC's 11-character form with the branch "XXX" is its
+    8-character form, the institution's primary office (ISO 9362). Anything else as it is."""
+    code = code.upper()
+    return code[:8] if len(code) == 11 and code.endswith("XXX") else code
+
+
+def _closest(
+    value: str, candidates: Sequence[str], *, preferred: frozenset[str] = frozenset()
+) -> str | None:
+    """The one of ``candidates`` that ``value`` was meant to be, for a correction: the nearest by
+    edit distance (a swap of two neighbours is one edit), when it is near - a slip or two, a
+    fifth of the characters at most - and nearer than any other. A tie is settled by
+    ``preferred`` (the contractor's own account, the one an act is paid on) when that leaves
+    one. A value near none of them is not a slip of any: then the only candidate, or the only
+    preferred one, is meant, and otherwise nothing is proposed rather than a guess."""
+    if not candidates:
+        return None
+    distance = {
+        c: damerau(value.upper(), c.upper(), cap=max(len(value), len(c))) for c in candidates
+    }
+    best = min(distance.values())
+    tied = [c for c in candidates if distance[c] == best]
+    if best <= max(2, len(value) // 5):
+        if len(tied) == 1:
+            return tied[0]
+        mine = [c for c in tied if c in preferred]
+        return mine[0] if len(mine) == 1 else None
+    mine = [c for c in candidates if c in preferred]
+    if len(mine) == 1:
+        return mine[0]
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def _digit_distance(a: str, b: str) -> int:
