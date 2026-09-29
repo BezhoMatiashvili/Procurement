@@ -2536,27 +2536,38 @@ def _explained_elsewhere(hunk: Hunk, deltas: list[ValueDelta]) -> bool:
     change: the preamble's line names it ("Director / signatory: X → Y"), and the table cell,
     where no label stands in front of the name, would otherwise add a bare "text changed".
     The name is matched in any case form, as the finding states it in the nominative.
+
+    Only a change this line states whole explains it: the other change's old value written in
+    this line's old text and its new value in the new text, word for word. A fragment is not
+    enough - an annex number "2" → "3" is no part of a date that moved from the 12th of
+    February to the 12th of March, and a court "in Tbilisi" is no part of an address that moved
+    from Tbilisi; matched as substrings, both lines vanished from the findings.
     """
+    if hunk.left is None or hunk.right is None:
+        return False
     changed = [
-        (normalize_name(op.left), normalize_name(op.right))
+        (_stem_words(op.left), _stem_words(op.right))
         for op in hunk.inline
         if op.tag != "equal" and (op.left.strip() or op.right.strip())
     ]
     if not changed:
         return False
-    reported = [
-        (normalize_name(d.left or ""), normalize_name(d.right or ""))
+    before, after = _stem_words(hunk.left.text), _stem_words(hunk.right.text)
+    stated = [
+        (left, right)
         for d in deltas
         if d.kind == "changed"
+        for left, right in [(_stem_words(d.left or ""), _stem_words(d.right or ""))]
+        if left and right and left <= before and right <= after
     ]
     return all(
-        any(_within(old, left) and _within(new, right) for left, right in reported)
-        for old, new in changed
+        any(old <= left and new <= right for left, right in stated) for old, new in changed
     )
 
 
-def _within(part: str, whole: str) -> bool:
-    return part in whole or name_stem(part) in name_stem(whole)
+def _stem_words(text: str) -> frozenset[str]:
+    """The words of ``text`` in any case form: "ჭიჭინაძის" and "ჭიჭინაძე" are one word."""
+    return frozenset(name_stem(w) for w in _WORD.findall(normalize_name(text)))
 
 
 _ROLES_LABEL = ("Party roles", "მხარეთა როლები")
