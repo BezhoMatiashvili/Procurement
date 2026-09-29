@@ -53,7 +53,7 @@ class TestBicBranch:
         assert _substantive(_check(act, both)) == []
 
 
-# --- AOA-08: a code's correction is the one contract value it stands for --------------------------
+# --- AOA-08: a code's correction is the one contract value it stands for -------------------------
 
 #: The contract with both parties' requisites, each in its own block.
 _REQUISITES = """5. მხარეთა რეკვიზიტები
@@ -149,3 +149,151 @@ class TestDirectorFinalVowel:
         assert not _same_person("ნინო ცქვიტინაშვილე", "ნინო ცქვიტინაშვილის")
         assert not _same_person("დავით მელაძე", "გიორგი მელაძე")
 
+
+# --- AOA-11: the act dated in other words --------------------------------------------------------
+
+_DATED = "4. გაფორმების თარიღი\nაქტი გაფორმდა 2026 წლის 30 აპრილი"
+
+
+def _dated(wording: str, day: str) -> str:
+    """The act with its date line written as ``wording`` (``{}`` for the date)."""
+    return ACT.replace(_DATED, "4. " + wording.format(day))
+
+
+_ACT_DATE_WORDINGS = (
+    "აქტი შედგენილია {}.",
+    "„აქტი“ შედგენილია {}.",
+    "აქტის შედგენის თარიღი: {}.",
+    "ხელმოწერის თარიღი: {}.",
+    "აქტი ხელმოწერილია {}.",
+)
+
+
+class TestActDateWordings:
+    def test_a_correct_act_is_clean_in_every_wording(self) -> None:
+        for wording in _ACT_DATE_WORDINGS:
+            report = _check(_dated(wording, "2026 წლის 30 აპრილს"))
+            assert _substantive(report) == [], wording
+            assert report.summary["act_date"] == "2026-04-30", wording
+
+    def test_a_late_act_is_an_error_in_every_wording(self) -> None:
+        for wording in _ACT_DATE_WORDINGS:
+            [finding] = _of(_check(_dated(wording, "2026 წლის 5 მაისს")), "AOA.ACT_DATE")
+            assert (finding.severity, finding.actual, finding.expected) == (
+                "error",
+                "2026 წლის 5 მაისს",
+                "2026 წლის 30 აპრილს",
+            ), wording
+
+    def test_copies_boilerplate_is_not_the_act_s_date(self) -> None:
+        """ "Drawn up in two copies" dates nothing, and the date after it is not the act's."""
+        act = ACT.replace(
+            _DATED,
+            "4. აქტი შედგენილია ორ ეგზემპლარად.\nავანსი გადახდილია 2026 წლის 10 მაისს.\n"
+            "5. აქტი გაფორმდა 2026 წლის 30 აპრილი",
+        )
+        report = _check(act)
+        assert report.summary["act_date"] == "2026-04-30"
+        assert _of(report, "AOA.ACT_DATE") == []
+
+    def test_a_deadline_counted_from_the_signing_is_not_the_act_s_date(self) -> None:
+        act = _dated("აქტი ხელმოწერილია {}.", "2026 წლის 30 აპრილს").replace(
+            "3. საფასური",
+            "3. საფასური გადაიხდება აქტის ხელმოწერის თარიღიდან 2026 წლის 20 მაისამდე.",
+        )
+        assert _check(act).summary["act_date"] == "2026-04-30"
+
+
+# --- AOA-12: the service period stated as a month ------------------------------------------------
+
+_PERIOD = "მომსახურება შესრულდა 2026 წლის 1 აპრილიდან 2026 წლის 30 აპრილის ჩათვლით."
+
+
+def _period(line: str, dated: str | None = None) -> str:
+    act = ACT.replace(_PERIOD, line)
+    if dated is not None:
+        act = act.replace("აქტი გაფორმდა 2026 წლის 30 აპრილი", f"აქტი გაფორმდა {dated}")
+    return act
+
+
+_MONTH_PERIODS = (
+    "მომსახურება შესრულდა 2026 წლის აპრილის თვეში.",
+    "საანგარიშო პერიოდი: 2026 წლის აპრილი.",
+    "მომსახურება გაწეულია 2026 წლის აპრილში.",
+    "საანგარიშო პერიოდი: აპრილი 2026.",
+)
+
+
+class TestPeriodByMonth:
+    def test_a_correct_act_is_clean(self) -> None:
+        for line in _MONTH_PERIODS:
+            report = _check(_period(line))
+            assert _substantive(report) == [], line
+            assert report.summary["execution_period"] == "2026-04-01..2026-04-30", line
+
+    def test_a_late_act_is_dated_the_month_s_last_day(self) -> None:
+        for line in _MONTH_PERIODS:
+            report = _check(_period(line, dated="2026 წლის 15 მაისი"))
+            [finding] = _of(report, "AOA.ACT_DATE")
+            assert (finding.actual, finding.expected) == (
+                "2026 წლის 15 მაისი",
+                "2026 წლის 30 აპრილი",
+            ), line
+
+    def test_a_month_out_of_the_term_is_corrected_to_the_term_s_year(self) -> None:
+        report = _check(_period("მომსახურება შესრულდა 2025 წლის აპრილის თვეში."))
+        [finding] = _of(report, "AOA.PERIOD_IN_TERM")
+        assert finding.expected == "2026 წლის აპრილის"
+        assert _of(report, "AOA.ACT_DATE") == []
+
+    def test_a_contract_s_month_named_in_the_line_is_no_period(self) -> None:
+        line = "მომსახურება შესრულდა 2026 წლის მარტის ხელშეკრულების შესაბამისად."
+        report = _check(_period(line))
+        assert "execution_period" not in report.summary
+
+
+# --- AOA-20: a period across the New Year with the end year not moved on -------------------------
+
+_NEW_YEAR_CONTRACT = CONTRACT.replace(
+    "2026 წლის 1 მარტიდან - 2026 წლის 1 სექტემბრის ჩათვლით",
+    "2026 წლის 1 სექტემბრიდან - 2027 წლის 1 მარტის ჩათვლით",
+)
+
+
+def _winter(period: str, dated: str = "2027 წლის 31 იანვარი") -> str:
+    return _period(f"მომსახურება შესრულდა {period} ჩათვლით.", dated=dated)
+
+
+class TestNewYearPeriod:
+    def test_the_right_years_are_clean(self) -> None:
+        act = _winter("2026 წლის 15 დეკემბრიდან 2027 წლის 14 იანვრის")
+        assert _substantive(_check(act, _NEW_YEAR_CONTRACT)) == []
+
+    def test_a_stale_end_year_is_the_period_s_mistake_not_the_act_date_s(self) -> None:
+        report = _check(
+            _winter("2026 წლის 15 დეკემბრიდან 2026 წლის 14 იანვრის"), _NEW_YEAR_CONTRACT
+        )
+        assert _of(report, "AOA.ACT_DATE") == []
+        [finding] = _of(report, "AOA.PERIOD_IN_TERM")
+        assert finding.severity == "error"
+        assert finding.actual == "2026 წლის 15 დეკემბრიდან 2026 წლის 14 იანვრის"
+        assert finding.expected == "2026 წლის 15 დეკემბრიდან 2027 წლის 14 იანვრის"
+        assert report.summary["execution_period"] == "2026-12-15..2027-01-14"
+
+    def test_a_start_year_run_ahead_is_put_back(self) -> None:
+        report = _check(
+            _winter("2027 წლის 15 დეკემბრიდან 2027 წლის 14 იანვრის"), _NEW_YEAR_CONTRACT
+        )
+        assert _of(report, "AOA.ACT_DATE") == []
+        [finding] = _of(report, "AOA.PERIOD_IN_TERM")
+        assert finding.expected == "2026 წლის 15 დეკემბრიდან 2027 წლის 14 იანვრის"
+
+    def test_the_act_dated_off_the_repaired_period_is_still_an_act_date_error(self) -> None:
+        report = _check(
+            _winter(
+                "2026 წლის 15 დეკემბრიდან 2026 წლის 14 იანვრის", dated="2027 წლის 20 თებერვალი"
+            ),
+            _NEW_YEAR_CONTRACT,
+        )
+        [finding] = _of(report, "AOA.ACT_DATE")
+        assert finding.expected == "2027 წლის 31 იანვარი"

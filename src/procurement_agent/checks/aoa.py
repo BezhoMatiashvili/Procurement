@@ -101,6 +101,7 @@ from procurement_agent.extraction.anchors import AnchorHit, Party, find_anchors,
 from procurement_agent.extraction.georgian import (
     CASES,
     GEORGIAN,
+    MONTH_FORMS,
     damerau,
     in_case_of,
     inflect,
@@ -273,12 +274,24 @@ _NOT_APPLICABLE: tuple[tuple[str, frozenset[str]], ...] = (
     ("AOA.FX_INVOICE", _FX_EXEMPT),
 )
 
-_ACT_DATE_KEYS = ("გაფორმდა", "გაფორმების თარიღი")
+#: A label that dates the act - its signing ("გაფორმების"), its drawing up ("შედგენის") or its
+#: signature ("ხელმოწერის") "თარიღი". The label must stand as a word: "ხელმოწერის თარიღიდან 5
+#: დღეში" counts a deadline from the date instead.
+_ACT_DATE_LABEL = r"(?:გაფორმების|შედგენის|ხელმოწერის)\s+თარიღი(?![ა-ჰ])"
+#: The verbs that say the act was drawn up or signed, with the act named before them: "აქტი
+#: შედგენილია 30.06.2026", "„აქტი“ ხელმოწერილია ...". Only with a date in the same sentence
+#: (``AoaChecker._act_date``): "აქტი შედგენილია ორ ეგზემპლარად" dates nothing.
+_ACT_DRAWN_UP = r"აქტი[\s„“”\"']*(?:შედგენილია|ხელმოწერილია)"
+#: Where a date may follow the words that date the act, further off than their sentence: the
+#: signing and the labels, never the verbs of drawing up.
+_ACT_DATE_KEYS = re.compile(rf"გაფორმდა|{_ACT_DATE_LABEL}")
 #: The words that date the act, right before a date: "აქტი გაფორმდა 30.11.2026".
-_ACT_DATED_BEFORE = re.compile(r"(?:აქტი[\s„“”\"']*გაფორმდა|გაფორმების\s+თარიღი)[\s:,]*$")
-#: The act's own signing, "აქტი გაფორმდა <date>" / "გაფორმების თარიღი: <date>". The label must
-#: stand as a word: "გაფორმების თარიღიდან 5 დღეში" counts a deadline from the date instead.
-_ACT_SIGNED = re.compile(r"გაფორმდა|გაფორმების\s+თარიღი(?![ა-ჰ])")
+_ACT_DATED_BEFORE = re.compile(
+    rf"(?:აქტი[\s„“”\"']*(?:გაფორმდა|შედგენილია|ხელმოწერილია)|{_ACT_DATE_LABEL})[\s:,]*$"
+)
+#: The act's own signing, "აქტი გაფორმდა <date>" / "გაფორმების თარიღი: <date>", and the other
+#: ways an act says when it was drawn up or signed.
+_ACT_SIGNED = re.compile(rf"გაფორმდა|{_ACT_DATE_LABEL}|{_ACT_DRAWN_UP}")
 #: An advance or prepayment clause: a date there is a payment's, never the act's.
 _ADVANCE_WORDS = re.compile(r"ავანს|წინასწარ|advance|prepay", re.IGNORECASE)
 #: What opens the service period: "შესრულდა …", a "შესრულების თარიღი" heading, and the other
@@ -455,12 +468,13 @@ _CONTRACT_REFERENCE = re.compile(r"\s*[„“\"]?\s*(?:N\s*\S+\s*)?ხელშ�
 
 def _date_hits_near(
     text: str,
-    keys: tuple[str, ...],
+    keys: tuple[str, ...] | re.Pattern[str],
     window: int = 160,
     *,
     skip: Callable[[RuleHit], bool] | None = None,
 ) -> list[tuple[date, RuleHit]]:
-    """Dates that follow one of the given keywords, in document order, with where each was read,
+    """Dates that follow one of the given keywords (or a match of a pattern), in document order,
+    with where each was read,
     each date once. ``skip`` drops a hit before that: a date set aside must not take the place
     of the same date written where it counts - an act dated the day its period ends, read first
     under the period's heading and dropped as the act's, took the period's end with it.
@@ -471,7 +485,7 @@ def _date_hits_near(
     hits = find_dates(text)
     if not hits:
         return []
-    starts = [m.start() for k in keys for m in re.finditer(re.escape(k), text)]
+    starts = _key_starts(text, keys)
     out: list[tuple[date, RuleHit]] = []
     for h in hits:
         if any(s <= h.start <= s + window for s in starts):
@@ -481,6 +495,62 @@ def _date_hits_near(
             if all(d != seen for seen, _ in out):
                 out.append((d, h))
     return out
+
+
+def _key_starts(text: str, keys: tuple[str, ...] | re.Pattern[str]) -> list[int]:
+    """Where each keyword (or each match of a pattern) starts in ``text``."""
+    if isinstance(keys, re.Pattern):
+        return [m.start() for m in keys.finditer(text)]
+    return [m.start() for k in keys for m in re.finditer(re.escape(k), text)]
+
+
+#: A month and its year with no day before the month: "2026 წლის ივნისის (თვეში)", "2026 წ.
+#: ივნისი", and the other order, "ივნისი 2026", "ივნისი, 2026 წ.". The month is any of its forms
+#: (``MONTH_FORMS``), which a pattern of letters leaves to be looked up.
+_YEAR_MONTH = re.compile(
+    rf"(?<![\d.])(?P<y>(?:19|20)\d\d)\s*(?:წლის|წ\.)\s*(?P<m>[{GEORGIAN}]+)(?![{GEORGIAN}])"
+)
+_MONTH_YEAR = re.compile(
+    rf"(?<![{GEORGIAN}\d])(?P<m>[{GEORGIAN}]+)\s*,?\s+(?P<y>(?:19|20)\d\d)(?!\d|\.\d)"
+    rf"(?:\s*(?:წლის|წელი|წ\.)(?![{GEORGIAN}]))?"
+)
+
+
+def _month_near(text: str, keys: tuple[str, ...], window: int = 160) -> list[tuple[date, RuleHit]]:
+    """The first month named with its year and no day after one of ``keys``, as the whole month:
+    its first and its last day, each read at the year and the month as written. A month that is
+    part of a date ("30 ივნისი 2026") is the date's, and not read here."""
+    starts = _key_starts(text, keys)
+    dated = [(h.start, h.end) for h in find_dates(text)]
+    found: list[tuple[int, int, int, int]] = []  # (start, end, year, month)
+    for pattern in (_YEAR_MONTH, _MONTH_YEAR):
+        for m in pattern.finditer(text):
+            form = MONTH_FORMS.get(m.group("m"))
+            if form is None or not any(s <= m.start() <= s + window for s in starts):
+                continue
+            end = m.end("m") if pattern is _YEAR_MONTH else m.end()
+            if any(a < end and m.start() < b for a, b in dated):
+                continue
+            found.append((m.start(), end, int(m.group("y")), form[0]))
+    if not found:
+        return []
+    start, end, year, month = min(found)
+    first = date(year, month, 1)
+    raw = text[start:end]
+    return [
+        (
+            d,
+            RuleHit(
+                type=FactType.date,
+                value=d.isoformat(),
+                raw_text=raw,
+                start=start,
+                end=end,
+                normalized=d.isoformat(),
+            ),
+        )
+        for d in (first, _last_day(first))
+    ]
 
 
 def _next_word(text: str, pos: int) -> str:
@@ -509,6 +579,20 @@ def add_months(start: date, months: int) -> date:
     total = start.month - 1 + months
     year, month = start.year + total // 12, total % 12 + 1
     return date(year, month, min(start.day, calendar.monthrange(year, month)[1]))
+
+
+@dataclass(frozen=True)
+class _Period:
+    """The act's service period: its dates as the act writes them, and as they are meant.
+
+    They differ only when the period ends before it starts - a period across the New Year with
+    one year not moved on ("2026 წლის 15 დეკემბრიდან 2026 წლის 14 იანვრის") - and one year
+    repair orders it (``_repair_year``). Then ``repaired`` is the endpoint put right and the
+    years it moved."""
+
+    hits: list[tuple[date, RuleHit]]
+    dates: list[date]
+    repaired: tuple[RuleHit, int] | None = None
 
 
 @dataclass(frozen=True, eq=False)
@@ -563,6 +647,8 @@ class AoaChecker:
         self._scope: ScopeReading | None = None
         #: ``review`` checked against this run's notes (``_review_outcome``), once a run
         self._review: ReviewOutcome | None = None
+        #: the service period (``_period``), read once a run
+        self._period_reading: _Period | None = None
 
     # --- plumbing ------------------------------------------------------------------------
 
@@ -650,12 +736,7 @@ class AoaChecker:
                 return date.fromisoformat(str(hit.normalized)), hit
         for d, hit in _date_hits_near(text, _ACT_DATE_KEYS):
             key_at = max(
-                (
-                    m.start()
-                    for k in _ACT_DATE_KEYS
-                    for m in re.finditer(re.escape(k), text)
-                    if m.start() <= hit.start
-                ),
+                (s for s in _key_starts(text, _ACT_DATE_KEYS) if s <= hit.start),
                 default=hit.start,
             )
             if not self._in_advance_clause(hit.start) and not _contract_is_subject(text, key_at):
@@ -695,19 +776,39 @@ class AoaChecker:
                 return True
             return _ACT_DATED_BEFORE.search(text, max(0, h.start - 30), h.start) is not None
 
-        out: list[tuple[date, RuleHit]] = []
-        for d, h in _date_hits_near(text, _PERIOD_KEYS, skip=is_act):
+        def in_period(h: RuleHit) -> bool:
             if _CONTRACT_REFERENCE.match(text, h.end):
-                continue  # "... შესრულდა 2026 წლის 1 მარტის ხელშეკრულების შესაბამისად"
+                return False  # "... შესრულდა 2026 წლის 1 მარტის ხელშეკრულების შესაბამისად"
             i = bisect_right(opens, h.start)
             opened = opens[i - 1] if i else None
             a, b = self._sentence_of(h.start)
             if opened is not None and _ADVANCE_NAMED.search(text, opened, h.start):
-                continue
-            if (opened is None or opened < a) and _ADVANCE_NAMED.search(text, a, b):
-                continue
-            out.append((d, h))
+                return False
+            return not ((opened is None or opened < a) and _ADVANCE_NAMED.search(text, a, b))
+
+        out = [(d, h) for d, h in _date_hits_near(text, _PERIOD_KEYS, skip=is_act) if in_period(h)]
+        if not out:
+            # "შესრულდა 2026 წლის ივნისის თვეში": a month with no day is the whole month
+            out = [(d, h) for d, h in _month_near(text, _PERIOD_KEYS) if in_period(h)][:2]
         return out
+
+    def _period(self) -> _Period:
+        """The service period (``_period_hits``), with a year put right when the period ends
+        before it starts and exactly one repair orders it (``_repair_year``). Every rule that
+        needs the period's days reads them here, once a run."""
+        if self._period_reading is None:
+            hits = self._period_hits()
+            dates = [d for d, _ in hits]
+            repaired = None
+            if len(hits) >= 2 and hits[-1][0] < hits[0][0]:
+                window = _term_window(self.contract.term()) if self.contract is not None else None
+                act = self._act_date()
+                repaired = _repair_year(hits, window, act[0] if act else None)
+                if repaired is not None:
+                    hit, shift = repaired
+                    dates = [_add_years(d, shift) if h is hit else d for d, h in hits]
+            self._period_reading = _Period(hits=hits, dates=dates, repaired=repaired)
+        return self._period_reading
 
     def _sentence_of(self, pos: int) -> tuple[int, int]:
         """The act's sentence holding ``pos``; an empty span when it falls between two."""
@@ -813,6 +914,7 @@ class AoaChecker:
         self._party_matches = None
         self._scope = None
         self._review = None
+        self._period_reading = None
         self.rule_amount_words()
         self.rule_required_fields()
         self.rule_act_date()
@@ -856,7 +958,7 @@ class AoaChecker:
         out: dict[str, str] = {}
         for i, p in enumerate(self.aoa.parties, 1):
             out[f"party_{i}"] = f"{p.role or '?'}: {p.name} ({p.id_code or 'no id'})"
-        period = [d for d, _ in self._period_hits()]
+        period = self._period().dates
         if period:
             out["execution_period"] = f"{min(period)}..{max(period)}"
         act = self._act_date()
@@ -1028,8 +1130,8 @@ class AoaChecker:
         same day; for a partial month (1-15 August) this rule follows the instruction's wording
         and expects the month's end. The messages say so, rather than "end of the period".
         """
-        hits = self._period_hits()
-        period = [d for d, _ in hits]
+        reading = self._period()
+        hits, period = reading.hits, reading.dates
         act = self._act_date()
         if not period:
             self._skip(
@@ -2319,8 +2421,8 @@ class AoaChecker:
         """
         if self.contract is None:  # run() calls the contract rules only with a contract
             raise RuntimeError(_NO_CONTRACT)
-        period_hits = self._period_hits()
-        period = [d for d, _ in period_hits]
+        reading = self._period()
+        period_hits, period = reading.hits, reading.dates
         if not period:
             self._add(
                 "AOA.PERIOD",
@@ -2330,6 +2432,9 @@ class AoaChecker:
             )
             return
         window = _term_window(self.contract.term())
+        if reading.repaired is not None:
+            self._period_year_repair(reading, window)
+            return
         if window is None:
             self._skip(
                 "AOA.PERIOD_IN_TERM",
@@ -2375,6 +2480,49 @@ class AoaChecker:
             expected=shown,
             actual=f"{min(period)}..{max(period)}",
             span=(outside[0].start, outside[0].end),
+        )
+
+    def _period_year_repair(
+        self, reading: _Period, window: tuple[date | None, date | None, str] | None
+    ) -> None:
+        """A period that ends before it starts, and the one year that orders it (``_period``):
+        the period as written is the mistake, and the correction is it with that year put
+        right. Held to the contract's term it is AOA.PERIOD_IN_TERM's; with no term to hold it
+        to, the act's own date chose the repair, and it is AOA.PERIOD's."""
+        if reading.repaired is None:  # pragma: no cover - called only with a repair
+            return
+        hit, shift = reading.repaired
+        first = min(h.start for _, h in reading.hits)
+        last = max(h.end for _, h in reading.hits)
+        year = str(next(d.year for d, h in reading.hits if h is hit))
+        endpoint = re.sub(
+            rf"(?<!\d){year}(?!\d)", str(int(year) + shift), self.aoa.as_written(hit.start, hit.end)
+        )
+        written = self.aoa.as_written(first, last)
+        fixed = (
+            self.aoa.as_written(first, hit.start) + endpoint + self.aoa.as_written(hit.end, last)
+        )
+        shown = f"{min(reading.dates)}..{max(reading.dates)}"
+        ka = (
+            f"შესრულების პერიოდი მთავრდება მანამ, სანამ დაიწყება: „{written}“; როგორც ჩანს, "
+            f"წელი არასწორადაა მითითებული — უნდა იყოს „{fixed}“ ({shown})"
+        )
+        en = (
+            f"the execution period ends before it starts: '{written}'; the year looks mistyped - "
+            f"it should read '{fixed}' ({shown})"
+        )
+        if window is not None:
+            shown_window = _window_text(window[0], window[1])
+            ka += f", ხელშეკრულების ვადის ({shown_window}) ფარგლებში"
+            en += f", inside {_WINDOW_NAME[window[2]][1]} {shown_window}"
+        self._add(
+            "AOA.PERIOD_IN_TERM" if window is not None else "AOA.PERIOD",
+            "error",
+            ka,
+            en,
+            expected=fixed,
+            actual=written,
+            span=(first, last),
         )
 
     def rule_act_date_in_term(self) -> None:
@@ -3036,6 +3184,36 @@ def _add_years(d: date, years: int) -> date:
         return d.replace(year=d.year + years)
     except ValueError:  # 29 February into a common year
         return d.replace(year=d.year + years, day=28)
+
+
+def _repair_year(
+    hits: list[tuple[date, RuleHit]],
+    window: tuple[date | None, date | None, str] | None,
+    act: date | None,
+) -> tuple[RuleHit, int] | None:
+    """For a period that ends before it starts, the endpoint whose year was typed wrong and the
+    years to move it by: the end one year on ("2026 წლის 15 დეკემბრიდან 2026 წლის 14 იანვრის"
+    is meant to end in 2027) or the start one year back. A repair counts when it orders the
+    period, leaves it shorter than a year and, when the contract states its term, inside it;
+    of two such, the one whose last month the act is dated in. None unless exactly one is left:
+    the dates as written are then compared as they are."""
+    (first, first_hit), (last, last_hit) = hits[0], hits[-1]
+    options: list[tuple[date, date, RuleHit, int]] = [
+        (first, _add_years(last, 1), last_hit, 1),
+        (_add_years(first, -1), last, first_hit, -1),
+    ]
+    fits = [
+        o
+        for o in options
+        if o[0] <= o[1]
+        and (o[1] - o[0]).days < 365
+        and (window is None or (_within(o[0], window) and _within(o[1], window)))
+    ]
+    if len(fits) > 1 and act is not None:
+        fits = [o for o in fits if (act.year, act.month) == (o[1].year, o[1].month)]
+    if len(fits) != 1:
+        return None
+    return fits[0][2], fits[0][3]
 
 
 def _year_shift_into(dates: list[date], window: tuple[date | None, date | None, str]) -> int | None:
