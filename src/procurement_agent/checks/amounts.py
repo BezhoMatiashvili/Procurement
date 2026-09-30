@@ -12,6 +12,8 @@ import re
 from dataclasses import dataclass
 
 from procurement_agent.extraction.georgian import damerau, number_to_words, parse_number_words
+from procurement_agent.extraction.normalize import FIGURE as _FIGURE
+from procurement_agent.extraction.normalize import FIGURE_SEPARATOR as _GROUP_SEPARATOR
 from procurement_agent.extraction.normalize import parse_georgian_number_words, parse_number
 from procurement_agent.extraction.rules import find_amounts
 from procurement_agent.extraction.schemas import FactType
@@ -39,11 +41,12 @@ NUM_IN_TEXT = re.compile("\\d[\\d\\s.,\u00a0]*\\d|\\d")
 
 _MONEY_TYPES = frozenset({FactType.price, FactType.total_amount, FactType.amount})
 
-#: A figure as documents write it: digits grouped in threes by a space, a dot or a comma, and
-#: an optional decimal part - "2 400", "2.400,50", "100". A group is exactly three digits after
-#: one separator, so an item number in front ("საფასური: 1. 100 (ასი)") is not read into it,
-#: which a looser pattern did: it read 1100 there and reported the words as wrong.
-FIGURE = r"\d{1,3}(?:[ \u00a0.,]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?"
+#: A figure as documents write it (``normalize.FIGURE``, the extraction's too): digits grouped
+#: in threes by a space, an apostrophe, a dot or a comma, and an optional decimal part - "2 400",
+#: "2.400,50", "100". A group is exactly three digits after one separator, so an item number in
+#: front ("საფასური: 1. 100 (ასი)") is not read into it, which a looser pattern did: it read 1100
+#: there and reported the words as wrong.
+FIGURE = _FIGURE
 #: "100 (ასი) ლარს" - a figure, then the same number written out. Digits may appear inside the
 #: brackets only for tetri ("ლარი და 50 თეთრი").
 _DIGITS_THEN_WORDS = re.compile(
@@ -313,7 +316,7 @@ def render_figure_like(value: float, example: str) -> str:
     """``value`` written the way ``example`` writes a figure: "2 400", "2,400.00", "2400"."""
     ex = example.strip()
     decimals = re.search(r"[.,](\d{1,2})$", ex)
-    grouped = re.search(r"\d[ \u00a0.,]\d{3}", ex)
+    grouped = re.search(rf"\d{_GROUP_SEPARATOR}\d{{3}}", ex)
     sep = grouped.group(0)[1] if grouped else ""
     dec_sep = decimals.group(0)[0] if decimals else ""
     places = len(decimals.group(1)) if decimals else 0

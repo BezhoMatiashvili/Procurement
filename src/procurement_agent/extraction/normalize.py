@@ -340,6 +340,29 @@ def stems_match(a: str, b: str) -> bool:
 
 # --- numbers ------------------------------------------------------------------------------------
 
+#: Besides "," and ".", what separates a figure's thousands: every space Word, a locale or a scan
+#: puts there - the no-break space, the thin space (U+2009), the narrow no-break space (U+202F),
+#: the figure space (U+2007) ... - and the apostrophe, straight or typographic ("36'000",
+#: "36’000"). One set for every reader of a figure (red team R3, EXTRACTION-R3-11): a reader that
+#: knew only two of them read "36 000" with a thin space as its last group, a total of 0.
+_GROUP_APOSTROPHES = "'\u2019"
+#: a regex class of the spaces that group a figure's digits
+FIGURE_SPACE = f"[ {_SPACES}]"
+#: one separator between two groups of a figure, as a regex class
+FIGURE_SEPARATOR = f"[ {_SPACES}{_GROUP_APOSTROPHES},.]"
+#: the separators only these readers know: after a digit and one of them, a figure goes on
+_NEW_SEPARATORS = _SPACES.replace("\u00a0", "") + _GROUP_APOSTROPHES
+#: A figure as documents write it: digits grouped in threes by a space of any kind, an
+#: apostrophe, a dot or a comma, and an optional decimal part - "2 400", "2.400,50", "36'000",
+#: "100". A group is exactly three digits after one separator, so an item number in front
+#: ("საფასური: 1. 100 (ასი)") is not read into it. A figure never starts right after a digit and
+#: one of the separators the older readers did not know: "48'50" is no amount, never "50".
+FIGURE = (
+    rf"(?<!\d[{_NEW_SEPARATORS}])"
+    rf"(?:\d{{1,3}}(?:{FIGURE_SEPARATOR}\d{{3}})+(?:[.,]\d{{1,2}})?|\d+(?:[.,]\d{{1,2}})?)"
+)
+_FIGURE_GROUPING = re.compile(f"[ ,.{_GROUP_APOSTROPHES}]")
+
 
 def parse_number(s: str) -> float | None:
     """Parse a human-written number, guessing the decimal separator.
@@ -370,13 +393,14 @@ def parse_number(s: str) -> float | None:
     # A thousands group is exactly three digits, so a separator followed by four or more can
     # only be the decimal point: '12.3450' and '1,234.5678' are not 123450 and 12345678.
     long_tail = re.fullmatch(r"(.*?)([.,])(\d{4,})", s)
-    if m and (len(m.group(1)) > 3 or not re.search(r"[ ,.]", m.group(1))):
+    if m and (len(m.group(1)) > 3 or not _FIGURE_GROUPING.search(m.group(1))):
         integer, frac = m.group(1), m.group(3)
     elif long_tail:
         integer, frac = long_tail.group(1), long_tail.group(3)
     else:
         integer, frac = s, ""
-    integer = re.sub(r"[ ,.]", "", integer)
+    # every group separator, the apostrophe included ("36'000"); spaces are one by now
+    integer = _FIGURE_GROUPING.sub("", integer)
     if not integer.isdigit():
         return None
     out = float(f"{integer}.{frac}" if frac else integer)
