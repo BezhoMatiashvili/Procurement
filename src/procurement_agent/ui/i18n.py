@@ -312,6 +312,10 @@ STRINGS: dict[str, tuple[str, str]] = {
         "კომპანიის მოცულობები და არითმეტიკა",
     ),
     "boq.diff.added_lines": ("added lines", "დამატებული პოზიციები"),
+    "boq.diff.optional_items": (
+        "optional items the bidder priced",
+        "კომპანიის მიერ შევსებული არასავალდებულო პოზიციები",
+    ),
     "boq.diff.priced_headings": (
         "priced rows that are not positions",
         "ფასიანი სტრიქონები, რომლებიც პოზიცია არ არის",

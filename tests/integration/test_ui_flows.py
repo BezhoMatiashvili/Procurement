@@ -289,7 +289,7 @@ def test_the_compare_report_counts_critical_values_and_labels_them_in_its_langua
     assert "Bank code" in table.group(0)
     assert "ბანკის კოდი" not in table.group(0)
     assert "2 critical change(s)" in en
-    assert "1 critical line" in en or ">1</span><span class=\"l\">critical lines<" in en
+    assert "1 critical line" in en or '>1</span><span class="l">critical lines<' in en
 
 
 # --- the AOA report ------------------------------------------------------------------------
@@ -881,6 +881,28 @@ def test_excluded_positions_are_listed_outside_the_leaderboard(client: TestClien
     assert "Extra scaffolding" in body
     leaderboard = re.search(r'<table class="list leaderboard">.*?</table>', body, re.S)
     assert leaderboard and "Extra scaffolding" not in leaderboard.group(0)
+
+
+def test_every_cause_the_stated_total_breaks_into_has_a_label() -> None:
+    """The template prints ``boq.diff.<cause>`` for each part of the difference; a cause with
+    no label printed its raw key ("boq.diff.optional_items"). The causes are read from
+    ``checks/boq.py`` itself, so a new one cannot go unlabelled."""
+    import ast
+
+    from procurement_agent.checks import boq
+    from procurement_agent.ui.i18n import STRINGS
+
+    tree = ast.parse(Path(boq.__file__).read_text(encoding="utf-8"))
+    causes = {"other"}
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "parts" for t in node.targets)
+            and isinstance(node.value, ast.Dict)
+        ):
+            causes |= {k.value for k in node.value.keys if isinstance(k, ast.Constant)}
+    assert len(causes) > 3
+    assert [c for c in sorted(causes) if f"boq.diff.{c}" not in STRINGS] == []
 
 
 def test_two_bidders_say_the_outlier_rule_did_not_run(client: TestClient) -> None:
