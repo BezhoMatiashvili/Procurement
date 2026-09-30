@@ -339,6 +339,40 @@ miss that must not match (`tests/unit/test_redteam_r2_dates.py`):
   დანართი N1)`, `მ.შ.`, `ე.წ.`), which cut a subject clause at `(იხ`. `ა.შ.` (and so on) still
   ends one, and a bracket left open or broken over a line holds nothing together.
 
+Red team round 3 (2026-10-01) found five more, each fixed by rule with a unit test and a near
+miss that must not match (`tests/unit/test_redteam_r3_dates.py`):
+
+* **A day and a month before a full date share its year** (`01.06-30.06.2026`, `25.05-30.06.2026`,
+  `1 ივნისი - 30 ივნისი, 2026 წ.`). Read as its last day alone, a correct act's period was one
+  day, a year slip was quoted without its first half, and a period starting before the term
+  went unreported. `rules.find_dates` now reads the leading day and month as the first day, in
+  the full date's year, where the month in figures has two digits as the full date's does
+  (`1.2-3.04.2026` reads as a clause or version number), nothing before it makes it part of
+  another number (a digit, also one word before, a stop, slash, dash, letter or `N`), and the
+  first day comes before the last. The round-2 near miss `01.06-15.06.2026` is now a range.
+* **A range's first day ends before its dash.** The first day of `01-31.05.2026`, `1-31 მაისი,
+  2026 წ.` and `2026 წლის 1-31 მაისი` took the dash into its span, so the comparison, which joins
+  two dates with a dash between them, saw two dates: a restyled window was "Execution period
+  removed", a moved end a delivery deadline added. The span now ends at the day (a "from" form,
+  `1-დან`, keeps its postposition), and a range's first day takes the type of the date that
+  closes it, so the two are one period to every reader.
+* **A four-digit numeric date keeps its year word** (`05.07.2026 წ.`, `05.07.2026წ.`,
+  `05.07.2026 წელს`), as the two-digit one already did: the act's date is quoted whole and its
+  correction keeps the word. `წლიდან` and other words that only start like it stay out.
+* **A date's role is on its month, before a year written after it.** `30 ნოემბრამდე, 2026 წ.`
+  was read as a validity start (the "until" was lost behind the year), and `30 ნოემბრის
+  ჩათვლით, 2026 წ.` not at all. `rules.date_role` reads the postposition off the date's own
+  words whatever follows; the contract-term reader and the comparison's value masking use it,
+  and the date reader reads the inclusive form whole, except where its year opens the next date
+  (`30 ნოემბრის ჩათვლით, 2027 წლის 1 იანვრიდან`).
+* **An act's heading date is the act's.** The extraction promoted every unlabelled preamble date
+  to `contract_date`; in an act that dated its contract in a wording the act reader did not know
+  (`N 11/2026 ხელშეკრულება, დადებული …`, `ხელშეკრულების (თარიღი: …)`, `03.03.2026 №11/2026
+  ხელშეკრულების`), the act's own date stood as a second, conflicting contract date. The preamble
+  date of an act is now `act_date`, and the act reader knows those wordings (the contract's
+  number read as the contract-number reader reads it). A date after the contract named for
+  another purpose (`ხელშეკრულების შესაბამისად, … 10 ივნისს გადაიხადა`) is not its signing.
+
 ### Scanned PDFs cannot carry Word comments
 
 The client asked for findings marked in the document itself. `report/docx_annotate.py` writes
