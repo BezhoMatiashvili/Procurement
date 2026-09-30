@@ -47,7 +47,12 @@ from procurement_agent.checks.amounts import (
     read_words,
 )
 from procurement_agent.checks.findings import Finding, Severity, SkipNote
-from procurement_agent.extraction.anchors import bic_is_well_formed, find_anchors, find_parties
+from procurement_agent.extraction.anchors import (
+    bic_is_well_formed,
+    find_anchors,
+    find_parties,
+    plain_party_wording,
+)
 from procurement_agent.extraction.georgian import (
     MixedWord,
     is_georgian_word,
@@ -2020,6 +2025,7 @@ def _classify(
     if not hidden and (
         _numeric_reformat(a.text, b.text)
         or _layout_key(a.text) == _layout_key(b.text)
+        or _layout_key(plain_party_wording(a.text)) == _layout_key(plain_party_wording(b.text))
         or _same_dates_rewritten(a.text, b.text)
     ):
         return "changed", "cosmetic", [], ["CMP.FORMATTING"], inline
