@@ -392,3 +392,13 @@ def test_an_act_naming_one_other_director_is_that_director_s_change() -> None:
     assert [(r, e, a, s) for r, e, a, s in found(run(CONTRACT, act)) if r == "CMP.PARTY"] == [
         ("CMP.PARTY", "ლაშა გოგიძე", "დავით ხუციშვილი", "error")
     ]
+
+
+def test_a_value_written_as_reported_is_anchored_on_itself_not_its_line() -> None:
+    right = edit(CONTRACT, "ZXCVGE33.", "ZXCVGE44.")
+    report = run(CONTRACT, right)
+    [bank] = [f for f in report.findings if f.rule_id == "CMP.BANK"]
+    text = "\n".join(right)
+    assert bank.span is not None
+    start, end = bank.span
+    assert text[start:end] == "ZXCVGE44"

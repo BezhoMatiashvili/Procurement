@@ -3437,14 +3437,22 @@ def _findings_of(
                 suppressed += 1
                 return
         seen.add(identity)
-        if quote is None and full is not None:
-            quote = new or old
-        anchor = quote if quote is not None and full is None else new
         span: tuple[int, int] | None = None
-        if anchor:
-            at = right_text.find(anchor)
+        if quote is not None and full is None:
+            # a value read on a line: anchored on the value itself where the line writes it as
+            # reported (an IBAN, a code), on the line where it does not ("0.2% per day")
+            at = right_text.find(quote)
+            inside = right_text.find(new, at, at + len(quote)) if at >= 0 and new else -1
+            if inside >= 0:
+                span, quote = (inside, inside + len(new or "")), None
+            elif at >= 0:
+                span = (at, at + len(quote))
+        else:
+            if quote is None and full is not None:
+                quote = new or old
+            at = right_text.find(new) if new else -1
             if at >= 0:
-                span = (at, at + len(anchor))
+                span = (at, at + len(new or ""))
         out.append(
             Finding(
                 rule_id=rule_id,
