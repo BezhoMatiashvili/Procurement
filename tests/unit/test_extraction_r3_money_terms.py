@@ -279,6 +279,9 @@ def test_a_net_fee_is_still_net() -> None:
     assert _doc(KA_HEAD + "4.1. ანაზღაურება შეადგენს 900 ლარს NET.", FactType.vat_status) == ["net"]
     text = KA_HEAD + "4.1. ანაზღაურება შეადგენს 900 ლარს NET (საშემოსავლო გადასახადის გარეშე)."
     assert _doc(text, FactType.vat_status) == ["net"]
+    # "net" before the money figure is the net amount itself, no count of days
+    for before in ("4.1. ანაზღაურება შეადგენს NET 900 ლარს.", "4.1. ანაზღაურება: ნეტო 900 ლარი."):
+        assert _doc(KA_HEAD + before, FactType.vat_status) == ["net"], before
 
 
 # --- EXTRACTION-R3-08: a non-payer clause under a condition --------------------------------------

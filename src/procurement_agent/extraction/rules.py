@@ -1041,16 +1041,20 @@ def is_vat_rate(text: str, start: int, end: int) -> bool:
 #: "net" that measures something other than money: a payment convention ("net 30 days"), a
 #: weight, a mass, an area, a profit ("net weight", "ნეტო წონის"). It says nothing about tax.
 _NET_MEASURE = re.compile(
-    r"\s*(?:-?[ა-ჰ]{1,3}\s+)?(?:\d|(?:weight|mass|area|volume|tonnage|profit|income|margin|"
-    r"loss)(?![a-z])|წონ|მას[აი]|ფართ|მოცულობ|მოგებ|ზარალ)",
+    r"\s*(?:-?[ა-ჰ]{1,3}\s+)?(?:(?P<figure>\d)|(?:weight|mass|area|volume|tonnage|profit|income|"
+    r"margin|loss)(?![a-z])|წონ|მას[აი]|ფართ|მოცულობ|მოგებ|ზარალ)",
     re.IGNORECASE,
 )
 
 
 def is_net_measure(text: str, end: int) -> bool:
     """Whether the word "net" ending at ``end`` measures a count, a weight or a profit rather
-    than stating a net amount: "net 30 days", "net weight", "ნეტო წონის მიხედვით"."""
-    return _NET_MEASURE.match(text, end) is not None
+    than stating a net amount: "net 30 days", "net weight", "ნეტო წონის მიხედვით". A figure
+    after it is a count only when it is no money: "NET 900 ლარი" is the net amount itself."""
+    m = _NET_MEASURE.match(text, end)
+    if m is None:
+        return False
+    return m.group("figure") is None or _AMOUNT_AFTER.match(text, m.start("figure")) is None
 
 
 #: A condition the tax wording after it stands under: "თუ „შემსრულებელი“ არ არის დღგ-ს
