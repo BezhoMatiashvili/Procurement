@@ -202,26 +202,70 @@ _HOMOGLYPHS = str.maketrans(
 #: and "pcs" are deliberately NOT merged: a lump sum and a count are different things, and the
 #: difference is worth a question; nor is a set a count of pieces. A metre and a linear metre
 #: are one measure (so says the mutation harness too). Plurals are listed, never derived by
-#: dropping an "s": "ls" (lump sum) is not "l" (a litre).
+#: dropping an "s": "ls" (lump sum) is not "l" (a litre). Spaces and dots are folded out first,
+#: so "square metre" is listed as "squaremetre" and "მ.გრძ." as "მგრძ"; a Georgian word cut
+#: after its stem ("ცალ.", "ტონ.") is listed as cut.
 _UNIT_ALIASES: dict[str, str] = {
     **dict.fromkeys(("m2", "m²", "sqm", "m^2", "მ2", "მ²", "კვმ"), "m2"),
     **dict.fromkeys(("m3", "m³", "cum", "cbm", "m^3", "მ3", "მ³", "კუბმ"), "m3"),
     **dict.fromkeys(
-        ("lm", "rm", "lnm", "linm", "runm", "გრძმ", "m", "მ", "მეტრი", "metre", "meter"), "lm"
+        (
+            *("squaremetre", "squaremetres", "squaremeter", "squaremeters", "sqmetre"),
+            *("კვადრატულიმეტრი",),
+        ),
+        "m2",
     ),
-    **dict.fromkeys(("km", "კმ", "kilometre", "kilometer", "კილომეტრი"), "km"),
+    **dict.fromkeys(
+        ("cubicmetre", "cubicmetres", "cubicmeter", "cubicmeters", "კუბურიმეტრი"), "m3"
+    ),
+    **dict.fromkeys(
+        (
+            *("lm", "rm", "lnm", "linm", "runm", "გრძმ", "მგრძ", "m", "მ", "მეტრი"),
+            *("metre", "metres", "meter", "meters"),
+            *("runningmetre", "runningmetres", "runningmeter", "runningmeters"),
+            *("linearmetre", "linearmetres", "linearmeter", "linearmeters", "გრძივიმეტრი"),
+        ),
+        "lm",
+    ),
+    **dict.fromkeys(
+        ("km", "kms", "კმ", "kilometre", "kilometres", "kilometer", "kilometers", "კილომეტრი"),
+        "km",
+    ),
     **dict.fromkeys(("ha", "ჰა", "hectare", "hectares", "ჰექტარი"), "ha"),
     **dict.fromkeys(
-        ("l", "ltr", "lit", "litre", "litres", "liter", "liters", "ლ", "ლიტ", "ლიტრი"), "l"
+        (
+            *("l", "lt", "lts", "ltr", "ltrs", "lit", "ლ", "ლიტ", "ლიტრი"),
+            *("litre", "litres", "liter", "liters"),
+        ),
+        "l",
     ),
-    **dict.fromkeys(("t", "tn", "ton", "tons", "tonne", "tonnes", "ტ", "ტნ", "ტონა"), "t"),
-    **dict.fromkeys(("kg", "კგ"), "kg"),
+    **dict.fromkeys(("t", "tn", "ton", "tons", "tonne", "tonnes", "ტ", "ტნ", "ტონ", "ტონა"), "t"),
+    **dict.fromkeys(
+        ("kg", "kgs", "კგ", "kilogram", "kilograms", "kilogramme", "kilogrammes", "კილოგრამი"),
+        "kg",
+    ),
     **dict.fromkeys(("month", "months", "mo", "mon", "mth", "თვე", "თვ"), "month"),
     **dict.fromkeys(("week", "weeks", "wk", "wks", "კვირა"), "week"),
     **dict.fromkeys(("day", "days", "დღე", "დღ"), "day"),
     **dict.fromkeys(("set", "sets", "kit", "kits", "კომპლ", "კომპლექტი", "კომპ"), "set"),
     **dict.fromkeys(
-        ("pcs", "pc", "nr", "no", "piece", "pieces", "ც", "ცალი", "\u0448\u0442"), "pcs"
+        (
+            "pcs",
+            "pc",
+            "nr",
+            "nrs",
+            "no",
+            "nos",
+            "number",
+            "numbers",
+            "piece",
+            "pieces",
+            "ც",
+            "ცალ",
+            "ცალი",
+            "\u0448\u0442",
+        ),
+        "pcs",
     ),
     **dict.fromkeys(("hr", "hrs", "h", "hour", "hours", "სთ", "საათი"), "hr"),
 }

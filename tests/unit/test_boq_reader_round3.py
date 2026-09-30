@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from procurement_agent.checks.boq import _num
+from procurement_agent.checks.boq import _num, norm_unit
 
 # --- numbers typed as text --------------------------------------------------------------------
 
@@ -61,3 +61,58 @@ def test_number_text_that_reads_one_way_is_that_number(text: str, value: float) 
 )
 def test_number_text_with_a_stray_or_doubled_separator_stays_text(text: str) -> None:
     assert _num(text) is None
+
+
+# --- units: every name of one measure -----------------------------------------------------------
+
+#: per measure: its abbreviations, its names singular and plural, English and Georgian
+_MEASURES = {
+    "lm": (
+        "m",
+        "lm",
+        "metre",
+        "metres",
+        "meter",
+        "meters",
+        "running metre",
+        "linear metres",
+        "მ",
+        "გრძ.მ",
+        "მ.გრძ.",
+        "მეტრი",
+    ),
+    "m2": ("m2", "sq.m", "square metre", "square meters", "მ2", "კვ.მ"),
+    "m3": ("m3", "cum", "cubic metre", "cubic meters", "მ3", "კუბ.მ"),
+    "km": ("km", "kms", "kilometre", "kilometers", "კმ"),
+    "kg": ("kg", "kgs", "kilogram", "kilograms", "კგ", "კილოგრამი"),
+    "t": ("t", "tn", "ton", "tonnes", "ტ", "ტონ.", "ტონა"),
+    "l": ("l", "lt", "ltr", "ltrs", "litre", "liters", "ლ", "ლიტრი"),
+    "pcs": ("pcs", "pc", "nr", "nos", "no.", "number", "pieces", "ც", "ცალ.", "ცალი"),
+}
+
+
+@pytest.mark.parametrize(
+    ("measure", "spelling"),
+    [(m, s) for m, spellings in _MEASURES.items() for s in spellings],
+)
+def test_every_name_of_a_measure_folds_to_that_measure(measure: str, spelling: str) -> None:
+    assert norm_unit(spelling) == measure
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ("ls", "l"),  # a lump sum is not a litre, even with an "s" dropped
+        ("lts", "ls"),
+        ("item", "pcs"),
+        ("each", "pcs"),  # a count by another name stays a question, like "item"
+        ("nos", "no-go"),
+        ("metres", "m2"),
+        ("square metre", "cubic metre"),
+        ("kms", "km2"),
+        ("kgs", "t"),
+        ("ტონ", "ტ2"),
+    ],
+)
+def test_names_of_different_measures_stay_apart(a: str, b: str) -> None:
+    assert norm_unit(a) != norm_unit(b)
