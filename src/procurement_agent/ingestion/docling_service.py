@@ -10,7 +10,9 @@ import tempfile
 import threading
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from typing import Any
 
+from docling.backend.msword_backend import MsWordDocumentBackend
 from docling.datamodel.accelerator_options import AcceleratorDevice, AcceleratorOptions
 from docling.datamodel.base_models import ConversionStatus, InputFormat
 from docling.datamodel.document import ConversionResult
@@ -29,6 +31,31 @@ from procurement_agent.security.audit import log
 class ConversionError(RuntimeError):
     pass
 
+
+class WholeParagraphWordBackend(MsWordDocumentBackend):
+    """Docling's Word reader, with each paragraph's text read whole.
+
+    Docling splits a paragraph wherever the character formatting changes (bold, italic,
+    underline, a hyperlink) into pieces it strips of their edge spaces, and the chunker writes
+    the pieces one to a line. A correct act with one italic "50" inside "3 450", or a surname
+    whose last letters are bold, then read "3 4\\n50" and "ბარამ\\nიძე": a fee of 50 and a
+    misspelled director (red team R3, AOA-R3-13), and the space a run began with was lost for
+    good. Nothing downstream reads the formatting (the serializer writes plain text), so a
+    paragraph is one piece of text, exactly as Word shows it; an empty one stays as Docling
+    keeps it.
+    """
+
+    def _get_paragraph_elements(self, paragraph: Any) -> Any:
+        elements = super()._get_paragraph_elements(paragraph)
+        if len(elements) <= 1:
+            return elements
+        text = self._get_paragraph_text(paragraph).strip()
+        return [(text, elements[0][1], None)]
+
+
+#: Bumped whenever this module changes what a conversion yields for the same file, so a cache
+#: of parses (``conversion_fingerprint``) never serves one made the old way.
+_CONVERSION_REVISION = "whole-paragraphs-1"
 
 _lock = threading.Lock()
 #: One converter per distinct configuration; see ``get_converter``.
@@ -64,7 +91,7 @@ def _build(settings: Settings) -> DocumentConverter:
         allowed_formats=[InputFormat.PDF, InputFormat.DOCX],
         format_options={
             InputFormat.PDF: PdfFormatOption(pipeline_options=pdf),
-            InputFormat.DOCX: WordFormatOption(),
+            InputFormat.DOCX: WordFormatOption(backend=WholeParagraphWordBackend),
         },
     )
 
@@ -109,6 +136,7 @@ def conversion_fingerprint(settings: Settings) -> str:
         docling_version = "unknown"
     parts = [
         docling_version,
+        _CONVERSION_REVISION,
         str(ocr_available(settings)),
         ",".join(settings.ocr_langs),
         str(settings.docling_artifacts_path),
