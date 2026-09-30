@@ -598,6 +598,42 @@ text (`tests/unit/test_compare_redteam.py`, `test_compare_tables.py`):
   the other end's (`rules.find_dates`).
 * **Document kind** is read from folded text, so an act titled with an en dash is an act.
 
+### Red team, round 2: one reader for a value, and what a value leaves unsaid (2026-09-30)
+
+The tests are in `tests/unit/test_compare_redteam2.py` and `test_compare_tables.py`, on invented
+text.
+
+* **Words beside a value are a change of their own.** Before, once a line's value change was
+  reported, its text change was dropped. A penalty whose rate changed could therefore move onto
+  the other party with no finding saying so. Now each side is read with its values cut out,
+  including their words, currency, unit and postpositions. If a word changed outside them, and it
+  is not one of the reported values' own words in whatever case the line writes it, the line is
+  also "text changed". A line removed whole stays one finding per value; the round-1 "one change,
+  one finding" still holds there. It says more only when a value on it went unreported because
+  the other document restates it. The value finding is now anchored on the line it was read on.
+* **One value reader for both passes.** A range of two dates is a period, whatever words stand
+  near it. A month named as a period is read on the line as the whole-document pass reads it.
+  A BIC and its `XXX` form are one code, as the act check reads them. An advance is `advance N%`.
+  A line whose values are the same values written another way is formatting: a postposition fused
+  into the month, the percent word, the lari abbreviated, tetri as a fraction.
+* **Nothing is suppressed by a change that is not reported.** Between a contract and its act, no
+  line's change is reported. Their positional diff still paired the party lines, though, and its
+  "director X → Y" silently dropped the document-wide "X removed" and "Y added". So both parties'
+  directors replaced in an act were listed as nothing. They are now listed as warnings. Pairing
+  them by role (the customer's director against the customer's) is a policy question the spec
+  does not answer yet.
+* **Table rows that move.** A Word table row found elsewhere by its words is a move, paired cell
+  by cell. Two rows swapped are one `CMP.MOVED`, not two warnings, and a price changed in the
+  moved row is the price's change. Two kinds of row never pair as a move:
+  * rows of nothing but numbers, which share a key (the "two limits" note above);
+  * rows whose words another row repeats.
+* **Quantity columns.** A figure under "რაოდენობა" beside its row's unit is read like the prose
+  quantity "20 ცალი". A changed count or unit is `CMP.QUANTITY`, not a bare number or a text
+  change.
+* **Left as it is.** English party names, directors and addresses are still only "text changed"
+  (COMPARE-R2-12). This follows the English-scope decision recorded under "An act not in
+  Georgian".
+
 ### The findings list is a list, not a dump
 
 Two different bid workbooks differ in over a thousand cells. Listing every one buried the
