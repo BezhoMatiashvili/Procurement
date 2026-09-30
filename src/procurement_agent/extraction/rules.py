@@ -411,6 +411,60 @@ _DATE_EN_MDY = re.compile(
 )
 
 
+#: A period whose end, or whose start's month and year, the other end states: "2026 წლის 1
+#: მაისიდან 31 მაისის ჩათვლით", "2026 წლის 1-დან 31 მაისის ჩათვლით", "2026 წლის 1-31 მაისის
+#: პერიოდში", "1 მაისიდან 31 მაისის ჩათვლით, 2026 წელს".
+_KA_DAY_MONTH_AFTER = re.compile(
+    rf"\s*(\d{{1,2}})\s+({_KA_MONTH_FUZZY})(?![ა-ჰ])(?!\s*,?\s*\d{{4}})"
+)
+_KA_DAYS_OF_MONTH = re.compile(
+    rf"(?<!\d)(\d{{4}})[.,\s]*წ(?:ლის|\.)?\s*(\d{{1,2}})\s*(?:-\s*დან|დან|[-\u2013])\s*"
+    rf"(\d{{1,2}})\s+({_KA_MONTH_FUZZY})"
+)
+_KA_RANGE_YEAR_AFTER = re.compile(
+    rf"(?<![\d.])(\d{{1,2}})\s+({_KA_MONTH_FUZZY}დან)\s+(\d{{1,2}})\s+({_KA_MONTH_FUZZY})"
+    rf"(?:\s+ჩათვლით)?\s*,?\s*(\d{{4}})\s*წ"
+)
+
+
+def _range_ends_without_year(
+    text: str, found: dict[tuple[int, int], tuple[date, str, str | None]]
+) -> list[tuple[tuple[int, int], date, str]]:
+    """The dates of a Georgian period that take their year - or month and year - from the other
+    end or from the year written after the period. Unread, "2026 წლის 1 მაისიდან 31 მაისის
+    ჩათვლით" was a period of one day, and the other forms no period at all."""
+    out: list[tuple[tuple[int, int], date, str]] = []
+
+    def month_day(y: int, mo_word: str, d: int) -> date | None:
+        mo = _month_ka(mo_word)
+        return _safe_date(y, mo, d) if mo else None
+
+    for (_start, end), (first, raw, _note) in list(found.items()):
+        if not raw.endswith("დან"):
+            continue
+        m = _KA_DAY_MONTH_AFTER.match(text, end)
+        if m is None:
+            continue
+        dt = month_day(first.year, m.group(2), int(m.group(1)))
+        if dt is not None and dt < first:  # "20 დეკემბრიდან 10 იანვრამდე": the next year's
+            dt = month_day(first.year + 1, m.group(2), int(m.group(1)))
+        if dt is not None:
+            out.append(((m.start(1), m.end()), dt, m.group(0).strip()))
+    for m in _KA_DAYS_OF_MONTH.finditer(text):
+        a = month_day(int(m.group(1)), m.group(4), int(m.group(2)))
+        b = month_day(int(m.group(1)), m.group(4), int(m.group(3)))
+        if a is not None and b is not None:
+            out.append(((m.start(), m.start(3)), a, text[m.start() : m.start(3)].strip()))
+            out.append(((m.start(3), m.end()), b, text[m.start(3) : m.end()]))
+    for m in _KA_RANGE_YEAR_AFTER.finditer(text):
+        a = month_day(int(m.group(5)), m.group(2), int(m.group(1)))
+        b = month_day(int(m.group(5)), m.group(4), int(m.group(3)))
+        if a is not None and b is not None:
+            out.append(((m.start(1), m.end(2)), a, text[m.start(1) : m.end(2)]))
+            out.append(((m.start(3), m.end(4)), b, text[m.start(3) : m.end(4)]))
+    return out
+
+
 def _safe_date(y: int, mo: int, d: int) -> date | None:
     try:
         dt = date(y, mo, d)
@@ -495,6 +549,8 @@ def find_dates(text: str) -> list[RuleHit]:
         add(m, _safe_date(int(m.group(3)), int(m.group(2)), int(m.group(1))))
     for m in _DATE_NUMERIC_SHORT_YEAR.finditer(text):
         add(m, _safe_date(2000 + int(m.group(3)), int(m.group(2)), int(m.group(1))))
+    for span, dt, raw in _range_ends_without_year(text, found):
+        found.setdefault(span, (dt, raw, None))
 
     hits: list[RuleHit] = []
     last_end = -1

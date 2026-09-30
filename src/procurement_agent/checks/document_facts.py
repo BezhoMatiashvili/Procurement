@@ -219,7 +219,12 @@ def _service_period(view: DocumentView, checker: AoaChecker) -> tuple[date, date
     if len({d for d, _ in hits}) >= 2:
         first = min(h.start for _, h in hits)
         last = max(h.end for _, h in hits)
-        return min(d for d, _ in hits), max(d for d, _ in hits), text[first:last]
+        dates = [d for d, _ in sorted(hits, key=lambda p: p[1].start)]
+        # two dates are the period's start and end as written, even when a year typed wrong
+        # puts the end first: sorted, the period stated was one neither document states
+        if len(dates) == 2:
+            return dates[0], dates[1], text[first:last]
+        return min(dates), max(dates), text[first:last]
     ranges = _ranges(view, checker)
     if hits:
         # one date read after the words that open the period: the range it starts, if any
