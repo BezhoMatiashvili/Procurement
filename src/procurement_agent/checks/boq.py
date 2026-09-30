@@ -1899,19 +1899,30 @@ def _unit_rate(line: BoqLine, columns: dict[str, int]) -> float | None:
 #: The template's invitation to list what it does not describe: "The tender is to list here
 #: below any other items", "Other costs if necessary", "სხვა, აღწერაში არ შეტანილი". A bidder
 #: need not price it, and one who does has added work of their own. Matched by what it asks,
-#: not by fixed phrases: "any other" item, work or cost anywhere; or a description that *opens*
-#: with "Other(s)" / "სხვა" and asks the bidder to specify or list, or says it is not included
-#: above / in this BOQ / elsewhere. Only the opening word counts: "Paint to walls and other
-#: surfaces, colour to be specified by the Engineer" is a described position, and read as a
-#: placeholder it would drop out of the evaluation and the common scope. "სხვადასხვა" (sundry
-#: items the template describes) is never one.
+#: not by fixed phrases, and only where it asks it of the bidder:
+#:
+#: * "any other" item, work or cost anywhere ("Any other undescribed items");
+#: * the bidder addressed: "the tender(er) / bidder is to list", "list here", "to be listed
+#:   here / below / by the tenderer" - "texts to be listed by the Engineer" is described work;
+#: * "Undescribed" and "სხვა ხარჯები" as the opening words - "removal of undescribed
+#:   obstructions" and "... და სხვა ხარჯები" qualify a described position;
+#: * "აღწერაში არ შეტანილი" (not in the description) anywhere, and "Other costs if necessary";
+#: * a description that *opens* with "Other(s)" / "სხვა" and asks the bidder to specify or list,
+#:   or says it is not included above / in this BOQ / elsewhere.
+#:
+#: Only the opening word counts: "Paint to walls and other surfaces, colour to be specified by
+#: the Engineer" is a described position, and read as a placeholder it would drop out of the
+#: evaluation and the common scope. "სხვადასხვა" (sundry items the template describes) is never
+#: one. A line under a heading that invites is one too (``_placeholder_rows``).
 _PLACEHOLDER = re.compile(
-    r"any\s+other\s+(?:item|work|cost)s?\b|list(?:ed)?\s+here|to\s+be\s+listed|undescribed|"
-    r"other\s+costs\s+if\s+necessary|"
+    r"any\s+other\s+(?:[a-z]+\s+)?(?:item|work|cost)s?\b|"
+    r"\b(?:tender(?:er)?|bidder)s?\s+(?:is\s+|are\s+)?to\s+list\b|\blist\s+here\b|"
+    r"\bto\s+be\s+listed\s+(?:here|below|by\s+the\s+(?:tenderer|bidder))\b|"
+    r"^\W*undescribed\b|other\s+costs\s+if\s+necessary|"
     r"^\W*others?\b.*\b(?:specify|to\s+be\s+(?:specified|listed)|"
     r"not\s+(?:otherwise\s+)?(?:included|covered|described|listed|mentioned)\s+"
     r"(?:above|elsewhere|in\s+(?:this|the)\s+(?:boq|bill|list|schedule|tender)))\b|"
-    r"აღწერაში\s+არ\s+შეტანილ|(?<![ა-ჰ])სხვა\s+ხარჯ|"
+    r"აღწერაში\s+არ\s+შეტანილ|^\W*სხვა\s+ხარჯ|"
     r"^\W*სხვა(?![ა-ჰ]).*(?:არ\s+არის\s+გათვალისწინებ|მიუთითეთ|ჩამოწერეთ|ჩამოთვალეთ|"
     r"დააკონკრეტეთ)",
     re.IGNORECASE,
@@ -1919,6 +1930,26 @@ _PLACEHOLDER = re.compile(
 #: A section row that is itself priced ("A8 Progress and Final Photographs"), whose own items are
 #: numbered under it ("8.1").
 _SECTION_POSITION = re.compile(r"^[A-Z](\d+)$")
+
+
+def _placeholder_rows(lines: list[BoqLine]) -> set[int]:
+    """The template's positions that invite the bidder's own items (GOLD_SPEC 5): by their own
+    text, or by the heading they stand under.
+
+    "Undescribed items (Bidder to list and price)" over "Item 1", "Item 2": the invitation is
+    the heading's, and each line under it is a slot for the bidder's own work - read as a
+    filled-in quantity, a bidder's extra counted in their evaluation and flipped the colours. A
+    heading reaches the positions below it until the next row that is not a position (the
+    group's Sub-total, the next heading) or the next priced section row ("A3").
+    """
+    out: set[int] = set()
+    inviting = False
+    for line in lines:
+        if line.kind != "position" or _SECTION_POSITION.match(line.item_no.strip()):
+            inviting = bool(_PLACEHOLDER.search(line.description))
+        if line.kind == "position" and (inviting or _PLACEHOLDER.search(line.description)):
+            out.add(line.row)
+    return out
 
 
 def _position_groups(lines: list[BoqLine]) -> dict[int, str]:
@@ -2021,6 +2052,7 @@ def _compare_sheet(out: BidComparison, t_sheet: BoqSheet, b_sheet: BoqSheet) -> 
             out.non_numeric.append((b_line, key, text))
 
     # the evaluation of every template position on the sheet
+    placeholders = _placeholder_rows(t_sheet.lines)
     for t in t_sheet.leaf_lines:
         b = by_template_row.get(t.row)
         if b is None:
@@ -2032,7 +2064,7 @@ def _compare_sheet(out: BidComparison, t_sheet: BoqSheet, b_sheet: BoqSheet) -> 
             continue
         rate = _unit_rate(b, b_sheet.columns)
         text_cols = {key for key, _ in b.non_numeric}
-        if _PLACEHOLDER.search(t.description):
+        if t.row in placeholders:
             if b.amount or rate:
                 out.priced_optional.append(b)
             out.positions.append(

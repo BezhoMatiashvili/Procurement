@@ -16,6 +16,7 @@ import pytest
 from openpyxl import Workbook
 
 from procurement_agent.checks.boq import (
+    _PLACEHOLDER,
     BoqLine,
     BoqWorkbook,
     _label_key,
@@ -638,3 +639,126 @@ def test_a_template_quantity_its_row_cannot_settle_is_evaluated_for_no_bidder(
     assert comp.filled_blank == [] and comp.unpriced_positions == []
     assert comp.evaluated_cost == pytest.approx(1000.0)
     assert "BOQ.ARITHMETIC" not in _rules(comp)
+
+
+# --- placeholders: where the invitation stands and what it asks ---------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Undescribed items (Bidder to list and price)",
+        "Any other undescribed items",
+        "Items to be listed here by the tenderer",
+        "The tenderer is to list below any additional work",
+        "List here any additional items",
+        "აღწერაში არ შეტანილი სამუშაოები",
+        "სხვა ხარჯები",
+    ],
+)
+def test_an_invitation_addressed_to_the_bidder_or_opening_the_text_is_a_placeholder(
+    text: str,
+) -> None:
+    assert _PLACEHOLDER.search(text) is not None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # the listing is someone else's, or the word qualifies described work
+        "Door and room signage, texts to be listed by the Engineer",
+        "Removal of undescribed obstructions met in excavation, as instructed",
+        "მობილიზაცია, დროებითი შენობები და სხვა ხარჯები",
+        "Fixings listed here are to be galvanised",
+        "Floor tiles 600x600, colour: bidder to specify",
+        "Contractor to list defects at handover and make good",
+    ],
+)
+def test_the_same_words_further_into_a_described_position_are_no_invitation(text: str) -> None:
+    assert _PLACEHOLDER.search(text) is None
+
+
+def _heading_sheet(heading: str, prices: dict[str, tuple[float, float]]) -> Cells:
+    """A group row over two blank-quantity lines, then a closing Sub-total and one more
+    position, then a described position; ``prices`` gives (qty, rate) for the lines priced.
+
+    A1 | <heading>                       | amount =SUM(F3:F4)
+    1.1 | Item 1   | item | (blank)      | amount =D3*E3
+    1.2 | Item 2   | item | (blank)      | amount =D4*E4
+        | Sub-total                      | =SUM(F3:F4)
+    1.3 | Excavation | m3 | 10 | 50      | =D6*E6
+    """
+    cells: Cells = {(1, c): h for c, h in enumerate(_HEAD, 1)}
+    cells.update({(2, 1): "A1", (2, 2): heading})
+    subtotal = 0.0
+    for r, item in ((3, "1.1"), (4, "1.2")):
+        cells.update({(r, 1): item, (r, 2): f"Item {r - 2}", (r, 3): "item"})
+        qty, rate = prices.get(item, (None, None))
+        if qty is not None and rate is not None:
+            cells.update({(r, 4): qty, (r, 5): rate})
+            subtotal += qty * rate
+        cells[(r, 6)] = Fx(f"=D{r}*E{r}", (qty or 0.0) * (rate or 0.0))
+    cells[(2, 6)] = Fx("=SUM(F3:F4)", subtotal)
+    cells.update({(5, 2): "Sub-total", (5, 6): Fx("=SUM(F3:F4)", subtotal)})
+    cells.update({(6, 1): "1.3", (6, 2): "Excavation", (6, 3): "m3", (6, 4): 10.0})
+    qty, rate = prices.get("1.3", (10.0, 0.0))
+    cells.update({(6, 5): rate, (6, 6): Fx("=D6*E6", 10.0 * rate)})
+    return cells
+
+
+@pytest.mark.parametrize(
+    "heading", ["Undescribed items (Bidder to list and price)", "აღწერაში არ შეტანილი სამუშაოები"]
+)
+def test_a_line_under_an_inviting_heading_is_a_placeholder(tmp_path: Path, heading: str) -> None:
+    t = read_boq(_save(tmp_path / "t.xlsx", {"1. WORKS": _heading_sheet(heading, {})}))
+    bid = _heading_sheet(heading, {"1.1": (2.0, 600.0), "1.3": (10.0, 50.0)})
+    comp = compare_bid(t, read_boq(_save(tmp_path / "b.xlsx", {"1. WORKS": bid}), name="B"))
+    status = {p.item_no: (p.status, p.cost) for p in comp.positions}
+    assert status["1.1"] == ("optional_priced", 0.0)
+    assert status["1.2"][0] == "optional"
+    assert status["1.3"] == ("priced", 500.0)
+    assert comp.filled_blank == [] and comp.evaluated_cost == pytest.approx(500.0)
+    assert "BOQ.OPTIONAL_PRICED" in _rules(comp) and "BOQ.FILLED_BLANK" not in _rules(comp)
+
+
+@pytest.mark.parametrize("heading", ["Sundry items / სხვადასხვა ხარჯები", "Earthworks"])
+def test_a_line_under_a_plain_heading_is_the_bidders_own_filled_in_quantity(
+    tmp_path: Path, heading: str
+) -> None:
+    t = read_boq(_save(tmp_path / "t.xlsx", {"1. WORKS": _heading_sheet(heading, {})}))
+    bid = _heading_sheet(heading, {"1.1": (2.0, 600.0), "1.3": (10.0, 50.0)})
+    comp = compare_bid(t, read_boq(_save(tmp_path / "b.xlsx", {"1. WORKS": bid}), name="B"))
+    status = {p.item_no: (p.status, p.cost) for p in comp.positions}
+    assert status["1.1"] == ("filled_blank", 1200.0)
+    assert comp.priced_optional == []
+
+
+def test_an_inviting_headings_reach_ends_at_the_sub_total_that_closes_it(tmp_path: Path) -> None:
+    """1.3 stands after the group's Sub-total: a described position, priced and evaluated."""
+    heading = "Any other undescribed items"
+    t = read_boq(_save(tmp_path / "t.xlsx", {"1. WORKS": _heading_sheet(heading, {})}))
+    bid = _heading_sheet(heading, {"1.3": (10.0, 50.0)})
+    comp = compare_bid(t, read_boq(_save(tmp_path / "b.xlsx", {"1. WORKS": bid}), name="B"))
+    status = {p.item_no: (p.status, p.cost) for p in comp.positions}
+    assert status["1.3"] == ("priced", 500.0)
+    assert status["1.1"][0] == status["1.2"][0] == "optional"
+    assert comp.unfilled_positions == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Door and room signage, texts to be listed by the Engineer",
+        "Removal of undescribed obstructions met in excavation, as instructed",
+    ],
+)
+def test_a_described_position_mentioning_listing_is_evaluated(tmp_path: Path, text: str) -> None:
+    cells = _heading_sheet("Earthworks", {"1.3": (10.0, 0.0)})
+    cells[(6, 2)] = text
+    t = read_boq(_save(tmp_path / "t.xlsx", {"1. WORKS": cells}))
+    bid = _heading_sheet("Earthworks", {"1.3": (10.0, 90.0)})
+    bid[(6, 2)] = text
+    comp = compare_bid(t, read_boq(_save(tmp_path / "b.xlsx", {"1. WORKS": bid}), name="B"))
+    status = {p.item_no: (p.status, p.cost) for p in comp.positions}
+    assert status["1.3"] == ("priced", 900.0)
+    assert comp.priced_optional == []

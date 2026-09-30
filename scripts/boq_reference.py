@@ -388,7 +388,10 @@ def classify_template(sheet: Sheet) -> None:
 
 #: GOLD_SPEC 5: the Summary's rows by their usual labels (folded: Latin upper-cased). The tax by
 #: its names, never the letters inside a word ("PRIVATE").
-_TAX = r"(?<![A-Zა-ჰ])(?:VAT|VALUE[ -]ADDED[ -]TAX|დღგ|დამატებული ღირებულების გადასახად[ა-ჰ]*)(?![A-Zა-ჰ])"
+_TAX = (
+    r"(?<![A-Zა-ჰ])(?:VAT|VALUE[ -]ADDED[ -]TAX|დღგ|"
+    r"დამატებული ღირებულების გადასახად[ა-ჰ]*)(?![A-Zა-ჰ])"
+)
 _PCT = r"(?:\d{1,2}(?:[.,]\d+)?\s*%\s*)?"
 INCL_VAT = re.compile(
     rf"\b(?:INCL(?:\.|UDING|USIVE)?|WITH)\s*(?:OF )?{_PCT}{_TAX}|{_TAX} INCL"
@@ -1098,7 +1101,9 @@ def build_gold(folder: Path, template: Path | None, verbose: bool = False) -> di
     return gold
 
 
-PLACEHOLDER_HEADINGS = ("UNDESCRIBED", "ANY OTHER")
+#: a heading inviting the bidder's own items, in either language ("აღწერაში არ შეტანილი" -
+#: not in the description)
+PLACEHOLDER_HEADINGS = ("UNDESCRIBED", "ANY OTHER", "აღწერაში არ შეტანილ")
 PLACEHOLDER_ROWS = ("ANY OTHER ITEMS", "TENDER IS TO LIST", "OTHER COSTS IF NECESSARY")
 
 DECISIONS = [
