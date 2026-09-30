@@ -126,6 +126,7 @@ from procurement_agent.extraction.normalize import (
     fold_look_alikes,
     iban_is_valid,
     id_code_digits,
+    in_grouping,
     keep_initial,
     name_stem,
     names_match,
@@ -789,8 +790,10 @@ class AoaChecker:
                 and re.sub(r"\D", "", self.aoa.text[span[0] : span[1]]) == code
             ):
                 return span
-        grouped = r"[ \u00a0]?".join(code)
-        m = re.search(rf"(?<!\d)(?<!\d[ \u00a0]){grouped}(?!\d)(?![ \u00a0]\d)", self.aoa.text)
+        grouped = r"[ \u00a0.\-]?".join(code)
+        m = re.search(
+            rf"(?<!\d)(?<!\d[ \u00a0.\-]){grouped}(?!\d)(?![ \u00a0.\-]\d)", self.aoa.text
+        )
         return m.span() if m is not None else None
 
     def _account_span(self, iban: str) -> tuple[int, int] | None:
@@ -1932,15 +1935,26 @@ class AoaChecker:
                         f"could be read, so the act's code {code} was not compared",
                     )
                     continue
+                closest: str | None
                 closest = min(sorted(c_ids), key=lambda c: (_digit_distance(code, c), c))
+                if len(closest) != len(code) and _digit_distance(code, closest) > 2:
+                    closest = None  # a digit or two dropped or doubled, or no correction
+                span = self._code_span(code)
+                written = self.aoa.as_written(*span) if span else code
+                # a code of the wrong length says so (red team R3, AOA-R3-01)
+                ka_len = en_len = ""
+                if len(code) not in (9, 11):
+                    ka_len = f" ({len(code)} ციფრი; კოდი 9- ან 11-ნიშნაა)"
+                    en_len = f" ({len(code)} digits; a code has 9 or 11)"
                 self._add(
                     "AOA.ID_CODES",
                     "error",
-                    f"საიდენტიფიკაციო კოდი ხელშეკრულებაში არ არის: {code}",
-                    f"identification code not in the contract: {code}",
-                    expected=closest,
+                    f"საიდენტიფიკაციო კოდი ხელშეკრულებაში არ არის: {code}{ka_len}",
+                    f"identification code not in the contract: {code}{en_len}",
+                    # in the act's grouping: "987-654-312" is corrected to "987-654-321"
+                    expected=in_grouping(closest, written) if closest else None,
                     actual=code,
-                    span=self._code_span(code),
+                    span=span,
                 )
 
         if not self.contract.parties:
@@ -3626,9 +3640,10 @@ def _closest(
 
 
 def _digit_distance(a: str, b: str) -> int:
-    """How many digits apart two codes of one length are; a length change counts as far."""
+    """How many digits apart two codes are: digits changed for codes of one length, and for
+    two lengths the digits dropped, doubled or changed (red team R3, AOA-R3-01)."""
     if len(a) != len(b):
-        return len(a) + len(b)
+        return edit_distance(a, b, cap=len(a) + len(b))
     return sum(x != y for x, y in zip(a, b, strict=True))
 
 

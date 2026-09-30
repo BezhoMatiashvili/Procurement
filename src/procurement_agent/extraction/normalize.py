@@ -543,8 +543,12 @@ ID_LABEL = (
 )
 #: between the label and the code: a number sign ("ს/კ N 204567890", "№"), a colon or a dash
 _ID_SEPARATOR = r"(?:\s*(?:N|№|#)(?![A-Za-z]))?\s*[:\-]?\s*"
-#: the code: 9 digits (a company) or 11 (a person), compact or a company's printed in threes
-_ID_VALUE = r"(\d{9}|\d{11}|\d{3} \d{3} \d{3})(?!\d)"
+#: The code: 9 digits (a company) or 11 (a person), compact or printed in threes by one
+#: separator throughout - a space, a hyphen or a dot ("406 444 789", "406-444-789"). Behind its
+#: label a run a slip makes of a code - a digit dropped or doubled, 7 to 13 digits - is read too:
+#: it is the code the document states, and the act check says what is wrong with its digits
+#: (red team R3, AOA-R3-01). Fewer digits, or more (an account's), are no code.
+_ID_VALUE = r"(\d{7,13}|\d{3}(?P<id_sep>[ .\-])\d{3}(?P=id_sep)\d{2,5})(?!\d)"
 #: An identification code behind its label; group 1 is the code as written (``id_code_digits``).
 ID_CODE_RE = re.compile(ID_LABEL + _ID_SEPARATOR + _ID_VALUE, re.IGNORECASE)
 
@@ -552,6 +556,24 @@ ID_CODE_RE = re.compile(ID_LABEL + _ID_SEPARATOR + _ID_VALUE, re.IGNORECASE)
 def id_code_digits(code: str) -> str:
     """A code as its digits alone: "406 444 789" is 406444789."""
     return re.sub(r"\D", "", code)
+
+
+def in_grouping(code: str, written: str) -> str:
+    """``code`` grouped as ``written`` groups its digits, so a correction is written as the
+    document writes the code it corrects: "987-654-312" is corrected to "987-654-321". Groups of
+    the sizes ``written`` has when the two are as long, of three otherwise; compact when
+    ``written`` is."""
+    separator = re.search(r"\D", written.strip())
+    if separator is None:
+        return code
+    sizes = [len(g) for g in re.split(r"\D+", written.strip()) if g]
+    if sum(sizes) != len(code):
+        sizes = [3] * (len(code) // 3) + ([len(code) % 3] if len(code) % 3 else [])
+    groups, at = [], 0
+    for size in sizes:
+        groups.append(code[at : at + size])
+        at += size
+    return separator.group(0).join(groups)
 
 
 # --- IBAN ---------------------------------------------------------------------------------------
