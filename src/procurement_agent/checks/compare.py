@@ -3154,7 +3154,11 @@ def _classify(
         return "changed", "cosmetic", [], ["CMP.FORMATTING"], inline
 
     hidden = hidden_character_rules(a.text, b.text)
-    values = deltas_between(_in_its_column(a.text, ca), _in_its_column(b.text, cb))
+    values = (
+        []  # a letter slipped: the words say what they said (``_slip_only``)
+        if _slip_only(a.text, b.text)
+        else deltas_between(_in_its_column(a.text, ca), _in_its_column(b.text, cb))
+    )
     counted = _cell_quantity(a.text, ca), _cell_quantity(b.text, cb)
     quantity = _delta(*counted) if None not in counted else None
     # a quantity column's figure, or its row's unit, is the row's quantity - not a bare number
@@ -3191,6 +3195,76 @@ def _classify(
     ):
         return "changed", "cosmetic", [], ["CMP.FORMATTING"], inline
     return "changed", "substantive", [], sorted({*hidden, "CMP.TEXT_CHANGED"}), inline
+
+
+def _one_letter_apart(a: str, b: str) -> bool:
+    """Whether ``b`` is ``a`` with one letter typed wrong, dropped or added."""
+    if a == b or abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        return sum(x != y for x, y in zip(a, b, strict=True)) == 1
+    short, long_ = (a, b) if len(a) < len(b) else (b, a)
+    k = next((i for i, (x, y) in enumerate(zip(short, long_, strict=False)) if x != y), len(short))
+    return short[k:] == long_[k + 1 :]
+
+
+#: The shortest word a one-letter slip is read past in: a short word one letter from another is
+#: as likely another word ("ის" / "ეს").
+_SLIP_MIN_LETTERS = 4
+
+
+def _slip_only(left: str, right: str) -> bool:
+    """Whether the one change between two lines is a letter slipped in one word - typed wrong,
+    dropped or doubled - in a word that carries no written value.
+
+    Such a line changed nothing it says. Read literally, the slip still flipped a value read
+    from the wording around the word: "გადასახადების ჩათვლით" (taxes included) typed
+    "გძდასახადების ჩათვლით" no longer read as including VAT, and the one letter was a VAT
+    change "incl → none" beside the text change. A word that is itself a value, or part of one,
+    is left alone: a month one letter from another ("ივნისი" / "ივლისი") is another date, a
+    number's word another number, a surname one letter off another person.
+    """
+    lt, rt = _TOKEN.findall(left), _TOKEN.findall(right)
+    ops = [
+        op
+        for op in difflib.SequenceMatcher(None, lt, rt, autojunk=False).get_opcodes()
+        if op[0] != "equal"
+    ]
+    if len(ops) != 1 or ops[0][0] != "replace":
+        return False
+    _tag, i1, i2, j1, j2 = ops[0]
+    if i2 - i1 != 1 or j2 - j1 != 1:
+        return False
+    a, b = lt[i1], rt[j1]
+    if not (re.fullmatch(r"[ა-ჰ]+", a) and re.fullmatch(r"[ა-ჰ]+", b)):
+        return False
+    if min(len(a), len(b)) < _SLIP_MIN_LETTERS or not _one_letter_apart(a, b):
+        return False
+    from procurement_agent.extraction.rules import _month_ka  # rules' own month reader
+
+    for word in (a, b):
+        if _month_ka(word) is not None or month_typo(word) is not None:
+            return False
+        if parse_number_words(word) is not None:
+            return False
+    stems = {name_stem(a), name_stem(b)}
+    for text in (left, right):
+        for hit in hits_of(text):
+            if hit.type in _WRITTEN_TYPES and stems & set(_stem_words(hit.value)):
+                return False
+    return True
+
+
+def _as_meant_by(pairs: list[_Pair], segments: list[Segment]) -> str:
+    """The text of ``segments`` with each line whose one change is a slip of a letter
+    (``_slip_only``) read as the line it is paired with: what the document means, for the
+    document-wide reading of its values."""
+    meant = {
+        id(b): a.text
+        for a, b, _group in pairs
+        if a is not None and b is not None and a.text != b.text and _slip_only(a.text, b.text)
+    }
+    return "\n".join(meant.get(id(s), s.text) for s in segments)
 
 
 def _still_spelled(d: ValueDelta, left: str, right: str) -> bool:
@@ -4446,7 +4520,7 @@ def compare(
         # a workbook states no term, period or penalty clause to read as a whole
         field_deltas = deltas_between(left_text, right_text, types=FIELD_TYPES)
     else:
-        field_deltas, notes = document_deltas(left_text, right_text)
+        field_deltas, notes = document_deltas(left_text, _as_meant_by(pairs, right))
         skipped.extend(notes)
         hunks = _named_dates(hunks, field_deltas)
         roles = _sides_reassigned(left_text, right_text)
