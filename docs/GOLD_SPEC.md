@@ -303,6 +303,32 @@ moved are `CMP.FORMATTING`, never `CMP.AMOUNT`. A "text changed" line is dropped
 change reported for another line states it whole, both values word for word, or when it is one
 of the lines of a table cell reported whole.
 
+Red team round 2 (compare) settled these cases:
+
+* A line whose value changed **and** whose other words changed is two findings: the value, and
+  `CMP.TEXT_CHANGED` (warning). Examples: a penalty's rate and the party it falls on; a price and
+  what it newly leaves out. The words of the reported value do not count as other words, in any
+  case form, and neither do a figure's own words. A line removed or added whole is its values
+  only, one finding each. The exception is a value on that line that the other document restates:
+  then the line is also `CMP.TEXT_REMOVED`/`CMP.TEXT_ADDED`.
+* A range is always a period. That holds whatever words stand near it, "contract" or "delivery"
+  included, so it is never a `Contract date` or a `Delivery deadline`. Deleting a range is one
+  finding, never the range plus each of its ends. A period stated as a month ("2026 წლის მაისის
+  თვეში") is that month's first to last day.
+* An advance is `advance N%` (`CMP.PAYMENT`). A BIC and its `XXX` branch form are one code.
+* The same values written another way are formatting, never a text change. This covers a date
+  with its postposition ("2026 წლის 31 დეკემბრამდე" / "31.12.2026-მდე"), "0.1%" / "0.1
+  პროცენტის", "ლარს" / "ლ." and "12 600 ლარი და 50 თეთრი" / "12 600.50 ლარი".
+* A Word table row that stands elsewhere in the other document is one `CMP.MOVED` (info), never a
+  row removed plus a row added. This applies only when the row's words are carried by that one
+  row in each document. Each cell changed on the way is classified as an aligned row's cell is;
+  a price changed in a moved row is `CMP.AMOUNT`.
+* A figure under a quantity header (რაოდენობა, quantity, qty) beside a unit cell naming a unit of
+  the closed list is the row's quantity. Changing the figure, the unit, or both gives one
+  `CMP.QUANTITY`, e.g. `20 item` -> `20 set`.
+* Between a contract and its act, two parties' directors, codes or names that both differ are
+  listed as the values removed and added (warnings). Nothing pairs them by role yet.
+
 ## 5. BOQ gold (per set, JSON) and the evaluation policy
 
 `samples/gold_boq/<set>.json`:

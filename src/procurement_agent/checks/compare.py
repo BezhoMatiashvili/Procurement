@@ -34,7 +34,7 @@ import time
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from datetime import date
+from datetime import date, timedelta
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -77,7 +77,12 @@ from procurement_agent.extraction.normalize import (
     parse_number,
     strip_quotes,
 )
-from procurement_agent.extraction.rules import VAT_RATE_NOTE, RuleHit, find_dates, run_rules
+from procurement_agent.extraction.rules import (
+    _KA_MONTHS,
+    VAT_RATE_NOTE,
+    RuleHit,
+    run_rules,
+)
 from procurement_agent.extraction.schemas import FactType
 from procurement_agent.extraction.spellcheck import classify_difference
 from procurement_agent.ingestion.segmenter import Segment, document_text, key_of
@@ -369,7 +374,13 @@ class _Hit:
 
 
 def _bank_key(value: str) -> str:
-    return re.sub(r"[^A-Z0-9]", "", normalize_confusables(value).upper())
+    """A bank detail as it is compared: letters and digits only, and a BIC's branch form
+    "XXX" as its eight-letter code, the key the act check compares bank codes by (ISO 9362). A
+    code restated with its "XXX" was a critical bank change the act check calls no change."""
+    # imported here: checks.aoa imports compare_llm, which imports this module
+    from procurement_agent.checks.aoa import _bank_key as branch_folded
+
+    return branch_folded(re.sub(r"[^A-Z0-9]", "", normalize_confusables(value).upper()))
 
 
 def _value_key(ft: FactType, value: str, normalized: str | float | None) -> str:
@@ -414,10 +425,50 @@ def hits_of(text: str, *, reference: str = "") -> list[_Hit]:
         keep(_canonical(_Hit(a.type, a.value, a.normalized, a.unit, None, "anchor")))
     for hit in _rule_hits(text):
         keep(_canonical(hit))
+    for _start, _end, span in _month_periods(text):
+        keep(_Hit(FactType.execution_period, span, span, None, None, "rules"))
     for hit in _vat_hits(text):
         keep(hit)
     for hit in _quantity_hits(text):
         keep(hit)
+    return out
+
+
+#: What may follow a month named as a period, and belongs to it: "თვეში", "თვის განმავლობაში".
+_MONTH_TAIL = re.compile(r"\s*(?:თვეში|თვის\s+განმავლობაში|თვის|თვე)(?![ა-ჰ])")
+
+
+def _month_periods(text: str) -> list[tuple[int, int, str]]:
+    """The service periods ``text`` states as a whole month - "შესრულდა 2026 წლის მაისის
+    თვეში" - as (start, end, "first/last day"), read as ``checks.document_facts`` reads them for
+    the whole document: that month's first to last day, in a sentence about the work and not
+    about an advance.
+
+    The line reader did not know the form. An act's period restated "in May" was an execution
+    period removed on its line while the whole-document reading saw the same period on both
+    sides, and moved to June it was a period change and a "text changed" besides.
+    """
+    # imported here: document_facts reads through checks.aoa, which imports this module
+    from procurement_agent.checks.aoa import _ADVANCE_WORDS
+    from procurement_agent.checks.document_facts import _MONTH_PERIOD, _SERVICE_WORDS
+    from procurement_agent.extraction.rules import _month_ka
+
+    out: list[tuple[int, int, str]] = []
+    for m in _MONTH_PERIOD.finditer(text):
+        month = _month_ka(m.group("m"))
+        if month is None:
+            continue
+        starts = [c.end() for c in _CLAUSE_START.finditer(text, 0, m.start())]
+        stop = _CLAUSE_START.search(text, m.end())
+        sentence = text[starts[-1] if starts else 0 : stop.start() if stop else len(text)]
+        if not _SERVICE_WORDS.search(sentence) or _ADVANCE_WORDS.search(sentence):
+            continue
+        year = int(m.group("y"))
+        first = date(year, month, 1)
+        last = date(year + month // 12, month % 12 + 1, 1) - timedelta(days=1)
+        tail = _MONTH_TAIL.match(text, m.start("m") + len(m.group("m")))
+        end = tail.end() if tail else m.end()
+        out.append((m.start(), end, f"{first.isoformat()}/{last.isoformat()}"))
     return out
 
 
@@ -582,7 +633,8 @@ def _rule_hits(text: str) -> list[_Hit]:
         if end is None:
             ft = _payment_if_said(text, r, _total_if_said(text, r))
             unit = _VAT_RATE if r.note == VAT_RATE_NOTE else r.unit
-            out.append(_Hit(ft, r.value, r.normalized, unit, r.currency, "rules"))
+            normalized = _advance_if_said(text, r, ft)
+            out.append(_Hit(ft, r.value, normalized, unit, r.currency, "rules"))
             i += 1
             continue
         j, ft = end
@@ -631,10 +683,33 @@ def _payment_if_said(text: str, hit: RuleHit, ft: FactType) -> FactType:
     """
     if ft is not FactType.duration:
         return ft
+    return FactType.payment_terms if _PAYMENT_WORDS.search(_sentence_of(text, hit)) else ft
+
+
+def _sentence_of(text: str, hit: RuleHit) -> str:
+    """The sentence ``hit`` stands in: from the last full stop, semicolon or line break before
+    it to the first after it."""
     starts = [m.end() for m in _CLAUSE_START.finditer(text, 0, hit.start)]
     end = _CLAUSE_START.search(text, hit.end)
-    sentence = text[starts[-1] if starts else 0 : end.start() if end else len(text)]
-    return FactType.payment_terms if _PAYMENT_WORDS.search(sentence) else ft
+    return text[starts[-1] if starts else 0 : end.start() if end else len(text)]
+
+
+def _advance_if_said(text: str, hit: RuleHit, ft: FactType) -> str | float | None:
+    """A share of the price paid in advance in the form ``docs/GOLD_SPEC.md`` gives payment
+    terms, "advance 20%": reported as a bare "20%" -> "30%", the change matched no gold entry
+    and did not say what the percentage was of. The words stay in the finding's note; a
+    percentage of a payment sentence that names no advance stays as it is written."""
+    if ft is not FactType.payment_terms or hit.unit != "%":
+        return hit.normalized
+    number = as_number(hit.value, hit.normalized)
+    if number is None:
+        return hit.normalized
+    # imported here: contract_terms imports compare_llm, which imports this module
+    from procurement_agent.checks.contract_terms import _ADVANCE
+
+    if not _ADVANCE.search(_sentence_of(text, hit)):
+        return hit.normalized
+    return f"advance {number:g}%"
 
 
 def _range_end(text: str, rules: list[RuleHit], i: int) -> tuple[int, FactType] | None:
@@ -658,16 +733,23 @@ def _range_end(text: str, rules: list[RuleHit], i: int) -> tuple[int, FactType] 
         return None
     gap = text[first.end : second.start]
     marked = _RANGE_GAP.fullmatch(gap) is not None or (
-        text[first.start : first.end].endswith("დან") and _RANGE_AFTER_FROM.fullmatch(gap)
+        text[first.start : first.end].rstrip().endswith("დან") and _RANGE_AFTER_FROM.fullmatch(gap)
     )
-    if marked and ft is FactType.date:
+    if marked and ft not in _PERIOD_TYPES:
         # two dates written as a range are a period whatever word names it ("გაწეულია
         # 01.11.2026 - 30.11.2026 პერიოდში"): the time the work is done, or the contract's
-        # validity where the words before say so
+        # validity where the words before say so. Never a point in time: a window "from 1 April
+        # to 30 September" near the word "contract" was a contract date holding a range, and
+        # one under delivery words a delivery deadline - each a type that holds one date
+        # (docs/GOLD_SPEC.md section 2)
         before = text[max(0, first.start - _VALIDITY_WINDOW) : first.start]
         valid = _VALIDITY_WORDS.search(before) is not None
         ft = FactType.validity_period if valid else FactType.execution_period
     return (j, ft) if marked else None
+
+
+#: The types that hold a period from one date to another.
+_PERIOD_TYPES = frozenset({FactType.execution_period, FactType.validity_period})
 
 
 #: Words that make a range the contract's validity rather than the time the work is done.
@@ -1282,45 +1364,144 @@ def _layout_key(text: str) -> str:
     return " ".join(_LAYOUT_TOKEN.findall(normalize_confusables(text).lower()))
 
 
-#: The word for "year" a date may be followed by: "2026 წ.", "2026 წელი".
-_YEAR_AFTER = re.compile(r"\s*(?:წლის|წელი|წ\.?)(?![ა-ჰ])")
+#: The year a period's dates take from after them: ", 2026 წელს".
 _YEAR_OF_DATES = re.compile(r",?\s*(?<!\d)(\d{4})\s*(?:წელს|წელი|წ\.)(?![ა-ჰ])")
 
 
-def _same_dates_rewritten(left: str, right: str) -> bool:
-    """True when the only difference is how the same dates are written.
+def _same_values_rewritten(left: str, right: str) -> bool:
+    """True when the only difference is how the same values are written.
 
-    "2026 წლის 31 მარტი", "31 მარტი, 2026 წ." and "31.03.2026" are one date: its
-    value is compared as a date and has not changed, so the line has nothing else to report.
+    "2026 წლის 31 მარტი", "31 მარტი, 2026 წ." and "31.03.2026" are one date; "2026 წლის 31
+    დეკემბრამდე" and "31.12.2026-მდე" one date with one postposition; a period from the first
+    of May to its last day and "2026 წლის მაისის თვეში" one period; "0.1%" and "0.1
+    პროცენტის" one rate; "ლარს" and "ლ." one currency; "12 600 ლარი და 50 თეთრი" and "12
+    600.50 ლარი" one amount. Each value is compared as the value it is and has not changed, and
+    the words around them are the same: the line has nothing else to report
+    (``_masked_values``).
     """
-    left_rest, left_dates = _without_dates(left)
-    right_rest, right_dates = _without_dates(right)
-    return (
-        bool(left_dates)
-        and left_dates == right_dates
-        and _layout_key(left_rest) == _layout_key(right_rest)
+    left_masked, left_values = _masked_values(left, keyed=True)
+    right_masked, right_values = _masked_values(right, keyed=True)
+    return bool(left_values or right_values) and _layout_key(left_masked) == _layout_key(
+        right_masked
     )
 
 
-def _without_dates(text: str) -> tuple[str, list[str]]:
-    """``text`` with its dates cut out, and the dates in ISO form, in order."""
-    folded = normalize_confusables(text)
-    kept: list[str] = []
-    dates: list[str] = []
-    pos = 0
-    for hit in sorted(find_dates(folded), key=lambda h: h.start):
-        if hit.start < pos or not _ISO_DATE.match(str(hit.normalized)):
+#: The stems of the Georgian month names, as the date reader knows them.
+_KA_MONTH_STEMS = tuple(_KA_MONTHS)
+
+
+@dataclass(frozen=True, slots=True)
+class _Span:
+    """Where a value stands in a text, and what it says: its canonical key."""
+
+    start: int
+    end: int
+    key: str
+
+
+#: What follows a date and belongs to it: the word for its year ("2026 წ."), a postposition
+#: fused on with or without a hyphen ("31.12.2026-მდე", "01.05.2026-დან", "30.06.2026-ის") and
+#: "ჩათვლით" (inclusive).
+_DATE_TAIL = re.compile(
+    r"(?:\s*(?:წლის|წელი|წ\.?)(?![ა-ჰ]))?"
+    r"(?:-?(?P<post>იდან|დან|ამდე|მდე|ის|ს|ში|ზე|ით)(?![ა-ჰ]))?"
+    r"(?P<incl>\s*\(?\s*ჩათვლით\s*\)?)?"
+)
+
+
+def _postposition(written: str, tail: re.Match[str] | None) -> str:
+    """What a date's postposition says of it: "from" (-დან), "until" (-მდე, ჩათვლით) or nothing
+    (a case ending). "2026 წლის 31 დეკემბრამდე" is fused into the month's name, "31.12.2026-მდე"
+    written after the figures; the two are one date until one day."""
+    post = (tail.group("post") or "") if tail else ""
+    for word in re.findall(r"[ა-ჰ]+", written):
+        if any(word.startswith(stem) for stem in _KA_MONTH_STEMS):
+            post = word
+    if post.endswith("დან"):
+        return "from"
+    if post.endswith("მდე") or (tail is not None and tail.group("incl")):
+        return "until"
+    return ""
+
+
+def _span_key(text: str, hit: RuleHit) -> str:
+    """A value's key for the masked text: everything a finding compares it by - its number or
+    code, its unit, currency and the days it counts - and nothing of how it is written."""
+    one = _canonical(_Hit(hit.type, hit.value, hit.normalized, hit.unit, hit.currency, "rules"))
+    if hit.type in _BANK:
+        return f"bank {_bank_key(hit.value)}"
+    number = as_number(hit.value, hit.normalized) if hit.type in _NUMERIC else None
+    value = f"{number:g}" if number is not None else str(one.normalized or one.value)
+    return f"{value} {hit.unit or ''} {hit.currency or ''} {_basis(one) or ''}"
+
+
+def _value_spans(text: str) -> list[_Span]:
+    """Every value ``text`` states, where it stands, read by the readers ``hits_of`` uses: the
+    rules' values with a period's two dates as one, a month named as a period, a quantity, the
+    tax wording, and a penalty's "per day". Each date carries the year word, postposition and
+    "ჩათვლით" written after it."""
+    # imported here: contract_terms imports compare_llm, which imports this module
+    from procurement_agent.checks.contract_terms import tax_phrases
+    from procurement_agent.extraction.rules import _PER_PERIOD
+
+    spans: list[_Span] = []
+    rules = run_rules(text)
+    i = 0
+    while i < len(rules):
+        r = rules[i]
+        closing = _range_end(text, rules, i)
+        if closing is not None:
+            second = rules[closing[0]]
+            tail = _DATE_TAIL.match(text, second.end)
+            end = tail.end() if tail else second.end
+            spans.append(_Span(r.start, end, f"period {r.normalized}/{second.normalized}"))
+            i = closing[0] + 1
             continue
-        kept.append(folded[pos : hit.start])
-        dates.append(str(hit.normalized))
-        year = _YEAR_AFTER.match(folded, hit.end)
-        pos = year.end() if year else hit.end
-    kept.append(folded[pos:])
-    years = {d[:4] for d in dates}
+        if _ISO_DATE.match(str(r.normalized)):
+            tail = _DATE_TAIL.match(text, r.end)
+            post = _postposition(text[r.start : r.end], tail)
+            end = tail.end() if tail else r.end
+            spans.append(_Span(r.start, end, f"date {r.normalized} {post}"))
+        else:
+            spans.append(_Span(r.start, r.end, _span_key(text, r)))
+            if r.type is FactType.penalty:
+                stop = _CLAUSE_START.search(text, r.end)
+                per = _PER_PERIOD.search(text, r.end, stop.start() if stop else len(text))
+                if per is not None:
+                    spans.append(_Span(per.start(), per.end(), "per"))
+        i += 1
+    spans.extend(_Span(a, b, f"period {span}") for a, b, span in _month_periods(text))
+    for m in _QUANTITY.finditer(text):
+        (hit,) = _quantity_hits(m.group(0)) or (None,)
+        if hit is not None:
+            spans.append(_Span(m.start(), m.end(), f"quantity {hit.normalized}"))
+    spans.extend(_Span(*p.span, f"vat {p.kind}") for p in tax_phrases(text))
+    out: list[_Span] = []
+    for span in sorted(spans, key=lambda s: (s.start, -s.end)):
+        if out and span.start < out[-1].end:
+            continue  # inside a value already masked
+        out.append(span)
+    return out
+
+
+def _masked_values(text: str, *, keyed: bool) -> tuple[str, list[_Span]]:
+    """``text`` folded as ``hits_of`` folds it, with every value it states cut out: replaced by
+    its key when ``keyed`` (two texts then read the same only where their values are the same),
+    by a bare mark otherwise (what is left is the words around the values)."""
+    folded = normalize_confusables(text)
+    spans = _value_spans(folded)
+    out: list[str] = []
+    pos = 0
+    for span in spans:
+        out.append(folded[pos : span.start])
+        out.append(f" §{span.key}§ " if keyed else " § ")
+        pos = span.end
+    out.append(folded[pos:])
+    years = {m.group(0) for s in spans for m in re.finditer(r"\d{4}(?=-\d\d-\d\d)", s.key)}
     # the year a period's dates take from after it, "1 მაისიდან 31 მაისის ჩათვლით, 2026 წელს",
     # is theirs
-    rest = _YEAR_OF_DATES.sub(lambda m: "" if m.group(1) in years else m.group(0), " ".join(kept))
-    return rest, dates
+    rest = _YEAR_OF_DATES.sub(lambda m: "" if m.group(1) in years else m.group(0), "".join(out))
+    return rest, spans
 
 
 _WORD_NUMBER_LABELS: dict[str, tuple[str, str]] = {
@@ -1345,25 +1526,77 @@ _LETTER = re.compile(r"[^\W\d_]")
 @dataclass(frozen=True, slots=True)
 class _Context:
     """What a number ending its segment counts may be said beside the segment: in the header of
-    its table column ("ღირებულება (ლარი)"), or at the start of the paragraph after it ("ლარს")."""
+    its table column ("ღირებულება (ლარი)"), or at the start of the paragraph after it ("ლარს").
+
+    A cell of a quantity column ("რაოდენობა") or a unit column ("ერთეული") also knows its row's
+    other half: ``quantity`` and ``unit`` are the texts of the row's quantity and unit cells."""
 
     header: str = ""
     following: str = ""
+    quantity: str = ""
+    unit: str = ""
 
 
 _NO_CONTEXT = _Context()
 
+#: The header of a table column of quantities, and of the column naming their unit - not
+#: "ერთეულის ფასი" (unit price), which is money.
+_QUANTITY_HEADER = re.compile(r"რაოდენობ|(?<![a-z])(?:quantity|qty)(?![a-z])", re.IGNORECASE)
+_UNIT_HEADER = re.compile(
+    r"(?<![ა-ჰ])ერთეული(?![ა-ჰ])|(?<![ა-ჰ])ერთ\.|ზომის\s+ერთეულ"
+    r"|(?<![a-z])(?:units?|uom)(?![a-z])(?!\s*(?:price|rate|cost))",
+    re.IGNORECASE,
+)
+
 
 def _contexts(segments: Sequence[Segment]) -> dict[int, _Context]:
-    """Each segment's context (``_Context``), keyed by ``id``: a table cell's column header,
-    another segment's next paragraph."""
+    """Each segment's context (``_Context``), keyed by ``id``: a table cell's column header and
+    its row's quantity and unit, another segment's next paragraph."""
+    rows: dict[tuple[int | None, int | None], dict[str, str]] = {}
+    for segment in segments:
+        header = segment.column or ""
+        for role, pattern in (("quantity", _QUANTITY_HEADER), ("unit", _UNIT_HEADER)):
+            if segment.table_row is not None and pattern.search(header):
+                rows.setdefault((segment.table, segment.table_row), {}).setdefault(
+                    role, segment.text
+                )
     out: dict[int, _Context] = {}
     for k, segment in enumerate(segments):
         if segment.column is not None:
-            out[id(segment)] = _Context(header=segment.column)
+            row = rows.get((segment.table, segment.table_row), {})
+            out[id(segment)] = _Context(
+                header=segment.column,
+                quantity=row.get("quantity", ""),
+                unit=row.get("unit", ""),
+            )
         elif k + 1 < len(segments) and segments[k + 1].table is None:
             out[id(segment)] = _Context(following=segments[k + 1].text[:_AFTER])
     return out
+
+
+def _cell_quantity(text: str, context: _Context) -> _Hit | None:
+    """The quantity a cell of a quantity or unit column states with the rest of its row: "20"
+    under "რაოდენობა" beside "ცალი" under "ერთეული" is "20 item", read from either cell.
+
+    Only a row whose unit cell is nothing but a unit of the closed list (``_UNITS``) and whose
+    quantity cell is nothing but a figure: a quantity column beside a unit it cannot name is
+    left to the figure's own reading.
+    """
+    if _QUANTITY_HEADER.search(context.header):
+        figure, unit = text, context.unit
+    elif _UNIT_HEADER.search(context.header):
+        figure, unit = context.quantity, text
+    else:
+        return None
+    if parse_number(_figure_alone(figure).strip()) is None:
+        return None
+    # the figure as written, with its words: "6 (ექვსი)" and a unit are read as the prose reads
+    # "6 (ექვსი) ცალი", and the words that changed with the figure are that change's own
+    written = f"{normalize_spaces(figure)} {normalize_spaces(unit)}"
+    hits = _quantity_hits(written)
+    if len(hits) != 1 or hits[0].value != written:
+        return None
+    return hits[0]
 
 
 def _numeral_kind(inner: str, after: str, header: str = "") -> str:
@@ -2209,6 +2442,15 @@ def _align_with_rows(left: list[Segment], right: list[Segment]) -> tuple[list[_P
         for u in ru[j1:j2]
         for s in u
     }
+    moved = _moved_rows(lu, ru, lk, rk, ops)
+    moved_to = {j: i for i, j in moved.items()}
+
+    def from_row(i: int) -> list[_Pair]:
+        return [(c, None, _moved_group(lu[i], ordinals)) for c in lu[i]]
+
+    def to_row(j: int) -> list[_Pair]:
+        return [(None, c, _moved_group(lu[moved_to[j]], ordinals)) for c in ru[j]]
+
     pairs: list[_Pair] = []
     for tag, i1, i2, j1, j2 in ops:
         if tag == "equal":
@@ -2216,41 +2458,107 @@ def _align_with_rows(left: list[Segment], right: list[Segment]) -> tuple[list[_P
                 pairs.extend(_pair_rows(a, b, ordinals))
             continue
         if tag == "delete":
-            pairs.extend(p for u in lu[i1:i2] for p in _one_side(u, left=True))
+            for i in range(i1, i2):
+                pairs.extend(from_row(i) if i in moved else _one_side(lu[i], left=True))
             continue
         if tag == "insert":
-            pairs.extend(p for u in ru[j1:j2] for p in _one_side(u, left=False))
+            for j in range(j1, j2):
+                pairs.extend(to_row(j) if j in moved_to else _one_side(ru[j], left=False))
             continue
-        la, rb = lu[i1:i2], ru[j1:j2]
-        if (
-            len(la) == len(rb)
-            and all(
-                (x[0].table_row is None) == (y[0].table_row is None)
-                for x, y in zip(la, rb, strict=True)
-            )
-            and all(x[0].table_row is not None for x in la)
-        ):
-            # the same rows with a word changed in each: still the rows they were
-            for a, b in zip(la, rb, strict=True):
-                pairs.extend(_pair_rows(a, b, ordinals))
-            continue
-        ls = [s for u in la for s in u]
-        rs = [s for u in rb for s in u]
-        if len(ls) + len(rs) > 2 and _laid_out_anew(ls, rs):
-            group = f"{_LAYOUT}{ls[0].index}"
-            pairs.extend(
-                (ls[k] if k < len(ls) else None, rs[k] if k < len(rs) else None, group)
-                for k in range(max(len(ls), len(rs)))
-            )
-        else:
-            pairs.extend(_pair_replace_with_moves(ls, rs, unmatched_left, unmatched_right))
+        # a row that moved is taken out first, as ``_pair_replace_with_moves`` takes a line out
+        for i in range(i1, i2):
+            if i in moved:
+                pairs.extend(from_row(i))
+        la = [lu[i] for i in range(i1, i2) if i not in moved]
+        rb = [ru[j] for j in range(j1, j2) if j not in moved_to]
+        pairs.extend(_replaced_rows(la, rb, ordinals, unmatched_left, unmatched_right))
+        pairs.extend(p for j in range(j1, j2) if j in moved_to for p in to_row(j))
     total = len(left) + len(right)
     same = sum(
         1
         for a, b, group in pairs
         if a is not None and b is not None and group is None and key_of(a.text) == key_of(b.text)
     )
+    # a row that only moved is the same text in both documents, cell for cell
+    same += sum(
+        1
+        for i, j in moved.items()
+        for a, b in zip(lu[i], ru[j], strict=False)
+        if key_of(a.text) == key_of(b.text)
+    )
     return pairs, _similarity_of([("equal", 0, same, 0, same)], pairs, total)
+
+
+def _replaced_rows(
+    la: list[_Unit],
+    rb: list[_Unit],
+    ordinals: set[tuple[int | None, int | None]],
+    unmatched_left: set[str],
+    unmatched_right: set[str],
+) -> list[_Pair]:
+    """The pairs of a block of units one document replaced with another's."""
+    if not la or not rb:
+        return [
+            *(p for u in la for p in _one_side(u, left=True)),
+            *(p for u in rb for p in _one_side(u, left=False)),
+        ]
+    if (
+        len(la) == len(rb)
+        and all(
+            (x[0].table_row is None) == (y[0].table_row is None)
+            for x, y in zip(la, rb, strict=True)
+        )
+        and all(x[0].table_row is not None for x in la)
+    ):
+        # the same rows with a word changed in each: still the rows they were
+        return [p for a, b in zip(la, rb, strict=True) for p in _pair_rows(a, b, ordinals)]
+    ls = [s for u in la for s in u]
+    rs = [s for u in rb for s in u]
+    if len(ls) + len(rs) > 2 and _laid_out_anew(ls, rs):
+        group = f"{_LAYOUT}{ls[0].index}"
+        return [
+            (ls[k] if k < len(ls) else None, rs[k] if k < len(rs) else None, group)
+            for k in range(max(len(ls), len(rs)))
+        ]
+    return _pair_replace_with_moves(ls, rs, unmatched_left, unmatched_right)
+
+
+#: The group of a table row that moved: its cells where it stood, then where it stands now.
+_MOVED_ROW = "moved-row:"
+
+
+def _moved_group(unit: _Unit, ordinals: set[tuple[int | None, int | None]]) -> str:
+    """The group both places of a moved row carry: the row, and which of its columns number
+    the table's rows (a row number that moved with its row is laid out anew, not changed)."""
+    columns = ",".join(str(c.table_col) for c in unit if (c.table, c.table_col) in ordinals)
+    return f"{_MOVED_ROW}{unit[0].index}:{columns}"
+
+
+def _moved_rows(
+    lu: list[_Unit], ru: list[_Unit], lk: list[str], rk: list[str], ops: list[_Opcode]
+) -> dict[int, int]:
+    """Table rows that stand elsewhere in the other document, left unit -> right unit.
+
+    Two rows swapped, or one moved to the end of its table, are a row removed where it stood
+    and added where it stands: the same row, reported as two warnings, and if its price changed
+    as well, as the row's text and never as the price. A row is found where it moved by its
+    words (``_unit_key``) - only a key that one row alone carries in each document, and only
+    a row with words: rows of nothing but numbers share a key and would be paired at random.
+    """
+    left_rows = [i for tag, i1, i2, _j1, _j2 in ops if tag != "equal" for i in range(i1, i2)]
+    right_rows = [j for tag, _i1, _i2, j1, j2 in ops if tag != "equal" for j in range(j1, j2)]
+    left_count, right_count = Counter(lk), Counter(rk)
+    where = {
+        rk[j]: j for j in right_rows if ru[j][0].table_row is not None and right_count[rk[j]] == 1
+    }
+    return {
+        i: where[lk[i]]
+        for i in left_rows
+        if lu[i][0].table_row is not None
+        and lk[i].startswith(f"\x00{_ROW}")
+        and left_count[lk[i]] == 1
+        and lk[i] in where
+    }
 
 
 def _pair_replace_with_moves(
@@ -2567,12 +2875,19 @@ def _classify(
 
     hidden = hidden_character_rules(a.text, b.text)
     values = deltas_between(a.text, b.text)
-    bare = bare_number_delta(
-        a.text,
-        b.text,
-        critical=a.kind != "sheet_cell",
-        left_number=a.number,
-        right_number=b.number,
+    counted = _cell_quantity(a.text, ca), _cell_quantity(b.text, cb)
+    quantity = _delta(*counted) if None not in counted else None
+    # a quantity column's figure, or its row's unit, is the row's quantity - not a bare number
+    bare = (
+        [quantity]
+        if quantity is not None
+        else bare_number_delta(
+            a.text,
+            b.text,
+            critical=a.kind != "sheet_cell",
+            left_number=a.number,
+            right_number=b.number,
+        )
     )
     words = [
         d
@@ -2593,7 +2908,7 @@ def _classify(
         _numeric_reformat(a.text, b.text)
         or _layout_key(a.text) == _layout_key(b.text)
         or _layout_key(plain_party_wording(a.text)) == _layout_key(plain_party_wording(b.text))
-        or _same_dates_rewritten(a.text, b.text)
+        or _same_values_rewritten(a.text, b.text)
     ):
         return "changed", "cosmetic", [], ["CMP.FORMATTING"], inline
     return "changed", "substantive", [], sorted({*hidden, "CMP.TEXT_CHANGED"}), inline
@@ -2615,6 +2930,9 @@ def _build(
     hunks: list[Hunk] = []
     counts = Counts()
     hunk_of: dict[int, str] = {}
+    # a moved row's hunk number, and the hunk of each of its cells that changed as it moved
+    moved_rows: dict[str, int] = {}
+    cell_hunk: dict[int, str] = {}
     made = 0
     i = 0
     while i < len(pairs):
@@ -2644,6 +2962,28 @@ def _build(
                     "insert" if ra is None else "delete" if rb is None else "replace"
                 )
                 rows.append(DiffRow(tag=shape, left=_ref(ra), right=_ref(rb), hunk_id=hid))
+            i = end
+            continue
+
+        if group is not None and group.startswith(_MOVED_ROW):
+            end = i
+            while end < len(pairs) and pairs[end][2] == group:
+                end += 1
+            if group not in moved_rows:
+                moved_rows[group] = made + 1
+                made = _moved_row_hunks(
+                    group, pairs, made, hunks, counts, cell_hunk, ocr=ocr, contexts=contexts
+                )
+            for ra, rb, _g in pairs[i:end]:
+                cell = rb if rb is not None else ra
+                rows.append(
+                    DiffRow(
+                        tag="delete" if ra is not None else "insert",
+                        left=_ref(ra),
+                        right=_ref(rb),
+                        hunk_id=cell_hunk.get(id(cell), f"h{moved_rows[group]}"),
+                    )
+                )
             i = end
             continue
 
@@ -2813,6 +3153,75 @@ def _build(
     return rows, hunks, counts
 
 
+def _moved_row_hunks(
+    group: str,
+    pairs: list[_Pair],
+    made: int,
+    hunks: list[Hunk],
+    counts: Counts,
+    cell_hunk: dict[int, str],
+    *,
+    ocr: bool,
+    contexts: dict[int, _Context] | None,
+) -> int:
+    """The hunks of a table row that moved: the move, and each cell it changed on the way.
+
+    Both places the row stands in carry ``group``; its cells are paired column by column as an
+    aligned row's are (``_pair_rows``), so a price changed in a row that also moved is the
+    price's change, and a row number that moved with its row is laid out anew. Returns the
+    number of the last hunk made; each changed cell's hunk is recorded in ``cell_hunk`` under
+    the id of its new cell (its old one when the column is gone).
+    """
+    left = tuple(a for a, _b, g in pairs if g == group and a is not None)
+    right = tuple(b for _a, b, g in pairs if g == group and b is not None)
+    columns = group.rsplit(":", 1)[-1]
+    ordinals: set[tuple[int | None, int | None]] = {
+        (left[0].table, int(c)) for c in columns.split(",") if c
+    }
+    whole = [replace(unit[0], text=" | ".join(c.text for c in unit)) for unit in (left, right)]
+    made += 1
+    hunks.append(
+        Hunk(
+            id=f"h{made}",
+            kind="moved",
+            materiality="cosmetic",
+            rules=["CMP.MOVED"],
+            left=_ref(whole[0]),
+            right=_ref(whole[1]),
+            moved_from=_row_path(left[0]),
+            moved_to=_row_path(right[0]),
+        )
+    )
+    counts.moved += 1
+    for a, b, g in _pair_rows(left, right, ordinals):
+        if g is not None or (a is not None and b is not None and _pair_equal(a, b)):
+            continue  # a cell that moved with its row as it was, or its row number
+        kind, materiality, deltas, rules, inline = _classify(a, b, ocr=ocr, contexts=contexts)
+        made += 1
+        hunks.append(
+            Hunk(
+                id=f"h{made}",
+                kind=kind,
+                materiality=materiality,
+                rules=rules,
+                left=_ref(a),
+                right=_ref(b),
+                inline=inline,
+                deltas=deltas,
+            )
+        )
+        setattr(counts, materiality, getattr(counts, materiality) + 1)
+        setattr(counts, kind, getattr(counts, kind) + 1)
+        cell = b if b is not None else a
+        cell_hunk[id(cell)] = f"h{made}"
+    return made
+
+
+def _row_path(cell: Segment) -> str:
+    """Where a table row stands: its first cell's path without the column, "T1/r3"."""
+    return re.sub(r"/c\d+$", "", cell.path)
+
+
 # --- findings -------------------------------------------------------------------------------
 
 
@@ -2978,7 +3387,11 @@ def _findings_of(
         return d.severity
 
     written = _Written(left_text), _Written(right_text)
-    all_deltas = [d for h in hunks for d in h.deltas] + list(field_deltas)
+    # Only a change that is reported can make another report of it superfluous. Two documents
+    # that are not versions of one another report no line's change: their positional diff pairs
+    # the contract's party lines with the act's, and its "director X -> Y" was dropping the
+    # document-wide "X removed" and "Y added" - for both parties, nothing was listed.
+    all_deltas = [d for h in hunks if not unrelated for d in h.deltas] + list(field_deltas)
     changed_sides = {
         (_kind_of_change(d), side)
         for d in all_deltas
@@ -3017,12 +3430,15 @@ def _findings_of(
         actual: str | None = None,
         key: tuple[str, str | None, str | None] | None = None,
         full: tuple[str | None, str | None] | None = None,
+        quote: str | None = None,
     ) -> None:
         """``full`` is the untruncated (old, new) text behind a shortened expected/actual.
 
         Identity and anchoring use the full text; only the display fields are shortened. Two
         long lines that share their first 160 characters are two changes, and a comment can
-        only be anchored on words the document actually contains - not on "…".
+        only be anchored on words the document actually contains - not on "…". ``quote`` is
+        the line a value finding was read on: a value stated in canonical form ("0.2% per day")
+        is written nowhere as such, and anchored on nothing the finding pointed nowhere.
         """
         nonlocal minor, suppressed
         old, new = full if full is not None else (expected, actual)
@@ -3035,12 +3451,22 @@ def _findings_of(
                 suppressed += 1
                 return
         seen.add(identity)
-        quote = (new or old) if full is not None else None
         span: tuple[int, int] | None = None
-        if new:
-            at = right_text.find(new)
+        if quote is not None and full is None:
+            # a value read on a line: anchored on the value itself where the line writes it as
+            # reported (an IBAN, a code), on the line where it does not ("0.2% per day")
+            at = right_text.find(quote)
+            inside = right_text.find(new, at, at + len(quote)) if at >= 0 and new else -1
+            if inside >= 0:
+                span, quote = (inside, inside + len(new or "")), None
+            elif at >= 0:
+                span = (at, at + len(quote))
+        else:
+            if quote is None and full is not None:
+                quote = new or old
+            at = right_text.find(new) if new else -1
             if at >= 0:
-                span = (at, at + len(new))
+                span = (at, at + len(new or ""))
         out.append(
             Finding(
                 rule_id=rule_id,
@@ -3097,6 +3523,7 @@ def _findings_of(
 
         if h.deltas:
             shown = [_as_period(d, field_deltas) for d in h.deltas if not superfluous(d)]
+            line = h.right or h.left
             for d in shown:
                 ka, en = _delta_message(d)
                 add(
@@ -3107,12 +3534,16 @@ def _findings_of(
                     expected=d.left,
                     actual=d.right,
                     key=dedup_key(d),
+                    quote=line.text if line is not None else None,
                 )
-            if shown or _rewrapped(h, written):
+            if shown and not _says_more(h, shown, whole=len(shown) == len(h.deltas)):
                 continue
-            # Every value on the line is written in the other document too, but words of it are
-            # not: the text change itself is still reported - a paragraph removed whose amount
-            # is restated elsewhere is a paragraph removed.
+            if not shown and _rewrapped(h, written):
+                continue
+            # The line changed words its values do not account for - the party a penalty falls
+            # on, what a price leaves out - or every value on it is written in the other
+            # document too while its words are not: the text change itself is reported as well
+            # (a paragraph removed whose amount is restated elsewhere is a paragraph removed).
         if h.kind == "moved":
             add(
                 "CMP.MOVED",
@@ -3498,6 +3929,65 @@ def _rewrapped(hunk: Hunk, written: tuple[_Written, _Written]) -> bool:
             if op.tag in ("insert", "replace"):
                 gained |= _words_of(op.right)
     return lost <= written[1].words and gained <= written[0].words
+
+
+def _says_more(hunk: Hunk, shown: list[ValueDelta], *, whole: bool) -> bool:
+    """Whether a line that carries a reported value change also changed words that change says
+    nothing of.
+
+    A line removed or added whole (one side only) is its values: a deleted penalty clause is the
+    penalty removed, one finding. It says more only when a value on it went unreported
+    (``whole`` false) because the other document restates it - the paragraph removed while its
+    amount is written elsewhere is still a paragraph removed. A line changed in place is read
+    word by word, below.
+
+    "მიმწოდებელს ეკისრება პირგასამტეხლო ... 0.1%" rewritten "შემსყიდველს ... 0.2%" is a new
+    rate, and a penalty that now falls on the buyer; a price raised and newly excluding
+    transport, a warranty shortened and newly excluding a component, are two changes each. With
+    the value reported, the line's own text change was dropped, and the party that bears a
+    penalty could flip with no finding saying so.
+
+    Each side is read with its values cut out (``_masked_values``: a figure with its words,
+    currency and unit, a date with its postposition, a rate with its "per day", the tax
+    wording). A word changed outside them counts unless it is one of the reported values' own
+    words, in whatever case the line writes it - a director's name, an address, a misspelled
+    word, or the words a canonical term was written in (its note). A figure and its words
+    changed together, and nothing else, say nothing more.
+    """
+    if hunk.left is None or hunk.right is None:
+        return not whole
+    left = _masked_values(hunk.left.text, keyed=False)[0] if hunk.left else ""
+    right = _masked_values(hunk.right.text, keyed=False)[0] if hunk.right else ""
+    lt, rt = _layout_key(left).split(), _layout_key(right).split()
+    told = {
+        name_stem(w)
+        for d in shown
+        for text in (d.left, d.right, d.note_en)
+        for w in _WORD.findall(normalize_name(text or ""))
+    }
+    stems = tuple(s for s in told if len(s) >= _TOLD_STEM)
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, lt, rt, autojunk=False).get_opcodes():
+        if tag == "equal":
+            continue
+        for token in (*lt[i1:i2], *rt[j1:j2]):
+            if not _is_word(token) or name_stem(token) in told:
+                continue
+            # a value's word in a case the stemmer does not undo: "კოშკისთვის" is the project
+            # "კოშკი" reported in the nominative
+            if any(token.startswith(stem) for stem in stems):
+                continue
+            return True
+    return False
+
+
+#: The shortest stem of a reported value's word that the line's word may extend by a case ending.
+_TOLD_STEM = 4
+
+
+def _is_word(token: str) -> bool:
+    """A layout token that is a word of two letters or more - not a figure, a sign or the mark
+    a value was cut out for."""
+    return len(token) > 1 and token.isalpha()
 
 
 def _stems(text: str) -> str:
