@@ -16,10 +16,12 @@ from docling_core.transforms.chunker.doc_chunk import DocMeta
 from docling_core.transforms.chunker.hierarchical_chunker import (
     ChunkingDocSerializer,
     ChunkingSerializerProvider,
+    TripletTableSerializer,
 )
 from docling_core.transforms.chunker.hybrid_chunker import HybridChunker
 from docling_core.transforms.chunker.tokenizer.base import BaseTokenizer
-from docling_core.transforms.serializer.base import BaseDocSerializer
+from docling_core.transforms.serializer.base import BaseDocSerializer, SerializationResult
+from docling_core.transforms.serializer.common import create_ser_result
 from docling_core.transforms.serializer.markdown import MarkdownParams
 from docling_core.types.doc.base import BoundingBox, CoordOrigin, ImageRefMode
 from docling_core.types.doc.common.content_layer import ContentLayer
@@ -28,6 +30,7 @@ from docling_core.types.doc.items.table.table import TableItem
 from docling_core.types.doc.items.text import TextItem
 from docling_core.types.doc.labels import DocItemLabel
 
+from procurement_agent.extraction.anchors import party_column
 from procurement_agent.extraction.normalize import normalize_spaces
 from procurement_agent.extraction.schemas import Provenance
 from procurement_agent.tokens import estimate_tokens
@@ -69,12 +72,108 @@ _ALL_LABELS: set[DocItemLabel] = set(DocItemLabel)
 _ALL_LAYERS: set[ContentLayer] = {ContentLayer.BODY, ContentLayer.FURNITURE}
 
 
+class PartyColumnsTableSerializer(TripletTableSerializer):
+    """Docling's triplet serialisation ("<row label>, <column header> = <cell>"), except for a
+    table laid out one party per column, which is written column by column.
+
+    A requisites or signature grid - the customer's column beside the contractor's, their
+    names, codes, accounts and directors row by row - written row by row puts each party's
+    requisite right after the other party's name: "შპს „ა“, „შემსრულებელი“ = შპს „ბ“. ს/კ: 1,
+    „შემსრულებელი“ = ს/კ: 2". Every reader that takes what follows a name as that party's then
+    gives the customer's code to the contractor (red team R2, AOA-R2-02), and an address runs into
+    the next column's (EXTRACTION-R2-11). Written column by column, each party's cells follow
+    its own name, and each cell ends with ";" - a line break alone is lost when the act check
+    flattens the text, and the readers already end an address or a name at ";".
+
+    The layout is known by a row with two or more different sides ("„შემკვეთი“") or two or more
+    different party names in different columns (``anchors.party_column``). A role and a name in
+    one row are one party, a table with a party per row, and stay in triplets. Columns before
+    the first party's are row labels ("ს/კ", "მისამართი"): each party's cell is written after
+    its row's label.
+    """
+
+    def serialize(
+        self,
+        *,
+        item: TableItem,
+        doc_serializer: BaseDocSerializer,
+        doc: DoclingDocument,
+        **kwargs: Any,
+    ) -> SerializationResult:
+        first = _party_columns(item)
+        if first is None or item.self_ref in doc_serializer.get_excluded_refs(**kwargs):
+            return super().serialize(item=item, doc_serializer=doc_serializer, doc=doc, **kwargs)
+        parts: list[SerializationResult] = []
+        captions = doc_serializer.serialize_captions(item=item, **kwargs)
+        if captions.text:
+            parts.append(captions)
+        shared = kwargs.get("visited")
+        local = {**kwargs, "visited": set(shared)} if shared is not None else kwargs
+        texts = [
+            [
+                _lines(cell._get_text(doc=doc, doc_serializer=doc_serializer, **local))
+                if cell.start_row_offset_idx == r and cell.start_col_offset_idx == c
+                else ""  # a merged cell is written once, where it starts
+                for c, cell in enumerate(row)
+            ]
+            for r, row in enumerate(item.data.grid)
+        ]
+        text = _by_column(texts, first)
+        if text:
+            if shared is not None:
+                shared.update(local["visited"])
+            parts.append(create_ser_result(text=text, span_source=item))
+        return create_ser_result(text="\n\n".join(p.text for p in parts), span_source=parts)
+
+
+def _lines(text: str) -> str:
+    """A cell's paragraphs one to a line: the serializer puts a blank line between them."""
+    return "\n".join(line.strip() for line in text.splitlines() if line.strip())
+
+
+def _party_columns(table: TableItem) -> int | None:
+    """The first party's column of a table laid out one party per column, or None."""
+    for row in table.data.grid:
+        found: dict[str, dict[str, int]] = {}
+        for c, cell in enumerate(row):
+            if cell.start_col_offset_idx != c or (column := party_column(cell.text)) is None:
+                continue
+            kind, value = column
+            found.setdefault(kind, {}).setdefault(value, c)
+        # two different sides, or two different names: a role beside a name is one party
+        columns = [
+            c for by_value in found.values() if len(by_value) >= 2 for c in by_value.values()
+        ]
+        if columns:
+            return min(columns)
+    return None
+
+
+def _by_column(texts: list[list[str]], first: int) -> str:
+    """The grid's cells column by column, each ended with ";", the row-label columns before
+    ``first`` written as each cell's label."""
+    blocks: list[str] = []
+    for c in range(first, len(texts[0]) if texts else 0):
+        lines: list[str] = []
+        for row in texts:
+            cell = row[c]
+            if not cell:
+                continue
+            label = " ".join(x for x in row[:first] if x).rstrip(" :")
+            line = f"{label}: {cell}" if label else cell
+            lines.append(line if line.endswith(";") else f"{line};")
+        if lines:
+            blocks.append("\n".join(lines))
+    return "\n".join(blocks)
+
+
 class AllLabelsSerializerProvider(ChunkingSerializerProvider):
     def get_serializer(self, doc: DoclingDocument) -> BaseDocSerializer:
         # Plain text for extraction: no **bold** markers (they break "100 (ასი) ლარს" and
         # "კოდი: 405123456" regexes), no markdown escaping, no image placeholders.
         return ChunkingDocSerializer(
             doc=doc,
+            table_serializer=PartyColumnsTableSerializer(),
             params=MarkdownParams(
                 labels=_ALL_LABELS,
                 layers=_ALL_LAYERS,

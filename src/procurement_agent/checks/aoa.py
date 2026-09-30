@@ -117,10 +117,13 @@ from procurement_agent.extraction.georgian import (
 )
 from procurement_agent.extraction.georgian import words as georgian_words
 from procurement_agent.extraction.normalize import (
+    ID_CODE_RE,
     amounts_equal,
+    edit_distance,
     fold_comma_quotes_mapped,
     fold_look_alikes,
     iban_is_valid,
+    id_code_digits,
     keep_initial,
     name_stem,
     names_match,
@@ -457,9 +460,8 @@ _CONTRACT_WORD = re.compile(r"ხელშეკრულებ|contract", re.IG
 _ACT_WORD = re.compile(r"აქტ|\bact\b", re.IGNORECASE)
 
 
-_ID_LABELLED = re.compile(
-    r"(?:საიდენტიფიკაციო\s+(?:კოდი|ნომერი)|ს/კ|ს\.კ\.|პირადი\s+ნომერი|ID)\s*[:#N№]?\s*(\d{9}|\d{11})(?!\d)"
-)
+#: every label the party reader knows, read by the one shared pattern (red team R2, AOA-R2-01)
+_ID_LABELLED = ID_CODE_RE
 
 
 #: The share of an act's letters that must be Georgian for the rules to read it. A Georgian act
@@ -483,7 +485,7 @@ def _reads_georgian(text: str) -> bool:
 def _labelled_codes(text: str) -> set[str]:
     """Identification codes read straight off their labels, for a document whose parties the
     party parser could not make out (a name without quotes, say): the codes are still there."""
-    return {m.group(1) for m in _ID_LABELLED.finditer(text)}
+    return {id_code_digits(m.group(1)) for m in _ID_LABELLED.finditer(text)}
 
 
 def _contract_is_subject(text: str, pos: int) -> bool:
@@ -1679,6 +1681,38 @@ class AoaChecker:
             self._party_matches = [_match_party(p, self.contract.parties) for p in self.aoa.parties]
         return self._party_matches
 
+    def _party_without_contract_code(self, code: str) -> str | None:
+        """The name of the contract party the act's party writing ``code`` is, when the contract
+        states no code for it; None otherwise."""
+        for m in self._matched_parties():
+            if m.party.id_code == code and m.match is not None and not m.match.id_code:
+                return m.match.name or m.party.name
+        return None
+
+    def _unread_party_of(self, form: str, match: Party, theirs: list[str]) -> Party | None:
+        """The contract party other than ``match`` whose signatory ``form`` names or is nearer
+        to than to ``theirs`` (``match``'s), when no act party is that party (red team R2,
+        AOA-R2-04): the act writes it in a form not read as a party, so its signatory - written
+        right or with a slip - stands in a neighbour's block and is no slip of the neighbour's."""
+        if self.contract is None:
+            return None
+        matched = [m.match for m in self._matched_parties()]
+        others = [
+            (q, s)
+            for q in self.contract.parties
+            if q is not match and not any(q is x for x in matched)
+            for s in [*q.directors, *q.deputies, *q.proxies]
+        ]
+        if not others:
+            return None
+
+        def distance(named: str) -> int:
+            return edit_distance(normalize_name(lemma(form)), normalize_name(lemma(named)), cap=99)
+
+        own = min((distance(s) for s in theirs), default=99)
+        q, nearest = min(((q, distance(s)) for q, s in others), key=lambda t: t[1])
+        return q if nearest <= own else None
+
     def _span_in_act(self, span: tuple[int, int] | None, holds: str) -> tuple[int, int] | None:
         """``span`` when it lies in the act's text and covers ``holds``; a party built by hand, or
         from another text, has none that can be trusted."""
@@ -1760,9 +1794,17 @@ class AoaChecker:
         """Client rule 1 and the contract cross-check: identify by code, then verify the rest."""
         if self.contract is None:  # run() calls the contract rules only with a contract
             raise RuntimeError(_NO_CONTRACT)
-        c_ids = self.contract.id_codes() or _labelled_codes(self.contract.text)
-        a_ids = self.aoa.id_codes() or _labelled_codes(self.aoa.text)
-        if not a_ids:
+        # every code the contract writes behind a label, not only the one per party the party
+        # reader takes: a code the contract states is never "not in the contract"
+        c_ids = self.contract.id_codes() | _labelled_codes(self.contract.text)
+        a_ids = self.aoa.id_codes()
+        if not a_ids or len(a_ids) < len(self.contract.id_codes()):
+            # a party the reader did not make out (a name without quotes) leaves its code in a
+            # neighbour's window, where only the neighbour's is taken: read them off the labels
+            a_ids |= _labelled_codes(self.aoa.text)
+        if not a_ids or not _reads_georgian(self.aoa.text):
+            # an act not in Georgian is not read for its parties (round 1, AOA-15), even where
+            # an English label ("ID: …") gives a code: its parties are not made out
             if not self._unread(
                 "AOA.ID_CODES",
                 "მხარეთა საიდენტიფიკაციო კოდები",
@@ -1778,6 +1820,17 @@ class AoaChecker:
             # one finding per code, marked where the act writes it, with the contract's code it
             # most likely stands for: a transposed digit is one code to fix, not a list to read
             for code in sorted(a_ids - c_ids):
+                if (party := self._party_without_contract_code(code)) is not None:
+                    # the contract states no code for this party: the other party's code is no
+                    # correction for it (red team R2, AOA-R2-01)
+                    self._skip(
+                        "AOA.ID_CODES",
+                        f"{party}: ხელშეკრულებაში ამ მხარის საიდენტიფიკაციო კოდი არ იკითხება, "
+                        f"ამიტომ აქტის კოდი {code} არ შედარდა",
+                        f"{party}: the contract states no identification code for this party that "
+                        f"could be read, so the act's code {code} was not compared",
+                    )
+                    continue
                 closest = min(sorted(c_ids), key=lambda c: (_digit_distance(code, c), c))
                 self._add(
                     "AOA.ID_CODES",
@@ -1823,47 +1876,77 @@ class AoaChecker:
                 match.address,
             )
             self._proxies(p, match)
-            for d in p.directors:
-                if not match.directors:
+            self._signatories(p, match, deputy=False)
+            self._signatories(p, match, deputy=True)
+
+    def _signatories(self, p: Party, match: Party, *, deputy: bool) -> None:
+        """AOA.DIRECTOR: the act's signatories for ``p`` against the contract's for ``match`` -
+        its head's (``deputy`` False) or its deputy's or acting head's (``deputy`` True). A
+        deputy is compared only with the deputy the contract names: signing in the head's place
+        can be right, so a deputy the contract does not name is a skip note, never an error."""
+        names, theirs = (p.deputies, match.deputies) if deputy else (p.directors, match.directors)
+        for d in names:
+            if not theirs:
+                if not deputy:
                     self._skip(
                         "AOA.DIRECTOR",
                         f"ხელშეკრულებაში {match.name}-ის დირექტორი მითითებული არ არის",
                         f"contract names no director for {match.name}",
                     )
-                    continue
-                # The preamble writes the genitive, the signature block the nominative, and the
-                # party reader keeps one of them: every form the act writes of this person is
-                # compared, so a slip in one ("მელაძი") does not hide behind the other written
-                # right. Each wrong form has its own correction and every place of it marked.
-                forms = self._person_forms(d)
-                if not forms:
-                    found = self._find_span(d)
-                    forms = [(d, [found] if found else [])]
-                for form, spans in forms:
-                    # an inflection of the contract's name, and nothing else, is the same name
-                    if any(_same_person(form, cd) for cd in match.directors):
-                        continue
-                    span, places = self._places_of_director(p, form, spans)
-                    # compared on the nominative, so a genitive in either document is no mistake
-                    guess = best_match(lemma(form), [lemma(c) for c in match.directors])
-                    diff = guess[1] if guess else None
-                    typo = diff is not None and diff.looks_like_typo
-                    hint_ka = " (როგორც ჩანს, შეცდომაა)" if typo else ""
-                    hint_en = " (looks like a misspelling)" if typo else ""
-                    # the correction in the act's own grammar, form by form
-                    expected = keep_initial(form, in_case_of(form, guess[0])) if guess else None
-                    self._add(
+                elif not any(_same_person(d, x) for x in [*match.directors, *match.proxies]):
+                    self._skip(
                         "AOA.DIRECTOR",
-                        "error",
-                        f"ხელმომწერი არ ემთხვევა ხელშეკრულებას: „{form}“, უნდა იყოს "
-                        f"„{expected}“{hint_ka}",
-                        f"signatory does not match the contract: '{form}', expected "
-                        f"'{expected}'{hint_en}",
-                        expected=expected,
-                        actual=form,
-                        span=span,
-                        places=places,
+                        f"აქტს {match.name}-ის სახელით ხელს აწერს მოადგილე ან მოვალეობის "
+                        f"შემსრულებელი „{d}“, ხელშეკრულება მოადგილეს არ ასახელებს: არ შედარდა",
+                        f"the act is signed for {match.name} by a deputy or an acting head, "
+                        f"'{d}', and the contract names no deputy: not compared",
                     )
+                continue
+            # The preamble writes the genitive, the signature block the nominative, and the
+            # party reader keeps one of them: every form the act writes of this person is
+            # compared, so a slip in one ("მელაძი") does not hide behind the other written
+            # right. Each wrong form has its own correction and every place of it marked.
+            forms = self._person_forms(d)
+            if not forms:
+                found = self._find_span(d)
+                forms = [(d, [found] if found else [])]
+            for form, spans in forms:
+                # an inflection of the contract's name, and nothing else, is the same name
+                if any(_same_person(form, cd) for cd in theirs):
+                    continue
+                if (other := self._unread_party_of(form, match, theirs)) is not None:
+                    # the act writes that party in a form not read as one (AOA.PARTY_MISSING's
+                    # note): its signatory is no slip of this party's
+                    self._skip(
+                        "AOA.DIRECTOR",
+                        f"„{form}“ ყველაზე ახლოსაა {other.name}-ის ხელმომწერთან, მხარესთან, "
+                        f"რომელიც აქტში ვერ ამოიცნო: {match.name}-ის ხელმომწერს არ შედარდა",
+                        f"'{form}' is nearest to the signatory the contract names for "
+                        f"{other.name}, a party the act does not name in a form read as one: not "
+                        f"compared with {match.name}'s",
+                    )
+                    continue
+                span, places = self._places_of_director(p, form, spans)
+                # compared on the nominative, so a genitive in either document is no mistake
+                guess = best_match(lemma(form), [lemma(c) for c in theirs])
+                diff = guess[1] if guess else None
+                typo = diff is not None and diff.looks_like_typo
+                hint_ka = " (როგორც ჩანს, შეცდომაა)" if typo else ""
+                hint_en = " (looks like a misspelling)" if typo else ""
+                # the correction in the act's own grammar, form by form
+                expected = keep_initial(form, in_case_of(form, guess[0])) if guess else None
+                self._add(
+                    "AOA.DIRECTOR",
+                    "error",
+                    f"ხელმომწერი არ ემთხვევა ხელშეკრულებას: „{form}“, უნდა იყოს "
+                    f"„{expected}“{hint_ka}",
+                    f"signatory does not match the contract: '{form}', expected "
+                    f"'{expected}'{hint_en}",
+                    expected=expected,
+                    actual=form,
+                    span=span,
+                    places=places,
+                )
 
     def _proxies(self, p: Party, match: Party) -> None:
         """AOA.DIRECTOR, as a warning: the act is signed for ``p`` under a power of attorney by
@@ -2320,9 +2403,34 @@ class AoaChecker:
                     "აქტში საბანკო ანგარიში არ წერია",
                     "the act does not state a bank account",
                 )
+        self._sub_accounts()
         if not mismatched:
             self._bank_owner()
             self._bank_pairing()
+
+    def _sub_accounts(self) -> None:
+        """AOA.BANK, a warning: one account whose currency sub-account the act and the contract
+        name differently ("…17GEL" against "…17USD"). The account is the same, so the IBAN is not
+        wrong (red team R2, AOA-R2-03), but the payment may go to the other currency."""
+        if self.contract is None:  # the bank rules run only with a contract
+            return
+        stated = _sub_accounts(self.contract)
+        for hit in self.aoa.bank_hits("IBAN"):
+            mine = _sub_account(hit)
+            theirs = stated.get(hit.value, set())
+            if mine and theirs and mine not in theirs:
+                expected = sorted(theirs)[0]
+                self._add(
+                    "AOA.BANK",
+                    "warning",
+                    f"ანგარიშის ვალუტა განსხვავდება: {hit.value}{mine} vs ხელშეკრულება "
+                    f"{hit.value}{expected}",
+                    f"the account's currency differs: {hit.value}{mine} vs contract "
+                    f"{hit.value}{expected}",
+                    expected=expected,
+                    actual=mine,
+                    span=(hit.end - len(mine), hit.end),
+                )
 
     def _payee_bank(self, unit: str) -> frozenset[str]:
         """The contract's bank details the contractor is paid on: the accounts in a paid party's
@@ -3257,6 +3365,20 @@ def _fee_like(value: float, written: str) -> str:
     else:
         out += rest
     return out.strip()
+
+
+def _sub_account(hit: AnchorHit) -> str:
+    """The currency code written straight after an account ("GE…17GEL"), or ""."""
+    return re.sub(r"\s", "", hit.raw_text)[len(hit.value) :]
+
+
+def _sub_accounts(view: DocumentView) -> dict[str, set[str]]:
+    """Each account's currency sub-accounts as a document writes them."""
+    out: dict[str, set[str]] = {}
+    for hit in view.bank_hits("IBAN"):
+        if tail := _sub_account(hit):
+            out.setdefault(hit.value, set()).add(tail)
+    return out
 
 
 def _bank_key(code: str) -> str:

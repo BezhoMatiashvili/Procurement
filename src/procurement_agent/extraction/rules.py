@@ -15,9 +15,12 @@ from datetime import date
 
 from procurement_agent.extraction.georgian import month_typo
 from procurement_agent.extraction.normalize import (
+    IBAN_CURRENCY_SUFFIXES,
+    ID_CODE_RE,
     amounts_equal,
     edit_distance,
     iban_is_valid,
+    id_code_digits,
     unlabelled_bic_plausible,
 )
 from procurement_agent.extraction.normalize import parse_number as _parse_number
@@ -591,25 +594,19 @@ def find_dates(text: str) -> list[RuleHit]:
 
 # --- identification codes ----------------------------------------------------------------------
 
-_ID_CODE = re.compile(
-    r"(?:ს\s*/\s*კ|ს\s*\.\s*კ\s*\.|საიდენტიფიკაციო\s*(?:კოდი|ნომერი|№)?|პირადი\s*ნომერი|"
-    # English labels start at a word boundary: "paid 204567890" is not "ID 204567890"
-    r"(?<![A-Za-z])(?:ID(?![A-Za-z])\s*(?:code|no\.?|number|№)?|"
-    r"identification\s*(?:code|number|no\.?)|tax\s*id(?![A-Za-z])))"
-    r"\s*[:№#\-]?\s*(\d{9}|\d{11})(?!\d)",
-    re.IGNORECASE,
-)
+#: one label pattern for every reader (``normalize.ID_CODE_RE``)
+_ID_CODE = ID_CODE_RE
 
 
 def find_id_codes(text: str) -> list[RuleHit]:
     return [
         RuleHit(
             type=FactType.party_id_code,
-            value=m.group(1),
+            value=id_code_digits(m.group(1)),
             raw_text=m.group(0),
             start=m.start(),
             end=m.end(),
-            normalized=m.group(1),
+            normalized=id_code_digits(m.group(1)),
             confidence=0.85,
         )
         for m in _ID_CODE.finditer(text)
@@ -825,8 +822,12 @@ def find_contract_numbers(text: str) -> list[RuleHit]:
 
 # --- bank accounts & cadastral codes -----------------------------------------------------------
 
-# Georgian IBAN, compact or printed in groups of four ("GE29 NB00 0000 ...").
-_IBAN_GE = re.compile(r"\bGE\d{2}[ \u00a0]?[A-Z]{2}\d{2}(?:[ \u00a0]?\d{4}){3}[ \u00a0]?\d{2}\b")
+# Georgian IBAN, compact or printed in groups of four ("GE29 NB00 0000 ..."), and ending where a
+# currency sub-account's code is written after it ("GE29...17GEL"): that code is no part of it.
+_IBAN_GE = re.compile(
+    r"\bGE\d{2}[ \u00a0]?[A-Z]{2}\d{2}(?:[ \u00a0]?\d{4}){3}[ \u00a0]?\d{2}"
+    rf"(?:\b|(?=(?:{'|'.join(sorted(IBAN_CURRENCY_SUFFIXES))})\b))"
+)
 _SWIFT = re.compile(r"\b[A-Z]{4}GE[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b")
 _SPACE_CHARS = re.compile(r"[ \u00a0]")
 #: A cadastral code: the parcel, "01.02.03.456", and a building or unit under it written with up
