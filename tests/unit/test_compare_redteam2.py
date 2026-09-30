@@ -272,3 +272,52 @@ def test_another_currency_for_the_same_figure_is_still_a_change() -> None:
 def test_a_rate_changed_with_the_word_percent_is_still_a_change() -> None:
     right = edit(CONTRACT, "0.3% ოდენობით", "0.4 პროცენტის ოდენობით")
     assert [r for r, _b, _a, _s in found(run(CONTRACT, right))] == ["CMP.PERCENT"]
+
+
+# --- COMPARE-R2-01: words a value change does not account for are a change of their own --------
+
+
+def test_a_penalty_moved_onto_the_other_party_with_its_rate_is_two_findings() -> None:
+    right = edit(CONTRACT, "მიმწოდებელს ეკისრება პირგასამტეხლო ღირებულების 0.3%",
+                 "შემსყიდველს ეკისრება პირგასამტეხლო ღირებულების 0.4%")
+    report = run(CONTRACT, right)
+    assert [(r, s) for r, _b, _a, s in found(report)] == [
+        ("CMP.PERCENT", "error"),
+        ("CMP.TEXT_CHANGED", "warning"),
+    ]
+    rate = report.findings[0]
+    assert (rate.expected, rate.actual) == ("0.3% per day", "0.4% per day")
+    # the canonical rate is written nowhere: the finding is anchored on the line it was read on
+    assert rate.span is not None and "შემსყიდველს" in (rate.quote or "")
+
+
+def test_a_price_raised_and_newly_excluding_a_cost_is_two_findings() -> None:
+    right = edit(CONTRACT, "8 400 (რვა ათას ოთხასი) ლარს დღგ-ს ჩათვლით.",
+                 "9 400 (ცხრა ათას ოთხასი) ლარს დღგ-ს ჩათვლით, რომელიც არ მოიცავს მონტაჟის ხარჯებს.")
+    rules = [(r, s) for r, _b, _a, s in found(run(CONTRACT, right))]
+    assert rules == [("CMP.AMOUNT", "error"), ("CMP.TEXT_CHANGED", "warning")]
+
+
+def test_a_price_clause_removed_while_its_amount_is_restated_is_a_paragraph_removed() -> None:
+    left = [*CONTRACT, "7.1. ხელშეკრულების ჯამური ღირებულებაა 8 400 ლარი."]
+    right = [t for t in left if not t.startswith("2.1.")]
+    rules = [(r, b, s) for r, b, _a, s in found(run(left, right))]
+    assert ("CMP.TEXT_REMOVED", "warning") in [(r, s) for r, _b, s in rules]
+    assert ("CMP.VAT", "incl", "error") in rules
+
+
+def test_a_figure_and_its_words_changed_together_are_one_finding() -> None:
+    right = edit(CONTRACT, "36 (ოცდათექვსმეტი) თვის", "24 (ოცდაოთხი) თვის")
+    assert found(run(CONTRACT, right)) == [("CMP.DURATION", "P36M", "P24M", "error")]
+
+
+def test_a_value_clause_deleted_whole_is_one_finding() -> None:
+    right = [t for t in CONTRACT if not t.startswith("4.1.")]
+    assert [(r, b, a) for r, b, a, _s in found(run(CONTRACT, right))] == [
+        ("CMP.PERCENT", "0.3% per day", None)
+    ]
+
+
+def test_a_rate_changed_on_a_line_whose_other_words_stay_is_one_finding() -> None:
+    right = edit(CONTRACT, "0.3% ოდენობით", "0.5% ოდენობით")
+    assert [r for r, _b, _a, _s in found(run(CONTRACT, right))] == ["CMP.PERCENT"]

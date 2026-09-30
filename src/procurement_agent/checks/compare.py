@@ -3184,12 +3184,15 @@ def _findings_of(
         actual: str | None = None,
         key: tuple[str, str | None, str | None] | None = None,
         full: tuple[str | None, str | None] | None = None,
+        quote: str | None = None,
     ) -> None:
         """``full`` is the untruncated (old, new) text behind a shortened expected/actual.
 
         Identity and anchoring use the full text; only the display fields are shortened. Two
         long lines that share their first 160 characters are two changes, and a comment can
-        only be anchored on words the document actually contains - not on "…".
+        only be anchored on words the document actually contains - not on "…". ``quote`` is
+        the line a value finding was read on: a value stated in canonical form ("0.2% per day")
+        is written nowhere as such, and anchored on nothing the finding pointed nowhere.
         """
         nonlocal minor, suppressed
         old, new = full if full is not None else (expected, actual)
@@ -3202,12 +3205,14 @@ def _findings_of(
                 suppressed += 1
                 return
         seen.add(identity)
-        quote = (new or old) if full is not None else None
+        if quote is None and full is not None:
+            quote = new or old
+        anchor = quote if quote is not None and full is None else new
         span: tuple[int, int] | None = None
-        if new:
-            at = right_text.find(new)
+        if anchor:
+            at = right_text.find(anchor)
             if at >= 0:
-                span = (at, at + len(new))
+                span = (at, at + len(anchor))
         out.append(
             Finding(
                 rule_id=rule_id,
@@ -3264,6 +3269,7 @@ def _findings_of(
 
         if h.deltas:
             shown = [_as_period(d, field_deltas) for d in h.deltas if not superfluous(d)]
+            line = h.right or h.left
             for d in shown:
                 ka, en = _delta_message(d)
                 add(
@@ -3274,12 +3280,16 @@ def _findings_of(
                     expected=d.left,
                     actual=d.right,
                     key=dedup_key(d),
+                    quote=line.text if line is not None else None,
                 )
-            if shown or _rewrapped(h, written):
+            if shown and not _says_more(h, shown, whole=len(shown) == len(h.deltas)):
                 continue
-            # Every value on the line is written in the other document too, but words of it are
-            # not: the text change itself is still reported - a paragraph removed whose amount
-            # is restated elsewhere is a paragraph removed.
+            if not shown and _rewrapped(h, written):
+                continue
+            # The line changed words its values do not account for - the party a penalty falls
+            # on, what a price leaves out - or every value on it is written in the other
+            # document too while its words are not: the text change itself is reported as well
+            # (a paragraph removed whose amount is restated elsewhere is a paragraph removed).
         if h.kind == "moved":
             add(
                 "CMP.MOVED",
@@ -3665,6 +3675,65 @@ def _rewrapped(hunk: Hunk, written: tuple[_Written, _Written]) -> bool:
             if op.tag in ("insert", "replace"):
                 gained |= _words_of(op.right)
     return lost <= written[1].words and gained <= written[0].words
+
+
+def _says_more(hunk: Hunk, shown: list[ValueDelta], *, whole: bool) -> bool:
+    """Whether a line that carries a reported value change also changed words that change says
+    nothing of.
+
+    A line removed or added whole (one side only) is its values: a deleted penalty clause is the
+    penalty removed, one finding. It says more only when a value on it went unreported
+    (``whole`` false) because the other document restates it - the paragraph removed while its
+    amount is written elsewhere is still a paragraph removed. A line changed in place is read
+    word by word, below.
+
+    "მიმწოდებელს ეკისრება პირგასამტეხლო ... 0.1%" rewritten "შემსყიდველს ... 0.2%" is a new
+    rate, and a penalty that now falls on the buyer; a price raised and newly excluding
+    transport, a warranty shortened and newly excluding a component, are two changes each. With
+    the value reported, the line's own text change was dropped, and the party that bears a
+    penalty could flip with no finding saying so.
+
+    Each side is read with its values cut out (``_masked_values``: a figure with its words,
+    currency and unit, a date with its postposition, a rate with its "per day", the tax
+    wording). A word changed outside them counts unless it is one of the reported values' own
+    words, in whatever case the line writes it - a director's name, an address, a misspelled
+    word, or the words a canonical term was written in (its note). A figure and its words
+    changed together, and nothing else, say nothing more.
+    """
+    if hunk.left is None or hunk.right is None:
+        return not whole
+    left =_masked_values(hunk.left.text, keyed=False)[0] if hunk.left else ""
+    right = _masked_values(hunk.right.text, keyed=False)[0] if hunk.right else ""
+    lt, rt = _layout_key(left).split(), _layout_key(right).split()
+    told = {
+        name_stem(w)
+        for d in shown
+        for text in (d.left, d.right, d.note_en)
+        for w in _WORD.findall(normalize_name(text or ""))
+    }
+    stems = tuple(s for s in told if len(s) >= _TOLD_STEM)
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, lt, rt, autojunk=False).get_opcodes():
+        if tag == "equal":
+            continue
+        for token in (*lt[i1:i2], *rt[j1:j2]):
+            if not _is_word(token) or name_stem(token) in told:
+                continue
+            # a value's word in a case the stemmer does not undo: "კოშკისთვის" is the project
+            # "კოშკი" reported in the nominative
+            if any(token.startswith(stem) for stem in stems):
+                continue
+            return True
+    return False
+
+
+#: The shortest stem of a reported value's word that the line's word may extend by a case ending.
+_TOLD_STEM = 4
+
+
+def _is_word(token: str) -> bool:
+    """A layout token that is a word of two letters or more - not a figure, a sign or the mark
+    a value was cut out for."""
+    return len(token) > 1 and token.isalpha()
 
 
 def _stems(text: str) -> str:
