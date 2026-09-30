@@ -33,7 +33,7 @@ import re
 import time
 from collections import Counter
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from typing import Literal
 
@@ -1998,6 +1998,8 @@ def _pair_replace(left: Sequence[Segment], right: Sequence[Segment]) -> list[_Pa
 
 
 def _align_linear(left: list[Segment], right: list[Segment]) -> tuple[list[_Pair], float]:
+    if any(s.table_row is not None for s in (*left, *right)):
+        return _align_with_rows(left, right)
     lk = [key_of(s.text) for s in left]
     rk = [key_of(s.text) for s in right]
     ops = _opcodes(lk, rk)
@@ -2029,6 +2031,179 @@ def _align_linear(left: list[Segment], right: list[Segment]) -> tuple[list[_Pair
                 _pair_replace_with_moves(left[i1:i2], right[j1:j2], unmatched_left, unmatched_right)
             )
     return pairs, _similarity_of(ops, pairs, len(lk) + len(rk))
+
+
+#: The group of a table row added or removed whole: one change, not one per cell.
+_ROW = "row:"
+
+#: A unit of alignment: one segment, or the cells of one table row.
+_Unit = tuple[Segment, ...]
+
+
+def _units(segments: list[Segment]) -> list[_Unit]:
+    """``segments`` with the cells of each table row taken together."""
+    out: list[_Unit] = []
+    for s in segments:
+        last = out[-1][-1] if out else None
+        if (
+            s.table_row is not None
+            and last is not None
+            and last.table_row is not None
+            and (last.table, last.table_row) == (s.table, s.table_row)
+        ):
+            out[-1] = (*out[-1], s)
+        else:
+            out.append((s,))
+    return out
+
+
+def _ordinal_columns(units: list[_Unit]) -> set[tuple[int | None, int | None]]:
+    """(table, column) of each column that numbers its table's rows 1, 2, 3 ... - the "№",
+    under a header or without one."""
+    columns: dict[tuple[int | None, int | None], list[str]] = {}
+    for unit in units:
+        if unit[0].table_row is None:
+            continue
+        for cell in unit:
+            columns.setdefault((cell.table, cell.table_col), []).append(cell.text.strip())
+
+    def counts(values: list[str]) -> bool:
+        return len(values) >= 2 and values == [str(n) for n in range(1, len(values) + 1)]
+
+    return {at for at, values in columns.items() if counts(values) or counts(values[1:])}
+
+
+def _unit_key(unit: _Unit, ordinals: set[tuple[int | None, int | None]]) -> str:
+    """A unit's alignment key. A row's is its words - not its figures, which a revision
+    changes, nor the number it is in its table, which an inserted row changes for every row
+    after it (the same reasoning as ``_row_key`` for a spreadsheet)."""
+    if len(unit) == 1 and unit[0].table_row is None:
+        return key_of(unit[0].text)
+    words = [
+        c.text
+        for c in unit
+        if (c.table, c.table_col) not in ordinals and parse_number(_figure_alone(c.text)) is None
+    ]
+    if words:
+        return "\x00row:" + normalize_name(" ".join(words))
+    return "\x00row#" + ",".join(str(c.table_col) for c in unit)
+
+
+def _pair_rows(a: _Unit, b: _Unit, ordinals: set[tuple[int | None, int | None]]) -> list[_Pair]:
+    """Two rows cell by cell, by column. A row number that moved because a row before it was
+    added or removed is not a figure that changed: it is laid out anew."""
+    if len(a) == 1 and len(b) == 1 and a[0].table_row is None and b[0].table_row is None:
+        return [(a[0], b[0], None)]
+    by_a = {c.table_col: c for c in a}
+    by_b = {c.table_col: c for c in b}
+    out: list[_Pair] = []
+    for col in sorted(set(by_a) | set(by_b), key=lambda c: (c is None, c or 0)):
+        x, y = by_a.get(col), by_b.get(col)
+        renumbered = (
+            x is not None
+            and y is not None
+            and (x.table, col) in ordinals
+            and x.text.strip() != y.text.strip()
+        )
+        out.append((x, y, f"{_LAYOUT}ord{x.index}" if renumbered and x is not None else None))
+    return out
+
+
+def _without_cell_words(deltas: list[ValueDelta], cells: list[Segment]) -> list[ValueDelta]:
+    """A row's deltas without the words a cell writes its own figure out in, "960 (ცხრაას
+    სამოცი)": the row is what was added or removed, and the figure beside the words, a bare
+    number, is no value found on its own either."""
+    figures = {parse_number(alone) for c in cells if (alone := _figure_alone(c.text)) != c.text}
+    return [
+        d
+        for d in deltas
+        if not (
+            d.rule_id == "CMP.AMOUNT_WORDS"
+            and d.kind != "changed"
+            and (shown := _SHOWN_FIGURE.search(d.left or d.right or "")) is not None
+            and float(shown.group(1)) in figures
+        )
+    ]
+
+
+def _one_side(unit: _Unit, *, left: bool) -> list[_Pair]:
+    """A unit only one side has: a row whole, as one change."""
+    if len(unit) == 1 or unit[0].table_row is None:
+        return [(s, None, None) if left else (None, s, None) for s in unit]
+    group = f"{_ROW}{'l' if left else 'r'}{unit[0].index}"
+    return [(s, None, group) if left else (None, s, group) for s in unit]
+
+
+def _align_with_rows(left: list[Segment], right: list[Segment]) -> tuple[list[_Pair], float]:
+    """``_align_linear`` for documents with Word or PDF tables: a table row is aligned as a
+    row, keyed by its words.
+
+    Cells aligned one by one, a row inserted into a priced table was one "text added" per cell,
+    and each row number after it - "4" paired with the "5" the next row became - a critical
+    change of amount. Aligned as rows, the new row is one change and the renumbered rows are
+    only laid out anew.
+    """
+    lu, ru = _units(left), _units(right)
+    ordinals = _ordinal_columns(lu) & _ordinal_columns(ru)
+    lk = [_unit_key(u, ordinals) for u in lu]
+    rk = [_unit_key(u, ordinals) for u in ru]
+    ops = _opcodes(lk, rk)
+    unmatched_left = {
+        key_of(s.text)
+        for tag, i1, i2, _j1, _j2 in ops
+        if tag != "equal"
+        for u in lu[i1:i2]
+        for s in u
+    }
+    unmatched_right = {
+        key_of(s.text)
+        for tag, _i1, _i2, j1, j2 in ops
+        if tag != "equal"
+        for u in ru[j1:j2]
+        for s in u
+    }
+    pairs: list[_Pair] = []
+    for tag, i1, i2, j1, j2 in ops:
+        if tag == "equal":
+            for a, b in zip(lu[i1:i2], ru[j1:j2], strict=True):
+                pairs.extend(_pair_rows(a, b, ordinals))
+            continue
+        if tag == "delete":
+            pairs.extend(p for u in lu[i1:i2] for p in _one_side(u, left=True))
+            continue
+        if tag == "insert":
+            pairs.extend(p for u in ru[j1:j2] for p in _one_side(u, left=False))
+            continue
+        la, rb = lu[i1:i2], ru[j1:j2]
+        if (
+            len(la) == len(rb)
+            and all(
+                (x[0].table_row is None) == (y[0].table_row is None)
+                for x, y in zip(la, rb, strict=True)
+            )
+            and all(x[0].table_row is not None for x in la)
+        ):
+            # the same rows with a word changed in each: still the rows they were
+            for a, b in zip(la, rb, strict=True):
+                pairs.extend(_pair_rows(a, b, ordinals))
+            continue
+        ls = [s for u in la for s in u]
+        rs = [s for u in rb for s in u]
+        if len(ls) + len(rs) > 2 and _laid_out_anew(ls, rs):
+            group = f"{_LAYOUT}{ls[0].index}"
+            pairs.extend(
+                (ls[k] if k < len(ls) else None, rs[k] if k < len(rs) else None, group)
+                for k in range(max(len(ls), len(rs)))
+            )
+        else:
+            pairs.extend(_pair_replace_with_moves(ls, rs, unmatched_left, unmatched_right))
+    total = len(left) + len(right)
+    same = sum(
+        1
+        for a, b, group in pairs
+        if a is not None and b is not None and group is None and key_of(a.text) == key_of(b.text)
+    )
+    return pairs, _similarity_of([("equal", 0, same, 0, same)], pairs, total)
 
 
 def _pair_replace_with_moves(
@@ -2421,6 +2596,48 @@ def _build(
                     "insert" if ra is None else "delete" if rb is None else "replace"
                 )
                 rows.append(DiffRow(tag=shape, left=_ref(ra), right=_ref(rb), hunk_id=hid))
+            i = end
+            continue
+
+        if group is not None and group.startswith(_ROW):
+            end = i
+            while end < len(pairs) and pairs[end][2] == group:
+                end += 1
+            run = pairs[i:end]
+            cells = [c for ra, rb, _g in run for c in (ra, rb) if c is not None]
+            whole = replace(cells[0], text=" | ".join(c.text for c in cells))
+            added = run[0][0] is None
+            kind, materiality, deltas, rules, inline = _classify(
+                None if added else whole, whole if added else None, ocr=ocr, contexts=contexts
+            )
+            deltas = _without_cell_words(deltas, cells)
+            if not deltas:
+                materiality, rules = "substantive", [rules[0]]
+            made += 1
+            hid = f"h{made}"
+            hunks.append(
+                Hunk(
+                    id=hid,
+                    kind=kind,
+                    materiality=materiality,
+                    rules=rules,
+                    left=None if added else _ref(whole),
+                    right=_ref(whole) if added else None,
+                    inline=inline,
+                    deltas=deltas,
+                )
+            )
+            setattr(counts, materiality, getattr(counts, materiality) + 1)
+            setattr(counts, kind, getattr(counts, kind) + 1)
+            for ra, rb, _g in run:
+                rows.append(
+                    DiffRow(
+                        tag="insert" if added else "delete",
+                        left=_ref(ra),
+                        right=_ref(rb),
+                        hunk_id=hid,
+                    )
+                )
             i = end
             continue
 

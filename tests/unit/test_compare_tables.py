@@ -145,3 +145,43 @@ def test_a_docx_paragraph_inside_a_table_knows_its_cell_and_column() -> None:
         ("55", 3, 2, "ფასი (ლარი)"),
     ]
     assert all(s.kind == "text" and s.table == 1 for s in segments)
+
+
+# --- COMPARE-08: a row inserted or removed is one change; the rows after it renumbered are not
+
+
+def renumbered(rows: list[list[str]]) -> list[list[str]]:
+    return [[str(n), *row[1:]] for n, row in enumerate(rows, start=1)]
+
+
+def test_a_row_inserted_into_a_numbered_table_is_one_change() -> None:
+    new = ["0", "ჭერის შეთეთრება", "კვ.მ", "80", "240"]
+    right = renumbered([*ROWS[:2], new, *ROWS[2:]])
+    assert found(run(document(ROWS), document(right))) == [
+        ("CMP.TEXT_ADDED", None, "3 | ჭერის შეთეთრება | კვ.მ | 80 | 240", "warning")
+    ]
+
+
+def test_a_row_removed_from_a_numbered_table_is_one_change() -> None:
+    right = renumbered([ROWS[0], *ROWS[2:]])
+    assert found(run(document(ROWS), document(right))) == [
+        (
+            "CMP.TEXT_REMOVED",
+            "2 | იატაკის დაგება | კვ.მ | 120 | 960 (ცხრაას სამოცი)",
+            None,
+            "warning",
+        )
+    ]
+
+
+def test_a_changed_figure_in_a_row_is_still_that_rows_change() -> None:
+    right = with_cell(3, 3, "11")
+    assert found(run(document(ROWS), document(right))) == [("CMP.AMOUNT", "9", "11", "error")]
+
+
+def test_a_changed_row_number_that_is_no_renumbering_is_still_reported() -> None:
+    # a table whose first column is a code, not a count of its rows: a changed code is a change
+    rows = [["7", *ROWS[0][1:]], ["12", *ROWS[1][1:]]]
+    right = [["7", *ROWS[0][1:]], ["13", *ROWS[1][1:]]]
+    rules = [r[0] for r in found(run(document(rows), document(right)))]
+    assert rules == ["CMP.AMOUNT"]
