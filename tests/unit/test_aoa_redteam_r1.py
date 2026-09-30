@@ -389,3 +389,71 @@ class TestFeeCorrectionWords:
         assert words_like(100.2, "შვიდასი ლარი და ოცი თეთრი") == "ასი ლარი და ოცი თეთრი"
         assert words_like(100.5, "შვიდასი") == "ასი ლარი და 50 თეთრი"
         assert words_like(100, "შვიდასი აშშ დოლარი") == "ასი აშშ დოლარი"
+
+
+# --- AOA-09: a name copied from the other party is marked in this party's places only ------------
+
+#: The act with the contractor's director named in its preamble too.
+_TWO_DIRECTORS = ACT.replace(
+    "ჭავჭავაძის 5 (შემდგომში „შემსრულებელი“)",
+    "ჭავჭავაძის 5 (შემდგომში „შემსრულებელი“) წარმოდგენილი დირექტორის დავით მელაძის სახით",
+)
+#: The contractor's director written as the customer's, in the preamble and the signature.
+_COPIED = _TWO_DIRECTORS.replace("დავით მელაძის", "ნინო კაპანაძის").replace(
+    "დავით მელაძე", "ნინო კაპანაძე"
+)
+
+
+def _annotated(tmp_path: object, act: str, findings: list[Finding], *, text: bool) -> list[str]:
+    """The paragraphs of the act (one per line) that carry a comment, as annotation leaves
+    them, and the words each comment covers."""
+    from pathlib import Path
+
+    from docx import Document
+
+    from procurement_agent.eval.score import comment_anchors
+    from procurement_agent.report.docx_annotate import annotate_docx
+
+    folder = Path(str(tmp_path))
+    doc = Document()
+    for line in act.splitlines():
+        doc.add_paragraph(line)
+    src = folder / "act.docx"
+    doc.save(src)
+    out = folder / "annotated.docx"
+    annotate_docx(src, findings, out, text=act if text else None)
+    return sorted(comment_anchors(out).values())
+
+
+class TestCopiedDirector:
+    def test_the_pair_with_both_directors_is_clean(self) -> None:
+        assert _substantive(_check(_TWO_DIRECTORS)) == []
+
+    def test_each_wrong_form_is_one_finding_at_the_contractor_s_place(self) -> None:
+        report = _check(_COPIED)
+        found = sorted((f.quote, f.expected) for f in _of(report, "AOA.DIRECTOR"))
+        assert found == [
+            ("ნინო კაპანაძე", "დავით მელაძე"),
+            ("ნინო კაპანაძის", "დავით მელაძის"),
+        ]
+        contractor_from = _COPIED.index("შპს „ბეტა სერვისი“")
+        for f in _of(report, "AOA.DIRECTOR"):
+            assert f.span is not None and f.span[0] > contractor_from, f.quote
+
+    def test_only_the_contractor_s_places_are_marked(self, tmp_path: object) -> None:
+        findings = _of(_check(_COPIED), "AOA.DIRECTOR")
+        for text in (False, True):
+            marked = _annotated(tmp_path, _COPIED, findings, text=text)
+            assert marked == ["ნინო კაპანაძე", "ნინო კაპანაძის"], text
+
+    def test_a_misspelt_name_is_still_marked_everywhere_it_stands(self, tmp_path: object) -> None:
+        """A slip that is nobody's name is wrong at every place: the preamble and signature."""
+        act = _TWO_DIRECTORS.replace("დავით მელაძე", "დავით მელაშვილი").replace(
+            "დავით მელაძის", "დავით მელაშვილის"
+        )
+        signed = "დირექტორი: დავით მელაშვილი"
+        act = act.replace(signed, f"{signed}\nდავით მელაშვილი")
+        findings = _of(_check(act), "AOA.DIRECTOR")
+        assert all(f.places is None for f in findings)
+        marked = _annotated(tmp_path, act, findings, text=False)
+        assert marked == ["დავით მელაშვილი", "დავით მელაშვილი", "დავით მელაშვილის"]

@@ -670,6 +670,7 @@ class AoaChecker:
         confidence: float = 1.0,
         needs_review: bool = False,
         reviewed_by: Literal["llm"] | None = None,
+        places: tuple[tuple[int, ...], int] | None = None,
     ) -> None:
         if severity == "error" and self._misread(rule_id, actual, expected):
             severity, needs_review = "warning", True
@@ -692,6 +693,7 @@ class AoaChecker:
                 actual=actual,
                 span=span,
                 quote=quote,
+                places=places,
                 confidence=confidence,
                 needs_review=needs_review,
                 reviewed_by=reviewed_by,
@@ -1639,18 +1641,18 @@ class AoaChecker:
                 forms.setdefault(self.aoa.as_written(*m.span()), m.span())
         return list(forms.items())
 
-    def _person_forms(self, name: str) -> list[tuple[str, tuple[int, int]]]:
+    def _person_forms(self, name: str) -> list[tuple[str, list[tuple[int, int]]]]:
         """Each form in which the act writes the person ``name``, spelled right or one slip away
-        (``_near_word``), with the first place of each, in the act's order.
+        (``_near_word``), with every place of each, in the act's order.
 
         The party reader keeps one form of a signatory and takes another that differs only in
         its ending for the same person, a slip in the ending included ("მელაძის" and "მელაძი");
         the rule compares each form found here on its own (``_same_person``)."""
         parts = normalize_name(name).split()
         if len(parts) < 2 or not all(is_georgian_word(w) for w in parts):
-            return self._written_forms(name)
+            return [(form, [span]) for form, span in self._written_forms(name)]
         found = georgian_words(self.aoa.text)
-        forms: dict[str, tuple[int, int]] = {}
+        forms: dict[str, list[tuple[int, int]]] = {}
         for i in range(len(found) - len(parts) + 1):
             window = found[i : i + len(parts)]
             # the words of one name stand side by side, spaces between them and nothing else
@@ -1658,8 +1660,40 @@ class AoaChecker:
                 continue
             if all(_near_word(w, p) for (w, _, _), p in zip(window, parts, strict=True)):
                 span = (window[0][1], window[-1][2])
-                forms.setdefault(self.aoa.as_written(*span), span)
+                forms.setdefault(self.aoa.as_written(*span), []).append(span)
         return list(forms.items())
+
+    def _owner_at(self, pos: int) -> Party | None:
+        """The act party whose block ``pos`` stands in: the one named last before it - by its
+        name, its identification code or its role label ("„შემკვეთი“" over a signature). None
+        when no party is named before it."""
+        best: tuple[int, Party] | None = None
+        for q in self.aoa.parties:
+            for start in _mention_starts(self.aoa.text, q):
+                if start < pos and (best is None or start > best[0]):
+                    best = (start, q)
+        return best[1] if best else None
+
+    def _places_of_director(
+        self, p: Party, form: str, spans: list[tuple[int, int]]
+    ) -> tuple[tuple[int, int] | None, tuple[tuple[int, ...], int] | None]:
+        """Where the wrong ``form`` of ``p``'s director is ``p``'s: the first such place, and
+        which of the form's places those are (``Finding.places``). A name copied from the other
+        party - the customer's director written for the contractor - is right where it stands
+        in the customer's block, and only the contractor's places are to be marked. Every place
+        is, when none of them is plainly another party's correct director."""
+        others: list[int] = []
+        for i, (start, _) in enumerate(spans):
+            owner = self._owner_at(start)
+            if owner is None or owner is p:
+                continue
+            owned = next((m.match for m in self._matched_parties() if m.party is owner), None)
+            if owned is not None and any(_same_person(form, cd) for cd in owned.directors):
+                others.append(i)
+        mine = [i for i in range(len(spans)) if i not in others]
+        if not others or not mine:
+            return (spans[0] if spans else None), None
+        return spans[mine[0]], (tuple(mine), len(spans))
 
     def rule_parties(self) -> None:
         """Client rule 1 and the contract cross-check: identify by code, then verify the rest."""
@@ -1735,11 +1769,15 @@ class AoaChecker:
                 # party reader keeps one of them: every form the act writes of this person is
                 # compared, so a slip in one ("მელაძი") does not hide behind the other written
                 # right. Each wrong form has its own correction and every place of it marked.
-                forms: list[tuple[str, tuple[int, int] | None]] = [*self._person_forms(d)]
-                for form, span in forms or [(d, self._find_span(d))]:
+                forms = self._person_forms(d)
+                if not forms:
+                    found = self._find_span(d)
+                    forms = [(d, [found] if found else [])]
+                for form, spans in forms:
                     # an inflection of the contract's name, and nothing else, is the same name
                     if any(_same_person(form, cd) for cd in match.directors):
                         continue
+                    span, places = self._places_of_director(p, form, spans)
                     # compared on the nominative, so a genitive in either document is no mistake
                     guess = best_match(lemma(form), [lemma(c) for c in match.directors])
                     diff = guess[1] if guess else None
@@ -1758,6 +1796,7 @@ class AoaChecker:
                         expected=expected,
                         actual=form,
                         span=span,
+                        places=places,
                     )
 
     def _proxies(self, p: Party, match: Party) -> None:
@@ -3080,6 +3119,28 @@ def _match_party(p: Party, parties: list[Party]) -> _PartyMatch:
 _LEGAL_FORM_WORDS = frozenset(
     {"შპს", "სს", "ააიპ", "სსიპ", "ი/მ", "ი", "მ", "ინდ", "ინდივიდუალური", "მეწარმე", "მეწარმ"}
 )
+
+
+def _mention_starts(text: str, q: Party) -> list[int]:
+    """Where ``text`` names the party ``q``: its identification code as a number of its own,
+    the words of its name after its legal form (any case ending, any quotes between), and its
+    role label as a word of its own ("შემკვეთი", not "შემკვეთის" in the body's prose)."""
+    out: list[int] = []
+    if q.id_code:
+        code = rf"(?<![0-9A-Za-z]){re.escape(q.id_code)}(?![0-9A-Za-z])"
+        out += [m.start() for m in re.finditer(code, text)]
+    words = [
+        w
+        for w in normalize_name(q.name or "").split()
+        if w not in _LEGAL_FORM_WORDS and any(c.isalpha() for c in w)
+    ]
+    if words:
+        pattern = r"[\W_]+".join(rf"{re.escape(w)}[{GEORGIAN}]*" for w in words)
+        out += [m.start() for m in re.finditer(rf"(?<!\w){pattern}", text, re.IGNORECASE)]
+    if q.role and is_georgian_word(q.role):
+        role = rf"(?<![{GEORGIAN}]){re.escape(q.role)}(?![{GEORGIAN}])"
+        out += [m.start() for m in re.finditer(role, text)]
+    return out
 
 
 def _mentions(text: str, q: Party) -> bool:

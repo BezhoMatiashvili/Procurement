@@ -115,40 +115,59 @@ def _normalised_index(text: str) -> tuple[str, list[int]]:
     return "".join(out), index
 
 
-def _locate(text: str, needle: str, start: int = 0) -> tuple[int, int] | None:
+def _bounded(text: str, start: int, end: int, needle: str) -> bool:
+    """Whether ``text[start:end]`` stands as whole words: a needle that begins (ends) with a
+    letter or a digit must not continue a word before it (after it). "ივნის" is not the start
+    of "ივნისიდან", and a name in the nominative is not the start of its genitive."""
+    if needle[:1].isalnum() and start > 0 and text[start - 1].isalnum():
+        return False
+    return not (needle[-1:].isalnum() and end < len(text) and text[end].isalnum())
+
+
+def _locate(
+    text: str, needle: str, start: int = 0, *, whole: bool = False
+) -> tuple[int, int] | None:
     """Offsets of ``needle`` in ``text`` at or after ``start``, tolerating quoting and spacing
-    differences."""
-    direct = text.find(needle, start)
-    if direct >= 0:
-        return direct, direct + len(needle)
+    differences. With ``whole``, only where it stands as whole words (``_bounded``)."""
+    at = text.find(needle, start)
+    while at >= 0:
+        if not whole or _bounded(text, at, at + len(needle), needle):
+            return at, at + len(needle)
+        at = text.find(needle, at + 1)
     flat, index = _normalised_index(text)
     flat_needle, _ = _normalised_index(needle)
     if not flat_needle:
         return None
     flat_start = next((i for i, orig in enumerate(index) if orig >= start), len(flat))
     at = flat.find(flat_needle, flat_start)
-    if at < 0:
-        return None
-    return index[at], index[at + len(flat_needle) - 1] + 1
+    while at >= 0:
+        found = index[at], index[at + len(flat_needle) - 1] + 1
+        if not whole or _bounded(text, *found, flat_needle):
+            return found
+        at = flat.find(flat_needle, at + 1)
+    return None
 
 
 def _runs_covering(paragraph: Paragraph, needle: str, start_at: int = 0) -> list[Run] | None:
     """Split runs as needed so ``needle`` is covered by a whole number of runs."""
-    found = _cover_next(paragraph, needle, start_at)
+    found = _cover_next(paragraph, needle, start_at, whole=True) or _cover_next(
+        paragraph, needle, start_at
+    )
     return found[0] if found else None
 
 
 def _cover_next(
-    paragraph: Paragraph, needle: str, start_at: int
+    paragraph: Paragraph, needle: str, start_at: int, *, whole: bool = False
 ) -> tuple[list[Run], int, int] | None:
-    """The runs covering the first occurrence of ``needle`` at or after ``start_at``, split so
-    they cover it exactly, and its offsets. Splitting leaves the paragraph's text unchanged,
-    so offsets stay valid from one occurrence to the next and between findings."""
+    """The runs covering the first occurrence of ``needle`` at or after ``start_at`` (with
+    ``whole``, the first standing as whole words), split so they cover it exactly, and its
+    offsets. Splitting leaves the paragraph's text unchanged, so offsets stay valid from one
+    occurrence to the next and between findings."""
     needle = needle.strip()
     if not needle:
         return None
     text = "".join(r.text for r in paragraph.runs)
-    located = _locate(text, needle, start_at)
+    located = _locate(text, needle, start_at, whole=whole)
     if located is None:
         return None
     start, end = located
@@ -286,21 +305,75 @@ def _places_for(document: DocumentType, finding: Finding, text: str | None = Non
     other occurrences are correct.
     """
     offending = _offending(finding, text)
+    if finding.places is not None and finding.quote and finding.quote.strip():
+        chosen = _chosen_places(document, finding.quote.strip(), finding.places)
+        if chosen:
+            return chosen
     for needle in _candidates(finding, text):
-        found: list[_Place] = []
-        for paragraph in all_paragraphs(document):
-            if needle not in offending:
-                if (hit := _cover_next(paragraph, needle, 0)) is not None:
-                    return [(paragraph, hit[1], hit[2], hit[0])]
-                continue
-            at = 0
-            while (hit := _cover_next(paragraph, needle, at)) is not None:
-                runs, start, end = hit
-                found.append((paragraph, start, end, runs))
-                at = end
+        # where the words stand as words first: a typo "ივნის" is not inside "ივნისიდან", and
+        # the nominative of a name is not inside its genitive. A needle found only inside
+        # longer words - a stem the act writes with an ending - is marked there.
+        found = _places_of(document, needle, whole=True, every=needle in offending)
+        if not found:
+            found = _places_of(document, needle, whole=False, every=needle in offending)
         if found:
             return found
     return []
+
+
+def _chosen_places(
+    document: DocumentType, quote: str, places: tuple[tuple[int, ...], int]
+) -> list[_Place]:
+    """The places of ``quote`` a finding names (``Finding.places``): its whole-word places in
+    reading order, the chosen ordinals of them. The document must show as many places as the
+    checked text did; when it shows another number - a table cell the parser read twice, a
+    header - the ordinals cannot be trusted, and every place is marked."""
+    wanted, total = places
+    found: list[_Place] = []
+    for paragraph in paragraphs_in_order(document):
+        at = 0
+        while (hit := _cover_next(paragraph, quote, at, whole=True)) is not None:
+            runs, start, end = hit
+            found.append((paragraph, start, end, runs))
+            at = end
+    if len(found) != total:
+        return found
+    return [found[i] for i in wanted if 0 <= i < len(found)]
+
+
+def paragraphs_in_order(container: object) -> Iterator[Paragraph]:
+    """Every paragraph in reading order - a table's between the paragraphs around it - each
+    once: a merged cell, which python-docx returns for every grid column it spans, is read
+    once, as a text reader reads it."""
+    seen: set[object] = set()  # the cells' elements, held so that each keeps its identity
+
+    def walk(inner: object) -> Iterator[Paragraph]:
+        for block in inner.iter_inner_content():  # type: ignore[attr-defined]
+            if isinstance(block, Paragraph):
+                yield block
+                continue
+            for row in block.rows:
+                for cell in row.cells:
+                    if cell._tc in seen:
+                        continue
+                    seen.add(cell._tc)
+                    yield from walk(cell)
+
+    yield from walk(container)
+
+
+def _places_of(document: DocumentType, needle: str, *, whole: bool, every: bool) -> list[_Place]:
+    """The places ``needle`` stands: every one, or only the first when not ``every``."""
+    found: list[_Place] = []
+    for paragraph in all_paragraphs(document):
+        at = 0
+        while (hit := _cover_next(paragraph, needle, at, whole=whole)) is not None:
+            runs, start, end = hit
+            found.append((paragraph, start, end, runs))
+            if not every:
+                return found
+            at = end
+    return found
 
 
 def annotate_docx(

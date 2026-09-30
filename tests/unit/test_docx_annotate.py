@@ -251,3 +251,104 @@ def test_a_service_for_review_is_marked_on_the_acts_own_line(tmp_path: Path) -> 
     assert "should be" not in xml
     runs = [r.text for p in Document(str(out)).paragraphs for r in p.runs]
     assert extra[2:] in runs  # the comment covers the item itself
+
+
+# --- AOA-10: a word is marked where it stands as a word, not inside a longer one -----------------
+
+
+def _anchored(path: Path) -> list[str]:
+    from procurement_agent.eval.score import comment_anchors
+
+    return list(comment_anchors(path).values())
+
+
+def _paragraphs_doc(tmp_path: Path, *lines: str) -> Path:
+    path = tmp_path / "act.docx"
+    doc = Document()
+    for line in lines:
+        doc.add_paragraph(line)
+    doc.save(path)
+    return path
+
+
+def test_a_typo_is_not_marked_inside_the_correct_words_it_begins(tmp_path: Path) -> None:
+    """'ივნის' (a letter dropped) is marked on itself, not inside 'ივნისიდან' or 'ივნისის'."""
+    path = _paragraphs_doc(
+        tmp_path,
+        "შესრულდა 2026 წლის 1 ივნისიდან 2026 წლის 30 ივნისის ჩათვლით.",
+        "აქტი გაფორმდა 2026 წლის 30 ივნის.",
+    )
+    typo = _finding("AOA.SPELLING", severity="warning", quote="ივნის", expected="ივნისს")
+    out, unanchored = annotate_docx(path, [typo], tmp_path / "o.docx")
+    assert unanchored == []
+    assert _anchored(out) == ["ივნის"]
+    marked = Document(str(out)).paragraphs[1]
+    assert "ივნის" in [r.text for r in marked.runs]
+
+
+def test_the_nominative_is_not_marked_inside_the_genitive(tmp_path: Path) -> None:
+    """Two findings, the genitive in the preamble and the nominative in the signature: one
+    comment each, every one in the case written at its place."""
+    path = _paragraphs_doc(
+        tmp_path,
+        "წარმოდგენილი დირექტორის, თემურ კაპანაშვილის სახით, მეორე მხრივ,",
+        "დირექტორი: თემურ კაპანაშვილი",
+    )
+    genitive = _finding("AOA.DIRECTOR", quote="თემურ კაპანაშვილის", expected="თემურ კობიაშვილის")
+    nominative = _finding("AOA.DIRECTOR", quote="თემურ კაპანაშვილი", expected="თემურ კობიაშვილი")
+    out, _ = annotate_docx(path, [genitive, nominative], tmp_path / "o.docx")
+    assert sorted(_anchored(out)) == ["თემურ კაპანაშვილი", "თემურ კაპანაშვილის"]
+    xml = _comments_xml(out)
+    assert xml.count("should be:") == 2
+
+
+def test_a_stem_found_only_inside_a_longer_word_is_still_marked(tmp_path: Path) -> None:
+    """A finding whose words stand nowhere as words of their own - a project named in the
+    nominative, the act writing it with a postposition - is still marked where it stands."""
+    path = _paragraphs_doc(tmp_path, "პროექტ „ტყის ბილიკისთვის“ მომსახურება")
+    finding = _finding("AOA.PROJECT_NAME", quote="ტყის ბილიკ", expected="ტყის სახლი")
+    out, unanchored = annotate_docx(path, [finding], tmp_path / "o.docx")
+    assert unanchored == []
+    assert _anchored(out) == ["ტყის ბილიკ"]
+
+
+# --- AOA-09: a finding that names some of its places marks those only ---------------------------
+
+
+def _name_in_paragraph_and_table(tmp_path: Path, *, merged: bool = False) -> Path:
+    """The name in a paragraph, then in a signature table, then in a paragraph after it."""
+    path = tmp_path / "act.docx"
+    doc = Document()
+    doc.add_paragraph("წარმოდგენილი დირექტორის, ლია ბერიძის სახით")
+    table = doc.add_table(rows=1, cols=2)
+    if merged:
+        table.rows[0].cells[0].merge(table.rows[0].cells[1])
+    table.rows[0].cells[0].paragraphs[0].add_run("დირექტორი: ლია ბერიძე")
+    doc.add_paragraph("დანართი: ლია ბერიძე")
+    doc.save(path)
+    return path
+
+
+def test_the_places_named_are_counted_in_reading_order(tmp_path: Path) -> None:
+    """The table stands between the two paragraphs, and its place is the one named."""
+    finding = _finding("AOA.DIRECTOR", quote="ლია ბერიძე", places=((0,), 2))
+    out, _ = annotate_docx(_name_in_paragraph_and_table(tmp_path), [finding], tmp_path / "o.docx")
+    result = Document(str(out))
+    assert _anchored(out) == ["ლია ბერიძე"]
+    assert "ლია ბერიძე" in [r.text for r in result.tables[0].rows[0].cells[0].paragraphs[0].runs]
+
+
+def test_a_merged_cell_is_one_place(tmp_path: Path) -> None:
+    finding = _finding("AOA.DIRECTOR", quote="ლია ბერიძე", places=((1,), 2))
+    path = _name_in_paragraph_and_table(tmp_path, merged=True)
+    out, _ = annotate_docx(path, [finding], tmp_path / "o.docx")
+    assert _anchored(out) == ["ლია ბერიძე"]
+    assert "ლია ბერიძე" in [r.text for r in Document(str(out)).paragraphs[1].runs]
+
+
+def test_places_the_document_does_not_show_mark_every_place(tmp_path: Path) -> None:
+    """The checked text counted three places, the file shows two: the ordinals cannot be
+    trusted, and every place is marked rather than a wrong one."""
+    finding = _finding("AOA.DIRECTOR", quote="ლია ბერიძე", places=((2,), 3))
+    out, _ = annotate_docx(_name_in_paragraph_and_table(tmp_path), [finding], tmp_path / "o.docx")
+    assert _anchored(out) == ["ლია ბერიძე", "ლია ბერიძე"]
