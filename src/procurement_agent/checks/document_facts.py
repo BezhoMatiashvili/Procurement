@@ -94,8 +94,8 @@ def document_facts(text: str) -> list[DocumentFact]:
             last = max(h.end for _, h in period)
             # two dates are the period's start and end as written, even when a year typed wrong
             # puts the end first: sorted, the period stated was one neither document states
-            start, end = (dates[0], dates[-1]) if len(dates) == 2 else (min(dates), max(dates))
-            out.append(_range_fact(FactType.execution_period, start, end, folded[first:last]))
+            opens, ends = (dates[0], dates[-1]) if len(dates) == 2 else (min(dates), max(dates))
+            out.append(_range_fact(FactType.execution_period, opens, ends, folded[first:last]))
     else:
         term = view.term()
         if term.signed is not None:
