@@ -868,8 +868,18 @@ _NUMBER_MARKER = r"(?:№|#|(?<![A-Za-z])N(?:[oº°]\.?|\.|:)?(?![A-Za-z]))"
 # A reference: groups of letters and digits joined by "-", "/", "_" or ".", and by a slash with a
 # space either side ("15 / 2026"), which the canonical form drops. Only around a slash: a space
 # before "." or "-" is a sentence's end or a dash, and a bare space is where the reference ends.
-_REFERENCE_GROUP = r"[A-Za-z0-9](?:[A-Za-z0-9\-/_.]{0,30}[A-Za-z0-9])?"
-_REFERENCE = rf"(?=[A-Za-z0-9\-/_.]*\d){_REFERENCE_GROUP}(?:\s*/\s*{_REFERENCE_GROUP})*"
+#: A group may also be one Georgian letter standing alone between separators: "12/2026-ა" and
+#: "12/2026-ბ" are two contracts, "ს-45/2026" one. Two letters or more after a hyphen are a case
+#: ending ("15/2026-ის", "-ით", "-ში") and end the reference; so do "-ს" (dative) and "-ი"
+#: (nominative) at its end, which are case endings too.
+_KA_LETTER_GROUP = r"(?<![ა-ჰ])[ა-ჰ](?![ა-ჰ])"
+_KA_LETTER_LAST = r"(?<![ა-ჰ])(?![სი])[ა-ჰ](?![ა-ჰ])"
+_REFERENCE_GROUP = (
+    rf"(?:{_KA_LETTER_GROUP}[\-/_.](?=[A-Za-z0-9]))?"
+    r"[A-Za-z0-9](?:[A-Za-z0-9\-/_.]{0,30}[A-Za-z0-9])?"
+    rf"(?:[\-/_.]{_KA_LETTER_LAST})?"
+)
+_REFERENCE = rf"(?=[A-Za-z0-9ა-ჰ\-/_.]*\d){_REFERENCE_GROUP}(?:\s*/\s*{_REFERENCE_GROUP})*"
 _SPACED_SLASH = re.compile(r"\s*/\s*")
 # The document word must start a word: "act" inside "Contact" and "აქტ" inside "კონტაქტი" named
 # a phone number a contract number.
@@ -1010,7 +1020,8 @@ _MIXED_TYPES = frozenset({FactType.penalty, FactType.payment_terms})
 _ID_DIGITS = re.compile(r"(?<!\d)(\d{9}|\d{11})(?!\d)")
 _BIC_SHAPE = re.compile(r"[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?")
 _IBAN_SHAPE = re.compile(r"[A-Z]{2}\d{2}[A-Z0-9]{11,30}")
-_REFERENCE_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9\-/_.]{0,30}[A-Za-z0-9]")
+#: A reference from another source, read as ``find_contract_numbers`` reads one.
+_REFERENCE_TOKEN = re.compile(_REFERENCE_GROUP)
 _LEADING_MARKER = re.compile(r"^\s*(?:№|#|N[oº°]?\.?|N:)\s*", re.IGNORECASE)
 #: A hit has to cover this share of the value to stand for it. "24 months" is a duration;
 #: "30% advance, remainder within 10 days" is a summary that merely contains one.
@@ -1052,7 +1063,8 @@ def normalize_fact_value(ft: FactType, value: str) -> str | float | None:
         return m.group(0) if m else None
     if ft == FactType.contract_number:
         m = _REFERENCE_TOKEN.fullmatch(_SPACED_SLASH.sub("/", _LEADING_MARKER.sub("", v)))
-        return m.group(0) if m and any(ch.isdigit() for ch in m.group(0)) else None
+        found = m.group(0) if m else ""
+        return found if len(found) >= 2 and any(ch.isdigit() for ch in found) else None
     if ft in _MONEY_TYPES:
         hit = _only(find_amounts(v), v)
         if hit is not None:
