@@ -173,17 +173,24 @@ _LABEL_RATE = r"(?:\d{1,2}(?:[.,]\d+)?\s*%\s*)?"
 _KA_VAT = r"(?:დღგ(?:-?ის|-?ს)?|გადასახადის)\s*"
 _INCL_VAT = re.compile(
     rf"\b(?:incl(?:\.|uding|usive)?|with)\s*(?:of\s+)?(?:the\s+)?{_LABEL_RATE}{_VAT_NAME}"
-    rf"|{_VAT_NAME}\s+incl|{_KA_VAT}ჩათვლით",
+    rf"|{_VAT_NAME}[\s-]+incl|{_KA_VAT}ჩათვლით",
     re.IGNORECASE,
 )
+#: The total without the tax, however joined: "excl. VAT", "before VAT", "VAT-exclusive total".
 _EXCL_VAT = re.compile(
     rf"\b(?:excl(?:\.|uding|usive)?|without|before|net\s+of)\s*(?:of\s+)?(?:the\s+)?"
-    rf"{_LABEL_RATE}{_VAT_NAME}|{_KA_VAT}გარეშე",
+    rf"{_LABEL_RATE}{_VAT_NAME}|{_VAT_NAME}[\s-]+excl|{_KA_VAT}გარეშე",
     re.IGNORECASE,
 )
-#: The VAT row: the tax's name opens the label, after an "Add" or its rate at most ("VAT 18%",
-#: "Value added tax @ 18%", "Add 18% VAT", "დამატებული ღირებულების გადასახადი 18%").
-_VAT = re.compile(rf"^\s*(?:add(?:ing)?\s+)?{_LABEL_RATE}{_VAT_NAME}", re.IGNORECASE)
+#: The VAT row: the tax's name opens the label, after an "Add", its rate or a word saying the
+#: row is its sum at most ("VAT 18%", "Value added tax @ 18%", "Add 18% VAT", "Total VAT",
+#: "Amount of VAT", "სულ დღგ"). A label that also says incl. or excl. VAT is a total, never the
+#: VAT row (``_plays``): "Total VAT inclusive", "VAT-exclusive total".
+_VAT = re.compile(
+    rf"^\s*(?:(?:total|sum|amount|სულ|ჯამი)(?:\s+of)?\s+)?(?:add(?:ing)?\s+)?"
+    rf"{_LABEL_RATE}{_VAT_NAME}",
+    re.IGNORECASE,
+)
 _TOTAL_COST = re.compile(r"\btotal\s+cost|ჯამური\s+ღირებულება", re.IGNORECASE)
 #: Overheads and profit by their usual names, English and Georgian: "Indirect costs", "General
 #: expenses", "არაპირდაპირი ხარჯები"; "Margin", "Mark-up", "გეგმიური დაგროვება" (the planned

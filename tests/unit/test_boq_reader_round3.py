@@ -11,7 +11,16 @@ from __future__ import annotations
 
 import pytest
 
-from procurement_agent.checks.boq import _num, norm_unit
+from procurement_agent.checks.boq import (
+    BoqWorkbook,
+    SummaryRow,
+    _num,
+    _plays,
+    grand_total,
+    norm_unit,
+    reconcile_summary,
+    summary_roles,
+)
 
 # --- numbers typed as text --------------------------------------------------------------------
 
@@ -116,3 +125,70 @@ def test_every_name_of_a_measure_folds_to_that_measure(measure: str, spelling: s
 )
 def test_names_of_different_measures_stay_apart(a: str, b: str) -> None:
     assert norm_unit(a) != norm_unit(b)
+
+
+# --- the Summary's VAT row worded "Total VAT" -----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("role", "label"),
+    [
+        ("vat", "Total VAT"),
+        ("vat", "Total VAT 18%"),
+        ("vat", "VAT amount"),
+        ("vat", "Amount of VAT"),
+        ("vat", "სულ დღგ"),
+        ("incl", "VAT-inclusive total"),
+        ("incl", "Total VAT inclusive"),
+        ("excl", "VAT-exclusive total"),
+        ("excl", "Total VAT exclusive"),
+    ],
+)
+def test_a_vat_row_or_total_worded_around_the_tax_name_plays_its_part(
+    role: str, label: str
+) -> None:
+    assert _plays(role, label)
+
+
+@pytest.mark.parametrize(
+    ("role", "label"),
+    [
+        ("vat", "VAT-inclusive total"),
+        ("vat", "Total VAT inclusive"),
+        ("vat", "VAT-exclusive total"),
+        ("vat", "Total excl. VAT"),
+        ("vat", "Total incl. VAT"),
+        ("vat", "Total cost"),
+        ("vat", "Total private works"),
+        ("cost", "Total VAT"),
+        ("incl", "Total VAT"),
+        ("excl", "Total VAT"),
+        ("incl", "VAT-exclusive total"),
+    ],
+)
+def test_a_row_worded_near_the_vat_row_does_not_take_its_part(role: str, label: str) -> None:
+    assert not _plays(role, label)
+
+
+@pytest.mark.parametrize(
+    ("vat_label", "incl_label"),
+    [("Total VAT", "TOTAL PRICE INCLUDING VAT"), ("VAT", "VAT-inclusive total")],
+)
+def test_a_chain_with_its_vat_row_or_total_worded_so_reconciles_and_ranks(
+    vat_label: str, incl_label: str
+) -> None:
+    book = BoqWorkbook(
+        name="B",
+        summary_sheet="SUMMARY",
+        summary_rows=[
+            SummaryRow(9, "1", "WORKS", 2000.0),
+            SummaryRow(10, "", "TOTAL COST", 2000.0),
+            SummaryRow(11, "", "TOTAL PRICE EXCL. VAT", 2000.0),
+            SummaryRow(12, "", vat_label, 360.0, rate=0.18),
+            SummaryRow(13, "", incl_label, 2360.0),
+        ],
+    )
+    roles = summary_roles(book)
+    assert (roles["vat"].row, roles["incl"].row) == (12, 13)
+    assert grand_total(book) == 2360.0
+    assert reconcile_summary(book) == []
