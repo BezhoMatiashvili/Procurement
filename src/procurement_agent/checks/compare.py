@@ -412,7 +412,7 @@ def hits_of(text: str, *, reference: str = "") -> list[_Hit]:
     another alphabet inside a Georgian word is read past (``_as_meant``); ``reference``, the
     text this one is compared with, says which word it was meant to be.
     """
-    text = _as_meant(normalize_confusables(text), reference)
+    text = _with_figures(_as_meant(normalize_confusables(text), reference))[0]
     out: list[_Hit] = []
     seen: set[tuple[FactType, str]] = set()
 
@@ -606,6 +606,73 @@ def _as_meant(text: str, reference: str = "") -> str:
         pos = word.end
     out.append(text[pos:])
     return "".join(out)
+
+
+#: The unit a count of time is in, right after the count: "სამუშაო დღის", "თვის", "წლის".
+_TIME_UNIT = re.compile(
+    r"\s+(?:(?:სამუშაო|კალენდარულ[ა-ჰ]*|საბანკო)\s+)?(?:დღ|თვ[ეი]|წ[ელ]|კვირ)", re.IGNORECASE
+)
+#: A unit of time right after a word: where a count written in words may end.
+_AFTER_A_WORD_UNIT = re.compile(r"(?<=[ა-ჰ])" + _TIME_UNIT.pattern, re.IGNORECASE)
+#: Where a count's figure was shown before its words: (start, end) in the text as written, and
+#: (start, end) in the text with the figure shown.
+_Edit = tuple[int, int, int, int]
+
+
+def _with_figures(text: str) -> tuple[str, list[_Edit]]:
+    """``text`` with each count of time written only in words shown with its figure, as a
+    contract writes a count both ways: "თხუთმეტი სამუშაო დღის" is read as "15 (თხუთმეტი)
+    სამუშაო დღის" - the same term (docs/GOLD_SPEC.md section 2: a count written in words is
+    the same duration as its figure). Returns the shown text and where it differs.
+
+    The rules read a count from its figure only. A term restated in words only - "15
+    (თხუთმეტი) სამუშაო დღის" → "თხუთმეტი სამუშაო დღის" - was then the payment term removed,
+    and a real change so written ("ოცი სამუშაო დღის") the term removed rather than changed.
+    Only a whole number right before a unit of time, outside brackets: an ordinal ("მეორე
+    დღეს") is no count, and words in brackets are a figure's own.
+    """
+    edits: list[_Edit] = []
+    out: list[str] = []
+    pos = shift = 0
+    for unit in _AFTER_A_WORD_UNIT.finditer(text):
+        run = _WORDS_BEFORE.search(text, max(pos, unit.start() - 120), unit.start())
+        if run is None:
+            continue
+        read: tuple[int, int] | None = None
+        for word in re.finditer(r"[ა-ჰ]+", run.group(1)):  # the longest run that is a number
+            value = parse_number_words(run.group(1)[word.start() :])
+            if value is not None and value == int(value) and value > 0:
+                read = run.start(1) + word.start(), int(value)
+                break
+        if read is None:
+            continue
+        start, value = read
+        end = unit.start()
+        if _in_brackets(text, start) or text[:start].rstrip().endswith(tuple("0123456789")):
+            continue
+        shown = f"{value} ({text[start:end]})"
+        out.append(text[pos:start])
+        out.append(shown)
+        edits.append((start, end, start + shift, start + shift + len(shown)))
+        shift += len(shown) - (end - start)
+        pos = end
+    if not edits:
+        return text, []
+    out.append(text[pos:])
+    return "".join(out), edits
+
+
+def _written_at(edits: list[_Edit], pos: int, *, end: bool) -> int:
+    """Where ``pos`` of the text ``_with_figures`` showed stands in the text as written: a
+    position inside a shown count is its words' start, or their end for a span's end."""
+    shift = 0
+    for start, stop, shown_start, shown_stop in edits:
+        if pos <= shown_start:
+            return pos - shift
+        if pos <= shown_stop:
+            return stop if end or pos == shown_stop else start
+        shift = shown_stop - stop
+    return pos - shift
 
 
 #: A period as ``docs/GOLD_SPEC.md`` writes it, "start/end"; ".." for an end not stated.
@@ -1445,32 +1512,39 @@ def _value_spans(text: str) -> list[_Span]:
     from procurement_agent.checks.contract_terms import tax_phrases
     from procurement_agent.extraction.rules import _PER_PERIOD
 
+    # the rules read a count written only in words with its figure shown (``_with_figures``);
+    # where they read it is mapped back onto ``text``
+    shown, edits = _with_figures(text)
     spans: list[_Span] = []
-    rules = run_rules(text)
+    rules = run_rules(shown)
     i = 0
     while i < len(rules):
         r = rules[i]
-        closing = _range_end(text, rules, i)
+        closing = _range_end(shown, rules, i)
         if closing is not None:
             second = rules[closing[0]]
-            tail = _DATE_TAIL.match(text, second.end)
+            tail = _DATE_TAIL.match(shown, second.end)
             end = tail.end() if tail else second.end
             spans.append(_Span(r.start, end, f"period {r.normalized}/{second.normalized}"))
             i = closing[0] + 1
             continue
         if _ISO_DATE.match(str(r.normalized)):
-            tail = _DATE_TAIL.match(text, r.end)
-            post = _postposition(text[r.start : r.end], tail)
+            tail = _DATE_TAIL.match(shown, r.end)
+            post = _postposition(shown[r.start : r.end], tail)
             end = tail.end() if tail else r.end
             spans.append(_Span(r.start, end, f"date {r.normalized} {post}"))
         else:
-            spans.append(_Span(r.start, r.end, _span_key(text, r)))
+            spans.append(_Span(r.start, r.end, _span_key(shown, r)))
             if r.type is FactType.penalty:
-                stop = _CLAUSE_START.search(text, r.end)
-                per = _PER_PERIOD.search(text, r.end, stop.start() if stop else len(text))
+                stop = _CLAUSE_START.search(shown, r.end)
+                per = _PER_PERIOD.search(shown, r.end, stop.start() if stop else len(shown))
                 if per is not None:
                     spans.append(_Span(per.start(), per.end(), "per"))
         i += 1
+    spans = [
+        _Span(_written_at(edits, s.start, end=False), _written_at(edits, s.end, end=True), s.key)
+        for s in spans
+    ]
     spans.extend(_Span(a, b, f"period {span}") for a, b, span in _month_periods(text))
     for m in _QUANTITY.finditer(text):
         (hit,) = _quantity_hits(m.group(0)) or (None,)
@@ -1493,7 +1567,7 @@ def _value_spans(text: str) -> list[_Span]:
 _FIGURE_THEN_WORDS = re.compile(rf"(?<![\d.,])({FIGURE})\s*\(([^()\d]{{2,80}})\)")
 _WORDS_THEN_FIGURE = re.compile(rf"\(\s*({FIGURE})\s*%?\s*\)")
 #: The words right before a bracket: up to eight, the number's words among them.
-_WORDS_BEFORE = re.compile(r"((?:[ა-ჰ]+\s+){0,7}[ა-ჰ]+)\s*$")
+_WORDS_BEFORE = re.compile(r"(?<![ა-ჰ])((?:[ა-ჰ]+\s+){0,7}[ა-ჰ]+)\s*$")
 
 
 #: A decimal written out: "ნული მთელი ორი" (0.2), "ერთი მთელი ოცდახუთი მეასედი" (1.25).
@@ -3101,15 +3175,11 @@ def _classify(
     words = [
         d
         for d, read in _word_number_changes(a.text, b.text, ca, cb)
-        if not _restated(read, values + bare)
+        if not _restated(read, values + bare) and not _still_spelled(d, a.text, b.text)
     ]
-    deltas = (
-        values
-        + words
-        + numeral_word_deltas(a.text, b.text)
-        + spelling_deltas(a.text, b.text)
-        + bare
-    )
+    numerals = numeral_word_deltas(a.text, b.text)
+    values = [d for d in values if not _told_in_words(d, numerals)]
+    deltas = values + words + numerals + spelling_deltas(a.text, b.text) + bare
     if deltas:
         mat = "critical" if any(d.is_critical for d in deltas) else "substantive"
         return "changed", mat, deltas, sorted({d.rule_id for d in deltas} | set(hidden)), inline
@@ -3121,6 +3191,58 @@ def _classify(
     ):
         return "changed", "cosmetic", [], ["CMP.FORMATTING"], inline
     return "changed", "substantive", [], sorted({*hidden, "CMP.TEXT_CHANGED"}), inline
+
+
+def _still_spelled(d: ValueDelta, left: str, right: str) -> bool:
+    """Whether a number's words removed from its brackets, or added in them, are still written
+    on the other side of the line, outside brackets: "15 (თხუთმეტი) სამუშაო დღის" restated as
+    "თხუთმეტი სამუშაო დღის" keeps the words it was said to lose."""
+    if d.rule_id != "CMP.AMOUNT_WORDS" or d.kind == "changed":
+        return False
+    shown = _SHOWN_FIGURE.search((d.left if d.kind == "removed" else d.right) or "")
+    if shown is None:
+        return False
+    other = right if d.kind == "removed" else left
+    return any(amounts_equal(v, float(shown.group(1))) for v in _counts_in_words(other))
+
+
+def _counts_in_words(text: str) -> list[float]:
+    """The numbers ``text`` writes only in words, outside brackets."""
+    found = georgian_words(text)
+    out: list[float] = []
+    i = 0
+    while i < len(found):
+        j = i
+        while j < len(found) and parse_number_words(found[j][0]) is not None:
+            j += 1
+        if j == i:
+            i += 1
+            continue
+        if not _in_brackets(text, found[i][1]):
+            value = parse_number_words(" ".join(w for w, _, _ in found[i:j]))
+            if value is not None:
+                out.append(float(value))
+        i = j
+    return out
+
+
+def _told_in_words(d: ValueDelta, numerals: list[ValueDelta]) -> bool:
+    """Whether a term's change is a count written only in words that changed, which
+    ``numeral_word_deltas`` reports as its words: "ხუთი სამუშაო დღის" → "ოცდაათი სამუშაო დღის"
+    is one change, the period in words, not that and the payment term besides."""
+    if d.kind != "changed" or d.rule_id not in ("CMP.DURATION", "CMP.PAYMENT"):
+        return False
+    before, after = _figure(d.left), _figure(d.right)
+    if before is None or after is None:
+        return False
+    for w in numerals:
+        if w.rule_id != "CMP.AMOUNT_WORDS" or w.type is not FactType.duration:
+            continue
+        a, b = _SHOWN_FIGURE.search(w.left or ""), _SHOWN_FIGURE.search(w.right or "")
+        if a and b and amounts_equal(float(a.group(1)), before):
+            if amounts_equal(float(b.group(1)), after):
+                return True
+    return False
 
 
 def _in_its_column(text: str, context: _Context) -> str:
@@ -3829,7 +3951,7 @@ def _findings_of(
         )
 
     for d in field_deltas:
-        if superfluous(d):
+        if superfluous(d) or _told_in_words(d, all_deltas):
             continue
         ka, en = _delta_message(d)
         add(d.rule_id, _one_sided(d), ka, en, expected=d.left, actual=d.right, key=dedup_key(d))
