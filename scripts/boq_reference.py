@@ -386,6 +386,20 @@ def classify_template(sheet: Sheet) -> None:
 
 # ---------------------------------------------------------------------------- summary sheet
 
+#: GOLD_SPEC 5: the Summary's rows by their usual labels (folded: Latin upper-cased). The tax by
+#: its names, never the letters inside a word ("PRIVATE").
+_TAX = r"(?<![A-Zა-ჰ])(?:VAT|VALUE[ -]ADDED[ -]TAX|დღგ|დამატებული ღირებულების გადასახად[ა-ჰ]*)(?![A-Zა-ჰ])"
+_PCT = r"(?:\d{1,2}(?:[.,]\d+)?\s*%\s*)?"
+INCL_VAT = re.compile(
+    rf"\b(?:INCL(?:\.|UDING|USIVE)?|WITH)\s*(?:OF )?{_PCT}{_TAX}|{_TAX} INCL"
+    r"|(?:დღგ(?:-?ის|-?ს)?|გადასახადის)\s*ჩათვლით"
+)
+EXCL_VAT = re.compile(
+    rf"\b(?:EXCL(?:\.|UDING|USIVE)?|WITHOUT|BEFORE|NET OF)\s*(?:OF )?{_PCT}{_TAX}"
+    r"|(?:დღგ(?:-?ის|-?ს)?|გადასახადის)\s*გარეშე"
+)
+VAT_ROW = re.compile(rf"(?:ADD )?{_PCT}{_TAX}")
+
 
 def read_summary(ws_v, ws_f, sheet_names: list[str], priced: set[str]) -> SummaryInfo | None:
     total_col = desc_col = None
@@ -419,12 +433,12 @@ def read_summary(ws_v, ws_f, sheet_names: list[str], priced: set[str]) -> Summar
             role = "overheads"
         elif "PROFIT" in label:
             role = "profit"
-        elif label == "VAT":
-            role = "vat"
-        elif "VAT" in label and "EXCL" in label:
+        elif EXCL_VAT.search(label):
             role = "excl_vat"
-        elif "VAT" in label and "INCL" in label:
+        elif INCL_VAT.search(label):
             role = "incl_vat"
+        elif VAT_ROW.match(label):
+            role = "vat"
         if role:
             if role in roles:
                 notes.append(f"Summary: second row labelled like {role} at row {r} ignored")
