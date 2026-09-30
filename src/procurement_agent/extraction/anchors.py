@@ -19,14 +19,17 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from procurement_agent.extraction.normalize import (
+    FUNCTION_WORDS,
     QUOTE_CHARS,
     bic_has_country,
     iban_is_valid,
+    iban_length,
     name_stem,
     names_match,
     normalize_confusables,
     normalize_name,
     normalize_spaces,
+    strip_quotes,
     unlabelled_bic_plausible,
 )
 from procurement_agent.extraction.rules import CADASTRAL_RE
@@ -37,61 +40,137 @@ _QUOTED = rf"[{_Q}]([^{_Q}]{{2,90}}?)[{_Q}]"
 
 # Georgian legal forms. "ი/მ" and "ინდ. მეწარმე" matter because the client's tax-wording rules
 # branch on whether the contractor is a company, an individual entrepreneur or a person.
-_LEGAL_FORM = r"შპს|სს|ააიპ|სსიპ|ი\s*/\s*მ|ინდ(?:\.|ივიდუალური)?\s*მეწარმ[ეის]*"
+# A company's form is also written out in full, in any case: "შეზღუდული პასუხისმგებლობის
+# საზოგადოება „…“" is "შპს „…“", and a party name carries the abbreviation (``_legal_form``).
+_SPELLED_OUT_FORMS: tuple[tuple[str, str], ...] = (
+    (r"შეზღუდული\s+პასუხისმგებლობის\s+საზოგადოებ[აისმ]{0,2}", "შპს"),
+    (r"სააქციო\s+საზოგადოებ[აისმ]{0,2}", "სს"),
+    (r"არასამეწარმეო\s*\(?\s*არაკომერციული\s*\)?\s*იურიდიული\s+პირ[ისმა]{0,2}", "ააიპ"),
+    (r"საჯარო\s+სამართლის\s+იურიდიული\s+პირ[ისმა]{0,2}", "სსიპ"),
+)
+_LEGAL_FORM = (
+    "|".join(pattern for pattern, _ in _SPELLED_OUT_FORMS)
+    + r"|შპს|სს|ააიპ|სსიპ|ი\s*/\s*მ|ინდ(?:\.|ივიდუალური)?\s*მეწარმ[ეის]*"
+)
 
 _PARTY_NAME = re.compile(rf"(?<![ა-ჰ])({_LEGAL_FORM})\s*{_QUOTED}")
+
+
+def _legal_form(written: str) -> str:
+    """The legal form as a party name carries it: abbreviated, "ი / მ" as "ი/მ"."""
+    for pattern, short in _SPELLED_OUT_FORMS:
+        if re.fullmatch(pattern, written):
+            return short
+    return re.sub(r"\s*/\s*", "/", written)
+
+
 #: An individual entrepreneur or a natural person is named, not quoted: "ი/მ ირაკლი სულაძე",
 #: "ფ/პ ანა ბერიძე" - a first name and a surname after the abbreviation.
 _PERSON_PARTY = re.compile(
     r"(?<![ა-ჰ])(ი\s*/\s*მ|ფ\s*/\s*პ|ინდ(?:\.|ივიდუალური)?\s*მეწარმე)\s+"
     r"([ა-ჰ]{2,20}\s+[ა-ჰ]{2,25})(?![ა-ჰ])"
 )
+# The code compact, or a company's nine digits printed in threes ("406 444 789"); its value is
+# the digits alone (``_code_digits``).
 _ID_CODE = re.compile(
-    r"(?:ს\s*/\s*კ|საიდენტიფიკაციო\s*(?:კოდი|ნომერი)?|პირადი\s*ნომერი)\s*[:№#-]?\s*(\d{9}|\d{11})(?!\d)",
+    r"(?:ს\s*/\s*კ|საიდენტიფიკაციო\s*(?:კოდი|ნომერი)?|პირადი\s*ნომერი)\s*[:№#-]?\s*"
+    r"(\d{9}|\d{11}|\d{3} \d{3} \d{3})(?!\d)",
     re.IGNORECASE,
 )
+
+
+def _code_digits(code: str) -> str:
+    return code.replace(" ", "")
+
+
+_SPELLED_OUT_BEFORE_NAME = tuple(
+    (re.compile(rf"(?<![ა-ჰ]){pattern}(?=\s*[{_Q}])"), short)
+    for pattern, short in _SPELLED_OUT_FORMS
+)
+_HONORIFIC_WORD = re.compile(
+    r"(?<![ა-ჰ])(?:(?:ქალ)?ბატონ(?:ი|ის|მა)?|[ბქ]\s?-\s?ნ(?:ი|ის|მა)?\.?)\s+(?=[ა-ჰ])"
+)
+
+
+def plain_party_wording(text: str) -> str:
+    """``text`` with each legal form written out before a quoted name abbreviated and each
+    courtesy title before a name dropped: "შეზღუდული პასუხისმგებლობის საზოგადოება „ა“" and
+    "შპს „ა“", "ქალბატონ ნინო" and "ნინო" name one party and one person. For a comparison that
+    must not report the other spelling as a change."""
+    for pattern, short in _SPELLED_OUT_BEFORE_NAME:
+        text = pattern.sub(short, text)
+    return _HONORIFIC_WORD.sub("", text)
+
+
 # An address ends at ";", "(" or ")", at the end of the text, or where the next field starts.
-# The next field is recognised three ways, because the address has to stop in text that still
+# The next field is recognised four ways, because the address has to stop in text that still
 # has its line breaks (the pipeline) and in text that has been flattened to one line (the AOA
 # checker hands the anchors normalised text):
 #   * a line break followed by a label ("ტელ: ...", "ელ-ფოსტა: ..."), a numbered clause
 #     ("4.1. ...") or a new party ("შპს „...“") - a plain line break is a wrapped address line;
-#   * an inline contact label, "ტელ:" / "ელ. ფოსტა:" / "e-mail:", written on the same line.
+#   * an inline contact label, "ტელ:" / "ელ. ფოსტა:" / "e-mail:", written on the same line;
+#   * another requisite's label - the code, the account, the bank - on the same line or the
+#     next, with its colon or without: "..., ს/კ: 206...", "\nა/ა GE...";
+#   * a bare account or code on the next line.
 # "ტელ" needs its colon or full stop: "ქ. ტელავი" is a city, not a telephone number.
 _CONTACT_LABEL = r"(?:ტელ(?:ეფონი)?|ელ\.?\s?-?\s?ფოსტა|მობ(?:ილური)?|ფაქსი|e-?mail|tel|phone|fax)"
+_REQUISITE_LABEL = (
+    r"(?:ს\s*/\s*კ|საიდენტიფიკაციო(?![ა-ჰ])|საიდენტიფიკაციო\s*(?:კოდი|ნომერი)|პირადი\s*ნომერი|"
+    r"პ\s*/\s*ნ|ა\s*/\s*ა|ანგარიშ(?:ი|ის\s*ნომერი)(?![ა-ჰ])|ბანკი(?![ა-ჰ])|ბანკის\s*კოდი|"
+    r"IBAN|BIC|SWIFT)(?![A-Za-z])"
+)
 _NEXT_LINE_FIELD = (
     # a clause number needs its full stop ("4.2. "): a bare "12 " is a wrapped house number
     r"\n\s*(?:\d+(?:\.\d+)*\.\s|(?:[^\s:;]{1,25}\s?){1,3}[:\uff1a]|"
-    rf"(?:{_LEGAL_FORM})\s*[{_Q}])"
+    rf"(?:{_LEGAL_FORM})\s*[{_Q}]|[A-Z]{{2}}\d{{2}}[A-Z0-9]{{4}}|(?:\d{{9}}|\d{{11}})(?!\d))"
 )
 _ADDRESS = re.compile(
     r"(?:იურიდიული\s*)?მისამართი\s*[:\uff1a]\s*([^;()]{4,140}?)\s*"
-    rf"(?=[;()]|{_NEXT_LINE_FIELD}|[\s,]+{_CONTACT_LABEL}\s*[.:\uff1a]|\s*$)",
+    rf"(?=[;()]|{_NEXT_LINE_FIELD}|[\s,]+{_CONTACT_LABEL}\s*[.:\uff1a]|"
+    rf"[\s,]+{_REQUISITE_LABEL}|\s*$)",
     re.IGNORECASE,
 )
-# "დირექტორი ნინო კაპანაძე", "დირექტორი: დავით მელაძე",
+#: "ბატონი", "ქალბატონ", "ბ-ნ", "ქ-ნი": a courtesy title before a name, not part of it
+_HONORIFIC = r"(?:(?:ქალ)?ბატონ(?:ი|ის|მა)?\s+|[ბქ]\s?-\s?ნ(?:ი|ის|მა)?\.?\s*)?"
+#: a first name and a surname (and a third word the reader may cut), or an initial and a surname
+_PERSON = r"[ა-ჰ]\.\s?[ა-ჰ]{2,25}(?![ა-ჰ])|[ა-ჰ]{2,20}(?:\s+[ა-ჰ]{2,25}){1,2}"
+# "დირექტორი ნინო კაპანაძე", "დირექტორი: დავით მელაძე", "დირექტორი: დ. მელაძე",
 # "წარმოდგენილი გენერალური დირექტორის, დავით მელაძის სახით"
 # The label must end its word ("დირექტორთან შეთანხმებით" is "in agreement with the director",
 # no name), and a deputy or an acting director is not the director.
 _DIRECTOR = re.compile(
-    r"(?:გენერალური\s+)?დირექტორ(?:ი|ის|მა)?(?![ა-ჰ])\s*[:,]?\s*"
-    r"(?!მოადგილ|მოვალეობ|შემსრულებ)"
-    r"([ა-ჰ]{2,20}(?:\s+[ა-ჰ]{2,25}){1,2})"
+    r"(?:გენერალური\s+)?დირექტორ(?:ი|ის|მა)?(?![ა-ჰ])\s*(?P<sep>[:,]?)\s*"
+    rf"{_HONORIFIC}(?!მოადგილ|მოვალეობ|შემსრულებ)(?P<name>{_PERSON})"
 )
 # "წარმოდგენილი მინდობილობით მოქმედი პირის, ლევან გელაშვილის სახით", "მინდობილობით: ლევან
 # გელაშვილი": a signatory acting under a power of attorney, not the party's director
 _PROXY = re.compile(
     r"(?:მინდობილობით(?:\s+მოქმედი\s+პირ(?:ი|ის|მა)?)?|რწმუნებულ(?:ი|ის|მა))(?![ა-ჰ])"
-    r"\s*[:,]?\s*([ა-ჰ]{2,20}\s+[ა-ჰ]{2,25})(?![ა-ჰ])"
+    rf"\s*(?P<sep>[:,]?)\s*{_HONORIFIC}"
+    r"(?P<name>[ა-ჰ]\.\s?[ა-ჰ]{2,25}|[ა-ჰ]{2,20}\s+[ა-ჰ]{2,25})(?![ა-ჰ])"
 )
 _PROJECT_WORD = r"პრო[ეა]{1,3}ქტ[ა-ჰ]*"
-# "პროექტ „ზღვის რეზიდენსი“", and after a dash or a colon: "პროექტის - „ზღვის რეზიდენსი“"
-_PROJECT = re.compile(rf"{_PROJECT_WORD}\s*(?:[-\u2013\u2014:]\s*)?{_QUOTED}")
-_PROJECT_REV = re.compile(rf"{_QUOTED}\s*{_PROJECT_WORD}")
-_IBAN = re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b")
-# An IBAN is also printed in groups of four ("GE29 NB00 0000 ..."). The grouped form can run
-# on into a following capitalised word, so it is accepted only at a length whose checksum
-# validates - see ``_ibans``.
+# "პროექტ „ზღვის რეზიდენსი“", after a dash or a colon: "პროექტის - „ზღვის რეზიდენსი“", and
+# after a label noun: "პროექტის დასახელება: „ზღვის რეზიდენსი“"
+_PROJECT = re.compile(
+    rf"{_PROJECT_WORD}(?:\s+(?:დასახელება|სახელწოდება|სახელი)[ა-ჰ]{{0,2}})?"
+    r"\s*(?:[-\u2013\u2014:]\s*)?"
+    rf"{_QUOTED}"
+)
+# "„ზღვის რეზიდენსი“ პროექტი", and with the case ending written after the quote:
+# "„ზღვის რეზიდენსი“-ს პროექტის" - the quote then holds the nominative
+_PROJECT_REV = re.compile(rf"{_QUOTED}(?:-?[ა-ჰ]{{1,4}}(?![ა-ჰ]))?\s*{_PROJECT_WORD}")
+# An IBAN: a country, two check digits and the account, compact ("GE29NB00...") or printed in
+# groups of four ("GE29 NB00 0000 ..."), and now and then cut by a line break. The first piece
+# starts it; the pieces after it are read up to the country's length - see ``_ibans``.
+_IBAN_START = re.compile(r"\b([A-Z]{2})\d{2}[A-Z0-9]*\b")
+_IBAN_PIECE = re.compile(r"[ \n]([A-Z0-9]+)\b")
+#: the shortest IBAN any country issues
+_IBAN_MIN = 15
+#: "4." or "4)" - the next clause's number, which may follow an account at the end of a line
+_CLAUSE_NUMBER = re.compile(r"\d{1,2}[.)]")
+# The grouped form of a country whose length is unknown can run on into a following capitalised
+# word, so it is accepted only at a length whose checksum validates - see ``_iban_by_checksum``.
 _IBAN_GROUPED = re.compile(r"\b[A-Z]{2}\d{2}(?: [A-Z0-9]{4}){2,7}(?: [A-Z0-9]{1,3})?\b")
 # Unlabelled BIC. The shape alone fits any 8- or 11-letter capitalised word ("SUPPLIER",
 # "DESCRIPTION"), so a match is kept only when ``unlabelled_bic_plausible`` says so.
@@ -220,23 +299,72 @@ def _prepare(text: str) -> str:
     return "\n".join(normalize_confusables(line) for line in text.split("\n"))
 
 
+def _iban_by_length(text: str, m: re.Match[str], length: int) -> tuple[str, int, int] | None:
+    """The IBAN starting at ``m`` for a country whose IBANs are ``length`` characters long.
+
+    Pieces after the first - groups of four, or the rest of an IBAN a line break or a soft break
+    cut off ("GE07XY0000000123 456789") - are taken while the whole still fits the length, and
+    the IBAN is whole when it has exactly that length. Its checksum is not asked: an anonymised
+    or mistyped account fails it and is still the account the document states. A clause number
+    after a short IBAN ("... 4. აქტი") is never a piece of it.
+    """
+    pieces, end = [m.group(0)], m.end()
+    total = len(m.group(0))
+    ran_out = True
+    while total < length:
+        pm = _IBAN_PIECE.match(text, end)
+        if pm is None:
+            break
+        piece = pm.group(1)
+        if total + len(piece) > length or _CLAUSE_NUMBER.match(text, pm.start(1)):
+            ran_out = False
+            break
+        pieces.append(piece)
+        total += len(piece)
+        end = pm.end()
+    if total == length:
+        return "".join(pieces), m.start(), end
+    grouped = len(pieces) > 1 and all(len(p) == 4 for p in pieces[:-1])
+    if grouped and ran_out and total >= _IBAN_MIN:
+        # a grouped account a digit short or long is still the account written: a mistake to report
+        return "".join(pieces), m.start(), end
+    if len(m.group(0)) >= _IBAN_MIN:
+        return m.group(0), m.start(), m.end()
+    return None
+
+
+def _iban_by_checksum(m: re.Match[str]) -> tuple[str, int, int] | None:
+    """A grouped IBAN of a country of unknown length: drop trailing groups until the checksum
+    holds, so "XX29 NB00 ... 17 BANK" does not take the next word with it."""
+    groups = m.group(0).split(" ")
+    while len(groups) > 3:
+        candidate = "".join(groups)
+        if iban_is_valid(candidate):
+            return candidate, m.start(), m.start() + len(" ".join(groups))
+        groups.pop()
+    return None
+
+
 def _ibans(text: str) -> list[tuple[str, int, int]]:
-    """(IBAN, start, end) for compact and grouped IBANs, compact ones never overlapped twice."""
+    """(IBAN, start, end) for compact, grouped and broken IBANs, each read once.
+
+    Where an IBAN ends is decided by its country's fixed length (``iban_length``) wherever that
+    is known; the checksum decides only for a grouped IBAN of another country.
+    """
     out: list[tuple[str, int, int]] = []
-    for m in _IBAN.finditer(text):
-        out.append((m.group(0), m.start(), m.end()))
-    for m in _IBAN_GROUPED.finditer(text):
-        if any(s < m.end() and m.start() < e for _, s, e in out):
+    for m in _IBAN_START.finditer(text):
+        if any(s <= m.start() < e for _, s, e in out):
             continue
-        groups = m.group(0).split(" ")
-        # drop trailing groups until the checksum holds: "GE29 NB00 ... 17 BANK" must not
-        # take the next word with it
-        while len(groups) > 3:
-            candidate = "".join(groups)
-            if iban_is_valid(candidate):
-                out.append((candidate, m.start(), m.start() + len(" ".join(groups))))
-                break
-            groups.pop()
+        length = iban_length(m.group(1))
+        if length is not None:
+            found = _iban_by_length(text, m, length)
+        elif len(m.group(0)) >= _IBAN_MIN:
+            found = (m.group(0), m.start(), m.end())
+        else:
+            grouped = _IBAN_GROUPED.match(text, m.start())
+            found = _iban_by_checksum(grouped) if grouped else None
+        if found is not None:
+            out.append(found)
     return out
 
 
@@ -250,6 +378,186 @@ def _same_party(a: Party, b: Party, *, split_conflicts: bool = False) -> bool:
     return bool(a.name and b.name and names_match(a.name, b.name))
 
 
+# --- signatories -----------------------------------------------------------------------------
+
+#: What a Georgian surname ends in: -შვილი, -ძე, -ია, -უა, -ავა, -ანი, -ელი, -ონი, in any case.
+#: A word after "დირექტორი" in a sentence ("პასუხს აგებს", "უფლებამოსილების") has none of these;
+#: a name that has none is still read where its place says it is a name.
+_SURNAME_NOMINATIVE = ("შვილი", "ძე", "ია", "უა", "ავა", "ანი", "ელი", "ონი")
+#: the stem a consonant-final surname keeps before a case ending: "ბერიძ-ის", "მაჭავარიან-ის"
+_SURNAME_STEM = ("შვილ", "ძ", "ან", "ელ", "ონ")
+_CASE_ENDINGS = ("ისა", "ის", "ით", "მა", "ს", "მ")
+#: The name's own line or cell ends after it: the line, the text, a quote, a signature line.
+_NAME_ENDS = re.compile(rf"[ \t]*(?:$|\n|[{_Q}_/])")
+#: The name is the preamble's "..., X Y-ის სახით" ("in the person of X Y").
+_IN_THE_PERSON_OF = re.compile(r"\s*სახით(?![ა-ჰ])")
+_NAME_WORD = re.compile(r"[ა-ჰ]\.|[ა-ჰ]+")
+
+
+def _surname_shaped(word: str) -> bool:
+    """Whether ``word``, in any case, ends as a Georgian surname does ("ჩხეტიას", "ბერიძის")."""
+    if word.endswith(_SURNAME_NOMINATIVE):
+        return len(word) >= 5  # "ხელი" ("hand") ends as "-ელი" does, and is no surname
+    stems = [word[: -len(e)] for e in _CASE_ENDINGS if word.endswith(e) and len(word) - len(e) >= 4]
+    return any(s.endswith((*_SURNAME_NOMINATIVE, *_SURNAME_STEM)) for s in stems)
+
+
+@dataclass(slots=True)
+class _Signatory:
+    """A name read after a director's or an attorney's label, not yet given to a party."""
+
+    owner: Party
+    name: str
+    start: int
+    #: its place says it is a name: after a colon, before "სახით", alone on its line, or with a
+    #: surname's ending. Otherwise it is kept only when the document names the person again.
+    confirmed: bool
+    proxy: bool
+
+
+#: The longest first name a signatory is given: "კონსტანტინე" has eleven letters, and a longer
+#: word after the label is a predicate ("უფლებამოსილია", "is authorised"), not a name.
+_FIRST_NAME_MAX = 12
+
+
+def _name_shaped(first: str, last: str) -> bool:
+    """Whether two words can be a first name and a surname. Not when the first is longer than
+    any first name, nor when it is a genitive the second word, no surname, depends on - a noun
+    phrase, "ხელმოწერის უფლება" ("the right of signature"): in a person's name only the
+    surname takes the case ending."""
+    if first.endswith(".") and len(first) == 2:
+        return True  # an initial
+    if len(first) > _FIRST_NAME_MAX:
+        return False
+    return not (first.endswith("ის") and len(first) > 4 and not _surname_shaped(last))
+
+
+def _read_signatory(window: str, m: re.Match[str]) -> tuple[str, int, bool] | None:
+    """(name, end of the name in ``window``, confirmed) for a director's or an attorney's label,
+    or None when the words after it are no name - "ან მის მიერ" ("or by him")."""
+    words: list[re.Match[str]] = []
+    for w in _NAME_WORD.finditer(m.group("name")):
+        if w.group(0) in _NOT_A_NAME or len(words) == 2:
+            break
+        words.append(w)
+    if len(words) < 2:
+        return None
+    first, last = words[0].group(0), words[1].group(0)
+    if {first, last} & (FUNCTION_WORDS | _NOT_A_NAME) or last.endswith("."):
+        return None
+    if not _name_shaped(first, last):
+        return None
+    end = m.start("name") + words[1].end()
+    confirmed = bool(
+        m.group("sep") == ":"
+        or _IN_THE_PERSON_OF.match(window, end)
+        or _NAME_ENDS.match(window, end)
+        or _surname_shaped(last)
+    )
+    return f"{first} {last}", end, confirmed
+
+
+# --- a signature table serialised row by row ------------------------------------------------
+
+# Docling writes a table cell by cell as "<first cell>, <column header> = <cell>." per row, and
+# drops the header row's first cell. A two-column signature table - the customer left, the
+# contractor right - thus reads "შპს „ა“, „შემსრულებელი“ = შპს „ბ“. დირექტორი: X, „შემსრულებელი“ =
+# დირექტორი: Y." The left column's director X then stands inside the right party's text.
+#: after a name: the next cell stands under the column header ``h``
+_GRID_NEXT = re.compile(r"\s*,\s*(?P<h>[^,=\n]{2,80}?)\s=\s")
+#: before a party's name: the name is a cell under the column header ``h``
+_GRID_BEFORE = re.compile(r",\s*(?P<h>[^,=\n]{2,80}?)\s=\s*$")
+
+
+def _column(header: str) -> tuple[str, str] | None:
+    """A column header that says whose column it is: a side ("შემსრულებელი") or a party's name."""
+    word = _clean(strip_quotes(header))
+    if word in _SIDE_WORDS:
+        return "role", word
+    if pm := _PARTY_NAME.fullmatch(_clean(header)):
+        return "name", _clean(f"{_legal_form(pm.group(1))} {pm.group(2)}")
+    return None
+
+
+def _in_column(p: Party, column: tuple[str, str], headed: dict[int, tuple[str, str]]) -> bool:
+    kind, value = column
+    if headed.get(id(p)) == column:
+        return True
+    if kind == "role":
+        return p.role == value
+    return bool(p.name and names_match(p.name, value))
+
+
+def _grid_owner(
+    text: str,
+    end: int,
+    party: Party,
+    earlier: list[Party],
+    headed: dict[int, tuple[str, str]],
+) -> Party:
+    """Whose signatory the name ending at ``end`` is.
+
+    The party whose text it stands in, unless the name is a table's first cell with a column
+    header after it that names that party (or the party is a bank's name in the payment lines):
+    the name is then in another column, the one of the nearest party before it that the header
+    does not name.
+    """
+    # the whole text: the header is often the next party's name, where this party's text ends
+    gm = _GRID_NEXT.match(text, end)
+    column = _column(gm.group("h")) if gm else None
+    if column is None:
+        return party
+    for q in reversed([*earlier, party]):
+        if not q.is_bank and not _in_column(q, column, headed):
+            return q
+    return party
+
+
+# --- parties ----------------------------------------------------------------------------------
+
+#: a side's role word written directly above or before a name: "„შემკვეთი“ სს „...ბანკი“"
+_SIDE_ABOVE = re.compile(rf"[{_Q}](?:{'|'.join(sorted(_SIDE_WORDS))})[{_Q}]\s*[:\-]?\s*$")
+
+
+def _is_a_named_party(p: Party, parties: list[Party], before: str) -> bool:
+    """A bank's name that is a contracting party: its side is defined or written above it, or a
+    party with an identification code carries the same name. A bank the payment lines name as a
+    bank ("ბანკი: სს „...“") stays a bank."""
+    if "ბანკ" in before[-25:]:
+        return False
+    return (
+        p.role_source == "defined"
+        or _SIDE_ABOVE.search(before) is not None
+        or any(
+            q is not p
+            and not q.is_bank
+            and q.id_code
+            and q.name
+            and names_match(p.name or "", q.name)
+            for q in parties
+        )
+    )
+
+
+def _merge_into(existing: Party, p: Party) -> None:
+    existing.name = existing.name or p.name
+    if not existing.id_code:
+        existing.id_code, existing.id_span = p.id_code, p.id_span
+    existing.address = existing.address or p.address
+    if not existing.role or (p.role_source == "defined" and existing.role_source != "defined"):
+        existing.role, existing.role_source = p.role, p.role_source
+        existing.role_span = p.role_span
+    existing.accounts.extend(a for a in p.accounts if a not in existing.accounts)
+    _add_names(existing.directors, p.directors)
+    _add_names(existing.proxies, p.proxies)
+
+
+def _add_names(names: list[str], new: list[str]) -> None:
+    for d in new:
+        if not any(names_match(d, e) for e in names):
+            names.append(d)
+
+
 def find_parties(text: str, *, split_conflicts: bool = False) -> list[Party]:
     """Find every contracting party and the labelled fields that belong to it.
 
@@ -258,6 +566,12 @@ def find_parties(text: str, *, split_conflicts: bool = False) -> list[Party]:
     identification code (or by name when there is none), so that the requisites block at the
     top and the signature block at the bottom contribute to one record. A role the document
     defines ("შემდგომში „…“") wins over a signature block's bare role word.
+
+    A bank named in the payment lines is no party: what its window holds - the account, and a
+    signatory listed after the bank lines - belongs to the party before it. A signatory is a
+    name where the label's place says so (``_read_signatory``), or one the document names again;
+    and one in the left column of a signature table goes to the left column's party
+    (``_grid_owner``).
 
     ``split_conflicts`` keeps two records with one code but different names apart instead of
     merging them. The AOA checker asks for it, to see a code given to the wrong party; the
@@ -276,43 +590,31 @@ def find_parties(text: str, *, split_conflicts: bool = False) -> list[Party]:
         return []
 
     parties: list[Party] = []
+    befores: list[str] = []
+    headed: dict[int, tuple[str, str]] = {}
+    signatories: list[_Signatory] = []
     for i, m in enumerate(matches):
         start = m.start()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
         window = text[start:end]
         before = text[max(0, start - 40) : start]
 
-        # "ი / მ" and "ი/მ" are one legal form
-        legal = re.sub(r"\s*/\s*", "/", m.group(1))
-        party = Party(name=_clean(f"{legal} {m.group(2)}"), span=m.span())
+        party = Party(name=_clean(f"{_legal_form(m.group(1))} {m.group(2)}"), span=m.span())
         # "ბანკი: სს „საქართველოს ბანკი“" and "...გადარიცხვით: სს „საქართველოს ბანკი“,
         # ბანკის კოდი:" are payment details, not contracting parties. A real party always
         # brings an identification code with it, so require one before believing the name.
         after = window[len(m.group(0)) : len(m.group(0)) + 60]
         looks_like_bank = "ბანკ" in before[-25:] or "ბანკ" in m.group(2) or "ბანკის კოდი" in after
         party.is_bank = looks_like_bank and not _ID_CODE.search(window[: len(m.group(0)) + 80])
+        gm = _GRID_BEFORE.search(text[max(0, start - 100) : start])
+        if gm and (column := _column(gm.group("h"))):
+            headed[id(party)] = column
 
         if mm := _ID_CODE.search(window):
-            party.id_code = mm.group(1)
+            party.id_code = _code_digits(mm.group(1))
             party.id_span = (start + mm.start(1), start + mm.end(1))
         if mm := _ADDRESS.search(window):
             party.address = _clean(mm.group(1))
-        for dm in _DIRECTOR.finditer(window):
-            words: list[str] = []
-            for w in _clean(dm.group(1)).split():
-                if w in _NOT_A_NAME:
-                    break
-                words.append(w)
-            if len(words) >= 2:
-                cand = " ".join(words[:2])
-                if not any(names_match(cand, d) for d in party.directors):
-                    party.directors.append(cand)
-        for pm in _PROXY.finditer(window):
-            cand = _clean(pm.group(1))
-            if cand.split()[0] not in _NOT_A_NAME and not any(
-                names_match(cand, p) for p in party.proxies
-            ):
-                party.proxies.append(cand)
         if rm := _ROLE.search(window):
             party.role = _clean(rm.group(1) or rm.group(2) or "")
             # "(შემდგომში „მომსახურება“)" after a name in a clause defines the service, not the
@@ -326,17 +628,41 @@ def find_parties(text: str, *, split_conflicts: bool = False) -> list[Party]:
             if cand in ROLE_WORDS:
                 party.role = cand
                 party.role_source = "signature"
+        for label, proxy in ((_DIRECTOR, False), (_PROXY, True)):
+            for dm in label.finditer(window):
+                if (read := _read_signatory(window, dm)) is None:
+                    continue
+                name, name_end, confirmed = read
+                owner = _grid_owner(text, start + name_end, party, parties, headed)
+                signatories.append(
+                    _Signatory(owner, name, start + dm.start("name"), confirmed, proxy)
+                )
         party.accounts = list(dict.fromkeys(iban for iban, _, _ in _ibans(window)))
         parties.append(party)
+        befores.append(before)
+
+    # a name no label's place confirms is kept when the document names the person again
+    confirmed_names = [s.name for s in signatories if s.confirmed]
+    for s in sorted(signatories, key=lambda s: s.start):
+        if s.confirmed or any(names_match(s.name, c) for c in confirmed_names):
+            _add_names(s.owner.proxies if s.proxy else s.owner.directors, [s.name])
+
+    for p, before in zip(parties, befores, strict=True):
+        if p.is_bank and _is_a_named_party(p, parties, before):
+            p.is_bank = False
 
     merged: list[Party] = []
     last: Party | None = None  # the record the previous real party went into
     for p in parties:
         if p.is_bank:
-            # "ბანკი: სს „…ბანკი“, ა/ა GE…" sits inside the preceding party's requisites, so the
-            # account after the bank's name is that party's account.
+            # "ბანკი: სს „…ბანკი“, ა/ა GE…" sits inside the preceding party's requisites: the
+            # account after the bank's name, and a signatory listed after the bank lines, are
+            # that party's
             if last is not None:
                 last.accounts.extend(a for a in p.accounts if a not in last.accounts)
+                _add_names(last.directors, p.directors)
+                _add_names(last.proxies, p.proxies)
+                last.address = last.address or p.address
             continue
         existing = next(
             (q for q in merged if _same_party(p, q, split_conflicts=split_conflicts)), None
@@ -345,20 +671,7 @@ def find_parties(text: str, *, split_conflicts: bool = False) -> list[Party]:
             merged.append(p)
             last = p
             continue
-        existing.name = existing.name or p.name
-        if not existing.id_code:
-            existing.id_code, existing.id_span = p.id_code, p.id_span
-        existing.address = existing.address or p.address
-        if not existing.role or (p.role_source == "defined" and existing.role_source != "defined"):
-            existing.role, existing.role_source = p.role, p.role_source
-            existing.role_span = p.role_span
-        existing.accounts.extend(a for a in p.accounts if a not in existing.accounts)
-        for d in p.directors:
-            if not any(names_match(d, e) for e in existing.directors):
-                existing.directors.append(d)
-        for d in p.proxies:
-            if not any(names_match(d, e) for e in existing.proxies):
-                existing.proxies.append(d)
+        _merge_into(existing, p)
         last = existing
     return merged
 
@@ -416,7 +729,8 @@ def find_anchors(text: str) -> list[AnchorHit]:
         emit(ft, value, m.group(0), m.start(), m.end(), normalized=normalized, unit=unit, note=note)
 
     for m in _ID_CODE.finditer(text):
-        add(FactType.party_id_code, m.group(1), m, normalized=m.group(1))
+        code = _code_digits(m.group(1))
+        add(FactType.party_id_code, code, m, normalized=code)
     for m in _ADDRESS.finditer(text):
         add(FactType.party_address, m.group(1), m)
     forward_spans: list[tuple[int, int]] = []
@@ -466,12 +780,16 @@ def find_anchors(text: str) -> list[AnchorHit]:
         # the payment clause is not a contracting party
         if party.name:
             index = text.find(party.name)
+            # a legal form written out is not the name's text: point at where the name stands
+            start, end = (
+                (index, index + len(party.name)) if index >= 0 or party.span is None else party.span
+            )
             emit(
                 FactType.party_name,
                 party.name,
-                party.name,
-                max(index, 0),
-                max(index, 0) + len(party.name),
+                party.name if index >= 0 else text[start:end],
+                max(start, 0),
+                max(start, 0) + (end - start),
                 note=f"role: {party.role}" if party.role else None,
             )
         if party.address:
