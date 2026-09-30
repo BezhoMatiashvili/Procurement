@@ -10,8 +10,10 @@ from datetime import date
 import pytest
 
 from procurement_agent.checks.aoa import check_aoa
+from procurement_agent.checks.compare import compare
 from procurement_agent.checks.document_facts import document_facts, is_act
 from procurement_agent.config import Settings
+from procurement_agent.eval.runner import compare_label
 from procurement_agent.extraction.anchors import preamble_end
 from procurement_agent.extraction.georgian import (
     MONTH_FORMS,
@@ -24,6 +26,8 @@ from procurement_agent.extraction.pipeline import run_extraction
 from procurement_agent.extraction.rules import find_dates
 from procurement_agent.extraction.schemas import FactType, Provenance
 from procurement_agent.ingestion.chunker import Chunk, estimate_tokens
+from procurement_agent.ingestion.segmenter import Segment
+from procurement_agent.ingestion.segmenter import build as build_segments
 from tests.unit.test_aoa_check import ACT, CONTRACT
 
 # --- the day of a date: quoted, ordinal ------------------------------------------------------
@@ -323,3 +327,46 @@ def test_a_short_contracts_clause_dates_are_no_header_dates() -> None:
 def test_a_date_above_the_parties_is_the_header_date() -> None:
     text = "ქ. თბილისი, 2027 წლის 3 მარტი\n" + _PARTIES + "2.1. ფასი 2027 წლის 9 მაისი.\n"
     assert _contract_dates(text) == ["2027-03-03"]
+
+
+# --- a contract's own date, compared ---------------------------------------------------------
+
+
+def _segments(lines: list[str]) -> list[Segment]:
+    return build_segments([(t, "text", f"¶{i + 1}", None, None) for i, t in enumerate(lines)])
+
+
+def _date_changes(left: list[str], right: list[str]) -> list[tuple[str | None, str | None, str]]:
+    report = compare(
+        _segments(left),
+        _segments(right),
+        left_document_id="L",
+        right_document_id="R",
+        left_kind="docx",
+        right_kind="docx",
+    )
+    return [
+        (f.expected, f.actual, str(compare_label(f, report)))
+        for f in report.findings
+        if f.rule_id == "CMP.DATE"
+    ]
+
+
+_HEADED = [
+    "მომსახურების ხელშეკრულება N 7",
+    "ქ. ქუთაისი, 2027 წლის 4 თებერვალი",
+    *_PARTIES.splitlines(),
+    "1. „შემსრულებელი“ ასუფთავებს ოფისს.",
+    "2. ხელშეკრულება ძალაში შედის ხელმოწერის მომენტიდან.",
+]
+
+
+def test_a_contracts_heading_date_changed_is_its_contract_date() -> None:
+    right = [line.replace("4 თებერვალი", "11 თებერვალი") for line in _HEADED]
+    assert _date_changes(_HEADED, right) == [("2027-02-04", "2027-02-11", "Contract date")]
+
+
+def test_an_english_heading_date_changed_is_the_contract_date() -> None:
+    left = ["CLEANING AGREEMENT No. 7", "Kutaisi, 4 February 2027", "1. The Contractor cleans."]
+    right = [line.replace("4 February", "11 February") for line in left]
+    assert _date_changes(left, right) == [("2027-02-04", "2027-02-11", "Contract date")]
