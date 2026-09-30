@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from procurement_agent.checks.amounts import digits_and_words
-from procurement_agent.checks.aoa import _fee_like, check_aoa
+from procurement_agent.checks.aoa import _fee_like, _nearest_price, check_aoa
 from procurement_agent.checks.contract_terms import tax_phrases
 from procurement_agent.checks.findings import CheckReport, Finding
 from tests.unit.test_aoa_check import ACT, CONTRACT
@@ -131,6 +131,12 @@ class TestNearestPriceCorrection:
         assert "100.00 GEL" in finding.message_en and "1,200.00 GEL" in finding.message_en
 
 
+    def test_two_prices_equally_near_give_no_correction(self) -> None:
+        """120 is one digit and a fifth from both 100 and 150: neither is the one meant."""
+        assert _nearest_price(120, [100, 150]) is None
+        assert _nearest_price(101, [100, 150]) == 100
+
+
 # --- AOA-R2-09: the words in brackets after the currency are part of the fee ---------------------
 
 
@@ -204,6 +210,10 @@ class TestVatTokenSpellings:
 
     def test_a_dotted_abbreviation_that_is_not_vat_is_not_vat(self) -> None:
         assert [p for p in tax_phrases("100 ლარს დ.ღ ჩათვლით") if "vat" in p.names] == []
+
+    @pytest.mark.parametrize("text", ["100 ლარს ადღგ-ს ჩათვლით", "100 ლარს ჩათვლით ადღგ-ს"])
+    def test_the_token_inside_another_word_is_not_vat(self, text: str) -> None:
+        assert [p for p in tax_phrases(text) if "vat" in p.names] == []
 
     def test_a_dotted_vat_number_is_a_label(self) -> None:
         assert tax_phrases("დ.ღ.გ-ს გადამხდელის ნომერი: 123456789") == []
@@ -345,6 +355,28 @@ class TestCountDigitsAgainstTheContract:
         act, contract = self._pair("4 (ექვსი)")
         [words] = _of(_check(act, contract), "AOA.AMOUNT_WORDS")
         assert (words.actual, words.expected) == ("ექვსი", "ოთხი")
+
+    def test_a_count_the_contract_item_writes_in_digits_only_decides_too(self) -> None:
+        """The contract's list says "4 სერვისის …" with no words: its item still states 4, so
+        the act's "6 (ოთხი)" is wrong in its digits, as AOA.SERVICES says."""
+        act = self.SCOPE_ACT.replace(self._ITEM, "- 6 (ოთხი) სერვისის გვერდის აღწერა GEO/ENG")
+        report = _check(act, self.SCOPE_CONTRACT)
+        [words] = _of(report, "AOA.AMOUNT_WORDS")
+        assert (words.actual, words.expected) == ("6", "4")
+        [service] = _of(report, "AOA.SERVICES")
+        assert service.expected == "4 სერვისის გვერდის აღწერა GEO/ENG"
+
+    def test_digits_the_contract_item_states_keep_the_words_wrong(self) -> None:
+        act = self.SCOPE_ACT.replace(self._ITEM, "- 4 (ექვსი) სერვისის გვერდის აღწერა GEO/ENG")
+        [words] = _of(_check(act, self.SCOPE_CONTRACT), "AOA.AMOUNT_WORDS")
+        assert (words.actual, words.expected) == ("ექვსი", "ოთხი")
+
+    def test_a_bare_contract_number_outside_the_item_decides_nothing(self) -> None:
+        """Near miss: the pair is in no listed service, so the "4" the contract's list writes in
+        digits only is not its counterpart; the figure is taken as written."""
+        act = self.SCOPE_ACT + "2. ეგზემპლარების რაოდენობა: 6 (ოთხი).\n"
+        [words] = _of(_check(act, self.SCOPE_CONTRACT), "AOA.AMOUNT_WORDS")
+        assert (words.actual, words.expected) == ("ოთხი", "ექვსი")
 
     def test_without_a_contract_the_figure_is_taken_as_written(self) -> None:
         act, _ = self._pair("6 (ოთხი)")

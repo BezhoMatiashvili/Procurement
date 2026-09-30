@@ -316,7 +316,11 @@ correct acts, where the rules read less than the act wrote (`tests/unit/test_aoa
 * **The contract says which half is wrong.** A service count whose digits changed
   (`15 (თორმეტი)` for `12 (თორმეტი)`) had its words corrected towards the wrong digits,
   against the services rule. Every figure the contract writes in agreeing digits and words now
-  decides, as its prices did.
+  decides, as its prices did, and so does any number the contract's item aligned with the act's
+  service states, in digits alone too (`- 12 პოსტი`). A bare number anywhere else in the
+  contract (a clause number, a day count) is not the pair's counterpart. Still open: a contract
+  item that writes the count in words only (`თორმეტი პოსტი`) is not read as a number, so the
+  act's `15 (თორმეტი)` there has its words corrected; the services rule only notes that item.
 * **One VAT token.** `დ.ღ.გ.-ს ჩათვლით` and `… ლარს ჩათვლით დღგ-ს` said "VAT included" and
   were errors for a VAT-registered entrepreneur. The dotted abbreviation is one token every tax
   pattern shares (the tax amount labels and the VAT-number label too), and `ჩათვლით` before

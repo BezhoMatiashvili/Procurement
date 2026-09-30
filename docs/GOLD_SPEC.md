@@ -148,8 +148,10 @@ strict_findings: true             # anything else reported (any severity) is a f
     (words that read as no number and as no misspelling of the figure are a warning: the reader
     may be at fault). Which half of a pair that disagrees is wrong is the contract's to say: a
     figure it states - a price, or a count it writes in digits and words that agree
-    (`12 (თორმეტი) პოსტი`) - is right, and the other half is corrected; with no such figure
-    the digits are taken as written;
+    (`12 (თორმეტი) პოსტი`), or a number the contract's own item states, in digits alone too,
+    for a pair inside a listed service or the subject (`- 12 პოსტი` for the act's `- 15
+    (თორმეტი) პოსტი`) - is right, and the other half is corrected; with no such figure the
+    digits are taken as written. A number written elsewhere in the contract decides nothing;
   * a figure the act labels as before VAT (`… ლარს დღგ-ს ჩათვლით (დღგ-ს გარეშე 500 ლარი)`) is
     no second fee when another fee the act states is it with VAT added at 18%, or at a rate the
     documents write beside VAT; with the VAT amount written out, net + VAT must make the fee.

@@ -1147,8 +1147,9 @@ class AoaChecker:
             checked += 1
             if amounts_equal(spelled, digits):
                 continue
-            words_are_right = any(amounts_equal(p, spelled) for p in prices) and not any(
-                amounts_equal(p, digits) for p in prices
+            figures = [*prices, *self._counterpart_figures(pair)]
+            words_are_right = any(amounts_equal(p, spelled) for p in figures) and not any(
+                amounts_equal(p, digits) for p in figures
             )
             if words_are_right:
                 wrong, span = pair.digits_raw, pair.digits_span
@@ -1185,6 +1186,31 @@ class AoaChecker:
             if p.spelled is not None and amounts_equal(p.spelled, p.digits)
         ]
         return [*self._contract_price_values(), *agreed]
+
+    def _counterpart_figures(self, pair: DigitsAndWords) -> list[float]:
+        """The numbers the contract's counterpart of the act's listed service or subject that
+        holds ``pair`` states (``aoa_scope.align``), in digits alone or in words: the contract's
+        "- 4 სერვისის გვერდი" states the count the act's "- 6 (ოთხი) სერვისის გვერდი" is of. A
+        number written anywhere else in the contract is no counterpart. Empty without a
+        contract, or when the pair stands in no aligned item."""
+        if self.contract is None:
+            return []
+        reading = self._scope_reading()
+        aligned = [*reading.services, *([reading.subject] if reading.subject else [])]
+        for found in aligned:
+            if found.best is None:
+                continue
+            span = found.item.span or self._find_span(found.item.text)
+            if span is None or not (span[0] <= pair.span[0] and pair.span[1] <= span[1]):
+                continue
+            stated = [float(n) for n in found.best.numbers if re.fullmatch(r"\d+(?:\.\d+)?", n)]
+            agreed = [
+                p.digits
+                for p in digits_and_words(found.best.text)
+                if p.spelled is not None and amounts_equal(p.spelled, p.digits)
+            ]
+            return [*stated, *agreed]
+        return []
 
     def _contract_price_values(self) -> list[float]:
         """The contract's prices as figures, as the fee rule reads them; empty without one."""
