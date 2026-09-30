@@ -773,6 +773,24 @@ class AoaChecker:
         i = self.aoa.text.find(needle)
         return (i, i + len(needle)) if i >= 0 else None
 
+    def _code_span(self, code: str) -> tuple[int, int] | None:
+        """Where the act writes an identification code, as printed: a code in groups ("123 456
+        789") is read compact, and only the party reader's span, or its digits found with the
+        group spaces between them, lead back to the characters the act has. Never the same
+        digits inside a longer number."""
+        for p in self.aoa.parties:
+            span = p.id_span
+            if (
+                p.id_code == code
+                and span is not None
+                and 0 <= span[0] < span[1]
+                and re.sub(r"\D", "", self.aoa.text[span[0] : span[1]]) == code
+            ):
+                return span
+        grouped = r"[ \u00a0]?".join(code)
+        m = re.search(rf"(?<!\d)(?<!\d[ \u00a0]){grouped}(?!\d)(?![ \u00a0]\d)", self.aoa.text)
+        return m.span() if m is not None else None
+
     def _account_span(self, iban: str) -> tuple[int, int] | None:
         """Where the act writes an account: an IBAN printed in groups or broken over a line is
         read compact, and only the reader's span finds the characters the document has."""
@@ -1830,7 +1848,7 @@ class AoaChecker:
                     f"identification code not in the contract: {code}",
                     expected=closest,
                     actual=code,
-                    span=self._find_span(code),
+                    span=self._code_span(code),
                 )
 
         if not self.contract.parties:
