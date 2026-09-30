@@ -545,7 +545,23 @@ def find_id_codes(text: str) -> list[RuleHit]:
 
 # --- percentages -------------------------------------------------------------------------------
 
-_PCT = re.compile(r"(?<![\d.,])(\d{1,3}(?:[.,]\d{1,2})?)\s*%")
+#: A percentage: the sign, or the word - "0.3 პროცენტის", "0.3 (ნული მთელი სამი) პროცენტი",
+#: "0.2 percent", "0.2 per cent". Not the adjective "პროცენტული" ("10 პროცენტული პუნქტი").
+_PCT = re.compile(
+    r"(?<![\d.,])(\d{1,3}(?:[.,]\d{1,2})?)\s*"
+    r"(?:%|(?:\([^()\d]{1,60}\)\s*)?(?:პროცენტ(?!ულ)[ა-ჰ]*|per\s?cent(?![a-z])))",
+    re.IGNORECASE,
+)
+_PCT_NUMBER = re.compile(r"\d{1,3}(?:[.,]\d{1,2})?")
+
+
+def percent_of(hit: RuleHit) -> float | None:
+    """The rate a percentage hit states. A penalty's ``normalized`` is its canonical text once
+    the period is known ("0.5% per day"), so a reader that needs the number takes it here."""
+    if isinstance(hit.normalized, float):
+        return hit.normalized
+    m = _PCT_NUMBER.match(hit.raw_text)
+    return parse_number(m.group(0)) if m else None
 
 
 def find_percentages(text: str) -> list[RuleHit]:
@@ -560,6 +576,13 @@ def find_percentages(text: str) -> list[RuleHit]:
             m.end(),
             (FactType.penalty, FactType.vat_status, FactType.payment_terms),
         )
+        # a penalty counted per period is stated with it, canonically (docs/GOLD_SPEC.md):
+        # "0.5% per day" and "0.5% per week" are two penalties, not one
+        shown = f"{v:g}%"
+        normalized: str | float = v
+        period = penalty_period(text, m.start(), m.end()) if ft == FactType.penalty else None
+        if period is not None:
+            shown = normalized = f"{v:g}% per {period}"
         hits.append(
             RuleHit(
                 type=ft or FactType.percentage,
@@ -575,16 +598,60 @@ def find_percentages(text: str) -> list[RuleHit]:
     return hits
 
 
+#: The period a penalty counts per, written after its rate or before it: "ყოველ ვადაგადაცილებულ
+#: დღეზე", "ყოველი თვის დაგვიანებისთვის", "დღიური", "per calendar day", "for each week of
+#: delay", "For every month of delay ... 1%". Never "a month": "within a month, a penalty of 5%"
+#: is no monthly penalty.
+_PERIOD_KA = r"(დღ(?!გ)|კვირ|თვ|წელ|წლ)"
+_PER_PERIOD = re.compile(
+    rf"ყოველ(?:ი|ს)?\s+(?:[ა-ჰ]+\s+){{0,2}}{_PERIOD_KA}"
+    r"|(?:ყოველ)?(დღ|თვ|კვირ|წლ)(?:იურ|ეულ)[ა-ჰ]*"
+    r"|(?<![a-z])(?:per|each|every|for\s+each|for\s+every)\s+"
+    r"(?:calendar\s+|working\s+|business\s+|banking\s+)?(day|week|month|year)(?![a-z])",
+    re.IGNORECASE,
+)
+_PERIOD_UNITS = {
+    "დღ": "day", "კვირ": "week", "თვ": "month", "წელ": "year", "წლ": "year",
+    "day": "day", "week": "week", "month": "month", "year": "year",
+}  # fmt: skip
+#: A sentence's end: a stop followed by a space. "0.5%" and "5.1." are not ends inside a clause.
+_SENTENCE_END = re.compile(r"[.;!?](?=\s)")
+_PERIOD_AFTER = 60
+_PERIOD_BEFORE = 120
+
+
+def penalty_period(text: str, start: int, end: int) -> str | None:
+    """The period ("day", "week", "month", "year") a rate at ``text[start:end]`` counts per,
+    or None. Read after the rate first, then before it, never across the sentence's end."""
+    after = text[end : end + _PERIOD_AFTER]
+    stop = _SENTENCE_END.search(after)
+    after = after[: stop.start()] if stop else after
+    before = text[max(0, start - _PERIOD_BEFORE) : start]
+    cut = list(_SENTENCE_END.finditer(before))
+    before = before[cut[-1].end() :] if cut else before
+    found = _PER_PERIOD.search(after)
+    if found is None:
+        found = next(reversed(list(_PER_PERIOD.finditer(before))), None)
+    if found is None:
+        return None
+    unit = next(g for g in found.groups() if g)
+    return _PERIOD_UNITS[unit.lower()]
+
+
 # --- durations ---------------------------------------------------------------------------------
 
+# The count: its figure, or its figure in brackets after the words - "10 (ათი) დღე" and "ათი
+# (10) დღე" are both how contracts write it, as are "24 (twenty-four) months" and "ten (10)
+# days". Only a closed bracket: "1) დღის ..." is a list item, not one day.
+_COUNT = r"(?<![\d(])(?:\(\s*(\d{1,4})\s*\)|(\d{1,4}))"
 _DUR_KA = re.compile(
-    r"(?<!\d)(\d{1,4})\s*(?:\(\s*[ა-ჰ ]+\s*\)\s*)?(კალენდარული|სამუშაო|საბანკო)?\s*"
+    rf"{_COUNT}\s*(?:\(\s*[ა-ჰ ]+\s*\)\s*)?(კალენდარული|სამუშაო|საბანკო)?\s*"
     # "დღ(?!გ)": დღგ is VAT, and "18 დღგ-ს ჩათვლით" is not eighteen days
     r"(დღ(?!გ)|კვირ|თვ|წელ|წლ)[ა-ჰ]*",
     re.IGNORECASE,
 )
 _DUR_EN = re.compile(
-    r"(?<!\d)(\d{1,4})\s*(?:\([a-z ]+\)\s*)?(calendar|working|business|banking)?\s*"
+    rf"{_COUNT}\s*(?:\([a-z\- ]+\)\s*)?(calendar|working|business|banking)?\s*"
     r"(day|week|month|year)s?\b",
     re.IGNORECASE,
 )
@@ -596,9 +663,9 @@ def find_durations(text: str) -> list[RuleHit]:
     hits: list[RuleHit] = []
     for pat, is_ka in ((_DUR_KA, True), (_DUR_EN, False)):
         for m in pat.finditer(text):
-            n = int(m.group(1))
-            qual = m.group(2).lower() if m.group(2) else None
-            unit = m.group(3).lower()
+            n = int(m.group(1) or m.group(2))
+            qual = m.group(3).lower() if m.group(3) else None
+            unit = m.group(4).lower()
             if is_ka and unit.startswith("წ") and n >= 1900:
                 continue  # "2026 წლის ..." is a date ("of the year 2026"), not a duration
             if is_ka:
@@ -649,29 +716,38 @@ _REFERENCED_DOC = (
 # letter must not be the start of a word - the old "N[oº]?\.?" read the n of "number" as a
 # marker and returned "umber" - and the reference itself must contain a digit.
 _NUMBER_MARKER = r"(?:№|#|(?<![A-Za-z])N(?:[oº°]\.?|\.|:)?(?![A-Za-z]))"
+# A reference: groups of letters and digits joined by "-", "/", "_" or ".", and by a slash with a
+# space either side ("15 / 2026"), which the canonical form drops. Only around a slash: a space
+# before "." or "-" is a sentence's end or a dash, and a bare space is where the reference ends.
+_REFERENCE_GROUP = r"[A-Za-z0-9](?:[A-Za-z0-9\-/_.]{0,30}[A-Za-z0-9])?"
+_REFERENCE = rf"(?=[A-Za-z0-9\-/_.]*\d){_REFERENCE_GROUP}(?:\s*/\s*{_REFERENCE_GROUP})*"
+_SPACED_SLASH = re.compile(r"\s*/\s*")
 # The document word must start a word: "act" inside "Contact" and "აქტ" inside "კონტაქტი" named
 # a phone number a contract number.
 _CONTRACT_NO = re.compile(
-    rf"(?<![A-Za-zა-ჰ])(?:{_REFERENCED_DOC})\s*{_NUMBER_MARKER}\s*"
-    r"((?=[A-Za-z0-9\-/_.]*\d)[A-Za-z0-9][A-Za-z0-9\-/_.]{0,30}[A-Za-z0-9])",
+    rf"(?<![A-Za-zა-ჰ])(?:{_REFERENCED_DOC})\s*{_NUMBER_MARKER}\s*({_REFERENCE})",
     re.IGNORECASE,
 )
 
 
 def find_contract_numbers(text: str) -> list[RuleHit]:
-    return [
-        RuleHit(
-            type=FactType.contract_number,
-            value=m.group(1),
-            raw_text=m.group(0),
-            start=m.start(),
-            end=m.end(),
-            normalized=m.group(1),
-            confidence=0.8,
+    hits: list[RuleHit] = []
+    for m in _CONTRACT_NO.finditer(text):
+        number = _SPACED_SLASH.sub("/", m.group(1))
+        if len(number) < 2 or not any(ch.isdigit() for ch in number):
+            continue
+        hits.append(
+            RuleHit(
+                type=FactType.contract_number,
+                value=number,
+                raw_text=m.group(0),
+                start=m.start(),
+                end=m.end(),
+                normalized=number,
+                confidence=0.8,
+            )
         )
-        for m in _CONTRACT_NO.finditer(text)
-        if any(ch.isdigit() for ch in m.group(1))
-    ]
+    return hits
 
 
 # --- bank accounts & cadastral codes -----------------------------------------------------------
@@ -826,7 +902,7 @@ def normalize_fact_value(ft: FactType, value: str) -> str | float | None:
         m = CADASTRAL_RE.search(v)
         return m.group(0) if m else None
     if ft == FactType.contract_number:
-        m = _REFERENCE_TOKEN.fullmatch(_LEADING_MARKER.sub("", v))
+        m = _REFERENCE_TOKEN.fullmatch(_SPACED_SLASH.sub("/", _LEADING_MARKER.sub("", v)))
         return m.group(0) if m and any(ch.isdigit() for ch in m.group(0)) else None
     if ft in _MONEY_TYPES:
         hit = _only(find_amounts(v), v)

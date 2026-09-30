@@ -28,6 +28,7 @@ from procurement_agent.extraction.rules import (
     find_durations,
     find_percentages,
     nearest_keyword_group,
+    percent_of,
 )
 from procurement_agent.extraction.schemas import FactType
 
@@ -951,7 +952,7 @@ def read_advance(
             if nearest_keyword_group(sentence, p.start, p.end, _SHARE_GROUPS) == "advance":
                 shares.append(
                     AdvanceShare(
-                        percent=float(p.normalized or 0),
+                        percent=percent_of(p) or 0.0,
                         span=(a + p.start, a + p.end),
                         raw=p.raw_text,
                     )
