@@ -392,8 +392,13 @@ def _vat_status(view: DocumentView) -> DocumentFact | None:
     for fee in fees:
         a, b = fee_scope(sentences, fee.money.span)
         near.extend(p for p in phrases if a <= p.span[0] < b)
-    chosen = near or [p for p in phrases if p.kind in ("inclusion", "exclusion", "net")]
-    for kind, status in (("net", "net"), ("exclusion", "excl"), ("inclusion", "incl")):
+    chosen = near or [p for p in phrases if p.kind in ("inclusion", "exclusion", "net", "exempt")]
+    for kind, status in (
+        ("net", "net"),
+        ("exempt", "none"),
+        ("exclusion", "excl"),
+        ("inclusion", "incl"),
+    ):
         found = next((p for p in chosen if p.kind == kind), None)
         if found is not None:
             return DocumentFact(

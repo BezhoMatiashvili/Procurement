@@ -493,7 +493,7 @@ def _basis(hit: _Hit) -> str | None:
     return _DAY_BASIS.get(words[1]) if len(words) == 3 else None
 
 
-_VAT_STATUS = {"inclusion": "incl", "exclusion": "excl", "net": "net"}
+_VAT_STATUS = {"inclusion": "incl", "exclusion": "excl", "net": "net", "exempt": "none"}
 
 
 def _vat_hits(text: str) -> list[_Hit]:
