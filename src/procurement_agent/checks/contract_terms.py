@@ -133,13 +133,13 @@ AmountRole = Literal[
     "price", "advance", "remainder", "penalty", "guarantee", "tax", "equivalent"
 ]  # fmt: skip
 
-#: An amount restated in another currency beside the real one: "100 ლარი (ეკვივალენტი 37 აშშ
-#: დოლარი)". It is the same fee, not a second one, and not a price to compare.
 #: VAT's abbreviation, however it is dotted: "დღგ", "დ.ღ.გ.", "დ.ღ.გ". Every pattern that reads
 #: VAT uses this one token, so a spelling one of them learns the others know too. A case ending
 #: follows it with or without a hyphen ("დღგ-ს", "დ.ღ.გ.-ს", "დღგ-ისა").
 _KA_VAT = r"დ\.?ღ\.?გ\.?"
 
+#: An amount restated in another currency beside the real one: "100 ლარი (ეკვივალენტი 37 აშშ
+#: დოლარი)". It is the same fee, not a second one, and not a price to compare.
 _EQUIVALENT = re.compile(r"ეკვივალენტ|ექვივალენტ|equivalent|equiv\.", re.IGNORECASE)
 
 #: What the words around an amount call it. At the same distance the longer keyword wins, so
