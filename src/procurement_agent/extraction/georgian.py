@@ -195,6 +195,15 @@ _VOWEL_STEM_ENDINGS: dict[str, Case] = {"ს": "gen", "მ": "erg", "დ": "adv"
 #: nouns in "-უ" (its surnames end in "-უა"), while loanwords end in "-უს", "-უმ" and "-უდ" in
 #: the nominative - "პლუს", "კამპუს", "პრემიუმ", "ფორუმ", "გრინვუდ" - and were cut to "პლუ".
 _ONE_LETTER_STEMS = "აეოი"
+#: A case ending or a postposition hyphenated to a stem that is no Georgian word - one ending
+#: in a Latin letter, a digit or a closing bracket. The endings are the declension's own
+#: (``_ENDINGS``, and the dative's and ergative's "-ს", "-მა", "-მ"); a nominative "-ი" is not
+#: one of them.
+_HYPHENATED_ENDING = re.compile(
+    r"(?P<stem>.*[A-Za-z0-9)\]])-(?:"
+    + "|".join(sorted({e for e, _c in _ENDINGS} | {"ს", "მ"}, key=len, reverse=True))
+    + ")"
+)
 
 
 def lemma_word(word: str, *, cases: Collection[Case] | None = None) -> str:
@@ -205,7 +214,14 @@ def lemma_word(word: str, *, cases: Collection[Case] | None = None) -> str:
     apposition after "პროექტის" is a nominative or at most a genitive, never an ergative, so
     "სიგმა" there is no ergative of "სიგი". The word stays as written when its ending reads
     only as a case its place does not allow.
+
+    A Latin word, a figure or an abbreviation takes its ending after a hyphen ("Green
+    Valley-სთვის", "2-ისთვის", "N3-ის"), and the nominative is the stem without it: only a whole
+    ending of the closed list (``_HYPHENATED_ENDING``), so "ვაკე-ა" and "12/2026-ბ" keep theirs.
     """
+    hyphenated = _HYPHENATED_ENDING.fullmatch(word)
+    if hyphenated is not None:
+        return hyphenated.group("stem")
     if not is_georgian_word(word):
         return word
     case = case_of(word)

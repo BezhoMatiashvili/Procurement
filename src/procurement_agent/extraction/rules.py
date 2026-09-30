@@ -266,12 +266,18 @@ _MAGNITUDE_RE = (
     r"(?:(?:ათას|მილიონ|მილიარდ)(?:ი|ს|ის|ით|ად)?(?![ა-ჰ])|ათ\.|მლნ\.?|მლრდ\.?"
     r"|(?:thousand|million|billion|mln|bn)(?![A-Za-z]))"
 )
+#: The figure's words in brackets between the figure and its magnitude: "36 (ოცდათექვსმეტი) ათას
+#: ლარს", "1,2 (ერთი მთელი ორი) მილიონ ლარს". Letters and spaces only, and only where a magnitude
+#: word follows: a bracket before the currency is ``_PAREN``'s.
+_WORDS_BEFORE_MAGNITUDE = rf"(?:\s*\(\s*[ა-ჰA-Za-z][ა-ჰA-Za-z\s-]{{0,80}}\)(?=\s*{_MAGNITUDE_RE}))?"
 _AMOUNT_AFTER = re.compile(
-    rf"(?<![\d.,])({_NUM_RE})(?:\s*({_MAGNITUDE_RE}))?\s*{_PAREN}({_CUR_RE})(?![A-Za-zა-ჰ])",
+    rf"(?<![\d.,])({_NUM_RE}){_WORDS_BEFORE_MAGNITUDE}(?:\s*({_MAGNITUDE_RE}))?\s*{_PAREN}"
+    rf"({_CUR_RE})(?![A-Za-zა-ჰ])",
     re.IGNORECASE,
 )
 _AMOUNT_BEFORE = re.compile(
-    rf"({_CUR_BEFORE_RE})\s*({_NUM_RE})(?![\d])(?:\s*({_MAGNITUDE_RE}))?", re.IGNORECASE
+    rf"({_CUR_BEFORE_RE})\s*({_NUM_RE})(?![\d]){_WORDS_BEFORE_MAGNITUDE}(?:\s*({_MAGNITUDE_RE}))?",
+    re.IGNORECASE,
 )
 
 
@@ -403,6 +409,99 @@ def _is_share(text: str, start: int) -> bool:
     return _SHARE_BEFORE.search(text, max(0, start - _SHARE_REACH), start) is not None
 
 
+#: A tax named inside a bracket, before the figure there: "(დღგ-ს გარეშე 1 000 ლარი)", "(excl.
+#: VAT GEL 1,000)".
+_TAX_WORD = re.compile(r"დ\.?ღ\.?გ|გადასახად|(?<![a-z])(?:vat|tax(?:es)?)(?![a-z])", re.IGNORECASE)
+#: How far a bracket may open before its figure, and a money figure before the bracket.
+_BRACKET_REACH = 60
+_RESTATED_REACH = 60
+
+
+def restating_bracket(text: str, start: int) -> tuple[int, int] | None:
+    """The bracket around the figure at ``start`` when it restates the money figure written right
+    before it on another tax basis: "1 180 ლარს დღგ-ს ჩათვლით (დღგ-ს გარეშე 1 000 ლარი)", "GEL
+    1,180 incl. VAT (excl. VAT GEL 1,000)". Its span, "(" to ")"; None otherwise.
+
+    The bracket names a tax before its figure, and a money figure stands before the bracket in
+    the same sentence: the figure is that price again, not a second one, and the tax wording in
+    the bracket is about it, not about the price (``document_facts`` reads the VAT status so).
+    A bracket with no price before it ("ფასი (დღგ-ს ჩათვლით 1 180 ლარი)") is the price itself.
+    """
+    opened = text.rfind("(", max(0, start - _BRACKET_REACH), start)
+    if opened < 0 or ")" in text[opened:start]:
+        return None
+    closed = text.find(")", start, start + _BRACKET_REACH * 2)
+    if closed < 0 or not _TAX_WORD.search(text, opened, start):
+        return None
+    before = text[max(0, opened - _RESTATED_REACH) : opened]
+    stops = list(_SENTENCE_END.finditer(before))
+    before = before[stops[-1].end() :] if stops else before
+    if not (_AMOUNT_AFTER.search(before) or _AMOUNT_BEFORE.search(before)):
+        return None
+    return opened, closed + 1
+
+
+#: Where a sentence turns to another amount: ", საიდანაც ავანსი ...", ", ხოლო საგარანტიო თანხა
+#: ...", ", მათ შორის ...", ", of which the advance ...", ", whereas ...".
+_AMOUNT_TURN = re.compile(
+    r"[,;\u2013\u2014]\s*(?:საიდანაც|აქედან|ხოლო|მათ\s+შორის|of\s+which|whereas|while)(?![ა-ჰa-z])",
+    re.IGNORECASE,
+)
+#: What an amount is when its own clause names it so: an advance, a guarantee, a retention, a
+#: deposit - a part of the price or a security, never the document's total.
+_PART_OF_PRICE = re.compile(
+    r"ავანს|წინასწარ|საგარანტიო|გარანტი|უზრუნველყოფ(?:ა|ის|ად)(?![ა-ჰ])|დაკავ|"
+    r"(?<![a-z])(?:advance|prepayment|guarantee|retention|security|deposit)(?![a-z])",
+    re.IGNORECASE,
+)
+#: A price per period ("ყოველთვიური ღირებულება", "monthly fee") and the total a sentence names
+#: beside it ("საერთო ღირებულება", "total value").
+_PERIODIC = re.compile(
+    r"ყოველთვიურ|თვიურ|ყოველწლიურ|კვარტალურ|(?<![a-z])(?:monthly|annual|quarterly|per\s+month)"
+    r"(?![a-z])",
+    re.IGNORECASE,
+)
+_TOTAL_NAMED = re.compile(
+    r"საერთო|ჯამურ|სრულ|მთლიან|(?<![a-z])(?:total|overall|aggregate)(?![a-z])", re.IGNORECASE
+)
+_CLAUSE_REACH = 160
+
+
+def _clauses_of(text: str, start: int) -> tuple[str, list[str]]:
+    """The clause the figure at ``start`` stands in, up to it, and every other clause of its
+    sentence: a sentence is cut at its turns (``_AMOUNT_TURN``)."""
+    lo = max(0, start - _CLAUSE_REACH)
+    before = text[lo:start]
+    stops = list(_SENTENCE_END.finditer(before))
+    a = lo + (stops[-1].end() if stops else 0)
+    stop = _SENTENCE_END.search(text, start, start + _CLAUSE_REACH)
+    b = stop.start() if stop else min(len(text), start + _CLAUSE_REACH)
+    turns = [m.start() for m in _AMOUNT_TURN.finditer(text, a, b)]
+    cuts = [a, *turns, b]
+    own = sum(1 for t in turns if t <= start)
+    clauses = [text[cuts[i] : cuts[i + 1]] for i in range(len(cuts) - 1)]
+    return text[cuts[own] : start], [c for i, c in enumerate(clauses) if i != own]
+
+
+def _named_in_own_clause(text: str, start: int) -> bool:
+    """Whether the figure at ``start`` is a part of the price or a periodic price that its own
+    clause names so, in a sentence another clause of which states the price: "... 36 000 ლარს,
+    საიდანაც ავანსი შეადგენს 10 800 ლარს", "ყოველთვიური ღირებულება 3 000 ლარი, ხოლო საერთო
+    ღირებულება 36 000 ლარი". Such a figure is an ``amount``: the total is the other one.
+
+    Only past a turn of the sentence, or beside a clause naming the total: "ღირებულება, ავანსის
+    ჩათვლით, შეადგენს 36 000 ლარს" has no turn, and 36 000 stays the price."""
+    own, others = _clauses_of(text, start)
+    if not others:
+        return False
+    if _AMOUNT_TURN.match(own) and _PART_OF_PRICE.search(own):
+        return True
+    return _PERIODIC.search(own) is not None and any(
+        _TOTAL_NAMED.search(c) and (_AMOUNT_AFTER.search(c) or _AMOUNT_BEFORE.search(c))
+        for c in others
+    )
+
+
 def find_amounts(text: str) -> list[RuleHit]:
     hits: list[RuleHit] = []
     seen: set[tuple[int, int]] = set()
@@ -440,8 +539,15 @@ def find_amounts(text: str) -> list[RuleHit]:
                 continue  # "20 ლ." with no word about money: litres as likely as lari
             if ft == FactType.total_amount and _is_line_total(text, span[0]):
                 ft = None
-            if ft in (FactType.total_amount, FactType.price) and _is_share(text, span[0]):
-                ft = None  # a guarantee, an advance or the VAT, as a share of the value
+            if ft in (FactType.total_amount, FactType.price) and (
+                _is_share(text, span[0])
+                or restating_bracket(text, span[0]) is not None
+                or _named_in_own_clause(text, span[0])
+            ):
+                # a guarantee, an advance or the VAT, as a share of the value; the price again
+                # on another tax basis; an advance or a monthly fee its clause names beside
+                # the total
+                ft = None
             seen.add(span)
             hits.append(
                 RuleHit(
@@ -1125,11 +1231,26 @@ _CONTRACT_NO = re.compile(
     rf"(?<![A-Za-zა-ჰ])(?:{_REFERENCED_DOC})\s*{_NUMBER_MARKER}\s*({_REFERENCE})",
     re.IGNORECASE,
 )
+#: The Georgian genitive puts the number first: "N 27/2026 ხელშეკრულების საფუძველზე",
+#: "№12 შეთანხმებით". The marker stays required ("2026 წლის ხელშეკრულება" names no number), and
+#: only the contract's own words follow it: "N 5 პუნქტის" is a clause, and an act's or an
+#: invoice's number written this way is left unread rather than taken for the contract's.
+_CONTRACT_WORD_AFTER = r"ხელშეკრულებ[ა-ჰ]*|შეთანხმებ[ა-ჰ]*|contract|agreement"
+_CONTRACT_NO_BEFORE = re.compile(
+    rf"{_NUMBER_MARKER}\s*({_REFERENCE})\s+(?:{_CONTRACT_WORD_AFTER})(?![A-Za-z])",
+    re.IGNORECASE,
+)
 
 
 def find_contract_numbers(text: str) -> list[RuleHit]:
     hits: list[RuleHit] = []
-    for m in _CONTRACT_NO.finditer(text):
+    matches = list(_CONTRACT_NO.finditer(text))
+    matches += [
+        m
+        for m in _CONTRACT_NO_BEFORE.finditer(text)
+        if not any(_overlaps(m.span(1), other.span(1)) for other in matches)
+    ]
+    for m in matches:
         number = _SPACED_SLASH.sub("/", m.group(1))
         if len(number) < 2 or not any(ch.isdigit() for ch in number):
             continue
