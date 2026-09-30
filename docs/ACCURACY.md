@@ -420,6 +420,47 @@ correct acts, where the rules read less than the act wrote (`tests/unit/test_aoa
 Round-2 AOA-R2-17 (the customer's own account in its signature block, against a contract that
 states only the contractor's) is left as it is by design.
 
+### Red team, round 3: what the act check reads, and what a correction says (2026-10-01)
+
+Round 3 found figures written in forms the readers did not know, and corrections that were
+right in value but wrong in place or style (`tests/unit/test_aoa_redteam_r3.py`):
+
+* **Tetri after a hyphen.** `3 450-00 ლარს`, the bookkeeping style, was read as a fee of `00`:
+  a correct act had two errors, and a slip was never quoted. The money reader (`amounts.py`) now
+  joins the two digits after a figure's hyphen to it as tetri, and the digits-and-words reader
+  starts no figure there. Two digits more than the figure before them (`10-15`, `90-95`) are
+  a range, not tetri; three digits after the hyphen, a figure with a fraction of its own, and a
+  date's digits are none either. The correction keeps the style (`3 450-00`).
+* **An initial and a slip in the surname.** `ო. ფუტკარაძი` for `ოთარ ფუტკარაძე` passed: the
+  party reader took it for the full name, and the forms the rule compares were only full ones. The
+  rule now also finds each initialled form of a signatory, and compares an initial with the
+  first letter of the contract's first name and the surname by the full name's rule. A correct
+  initialled signature that was the act's only form of the name had been an error with no
+  correction; it is clean now.
+* **Before VAT is its own role.** A figure labelled `დღგ-ს გარეშე` beside the act's fee was
+  compared with the price and corrected to it - writing the gross into a net slot. It is now
+  compared with the price less VAT (18%, or the one other rate the documents write) and
+  corrected to that. In a breakdown whose fee and net are right, the VAT amount that does not
+  add up is the one reported (`562.27` -> `526.27`); round 1 and 2 put that finding on the
+  correct net, and their tests now pin it on the VAT. A net stated alone stays the act's fee
+  (round 2). An exclusion phrase labels the figure it follows directly, else the one after it
+  in its sentence, so `… ლარს დღგ-ს ჩათვლით (დღგ-ს გარეშე 500 ლარი)` labels the 500.
+* **A price table's total.** A table whose column header alone names the currency (`ღირებულება
+  (ლარი)`, `თანხა, ლარი`) held figures no reader took for money, so a slip in its `სულ:` row
+  passed with no note. The act's table total - the last row a total word names, not one before
+  tax, not a column of rates - is now compared as a fee. Only the act's: the contract's prices
+  are read as before. A table with such figures and no total row leaves a skip note.
+* **The term as a correction.** When no single year puts the period inside the term, the
+  finding quoted only the date outside and gave the term in ISO. It now quotes the whole period
+  and writes the term over it in the period's own style, each end keeping its case and
+  postposition; a month written with no day gets the term written out in the long style.
+* **A slip in the signing verb** (the mutation harness): `„აქტი“ გაორმდა 2026 წლის 30 სექტემბერი`
+  made `AOA.ACT_DATE` say the act was undated. The act-date reader accepts one edit in `გაფორმდა`
+  after the act's name; `გაფორმდება`, `გააფორმეს` and a slip after `ხელშეკრულება` date nothing.
+
+Round-3 AOA-R3-12 (a services annex written as a Word table is not read as the act's services;
+the skip note names the list form it looks for) is left as it is by design.
+
 ## LLM configuration, and why
 
 Three settings were established by reading what the model actually receives:

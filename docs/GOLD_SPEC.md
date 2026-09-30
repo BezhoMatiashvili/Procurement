@@ -216,7 +216,10 @@ strict_findings: true             # anything else reported (any severity) is a f
   corrected to `100 ლარი`). With several contract prices (a monthly price and a total) it is the
   one the fee is a slip of - the fewest digit edits, a slip or two at most, then the smallest
   difference - and none when no one price is meant; the message lists them. An error never
-  offers the act's own words as its correction.
+  offers the act's own words as its correction. Tetri written after a hyphen (`3 450-00`, red
+  team R3) are the figure's fraction, quoted and corrected in that style (`3 540-00 (…) ლარს` ->
+  `3 450-00 (…) ლარს`); two digits after a hyphen that are more than the figure before them
+  (`10-15 ლარი`) are a range, never tetri.
 * Which rule owns which mistake:
   * wrong digits and/or words of the fee → `AOA.FEE` (+ `AOA.AMOUNT_WORDS` when digits and words
     disagree); words misspelled (`ასოი`) → `AOA.AMOUNT_WORDS`, an error, with the correct words
@@ -231,7 +234,15 @@ strict_findings: true             # anything else reported (any severity) is a f
     no second fee when another fee the act states is it with VAT added at 18%, or at a rate the
     documents write beside VAT; with the VAT amount written out, net + VAT must make the fee.
     VAT is `დღგ`, `დ.ღ.გ.` or `დ.ღ.გ`, with or without its case ending, before or after
-    `ჩათვლით`;
+    `ჩათვლით`. Beside another fee the act states (red team R3), such a figure is compared with
+    the price before VAT (the price less VAT at that rate) and corrected to it, never to the
+    price; a breakdown whose fee and net are right but do not add up with the VAT amount is the
+    VAT amount's mistake (`AOA.FEE`, correction = the fee less the net). A figure before VAT the
+    act states alone is its fee, compared with the price;
+  * a fee the act's price table states in a row a total word names (`სულ`, `ჯამი`), under a
+    column whose header names the currency (`ღირებულება (ლარი)`), is a fee like one in the prose
+    (`AOA.FEE`, text = the cell's figure, correction in its style); a table with such figures
+    and no total row leaves an `AOA.FEE` skip note saying they were not compared;
   * a party's name is written whole: a word's final `ი` dropped (`შპს „ბეტა სერვის“`) is
     `AOA.PARTY_NAME`, corrected to the contract's name, unless an ending is attached to the stem
     (`„ბეტა სერვის“-ის`). A case ending inside the quotes (`„ბეტა სერვისის“`) is still the name;
@@ -242,8 +253,15 @@ strict_findings: true             # anything else reported (any severity) is a f
   * the service period's year outside the contract term → `AOA.PERIOD_IN_TERM` (text = the
     period as written, correction = with the in-term year: every year moved when all of them
     are wrong, one end's year when only that end's is); when no single year puts the period
-    inside the term, the correction is the term itself; `AOA.ACT_DATE` only when the act's
-    own date is the odd one out;
+    inside the term, the correction is the term itself, written over the whole period in the
+    act's date style (`2026 წლის 1 მარტიდან 2026 წლის 1 სექტემბრის`, `01.03.2026-დან
+    01.09.2026`), never ISO unless the act wrote ISO; `AOA.ACT_DATE` only when the act's own
+    date is the odd one out. The act's date is read after its signing verb with a one-letter
+    slip too (`„აქტი“ გაორმდა …`): the slip is `AOA.SPELLING`'s, the date still the act's;
+  * a signatory with the first name as an initial (`ო. ფუტკარაძე`) is the contract's director
+    whose first name starts with that letter, and its surname is held to the rule for a full
+    name: a final-vowel slip (`ო. ფუტკარაძი`) is an `AOA.DIRECTOR` error, corrected with the
+    initial kept (`ო. ფუტკარაძე`);
   * a missing project name / cadastral code → `AOA.PROJECT_PRESENT` / `AOA.CADASTRAL_PRESENT`;
   * a bank code or plot code not the contract's → one `AOA.BANK` / `AOA.CADASTRAL` per value,
     correction = the contract value it is a slip or two from, the contractor's own on a tie;
