@@ -299,6 +299,43 @@ read as before, and a project missing from it is still a warning. Not measured: 
 English act is still missed (the act date and the period are not read), and says so only
 through those notes.
 
+### Red team, round 2: what a correction may say (2026-09-30)
+
+The second round found the act's findings right but their corrections wrong, or findings on
+correct acts, where the rules read less than the act wrote (`tests/unit/test_aoa_redteam_r2.py`):
+
+* **A correction is one value, written as the act writes it.** A fee slip against a contract
+  stating a monthly price and a total was "corrected" to both, in ISO form; it is now the price
+  the fee is a slip of (fewest digit edits, then the smallest difference) or none, as round 1
+  did for accounts and plots. Words in brackets after the currency (`3 540.00 ლარს (…)`, `GEL
+  3,540.00 (…)`, `3 540 ₾ (…)`) were left out of the quote and the correction, so typing the
+  correction over the mark left a second wrong amount; the digits-and-words reader now allows
+  the currency between the two, when the bracket reads as a numeral. Tetri written after the
+  lari were copied, so the correction was the act's own text; they are rewritten from the
+  price, and an error whose correction equals its quote now carries none.
+* **The contract says which half is wrong.** A service count whose digits changed
+  (`15 (თორმეტი)` for `12 (თორმეტი)`) had its words corrected towards the wrong digits,
+  against the services rule. Every figure the contract writes in agreeing digits and words now
+  decides, as its prices did.
+* **One VAT token.** `დ.ღ.გ.-ს ჩათვლით` and `… ლარს ჩათვლით დღგ-ს` said "VAT included" and
+  were errors for a VAT-registered entrepreneur. The dotted abbreviation is one token every tax
+  pattern shares (the tax amount labels and the VAT-number label too), and `ჩათვლით` before
+  the tax may follow the amount's currency word; after any other word it still closes a date.
+* **The fee before VAT at the rate.** An act restating its fee before VAT in brackets, with no
+  VAT amount, had that figure compared as a second fee. It is set aside when another fee the
+  act states is it plus VAT (18%, or a rate either document writes beside VAT); a net figure
+  the act states alone is still compared, since that act states its fee without VAT.
+* **A name is written whole.** `შპს „ბეტა სერვის“` passed as `ბეტა სერვისი`: the word matcher
+  takes an attribute's bare stem as a form of the word. For a party's name a bare stem is a
+  misspelling unless an ending is attached to it (`„ბეტა სერვის“-ის`). Whether a case ending
+  may stand inside the quotes (`„ბეტა სერვისის“`) stays open; it is accepted.
+* **A grouped code is quoted as printed**, so its Word comment marks it rather than landing at
+  the end of the document; and a period whose start year alone is wrong is corrected in that
+  end, never to the contract's term in ISO.
+
+Round-2 AOA-R2-17 (the customer's own account in its signature block, against a contract that
+states only the contractor's) is left as it is by design.
+
 ## LLM configuration, and why
 
 Three settings were established by reading what the model actually receives:
