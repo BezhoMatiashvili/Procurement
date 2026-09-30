@@ -473,7 +473,43 @@ one numeric row mid-block shifts the rest. Inserting a row that carries *any* te
 right segment is quadratic, so past `_PAIR_BUDGET` (2500 candidate pairs) a block becomes an
 all-removed plus an all-added rather than a set of line edits. The act-vs-contract pair is
 59 × 68 = 4012 and lands there — which is the other reason that report leads with the field
-differences: they are the only layer still carrying an answer.
+differences: they are the only layer still carrying an answer. Lines that differ only in their
+clause number ("5.3." → "6.3.", the same text after it, once on each side) are paired first,
+before the budget applies: an article inserted near the top of a 70-clause contract renumbered
+every clause after it, made one block too big to pair, and the two versions scored 0.12 —
+"unrelated", nothing reported. They now align at 0.97. Each renumbered clause is still its own
+"text changed" warning; whether a clause number that moved with its clause is a change at all
+is an open policy question (red team COMPARE-27).
+
+### Red team, round 1: what the comparison now reads (2026-09-30)
+
+Eighteen defects a red team found and a verifier reproduced, each with a unit test on invented
+text (`tests/unit/test_compare_redteam.py`, `test_compare_tables.py`):
+
+* **Values in canonical form.** A payment term, warranty, delivery deadline and quantity are
+  reported as `docs/GOLD_SPEC.md` writes them (`P7D working`, `P12M`, `P30D`, `4 item`); the
+  words as written stay in the finding's note. The days a term counts are part of it, so
+  working → calendar days is a change. A duration in a sentence that pays ("საფასური
+  გადაიხდება ... 7 სამუშაო დღის ვადაში") is a payment term, not an unclassified duration.
+* **VAT is decided deterministically.** `tax_phrases`, the reader the act check uses, types a
+  line's VAT status, and the document-wide pass compares it, so a contract including VAT
+  against an act excluding taxes is `CMP.VAT`.
+* **Quantities in prose** (a number, optionally its words, and a unit from a closed list:
+  piece, set, m², m³, kg, t, l) are `CMP.QUANTITY`. A unit is the unit noun in one of its case
+  forms: "ტონერი" (toner) or "ცალმხრივი" (unilateral) are not.
+* **Word tables.** A cell's column header, and the paragraph after a line, say what a figure's
+  words count ("800 (რვაასი)" under "ღირებულება (ლარი)" is lari). A row is aligned as a row,
+  keyed by its words without its figures or its "№", so a row inserted is one change and the
+  renumbered rows after it are formatting, not critical amount changes.
+* **One change, one finding.** A validity end read on its line is the period the document states;
+  words that retell a figure's reported change are that change; a moved list item is a move; a
+  "text changed" line is dropped only when another reported change states it whole (an annex
+  number "2" is no part of a date that moved from the 12th of February). A line quoted inside
+  another is its own change unless it is one of the lines of a table cell reported whole.
+* **Dates.** A period keeps its ends as written, so a year typed wrong in one end is one change
+  to a period neither document states sorted; a period whose end has no year of its own takes
+  the other end's (`rules.find_dates`).
+* **Document kind** is read from folded text, so an act titled with an en dash is an act.
 
 ### The findings list is a list, not a dump
 

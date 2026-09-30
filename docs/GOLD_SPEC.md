@@ -125,7 +125,21 @@ A value both documents carry must never be reported "added" or "removed"; one en
 one finding. An amount's words misspelled ("(ასი)" -> "(ასოი)") are `CMP.AMOUNT_WORDS`, an error,
 as the act check grades the same slip; a count's or a period's words misspelled are
 `CMP.SPELLING`, a warning. Two dates written as a range are one period (`CMP.DURATION`, label
-"Execution period", or "Validity period" when validity words precede it).
+"Execution period", or "Validity period" when validity words precede it), its ends as written -
+a year typed wrong in one end gives `2026-05-01/2025-05-31`, never the ends sorted - and a
+period whose year is written once ("2026 წლის 1-დან 31 მაისის ჩათვლით") is the same period.
+
+`before`/`after` are the section 2 canonical forms: a payment term `P7D working` (its days
+counted are part of it: `P7D working` -> `P7D calendar` is a `CMP.PAYMENT` change, whatever verb
+the sentence pays with), a warranty `P12M`, a delivery deadline `P30D`, a quantity `4 item`
+(`CMP.QUANTITY`), VAT `incl`/`excl` (`CMP.VAT`, also between a contract and its act). A number in
+words is an amount's (`CMP.AMOUNT_WORDS`, error) when the currency is beside it, in the header
+of its table column, or at the start of the next paragraph. A table cell holding a figure and its
+words ("800 (რვაასი)") is that figure. A Word table row added or removed is one
+`CMP.TEXT_ADDED`/`CMP.TEXT_REMOVED` (its cells joined with " | "); the row numbers after it that
+moved are `CMP.FORMATTING`, never `CMP.AMOUNT`. A "text changed" line is dropped only when a
+change reported for another line states it whole, both values word for word, or when it is one
+of the lines of a table cell reported whole.
 
 ## 5. BOQ gold (per set, JSON) and the evaluation policy
 
