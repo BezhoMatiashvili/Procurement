@@ -175,8 +175,11 @@ def test_a_row_removed_from_a_numbered_table_is_one_change() -> None:
 
 
 def test_a_changed_figure_in_a_row_is_still_that_rows_change() -> None:
+    # the figure is in the quantity column, beside its unit: the row's quantity (COMPARE-R2-09)
     right = with_cell(3, 3, "11")
-    assert found(run(document(ROWS), document(right))) == [("CMP.AMOUNT", "9", "11", "error")]
+    assert found(run(document(ROWS), document(right))) == [
+        ("CMP.QUANTITY", "9 item", "11 item", "error")
+    ]
 
 
 def test_a_changed_row_number_that_is_no_renumbering_is_still_reported() -> None:
@@ -266,7 +269,7 @@ def test_a_word_table_of_four_hundred_rows_is_read_and_aligned_quickly() -> None
     left, right = annex(0), annex(200)
     report = run(left, right)
     assert time.perf_counter() - started < 20
-    assert found(report) == [("CMP.AMOUNT", "200", "201", "error")]
+    assert found(report) == [("CMP.QUANTITY", "200 item", "201 item", "error")]
 
 
 # --- COMPARE-R2-13 / R2-08: a row that moved is a move, and what changed in it is still read ----
@@ -341,3 +344,70 @@ def test_a_row_really_removed_is_still_one_row_removed() -> None:
     report = run(document(ROWS), document([ROWS[0], ROWS[1], ROWS[3]]))
     assert [r for r, *_ in found(report)] == ["CMP.TEXT_REMOVED"]
     assert moved(report) == []
+
+
+# --- COMPARE-R2-09: a quantity column's figure, with its row's unit, is a quantity -------------
+
+
+def test_a_quantity_cell_changed_is_the_row_s_quantity() -> None:
+    right = with_cell(2, 3, "8")
+    assert found(run(document(ROWS), document(right))) == [
+        ("CMP.QUANTITY", "6 item", "8 item", "error")
+    ]
+
+
+def test_a_unit_cell_changed_is_the_row_s_quantity() -> None:
+    right = with_cell(2, 2, "კომპლექტი")
+    assert found(run(document(ROWS), document(right))) == [
+        ("CMP.QUANTITY", "6 item", "6 set", "error")
+    ]
+
+
+def test_a_quantity_and_its_unit_changed_together_are_one_change() -> None:
+    right = with_cell(2, 2, "კომპლექტი")
+    right[2][3] = "4"
+    assert found(run(document(ROWS), document(right))) == [
+        ("CMP.QUANTITY", "6 item", "4 set", "error")
+    ]
+
+
+def test_a_square_metre_quantity_changed_is_the_row_s_quantity() -> None:
+    right = with_cell(0, 3, "320")
+    assert found(run(document(ROWS), document(right))) == [
+        ("CMP.QUANTITY", "300 m2", "320 m2", "error")
+    ]
+
+
+def test_a_price_cell_beside_a_unit_stays_an_amount() -> None:
+    right = with_cell(3, 4, "1400")
+    assert found(run(document(ROWS), document(right))) == [("CMP.AMOUNT", "1350", "1400", "error")]
+
+
+def test_a_quantity_beside_a_unit_no_list_names_stays_a_number() -> None:
+    rows = with_cell(3, 2, "რეისი")
+    right = [list(r) for r in rows]
+    right[3][3] = "11"
+    assert found(run(document(rows), document(right))) == [("CMP.AMOUNT", "9", "11", "error")]
+
+
+def test_a_unit_price_header_is_no_unit_column() -> None:
+    header = ["№", "დასახელება", "ერთეულის ფასი", "რაოდენობა"]
+    left = [["1", "კარების მონტაჟი", "ცალი", "6"]]
+    right = [["1", "კარების მონტაჟი", "კომპლექტი", "6"]]
+
+    def table(rows: list[list[str]]) -> list[Segment]:
+        records: list[tuple] = []  # type: ignore[type-arg]
+        for r, row in enumerate([header, *rows], start=1):
+            for c, text in enumerate(row, start=1):
+                where = TableCell(1, r, c, header[c - 1] if r > 1 else None)
+                records.append((text, "table_cell", f"T1/r{r}/c{c}", None, None, where))
+        return build(records)
+
+    assert [r for r, *_ in found(run(table(left), table(right)))] == ["CMP.TEXT_CHANGED"]
+
+
+def test_a_quantity_changed_with_its_words_is_one_change() -> None:
+    left, right = with_cell(2, 3, "6 (ექვსი)"), with_cell(2, 3, "7 (შვიდი)")
+    assert found(run(document(left), document(right))) == [
+        ("CMP.QUANTITY", "6 item", "7 item", "error")
+    ]

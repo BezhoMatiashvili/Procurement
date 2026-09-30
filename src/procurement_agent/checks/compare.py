@@ -1512,25 +1512,77 @@ _LETTER = re.compile(r"[^\W\d_]")
 @dataclass(frozen=True, slots=True)
 class _Context:
     """What a number ending its segment counts may be said beside the segment: in the header of
-    its table column ("ღირებულება (ლარი)"), or at the start of the paragraph after it ("ლარს")."""
+    its table column ("ღირებულება (ლარი)"), or at the start of the paragraph after it ("ლარს").
+
+    A cell of a quantity column ("რაოდენობა") or a unit column ("ერთეული") also knows its row's
+    other half: ``quantity`` and ``unit`` are the texts of the row's quantity and unit cells."""
 
     header: str = ""
     following: str = ""
+    quantity: str = ""
+    unit: str = ""
 
 
 _NO_CONTEXT = _Context()
 
+#: The header of a table column of quantities, and of the column naming their unit - not
+#: "ერთეულის ფასი" (unit price), which is money.
+_QUANTITY_HEADER = re.compile(r"რაოდენობ|(?<![a-z])(?:quantity|qty)(?![a-z])", re.IGNORECASE)
+_UNIT_HEADER = re.compile(
+    r"(?<![ა-ჰ])ერთეული(?![ა-ჰ])|(?<![ა-ჰ])ერთ\.|ზომის\s+ერთეულ"
+    r"|(?<![a-z])(?:units?|uom)(?![a-z])(?!\s*(?:price|rate|cost))",
+    re.IGNORECASE,
+)
+
 
 def _contexts(segments: Sequence[Segment]) -> dict[int, _Context]:
-    """Each segment's context (``_Context``), keyed by ``id``: a table cell's column header,
-    another segment's next paragraph."""
+    """Each segment's context (``_Context``), keyed by ``id``: a table cell's column header and
+    its row's quantity and unit, another segment's next paragraph."""
+    rows: dict[tuple[int | None, int | None], dict[str, str]] = {}
+    for segment in segments:
+        header = segment.column or ""
+        for role, pattern in (("quantity", _QUANTITY_HEADER), ("unit", _UNIT_HEADER)):
+            if segment.table_row is not None and pattern.search(header):
+                rows.setdefault((segment.table, segment.table_row), {}).setdefault(
+                    role, segment.text
+                )
     out: dict[int, _Context] = {}
     for k, segment in enumerate(segments):
         if segment.column is not None:
-            out[id(segment)] = _Context(header=segment.column)
+            row = rows.get((segment.table, segment.table_row), {})
+            out[id(segment)] = _Context(
+                header=segment.column,
+                quantity=row.get("quantity", ""),
+                unit=row.get("unit", ""),
+            )
         elif k + 1 < len(segments) and segments[k + 1].table is None:
             out[id(segment)] = _Context(following=segments[k + 1].text[:_AFTER])
     return out
+
+
+def _cell_quantity(text: str, context: _Context) -> _Hit | None:
+    """The quantity a cell of a quantity or unit column states with the rest of its row: "20"
+    under "რაოდენობა" beside "ცალი" under "ერთეული" is "20 item", read from either cell.
+
+    Only a row whose unit cell is nothing but a unit of the closed list (``_UNITS``) and whose
+    quantity cell is nothing but a figure: a quantity column beside a unit it cannot name is
+    left to the figure's own reading.
+    """
+    if _QUANTITY_HEADER.search(context.header):
+        figure, unit = text, context.unit
+    elif _UNIT_HEADER.search(context.header):
+        figure, unit = context.quantity, text
+    else:
+        return None
+    if parse_number(_figure_alone(figure).strip()) is None:
+        return None
+    # the figure as written, with its words: "6 (ექვსი)" and a unit are read as the prose reads
+    # "6 (ექვსი) ცალი", and the words that changed with the figure are that change's own
+    written = f"{normalize_spaces(figure)} {normalize_spaces(unit)}"
+    hits = _quantity_hits(written)
+    if len(hits) != 1 or hits[0].value != written:
+        return None
+    return hits[0]
 
 
 def _numeral_kind(inner: str, after: str, header: str = "") -> str:
@@ -2809,12 +2861,19 @@ def _classify(
 
     hidden = hidden_character_rules(a.text, b.text)
     values = deltas_between(a.text, b.text)
-    bare = bare_number_delta(
-        a.text,
-        b.text,
-        critical=a.kind != "sheet_cell",
-        left_number=a.number,
-        right_number=b.number,
+    counted = _cell_quantity(a.text, ca), _cell_quantity(b.text, cb)
+    quantity = _delta(*counted) if None not in counted else None
+    # a quantity column's figure, or its row's unit, is the row's quantity - not a bare number
+    bare = (
+        [quantity]
+        if quantity is not None
+        else bare_number_delta(
+            a.text,
+            b.text,
+            critical=a.kind != "sheet_cell",
+            left_number=a.number,
+            right_number=b.number,
+        )
     )
     words = [
         d
