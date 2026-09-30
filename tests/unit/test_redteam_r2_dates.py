@@ -137,14 +137,14 @@ def test_the_act_date_correction_keeps_the_acts_style(written: str, expected: st
 @pytest.mark.parametrize(
     ("text", "dates", "raws"),
     [
-        ("1-15 ივნისი, 2026 წ.", ["2026-06-01", "2026-06-15"], ["1-", "15 ივნისი, 2026 წ."]),
-        ("01-15.06.2026", ["2026-06-01", "2026-06-15"], ["01-", "15.06.2026"]),
+        ("1-15 ივნისი, 2026 წ.", ["2026-06-01", "2026-06-15"], ["1", "15 ივნისი, 2026 წ."]),
+        ("01-15.06.2026", ["2026-06-01", "2026-06-15"], ["01", "15.06.2026"]),
         (
             f"1 {chr(0x2013)} 15 ივნისი 2026 წლის",
             ["2026-06-01", "2026-06-15"],
-            [f"1 {chr(0x2013)}", "15 ივნისი 2026 წლის"],
+            ["1", "15 ივნისი 2026 წლის"],
         ),
-        ("1-15 June 2026", ["2026-06-01", "2026-06-15"], ["1-", "15 June 2026"]),
+        ("1-15 June 2026", ["2026-06-01", "2026-06-15"], ["1", "15 June 2026"]),
     ],
 )
 def test_a_day_range_before_a_date_is_the_ranges_first_day(
@@ -161,7 +161,9 @@ def test_a_day_range_before_a_date_is_the_ranges_first_day(
         "15-06-2026",  # a date written with dashes
         "20-15 ივნისი, 2026 წ.",  # a first day after the last is no range
         "15-15 ივნისი, 2026 წ.",
-        "01.06-15.06.2026",  # a day that is a month's, not a range's
+        # "01.06-15.06.2026" is a range (AOA-R3-02, test_redteam_r3_dates); a day.month
+        # after a stop is part of another number
+        "5.01.06-15.06.2026",
         "2026-06-15",
         "N 3-15 ივნისი, 2026 წ.",  # a number, not a day
         "ოთახი12-15 ივნისი, 2026 წ.",

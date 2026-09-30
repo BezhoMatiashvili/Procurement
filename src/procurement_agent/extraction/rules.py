@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Hashable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 
 from procurement_agent.extraction.georgian import month_typo
@@ -510,22 +510,26 @@ _KA_DAY_MONTH_AFTER = re.compile(
     rf"\s*(\d{{1,2}})\s+({_KA_MONTH_FUZZY})(?![ა-ჰ])(?!\s*,?\s*\d{{4}})"
 )
 _KA_DAYS_OF_MONTH = re.compile(
-    rf"(?<!\d)(\d{{4}})[.,\s]*წ(?:ლის|\.)?\s*(\d{{1,2}})\s*(?:-\s*დან|დან|[-\u2013])\s*"
-    rf"(\d{{1,2}})\s+({_KA_MONTH_FUZZY})"
+    rf"(?<!\d)(?P<y>\d{{4}})[.,\s]*წ(?:ლის|\.)?\s*(?P<a>\d{{1,2}})\s*(?P<sep>-\s*დან|დან|[-\u2013])"
+    rf"\s*(?P<b>\d{{1,2}})\s+(?P<m>{_KA_MONTH_FUZZY})"
 )
 _KA_RANGE_YEAR_AFTER = re.compile(
     rf"(?<![\d.])(\d{{1,2}})\s+({_KA_MONTH_FUZZY}დან)\s+(\d{{1,2}})\s+({_KA_MONTH_FUZZY})"
     rf"(?:\s+ჩათვლით)?\s*,?\s*(\d{{4}})\s*წ"
 )
 
+#: A date of a range: where it stands, its day, its words, and where the date that closes the
+#: range stands (None for a range's last day, or a date that closes nothing).
+_RangeDate = tuple[tuple[int, int], date, str, tuple[int, int] | None]
+
 
 def _range_ends_without_year(
     text: str, found: dict[tuple[int, int], tuple[date, str, str | None]]
-) -> list[tuple[tuple[int, int], date, str]]:
+) -> list[_RangeDate]:
     """The dates of a Georgian period that take their year - or month and year - from the other
     end or from the year written after the period. Unread, "2026 წლის 1 მაისიდან 31 მაისის
     ჩათვლით" was a period of one day, and the other forms no period at all."""
-    out: list[tuple[tuple[int, int], date, str]] = []
+    out: list[_RangeDate] = []
 
     def month_day(y: int, mo_word: str, d: int) -> date | None:
         mo = _month_ka(mo_word)
@@ -541,50 +545,89 @@ def _range_ends_without_year(
         if dt is not None and dt < first:  # "20 დეკემბრიდან 10 იანვრამდე": the next year's
             dt = month_day(first.year + 1, m.group(2), int(m.group(1)))
         if dt is not None:
-            out.append(((m.start(1), m.end()), dt, m.group(0).strip()))
+            out.append(((m.start(1), m.end()), dt, m.group(0).strip(), None))
     for m in _KA_DAYS_OF_MONTH.finditer(text):
-        a = month_day(int(m.group(1)), m.group(4), int(m.group(2)))
-        b = month_day(int(m.group(1)), m.group(4), int(m.group(3)))
+        a = month_day(int(m.group("y")), m.group("m"), int(m.group("a")))
+        b = month_day(int(m.group("y")), m.group("m"), int(m.group("b")))
         if a is not None and b is not None:
-            out.append(((m.start(), m.start(3)), a, text[m.start() : m.start(3)].strip()))
-            out.append(((m.start(3), m.end()), b, text[m.start(3) : m.end()]))
+            # "2026 წლის 1-დან": the first day keeps its "from"; "2026 წლის 1-31 მაისი": the
+            # dash stands between the two days, as it does between two dates
+            stop = m.end("sep") if m.group("sep").endswith("დან") else m.end("a")
+            last = (m.start("b"), m.end())
+            out.append(((m.start(), stop), a, text[m.start() : stop].strip(), last))
+            out.append((last, b, text[last[0] : last[1]], None))
     for m in _KA_RANGE_YEAR_AFTER.finditer(text):
         a = month_day(int(m.group(5)), m.group(2), int(m.group(1)))
         b = month_day(int(m.group(5)), m.group(4), int(m.group(3)))
         if a is not None and b is not None:
-            out.append(((m.start(1), m.end(2)), a, text[m.start(1) : m.end(2)]))
-            out.append(((m.start(3), m.end(4)), b, text[m.start(3) : m.end(4)]))
+            out.append(((m.start(1), m.end(2)), a, text[m.start(1) : m.end(2)], None))
+            out.append(((m.start(3), m.end(4)), b, text[m.start(3) : m.end(4)], None))
     return out
 
 
 #: A day and a dash right before a date that opens with its own day: "1-15 ივნისი, 2026 წ.",
 #: "01-15.06.2026", "1 - 15 June 2026". Nothing that makes the number something else stands
-#: before it: a digit, a stop, a slash, a dash or a letter ("1.5-15", "N12-15", "01.06-15.06").
+#: before it: a digit, a stop, a slash, a dash or a letter ("1.5-15", "N12-15").
 _DAY_RANGE_FIRST = re.compile(r"(?<![\w./\-\u2013])(\d{1,2})\s?[-\u2013]\s?$")
+#: A day and a month and a dash right before a date that opens with its own day, the year
+#: written once for both: "01.06-30.06.2026", "1 ივნისი - 30 ივნისი, 2026 წ.". The month in
+#: figures has two digits, as the date after it writes its own ("1.2-3.04.2026" reads as a
+#: clause or a version number), and nothing stands before the day that makes it part of another
+#: number: a digit (also one word before), a stop, a slash, a dash or a letter.
+_DAY_MONTH_RANGE_FIRST = re.compile(
+    r"(?<![\w./\-\u2013])(?<!\d\s)(?P<d>\d{1,2})(?:(?P<sep>[./])(?P<mo>\d{2})|\s+(?P<m>[ა-ჰ]{3,14}))"
+    r"\s*[-\u2013]\s*$"
+)
+#: A numeric date whose month has two digits: "30.06.2026", "30/06/2026 წ.".
+_TWO_DIGIT_MONTH = re.compile(r"\d{1,2}(?P<sep>[./])\d{2}(?P=sep)\d{4}")
 #: A number marker before the day makes it a number: "N 3-15 ივნისი".
 _NUMBER_BEFORE = re.compile(r"(?:№|#|(?<![A-Za-zა-ჰ])N)\s*$")
 _LEADING_DAY = re.compile(r"\d{1,2}(?!\d)")
+_REACH_BEFORE = 24
 
 
-def _day_range_firsts(
+def _range_firsts(
     text: str, found: dict[tuple[int, int], tuple[date, str, str | None]]
-) -> list[tuple[tuple[int, int], date, str]]:
-    """The first day of a range written as two days before one month and year - "1-15 ივნისი,
-    2026 წ.", "01-15.06.2026" - in that date's month and year. Unread, the period was its last
-    day alone. Its span runs up to the last day's, so the two quote the period as written."""
-    out: list[tuple[tuple[int, int], date, str]] = []
-    for (start, _end), (last, raw, _note) in list(found.items()):
+) -> list[_RangeDate]:
+    """The first day of a range written before a date that states the month and the year for
+    both ends, in that year: two days before one month and year - "1-15 ივნისი, 2026 წ.",
+    "01-15.06.2026" - in that date's month too, and a day and a month before it -
+    "01.06-30.06.2026", "1 ივნისი - 30 ივნისი, 2026 წ." - in their own month. Unread, the
+    period was its last day alone. The first day's span ends before the dash, which stands
+    between the two dates as it does in "01.06.2026 - 30.06.2026": every reader of a range reads
+    both forms as one."""
+    out: list[_RangeDate] = []
+    for (start, end), (last, raw, _note) in list(found.items()):
         lead = _LEADING_DAY.match(raw)
         if lead is None or int(lead.group(0)) != last.day:
             continue  # the date does not open with its own day (ISO, "June 15, 2026", „15“)
+        window = max(0, start - _REACH_BEFORE)
         m = _DAY_RANGE_FIRST.search(text, max(0, start - 8), start)
-        if m is None or _NUMBER_BEFORE.search(text, max(0, m.start() - 4), m.start(1)):
+        if m is not None:
+            if _NUMBER_BEFORE.search(text, max(0, m.start() - 4), m.start(1)):
+                continue
+            first_day = int(m.group(1))
+            if 1 <= first_day < last.day:
+                span = (m.start(1), m.end(1))
+                out.append((span, last.replace(day=first_day), m.group(1), (start, end)))
             continue
-        first_day = int(m.group(1))
-        if not 1 <= first_day < last.day:
+        m = _DAY_MONTH_RANGE_FIRST.search(text, window, start)
+        if m is None or _NUMBER_BEFORE.search(text, max(0, m.start() - 4), m.start("d")):
             continue
-        first = last.replace(day=first_day)
-        out.append(((m.start(1), start), first, text[m.start(1) : start].strip()))
+        if m.group("mo") is not None:
+            numeric = _TWO_DIGIT_MONTH.match(raw)
+            if numeric is None or numeric.group("sep") != m.group("sep"):
+                continue
+            month: int | None = int(m.group("mo"))
+        else:
+            if not _GEORGIAN_LETTER.search(raw):
+                continue  # a Georgian day and month before an English or numeric date
+            month = _month_ka(m.group("m"))
+        first = _safe_date(last.year, month, int(m.group("d"))) if month else None
+        if first is None or first >= last:
+            continue
+        span = (m.start("d"), m.end("mo") if m.group("mo") is not None else m.end("m"))
+        out.append((span, first, text[span[0] : span[1]], (start, end)))
     return out
 
 
@@ -672,10 +715,13 @@ def find_dates(text: str) -> list[RuleHit]:
         add(m, _safe_date(int(m.group(3)), int(m.group(2)), int(m.group(1))))
     for m in _DATE_NUMERIC_SHORT_YEAR.finditer(text):
         add(m, _safe_date(2000 + int(m.group(3)), int(m.group(2)), int(m.group(1))))
-    for span, dt, raw in _range_ends_without_year(text, found):
-        found.setdefault(span, (dt, raw, None))
-    for span, dt, raw in _day_range_firsts(text, found):
-        found.setdefault(span, (dt, raw, None))
+    closes: dict[tuple[int, int], tuple[int, int]] = {}
+    for reader in (_range_ends_without_year, _range_firsts):
+        for span, dt, raw, last in reader(text, found):
+            if span not in found:
+                found[span] = (dt, raw, None)
+                if last is not None:
+                    closes[span] = last
 
     hits: list[RuleHit] = []
     last_end = -1
@@ -711,7 +757,24 @@ def find_dates(text: str) -> list[RuleHit]:
                 note=note,
             )
         )
-    return hits
+    return _one_type_per_range(hits, closes)
+
+
+def _one_type_per_range(
+    hits: list[RuleHit], closes: dict[tuple[int, int], tuple[int, int]]
+) -> list[RuleHit]:
+    """A range's first day typed as the date that closes it. Each is typed by the keyword
+    nearest to it, and a first day typed apart from its last ("01" a delivery deadline,
+    "30.06.2026" an execution period) was no range to the readers that join two dates of one
+    type."""
+    at = {(h.start, h.end): h for h in hits}
+    out: list[RuleHit] = []
+    for h in hits:
+        last = at.get(closes.get((h.start, h.end), (-1, -1)))
+        if last is not None and last.type is not h.type:
+            h = replace(h, type=last.type, confidence=last.confidence)
+        out.append(h)
+    return out
 
 
 # --- identification codes ----------------------------------------------------------------------
