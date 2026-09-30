@@ -7,6 +7,7 @@ over-estimates token counts for Georgian text (which tokenizes poorly in most LL
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -23,6 +24,7 @@ from docling_core.transforms.serializer.markdown import MarkdownParams
 from docling_core.types.doc.base import BoundingBox, CoordOrigin, ImageRefMode
 from docling_core.types.doc.common.content_layer import ContentLayer
 from docling_core.types.doc.document import DoclingDocument
+from docling_core.types.doc.items.table.table import TableItem
 from docling_core.types.doc.items.text import TextItem
 from docling_core.types.doc.labels import DocItemLabel
 
@@ -122,14 +124,22 @@ def chunk_docling_document(
     chunks: list[Chunk] = []
     #: every item a chunk lists, with the text of each chunk that lists it
     cover: dict[str, list[str]] = {}
+    restored: set[str] = set()
     for dc in chunker.chunk(doc):
         meta = dc.meta
         if not isinstance(meta, DocMeta):  # pragma: no cover - HybridChunker always yields DocMeta
             raise TypeError("unexpected chunk metadata")
+        body, contextual = dc.text, chunker.contextualize(dc)
         for listed in meta.doc_items:
-            cover.setdefault(listed.self_ref, []).append(dc.text)
-        contextual = chunker.contextualize(dc)
-        _append(chunks, doc, doc_id, contextual, dc.text, meta.doc_items, list(meta.headings or []))
+            # a chunk lists its items by reference only: the table's cells are in the document
+            item = listed.get_ref().resolve(doc)
+            if isinstance(item, TableItem) and item.self_ref not in restored:
+                # once per table: a long table split over chunks lists it in each
+                restored.add(item.self_ref)
+                body, contextual = _restore_first_row(item, body, contextual)
+        for listed in meta.doc_items:
+            cover.setdefault(listed.self_ref, []).append(body)
+        _append(chunks, doc, doc_id, contextual, body, meta.doc_items, list(meta.headings or []))
 
     # Safety net: Docling's serializer silently drops some items (e.g. text the layout model
     # labelled as a footnote). Anything with text that no chunk carries is emitted on its own,
@@ -148,6 +158,44 @@ def chunk_docling_document(
             batch.append(item)
         _flush_orphans(chunks, doc, doc_id, batch)
     return chunks
+
+
+_DIGIT = re.compile(r"\d")
+
+
+def _restore_first_row(table: TableItem, body: str, contextual: str) -> tuple[str, str]:
+    """``body`` and ``contextual`` with a two-column table's first row written out as
+    "label: value" when the serializer lost it.
+
+    A key-terms table with no header row ("ხელშეკრულების ღირებულება | 9 100 ლარი") has its
+    first row promoted to the column header. The serializer then drops that row's label - the
+    corner cell - and writes its value into every other row as a column name, so the value is
+    read with no label: the contract's price was no total. A real header names its columns
+    and carries no figure ("პირობა | მნიშვნელობა"), so only a first row whose value has a
+    digit is data, and only when its label is nowhere in the chunk. The line goes before the
+    row that follows it, where the document has it.
+    """
+    grid = table.data.grid
+    if table.data.num_cols != 2 or len(grid) < 2:
+        return body, contextual
+    label, value = (normalize_spaces(c.text) for c in grid[0][:2])
+    if not label or not _DIGIT.search(value) or label in normalize_spaces(body):
+        return body, contextual
+    line = f"{label}: {value}"
+    # the next row as the serializer writes it: its label, then the promoted value as its
+    # column's name
+    row = f"{normalize_spaces(grid[1][0].text)}, {value}"
+    return _insert_before(body, line, row), _insert_before(contextual, line, row)
+
+
+def _insert_before(text: str, line: str, row: str) -> str:
+    """``text`` with ``line`` on a line of its own before the line holding ``row``, or at the
+    end when ``row`` is not found as written."""
+    at = text.find(row)
+    if at < 0:
+        return f"{text}\n{line}"
+    start = text.rfind("\n", 0, at) + 1
+    return f"{text[:start]}{line}\n{text[start:]}"
 
 
 def _not_yet_carried(
