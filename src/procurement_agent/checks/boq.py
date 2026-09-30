@@ -174,18 +174,29 @@ _PROFIT = re.compile(r"profit|margin|mark-?up|მოგება|გეგმი
 _HOMOGLYPHS = str.maketrans(
     "\u0430\u043c\u0442\u043a\u0441\u0435\u043e\u0440\u0445\u0443", "amtkceopxy"
 )
-#: Unit spellings that mean the same measure. "item" and "pcs" are deliberately NOT merged: a
-#: lump sum and a count are different things, and the difference is worth a question. A metre
-#: and a linear metre are one measure (so says the mutation harness too).
+#: Unit spellings that mean the same measure: one table per measure, its English names singular
+#: and plural and its Georgian abbreviation and full word ("t", "tn", "ტ", "ტნ", "ტონა"). "item"
+#: and "pcs" are deliberately NOT merged: a lump sum and a count are different things, and the
+#: difference is worth a question; nor is a set a count of pieces. A metre and a linear metre
+#: are one measure (so says the mutation harness too). Plurals are listed, never derived by
+#: dropping an "s": "ls" (lump sum) is not "l" (a litre).
 _UNIT_ALIASES: dict[str, str] = {
     **dict.fromkeys(("m2", "m²", "sqm", "m^2", "მ2", "მ²", "კვმ"), "m2"),
     **dict.fromkeys(("m3", "m³", "cum", "cbm", "m^3", "მ3", "მ³", "კუბმ"), "m3"),
     **dict.fromkeys(
         ("lm", "rm", "lnm", "linm", "runm", "გრძმ", "m", "მ", "მეტრი", "metre", "meter"), "lm"
     ),
-    **dict.fromkeys(("t", "tn", "ton", "tons", "tonne", "tonnes", "ტ", "ტონა"), "t"),
+    **dict.fromkeys(("km", "კმ", "kilometre", "kilometer", "კილომეტრი"), "km"),
+    **dict.fromkeys(("ha", "ჰა", "hectare", "hectares", "ჰექტარი"), "ha"),
+    **dict.fromkeys(
+        ("l", "ltr", "lit", "litre", "litres", "liter", "liters", "ლ", "ლიტ", "ლიტრი"), "l"
+    ),
+    **dict.fromkeys(("t", "tn", "ton", "tons", "tonne", "tonnes", "ტ", "ტნ", "ტონა"), "t"),
     **dict.fromkeys(("kg", "კგ"), "kg"),
     **dict.fromkeys(("month", "months", "mo", "mon", "mth", "თვე", "თვ"), "month"),
+    **dict.fromkeys(("week", "weeks", "wk", "wks", "კვირა"), "week"),
+    **dict.fromkeys(("day", "days", "დღე", "დღ"), "day"),
+    **dict.fromkeys(("set", "sets", "kit", "kits", "კომპლ", "კომპლექტი", "კომპ"), "set"),
     **dict.fromkeys(
         ("pcs", "pc", "nr", "no", "piece", "pieces", "ც", "ცალი", "\u0448\u0442"), "pcs"
     ),
