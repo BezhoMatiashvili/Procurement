@@ -1169,10 +1169,17 @@ def _closing_line(sheet: BoqSheet, linked_rows: set[int]) -> BoqLine | None:
     labelled as a total ("TOTAL CARRIED TO SUMMARY", "სულ ჯამი"). Read by the SUB-TOTAL label
     alone, a sheet closed any other way was never reconciled, and a SUM range one row short
     passed without a word. A VAT row is never the closing total: the positions are without VAT.
+
+    Several SUB-TOTAL rows are the sections' own ("Sub-total Section 1", "ქვეჯამი II თავი"),
+    and the sheet is closed by role as above: the last section's sub-total held against every
+    position of the sheet was a false gap on each faithful bid. Their grand total is the row the
+    Summary links to, else the last total after them; with none, the last sub-total still is.
     """
-    for line in reversed(sheet.lines):
-        if _SUBTOTAL.match(line.description) and line.quantity is None:
-            return line
+    subtotals = [
+        ln for ln in sheet.lines if _SUBTOTAL.match(ln.description) and ln.quantity is None
+    ]
+    if len(subtotals) == 1:
+        return subtotals[0]
     last = max((ln.row for ln in sheet.lines if ln.kind == "position"), default=0)
     after = [
         ln
@@ -1187,7 +1194,9 @@ def _closing_line(sheet: BoqSheet, linked_rows: set[int]) -> BoqLine | None:
     if linked:
         return linked[-1]
     labelled = [ln for ln in after if _CLOSING.match(ln.description)]
-    return labelled[-1] if labelled else None
+    if labelled:
+        return labelled[-1]
+    return subtotals[-1] if subtotals else None
 
 
 def _summary_columns(ws: object) -> tuple[int | None, int | None, int | None, int]:

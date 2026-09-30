@@ -27,6 +27,7 @@ from procurement_agent.checks.boq import (
     grand_total,
     norm_unit,
     read_boq,
+    reconcile,
     reconcile_summary,
     stated_total_cost,
     summary_roles,
@@ -762,3 +763,83 @@ def test_a_described_position_mentioning_listing_is_evaluated(tmp_path: Path, te
     status = {p.item_no: (p.status, p.cost) for p in comp.positions}
     assert status["1.3"] == ("priced", 900.0)
     assert comp.priced_optional == []
+
+
+# --- the row that closes a sheet --------------------------------------------------------------
+
+
+def _closed_sheet(rows: list[tuple[str, object, float]], *, linked: int | None) -> dict[str, Cells]:
+    """Positions 1.1 (10 x 100), 1.2 (5 x 20), 2.1 (5 x 40) in rows 2, 3 and 5 of "1. WORKS",
+    then ``rows`` as (label, formula, cached value) from row 4 on, skipping row 5; with
+    ``linked``, a Summary whose WORKS row links to that row."""
+    cells: Cells = {(1, c): h for c, h in enumerate(_HEAD, 1)}
+    for r, item, text, unit, qty, rate in (
+        (2, "1.1", "Plaster", "m2", 10.0, 100.0),
+        (3, "1.2", "Paint", "m2", 5.0, 20.0),
+        (5, "2.1", "Skirting", "lm", 5.0, 40.0),
+    ):
+        cells.update({(r, 1): item, (r, 2): text, (r, 3): unit, (r, 4): qty, (r, 5): rate})
+        cells[(r, 6)] = Fx(f"=D{r}*E{r}", qty * rate)
+    for r, (label, formula, value) in zip((4, 6, 7, 8), rows, strict=False):
+        cells.update({(r, 2): label, (r, 6): Fx(str(formula), value)})
+    sheets: dict[str, Cells] = {"1. WORKS": cells}
+    if linked is not None:
+        total = cells[(linked, 6)]
+        assert isinstance(total, Fx)
+        sheets["SUMMARY"] = {
+            (1, 1): "ITEM",
+            (1, 2): "DESCRIPTION",
+            (1, 3): "TOTAL",
+            (2, 1): "1",
+            (2, 2): "WORKS",
+            (2, 3): Fx(f"='1. WORKS'!F{linked}", total.value),
+            (3, 2): "TOTAL COST",
+            (3, 3): Fx("=C2", total.value),
+        }
+    return sheets
+
+
+@pytest.mark.parametrize(
+    ("section_1", "section_2", "grand"),
+    [
+        ("Sub-total Section 1", "Sub-total Section 2", "TOTAL CARRIED TO SUMMARY"),
+        ("ქვეჯამი I თავი", "ქვეჯამი II თავი", "სულ ჯამი"),
+    ],
+)
+@pytest.mark.parametrize("linked", [7, None])
+def test_sections_closed_by_sub_totals_under_a_grand_total_reconcile_against_the_grand_total(
+    tmp_path: Path, section_1: str, section_2: str, grand: str, linked: int | None
+) -> None:
+    rows = [
+        (section_1, "=SUM(F2:F3)", 1100.0),
+        (section_2, "=SUM(F5:F5)", 200.0),
+        (grand, "=F4+F6", 1300.0),
+    ]
+    book = read_boq(_save(tmp_path / "b.xlsx", _closed_sheet(rows, linked=linked)), name="B")
+    sheet = book.sheets["1. WORKS"]
+    assert (sheet.subtotal_row, sheet.subtotal) == (7, 1300.0)
+    assert reconcile(sheet) is None
+    assert reconcile_summary(book) == []
+
+
+def test_one_sub_total_stays_the_closing_row_under_a_total_that_adds_more_to_it(
+    tmp_path: Path,
+) -> None:
+    """SUB-TOTAL, a contingency on it, and the TOTAL the Summary links to: the positions add up
+    to the SUB-TOTAL, not to the TOTAL with the contingency."""
+    sheets = _closed_sheet([], linked=None)
+    works = sheets["1. WORKS"]
+    works.update({(6, 2): "SUB-TOTAL", (6, 6): Fx("=SUM(F2:F5)", 1300.0)})
+    works.update({(7, 2): "Contingency 5%", (7, 6): Fx("=F6*0.05", 65.0)})
+    works.update({(8, 2): "TOTAL", (8, 6): Fx("=F6+F7", 1365.0)})
+    sheets["SUMMARY"] = {
+        (1, 1): "ITEM",
+        (1, 2): "DESCRIPTION",
+        (1, 3): "TOTAL",
+        (2, 1): "1",
+        (2, 2): "WORKS",
+        (2, 3): Fx("='1. WORKS'!F8", 1365.0),
+    }
+    sheet = read_boq(_save(tmp_path / "b.xlsx", sheets), name="B").sheets["1. WORKS"]
+    assert (sheet.subtotal_row, sheet.subtotal) == (6, 1300.0)
+    assert reconcile(sheet) is None
