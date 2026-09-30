@@ -1476,12 +1476,84 @@ def _value_spans(text: str) -> list[_Span]:
         if hit is not None:
             spans.append(_Span(m.start(), m.end(), f"quantity {hit.normalized}"))
     spans.extend(_Span(*p.span, f"vat {p.kind}") for p in tax_phrases(text))
+    spans.extend(_figures_with_words(text))
+    spans.extend(_Span(*p.span, f"party {normalize_name(p.name)}") for p in find_parties(text))
+    spans = [_with_own_words(text, s) for s in spans]
     out: list[_Span] = []
     for span in sorted((_whole_words(text, s) for s in spans), key=lambda s: (s.start, -s.end)):
         if out and span.start < out[-1].end:
             continue  # inside a value already masked
         out.append(span)
     return out
+
+
+#: A figure with its words in brackets after it, "8 450 (რვა ათას ოთხას ორმოცდაათი)", or its
+#: words with the figure in brackets after them, "ნული მთელი ორი (0.2)".
+_FIGURE_THEN_WORDS = re.compile(rf"(?<![\d.,])({FIGURE})\s*\(([^()\d]{{2,80}})\)")
+_WORDS_THEN_FIGURE = re.compile(rf"\(\s*({FIGURE})\s*%?\s*\)")
+#: The words right before a bracket: up to eight, the number's words among them.
+_WORDS_BEFORE = re.compile(r"((?:[ა-ჰ]+\s+){0,7}[ა-ჰ]+)\s*$")
+
+
+#: A decimal written out: "ნული მთელი ორი" (0.2), "ერთი მთელი ოცდახუთი მეასედი" (1.25).
+_DECIMAL_WORDS = re.compile(r"(.+?)\s+მთელი\s+(.+?)(?:\s+მე(?:ათ|ას|ათას)ედი)?")
+
+
+def _spelled_as(words: str, figure: str) -> bool:
+    """Whether ``words`` are ``figure`` written out, a decimal's words among them."""
+    value = parse_number(figure)
+    if value is None:
+        return False
+    decimal = _DECIMAL_WORDS.fullmatch(words.strip())
+    if decimal is not None:
+        whole, fraction = (parse_number_words(p) for p in decimal.groups())
+        digits = re.split(r"[.,]", figure.strip())
+        return (
+            whole is not None
+            and fraction is not None
+            and len(digits) == 2
+            and whole == int(digits[0])
+            and fraction == int(digits[1])
+        )
+    said = read_words(words)[1]
+    return said is not None and amounts_equal(said, value)
+
+
+def _words_before(text: str, at: int, figure: str) -> int | None:
+    """Where the words that write out ``figure`` begin, when they end right before ``at``."""
+    m = _WORDS_BEFORE.search(text[max(0, at - 120) : at])
+    if m is None:
+        return None
+    base = max(0, at - 120) + m.start(1)
+    words = list(re.finditer(r"[ა-ჰ]+", m.group(1)))
+    for k in range(len(words)):  # the longest run of words that is the number
+        if _spelled_as(m.group(1)[words[k].start() :], figure):
+            return base + words[k].start()
+    return None
+
+
+def _figures_with_words(text: str) -> list[_Span]:
+    """Every figure written with its own words, figure first or words first, as one value: the
+    figure's words are no words of the line's own (docs/GOLD_SPEC.md section 4, round 2)."""
+    out: list[_Span] = []
+    for m in _FIGURE_THEN_WORDS.finditer(text):
+        if _spelled_as(m.group(2), m.group(1)):
+            out.append(_Span(m.start(), m.end(), f"number {parse_number(m.group(1)):g}"))
+    for m in _WORDS_THEN_FIGURE.finditer(text):
+        start = _words_before(text, m.start(), m.group(1))
+        if start is not None:
+            out.append(_Span(start, m.end(), f"number {parse_number(m.group(1)):g}"))
+    return out
+
+
+def _with_own_words(text: str, span: _Span) -> _Span:
+    """``span`` with the words its figure is written out in: a rate "(0.2) პროცენტის" read by
+    the rules keeps "ნული მთელი ორი" before it, the same rate written another way."""
+    m = _WORDS_THEN_FIGURE.match(text, span.start)
+    if m is None:
+        return span
+    start = _words_before(text, span.start, m.group(1))
+    return span if start is None else _Span(start, span.end, span.key)
 
 
 def _whole_words(text: str, span: _Span) -> _Span:
