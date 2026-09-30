@@ -808,8 +808,36 @@ _UNIT_KA = {"დღ": "day", "კვირ": "week", "თვ": "month", "წე�
 _QUAL_KA = {"კალენდარული": "calendar", "სამუშაო": "working", "საბანკო": "banking"}
 
 
+#: The event a count starts from, which is not what the count measures: "მიწოდებიდან 10 დღის
+#: ვადაში" (within 10 days *from delivery*) is an installation's or a payment's deadline, not the
+#: delivery's; "24 months after delivery" is a warranty. A Georgian ablative ("-დან") or the word
+#: after an English "from"/"after".
+_COUNT_STARTS_FROM = re.compile(
+    r"(?<![ა-ჰ])[ა-ჰ]+დან(?![ა-ჰ])"
+    r"|(?<![a-z])(?:from|after|following|upon)\s+(?:the\s+)?(?:date\s+of\s+(?:the\s+)?)?"
+    r"(?P<event>[a-z]+)",
+    re.IGNORECASE,
+)
+#: Where a second clause of a sentence turns to another subject: ", ხოლო მონტაჟი ..." (whereas
+#: the installation ...), ", whereas". A keyword of the first clause names nothing in the second.
+_CLAUSE_TURN = re.compile(r"[,\u2013\u2014-](?=\s*(?:ხოლო|whereas)(?![ა-ჰa-z]))", re.IGNORECASE)
+
+
+def _duration_context(text: str) -> str:
+    """``text`` as a duration's type is read from it: the events counts start from blanked out,
+    and a turn to another clause made a sentence boundary. Every offset stays where it was."""
+    chars = list(text)
+    for m in _COUNT_STARTS_FROM.finditer(text):
+        a, b = m.span("event") if m.group("event") else m.span()
+        chars[a:b] = " " * (b - a)
+    for m in _CLAUSE_TURN.finditer(text):
+        chars[m.start()] = ";"
+    return "".join(chars)
+
+
 def find_durations(text: str) -> list[RuleHit]:
     hits: list[RuleHit] = []
+    context = _duration_context(text)
     for pat, is_ka in ((_DUR_KA, True), (_DUR_EN, False)):
         for m in pat.finditer(text):
             n = int(m.group(1) or m.group(2))
@@ -823,7 +851,7 @@ def find_durations(text: str) -> list[RuleHit]:
                 unit = _UNIT_KA.get(unit, unit)
                 qual = _QUAL_KA.get(qual, qual) if qual else None
             ft = _classify(
-                text,
+                context,
                 m.start(),
                 m.end(),
                 (
