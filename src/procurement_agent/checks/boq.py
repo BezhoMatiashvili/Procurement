@@ -151,7 +151,13 @@ _RATE_KEYS = ("rate_total", *_COMPONENT_RATES)
 #: The columns a template computes (quantity x rate): a number typed over one is flagged.
 _TOTAL_KEYS = (*_COMPONENT_SUMS, "amount")
 
-_HEADER_SCAN_ROWS = 14
+#: Where a header block may start: a bid-form block (the bidder's name, ID, address, tender
+#: number ...) filled in above the bill pushes it down, so the window is as deep as the gold
+#: writer's. It bounds only the start: the block's own rows are followed wherever they fall
+#: (at most ``_HEADER_BLOCK_ROWS`` of them). A window of 14 rows bounding both once cut a header
+#: at its second row, and the materials rate was read as the unit rate.
+_HEADER_SCAN_ROWS = 40
+_HEADER_BLOCK_ROWS = 8
 _HEADER_SCAN_COLS = 30
 #: Line totals are money; a cent of drift is rounding, not an error.
 _MONEY_TOL = 0.01
@@ -635,6 +641,8 @@ class BoqWorkbook:
     sheet_order: list[str] = field(default_factory=list)
     summary_rows: list[SummaryRow] = field(default_factory=list)
     summary_sheet: str | None = None
+    #: the Summary column its rows' values are read from (the TOTAL column)
+    summary_total_col: int | None = None
     #: sheets that look priced (the Summary links to them, a SUB-TOTAL row, half a BOQ header)
     #: but whose columns could not be recognised - never skipped silently
     unreadable_sheets: list[str] = field(default_factory=list)
@@ -852,12 +860,14 @@ def _map_headers(ws: object) -> tuple[dict[str, int], int]:
     """
     block: list[int] = []
     first: dict[str, int] = {}
-    for r in range(1, _HEADER_SCAN_ROWS + 1):
+    for r in range(1, _HEADER_SCAN_ROWS + _HEADER_BLOCK_ROWS + 1):
         if block:
-            if not _continues_header(ws, r, block[-1], first):
+            if r >= block[0] + _HEADER_BLOCK_ROWS or not _continues_header(ws, r, block[-1], first):
                 break
             block.append(r)
             continue
+        if r > _HEADER_SCAN_ROWS:
+            break
         found = [
             (c, key)
             for c in range(1, _HEADER_SCAN_COLS + 1)
@@ -904,8 +914,9 @@ def _map_headers(ws: object) -> tuple[dict[str, int], int]:
 
 
 def _column_number_row(ws: object, after: int) -> int:
-    """The '1 2 3 4 ...' row some templates put under the header, if present."""
-    for r in range(after, min(after + 3, _HEADER_SCAN_ROWS) + 1):
+    """The '1 2 3 4 ...' row some templates put under the header, if present - wherever the
+    header ends (a fixed window once left it unseen under a header pushed down)."""
+    for r in range(after, after + 4):
         values = [
             ws.cell(r, c).value  # type: ignore[attr-defined]
             for c in range(1, _HEADER_SCAN_COLS)
@@ -1406,20 +1417,46 @@ def _summary_columns(ws: object) -> tuple[int | None, int | None, int | None, in
     Every column is located by its header label. One of the client's bidders returned a Summary
     shifted one column to the right, which a reader that assumed columns A and B silently read
     as all zeroes - a wrong answer that looks like a correct one.
+
+    The header is found wherever a bid-form block above it pushed it (``_HEADER_SCAN_ROWS``):
+    the description label with the item or a total label beside it, and the TOTAL column is
+    looked for in that header's own rows only. A fixed 14-row window once cut the header from
+    its "TOTAL" sub-label, and the group label "AMOUNT EXCL. VAT" over the materials column was
+    read as the total - every chain row empty, and the bid unranked.
     """
     cells = [
         (cell.row, cell.column, _norm_label(cell.value))
-        for row in ws.iter_rows(min_row=1, max_row=_HEADER_SCAN_ROWS, max_col=_HEADER_SCAN_COLS)  # type: ignore[attr-defined]
+        for row in ws.iter_rows(  # type: ignore[attr-defined]
+            min_row=1, max_row=_HEADER_SCAN_ROWS + _HEADER_BLOCK_ROWS, max_col=_HEADER_SCAN_COLS
+        )
         for cell in row
         if cell.value not in (None, "")
     ]
-    item = next(((r, c) for r, c, label in cells if label in _SUMMARY_ITEM_LABELS), None)
-    desc = next(((r, c) for r, c, label in cells if label in _SUMMARY_DESC_LABELS), None)
+
+    def header_score(r: int, c: int) -> int:
+        """How much a description label at (r, c) looks like the Summary's header row."""
+        has_item = any(row == r and label in _SUMMARY_ITEM_LABELS for row, _, label in cells)
+        has_total = any(
+            r <= row <= r + 1 and col > c and label.startswith(_SUMMARY_TOTAL_LABELS)
+            for row, col, label in cells
+        )
+        return 2 * has_item + has_total
+
+    descs = [(r, c) for r, c, label in cells if label in _SUMMARY_DESC_LABELS]
+    desc = max(descs, key=lambda d: header_score(*d), default=None)  # the first of the best
+    near = range(desc[0] - 1, desc[0] + 3) if desc else range(1, _HEADER_SCAN_ROWS + 1)
+    item = next(
+        ((r, c) for r, c, label in cells if r in near and label in _SUMMARY_ITEM_LABELS), None
+    )
+    content = {pos[1] for pos in (item, desc) if pos is not None}
     # "TOTAL" itself wins: the client's Summary puts it under a group header "AMOUNT EXCL.
     # VAT" that spans the materials, labour and transport columns. Only without one does a label
     # that starts with a total's word name the column - and only in the header's own rows, not
     # in a row below it that says "TOTAL COST".
-    total = next(((r, c) for r, c, label in cells if label == "total"), None)
+    total = next(
+        ((r, c) for r, c, label in cells if r in near and c not in content and label == "total"),
+        None,
+    )
     if total is None and desc is not None:
         total = next(
             (
@@ -1455,6 +1492,7 @@ def _read_summary_rows(book: BoqWorkbook, ws: object, wf: object) -> list[Summar
     against the sheets and against each other.
     """
     item_col, desc_col, total_col, header_row = _summary_columns(ws)
+    book.summary_total_col = total_col
     out: list[SummaryRow] = []
     if total_col is None or desc_col is None:
         return out
@@ -1621,7 +1659,7 @@ class PositionEval:
     #: template quantity x rate, or the bidder's own amount where the template quantity is blank
     cost: float
     #: priced | filled_blank | unpriced | not_filled | non_numeric | removed | sheet_missing |
-    #: sheet_unreadable | optional | optional_priced
+    #: sheet_unreadable | prices_not_read | optional | optional_priced
     status: str
     in_common_scope: bool = False
     #: the positions priced as one: a section row ("A8") and the rows numbered under it ("8.1")
@@ -1697,7 +1735,9 @@ class BidComparison:
             self.removed_sheets_priced
             or self.unreadable_sheets
             or self.unpriced_positions
-            or any(p.status in ("removed", "sheet_missing") for p in self.positions)
+            or any(
+                p.status in ("removed", "sheet_missing", "prices_not_read") for p in self.positions
+            )
         )
 
     @property
@@ -2070,19 +2110,36 @@ def compare_bid(template: BoqWorkbook, bid: BoqWorkbook) -> BidComparison:
 
     _evaluate(out, bid)
     if bid.summary_sheet is not None and out.markup_factor is None:
-        out.findings.append(_not_ranked(out))
+        out.findings.append(_not_ranked(out, bid))
     out.findings.extend(reconcile_summary(bid))
     _list_findings(out)
     return out
 
 
-def _not_ranked(out: BidComparison) -> Finding:
+def _not_ranked(out: BidComparison, bid: BoqWorkbook) -> Finding:
     """The bid has a Summary, but no markup could be taken from it: say which row is missing
-    rather than leave the bidder uncoloured without a word."""
+    rather than leave the bidder uncoloured without a word - or, where the row is there but
+    states no number in the column read as the Summary's total, say that instead: "no row
+    states the total incl. VAT" over a row that does sent the reader looking for the wrong
+    thing."""
     if out.stated_incl_vat is None:
-        ka, en = "ჯამი დღგ-ს ჩათვლით", "the total incl. VAT"
+        role, ka, en = "incl", "ჯამი დღგ-ს ჩათვლით", "the total incl. VAT"
     else:
-        ka, en = "TOTAL COST", "TOTAL COST"
+        role, ka, en = "cost", "TOTAL COST", "TOTAL COST"
+    row = summary_roles(bid).get(role)
+    if row is not None and row.value is None:
+        column = get_column_letter(bid.summary_total_col) if bid.summary_total_col else "?"
+        return _finding(
+            "BOQ.NOT_RANKED",
+            "warning",
+            f"{out.bidder}: Summary-ის სტრიქონს {row.row} („{row.label[:40]}“) ჯამის სვეტში "
+            f"({column}) რიცხვი არ უწერია — ფასნამატი ვერ გამოითვალა და კომპანია რანჟირებაში "
+            "არ მონაწილეობს",
+            f"{out.bidder}: Summary row {row.row} ('{row.label[:40]}') states no number in "
+            f"column {column}, the column read as the Summary's total - the bidder's markup "
+            "could not be worked out, so the bid is not ranked",
+            expected=en,
+        )
     return _finding(
         "BOQ.NOT_RANKED",
         "warning",
@@ -2410,6 +2467,12 @@ def _compare_sheet(out: BidComparison, t_sheet: BoqSheet, b_sheet: BoqSheet) -> 
         # the reader's gap, not the bidder's: said once, on the template, when it is the same
         if _reads_prices(t_sheet):
             out.findings.append(_prices_not_read(b_sheet.name, template=False))
+        # and its positions are not read, never "left unpriced" by a bidder who priced them
+        for pos in sheet_positions:
+            if pos.status in ("unpriced", "not_filled", "non_numeric"):
+                pos.status = "prices_not_read"
+        out.unpriced_positions = [t for t in out.unpriced_positions if t.sheet != t_sheet.name]
+        out.unfilled_positions = [t for t in out.unfilled_positions if t.sheet != t_sheet.name]
     elif not priced and any(line.quantity for line in t_sheet.lines):
         out.unpriced_sheets.append(t_sheet.name)
 
@@ -3046,6 +3109,7 @@ _STATUS_TEXT = {
     "removed": "EXCLUDED: removed by the bidder",
     "sheet_missing": "EXCLUDED: sheet missing",
     "sheet_unreadable": "EXCLUDED: sheet unreadable",
+    "prices_not_read": "EXCLUDED: its rate and amount columns were not recognised",
     "optional": "optional (placeholder for other items)",
     "optional_priced": "EXCLUDED: the bidder's own additional items",
 }
@@ -3369,7 +3433,14 @@ def _write_excluded_block(ws: object, row: int, comps: list[BidComparison]) -> i
             (_STATUS_TEXT.get(p.status, p.status), p.sheet, p.row, p.item_no, p.description)
             for p in comp.positions
             if p.status
-            in ("removed", "unpriced", "non_numeric", "sheet_missing", "sheet_unreadable")
+            in (
+                "removed",
+                "unpriced",
+                "non_numeric",
+                "sheet_missing",
+                "sheet_unreadable",
+                "prices_not_read",
+            )
         )
         for kind, sheet, line_row, item, desc in entries:
             for col, value in enumerate((kind, comp.bidder, sheet, line_row, item, desc[:200]), 1):

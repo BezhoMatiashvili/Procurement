@@ -9,6 +9,8 @@ memory; every expected number is worked out here from the test's own data.
 
 from __future__ import annotations
 
+import re
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -26,6 +28,7 @@ from procurement_agent.checks.boq import (
     _label_key,
     _num,
     _plays,
+    _summary_columns,
     _unit_rate,
     cents,
     compare_all,
@@ -37,6 +40,7 @@ from procurement_agent.checks.boq import (
     summary_roles,
     template_findings,
 )
+from tests.boq_factory import Bid, build_real_boq
 from tests.unit.test_boq_reader_variants import Cells, Fx, _rules, _save
 
 _HEAD = ("No", "Description", "Unit", "Quantity", "Rate", "Amount")
@@ -491,3 +495,139 @@ def test_a_text_column_inside_the_price_block_keeps_the_rate_check(tmp_path: Pat
     [line] = read_boq(_save(tmp_path / "b.xlsx", {"1. WORKS": cells})).sheets["1. WORKS"].lines
     assert not line.partial_rate
     assert [f.expected for f in _arithmetic_findings(line, ())] == ["9.80"]
+
+
+# --- a bid-form block above the bill ----------------------------------------------------------
+
+#: what a bidder fills in above the bill: all invented
+_BID_FORM = (
+    "BID FORM",
+    "Bidder: Sample Works Ltd",
+    "Registration code: 000111222",
+    "Address: 7 Invented Lane",
+    "Tender No: T-0000",
+    "Date: 01.02.2026",
+    "Bid validity: 60 days",
+    "Currency: USD",
+    "Signatory: B. Sample",
+    "Stamp:",
+    "Phone: +000 000 000",
+    "E-mail: bids@sample.invalid",
+    "Contact: C. Sample",
+    "Bank: Sample Bank",
+    "Account: XX00SAMPLE0000",
+    "Notes: none",
+    "Prepared by: D. Sample",
+    "Checked by: E. Sample",
+)
+
+
+def _below_form(rows: int, cells: Cells) -> Cells:
+    """``cells`` moved down under a bid form of ``rows`` rows."""
+    out: Cells = {(r + rows, c): v for (r, c), v in cells.items()}
+    for i in range(rows):
+        out[(i + 1, 1)] = _BID_FORM[i % len(_BID_FORM)]
+    for (r, c), v in list(out.items()):
+        if isinstance(v, Fx):  # formulas move with their rows
+            text = re.sub(
+                r"([A-Z])(\d+)", lambda m: f"{m.group(1)}{int(m.group(2)) + rows}", v.text
+            )
+            out[(r, c)] = Fx(text, v.value)
+    return out
+
+
+def _grouped_rate_sheet() -> Cells:
+    """A two-row header - "Unit rate" over Materials | Total - and one position."""
+    cells: Cells = {(1, c): h for c, h in enumerate(_HEAD[:4], 1)}
+    cells.update({(1, 5): "Unit rate", (1, 7): "Amount", (2, 5): "Materials", (2, 6): "Total"})
+    cells.update({(3, 1): "1.1", (3, 2): "Wall render", (3, 3): "m2", (3, 4): 10.0})
+    cells.update({(3, 5): 5.0, (3, 6): 5.0, (3, 7): Fx("=D3*F3", 50.0)})
+    return cells
+
+
+@pytest.mark.parametrize("rows", [0, 13, 19])
+def test_a_header_pushed_down_by_a_bid_form_keeps_all_its_rows(tmp_path: Path, rows: int) -> None:
+    """At row 14, the header's second row fell outside a 14-row window: "Unit rate" bound the
+    materials column as the unit rate. At row 20 the sheet was unreadable."""
+    cells = _below_form(rows, _grouped_rate_sheet())
+    sheet = read_boq(_save(tmp_path / "b.xlsx", {"1. WORKS": cells})).sheets["1. WORKS"]
+    assert (sheet.columns["rate_materials"], sheet.columns["rate_total"]) == (5, 6)
+    assert sheet.header_row == rows + 2
+    assert [(ln.item_no, ln.rate_total) for ln in sheet.lines] == [("1.1", 5.0)]
+
+
+def test_the_bid_form_rows_themselves_are_neither_header_nor_lines(tmp_path: Path) -> None:
+    t = read_boq(_save(tmp_path / "t.xlsx", {"1. WORKS": _grouped_rate_sheet()}))
+    b = read_boq(_save(tmp_path / "b.xlsx", {"1. WORKS": _below_form(18, _grouped_rate_sheet())}))
+    comp = compare_bid(t, b)
+    assert comp.evaluated_cost == pytest.approx(50.0)
+    assert comp.findings == []
+
+
+def _summary_sheet(top: int) -> Cells:
+    """The client-style Summary with its header on row ``top``: "AMOUNT EXCL. VAT" spanning
+    the materials, labour, transport and TOTAL sub-columns under it."""
+    cells: Cells = {(top, 1): "ITEM", (top, 2): "DESCRIPTION", (top, 3): "AMOUNT EXCL. VAT"}
+    for c, label in enumerate(("MATERIALS", "LABOUR", "TRANSPORT", "TOTAL"), 3):
+        cells[(top + 1, c)] = label
+    cells.update({(top + 2, 1): "1", (top + 2, 2): "WORKS", (top + 2, 6): 1000.0})
+    cells.update({(top + 3, 2): "TOTAL COST", (top + 3, 6): 1000.0})
+    return cells
+
+
+@pytest.mark.parametrize("top", [1, 13, 14, 20])
+def test_the_summary_total_column_is_found_wherever_its_header_sits(top: int) -> None:
+    ws = Workbook().active
+    assert ws is not None
+    for (r, c), v in _below_form(top - 1, _summary_sheet(1)).items():
+        ws.cell(r, c, v)
+    ws.merge_cells(start_row=top, start_column=3, end_row=top, end_column=5)
+    assert _summary_columns(ws) == (1, 2, 6, top + 1)
+
+
+def test_a_summary_row_labelled_total_is_never_the_total_column() -> None:
+    """The column is looked for in the header's own rows, and never in the description column:
+    a "Total" row further down named the descriptions as the total."""
+    ws = Workbook().active
+    assert ws is not None
+    for c, label in enumerate(("Item", "Description", "Amount, USD"), 1):
+        ws.cell(1, c, label)
+    ws.cell(2, 1, "1")
+    ws.cell(2, 2, "WORKS")
+    ws.cell(2, 3, 1000.0)
+    ws.cell(4, 2, "Total")
+    ws.cell(4, 3, 1000.0)
+    assert _summary_columns(ws) == (1, 2, 3, 1)
+
+
+def test_a_summary_row_with_no_value_in_the_total_column_is_named_not_called_missing(
+    tmp_path: Path,
+) -> None:
+    t_path, b_path = tmp_path / "t.xlsx", tmp_path / "b.xlsx"
+    t_path.write_bytes(build_real_boq())
+    b_path.write_bytes(build_real_boq(Bid()))
+    t, b = read_boq(t_path, name="T"), read_boq(b_path, name="B")
+    incl = summary_roles(b)["incl"]
+    b.summary_rows = [replace(r, value=None) if r.row == incl.row else r for r in b.summary_rows]
+    [note] = [f for f in compare_bid(t, b).findings if f.rule_id == "BOQ.NOT_RANKED"]
+    assert f"row {incl.row}" in note.message_en and "states no number" in note.message_en
+
+
+def test_positions_on_a_sheet_whose_prices_are_not_read_are_never_called_unpriced(
+    tmp_path: Path,
+) -> None:
+    """The reader's gap is said once (BOQ.PRICES_NOT_READ); "5 position(s) left unpriced" beside
+    it blamed a bidder who priced every line."""
+    head = (*_HEAD[:4], "Tarif", "Summe")
+    t_cells: Cells = {(1, c): h for c, h in enumerate(_HEAD, 1)}
+    b_cells: Cells = {(1, c): h for c, h in enumerate(head, 1)}
+    for cells in (t_cells, b_cells):
+        cells.update({(2, 1): "1.1", (2, 2): "Wall render", (2, 3): "m2", (2, 4): 10.0})
+        cells.update({(2, 5): 5.0, (2, 6): Fx("=D2*E2", 50.0)})
+    t = read_boq(_save(tmp_path / "t.xlsx", {"1. WORKS": t_cells}))
+    b = read_boq(_save(tmp_path / "b.xlsx", {"1. WORKS": b_cells}))
+    comp = compare_bid(t, b)
+    rules = _rules(comp)
+    assert "BOQ.PRICES_NOT_READ" in rules and "BOQ.POSITIONS_UNPRICED" not in rules
+    assert comp.unpriced_positions == [] and not comp.complete
+    assert [p.status for p in comp.positions] == ["prices_not_read"]
