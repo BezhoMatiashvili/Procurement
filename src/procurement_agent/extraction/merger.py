@@ -28,6 +28,10 @@ SINGLE_VALUED: frozenset[FactType] = frozenset(
     }
 )
 
+#: What a vat_status states (docs/GOLD_SPEC.md): the price includes VAT, excludes it, none
+#: applies, or it is a net amount. Never a number.
+VAT_STATUSES = frozenset({"incl", "excl", "none", "net"})
+
 _WS = re.compile(r"\s+")
 _ORDER = {t: i for i, t in enumerate(DEFAULT_TARGETS)}
 
@@ -125,6 +129,10 @@ def rule_hits_to_facts(hits: dict[str, list[RuleHit]], chunks: list[Chunk]) -> l
         chunk = by_id[cid]
         for h in hs:
             ftype, conf, note = h.type, h.confidence, h.note
+            if ftype == FactType.vat_status and h.normalized not in VAT_STATUSES:
+                # the rate next to "დღგ" ("+ 18% დღგ") says nothing about whether the price
+                # includes the tax: as a fact it is a percentage
+                ftype = FactType.percentage
             if ftype == FactType.date and cid == header_id:
                 # An unlabeled date in the document header is almost always the document date
                 # ("ქ. თბილისი, 2026 წლის 15 მარტი"); keep it, but say so.
