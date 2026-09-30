@@ -39,6 +39,7 @@ from procurement_agent.checks.boq import (
     LineDiff,
     compare_all,
     rate_outliers,
+    read_bid,
     read_boq,
     template_findings,
     write_merged_workbook,
@@ -730,12 +731,19 @@ def _read_book(settings: Settings, doc: Document) -> BoqWorkbook:
     return read_boq(upload_path(settings, doc.id, doc.kind), name=Path(doc.display_name).stem[:31])
 
 
+def _read_bid(settings: Settings, doc: Document) -> BoqWorkbook:
+    """A bid, read so that one unreadable workbook is reported on its bidder (``BOQ.UNREADABLE``)
+    instead of failing the comparison for every bidder. The template is still read strictly:
+    without it there is nothing to compare against."""
+    return read_bid(upload_path(settings, doc.id, doc.kind), name=Path(doc.display_name).stem[:31])
+
+
 def run_boq(
     settings: Settings, template_doc: Document, bid_docs: list[Document]
 ) -> tuple[BoqCheckReport, BoqWorkbook, list[BoqWorkbook], list[BidComparison]]:
     """The whole comparison. Shared by the JSON API, the xlsx download and the UI page."""
     template = _read_book(settings, template_doc)
-    books = [_read_book(settings, d) for d in bid_docs]
+    books = [_read_bid(settings, d) for d in bid_docs]
     comparisons = compare_all(template, books)
     outliers = rate_outliers(template, comparisons)
 

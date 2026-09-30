@@ -683,6 +683,44 @@ alone. On the client's six acts and the twelve of Test Set 2 the rules leave no 
 open, so the review would never be asked, and the two columns are identical by construction. A
 real number needs labelled paraphrases and substitutions, which this corpus does not have.
 
+## BOQ comparison
+
+Measured 2026-09-30, after the second red-team round on the BOQ reader:
+
+| harness | result |
+|---|---|
+| `scripts/evaluate_boq.py`, client set | 102/102 checks |
+| `scripts/evaluate_boq.py`, test set 2 | 102/102 checks |
+| `scripts/evaluate_boq.py`, test set 3 | 127/127 checks |
+| `scripts/mutate_boq.py --seed 3 --per-class 3` | 51 mutants, 17 classes, 100% pass, 0 false positives, 0 control false positives |
+
+The red team's round-2 probes were each workbooks laid out otherwise than the client's
+template: a group header over rate and amount sub-columns, a quantity split per building, a
+closing row not called SUB-TOTAL, a Summary lettered A, B, C or worded the Georgian way, a later
+row that also says "TOTAL COST" or "incl. VAT", units in Cyrillic or Georgian, chart sheets, a
+column inserted into the item-number block. The rules now in GOLD_SPEC 5 cover each; every probe
+is a synthetic unit test in `tests/unit/test_boq_reader_variants.py`. On the three gold sets
+the findings did not change, only the wording of the closing-row reconciliation. These are
+fitting numbers in the same sense as above: the gold sets are this client's.
+
+Policy questions left open:
+
+* Profit on cost + overheads, usual in Georgian estimates, is a `BOQ.RECONCILE` error on every
+  faithful bid that computes it so, because `reconcile_summary` holds overheads and profit
+  against TOTAL COST x their rate. That base is the module's own documented decision, not
+  GOLD_SPEC 5's (which asks only that the rows follow from each other), and the gold writer
+  checks no rates at all. The markup and the ranking are right; the error is not. Accepting
+  either base (TOTAL COST, or TOTAL COST + overheads) and noting which was used is the
+  recommended change.
+
+The rest follow the letter of GOLD_SPEC 5, and the gold writer agrees:
+
+* A provisional sum the client fixes (amount typed, no rate) is unpriced for every bidder and
+  makes every bid incomplete; the ranking is unaffected.
+* A lump sum typed on a group row over its formula is booked as "Summary vs sheets", not as a
+  priced non-position; renumbered positions after an inserted line are removed + added; an amount
+  typed with every rate cell empty is unpriced.
+
 ## Known gaps
 
 * The scanned PDFs are not yet in the gold set; OCR only runs inside the Docker image, so they
