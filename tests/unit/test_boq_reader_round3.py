@@ -20,6 +20,7 @@ from procurement_agent.checks.boq import (
     SummaryRow,
     _colour,
     _colour_extremes,
+    _label_key,
     _num,
     _plays,
     cents,
@@ -29,6 +30,7 @@ from procurement_agent.checks.boq import (
     read_boq,
     reconcile_summary,
     summary_roles,
+    template_findings,
 )
 from tests.unit.test_boq_reader_variants import Cells, Fx, _rules, _save
 
@@ -272,3 +274,57 @@ def test_a_unit_the_template_states_is_never_listed_as_filled(tmp_path: Path) ->
     comp = compare_bid(t, b)
     assert comp.unit_filled == []
     assert _rules(comp).count("BOQ.UNIT_CHANGED") == 1
+
+
+# --- the line amount headed "Cost", "Sum", "თანხა" ------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("label", "key"),
+    [
+        ("Cost", "amount"),
+        ("Total cost", "amount"),
+        ("Total cost, USD", "amount"),
+        ("Sum", "amount"),
+        ("თანხა", "amount"),
+        ("სულ ღირებულება", "amount"),
+        ("ჯამური ღირებულება ლარში", "amount"),
+        ("Unit cost", "rate_total"),  # the rate, never the line amount
+    ],
+)
+def test_the_line_amount_is_read_by_its_usual_names(label: str, key: str) -> None:
+    assert _label_key(label) == key
+
+
+@pytest.mark.parametrize(
+    "label", ["Cost code", "Costs excl. VAT", "Summary", "Sum insured", "თანხის წყარო"]
+)
+def test_a_header_only_resembling_the_amount_is_not_the_amount(label: str) -> None:
+    assert _label_key(label) is None
+
+
+def _amount_sheet(amount_label: str, typed: float) -> Cells:
+    """1.1 at 210 x 38.50 whose amount is typed as ``typed``, and 1.2 at 10 x 5.00."""
+    cells: Cells = {(1, c): h for c, h in enumerate((*_HEAD[:5], amount_label), 1)}
+    cells.update({(2, 1): "1.1", (2, 2): "Floor tiling", (2, 3): "m2", (2, 4): 210.0})
+    cells.update({(2, 5): 38.5, (2, 6): typed})
+    cells.update({(3, 1): "1.2", (3, 2): "Skirting", (3, 3): "m", (3, 4): 10.0, (3, 5): 5.0})
+    cells[(3, 6)] = Fx("=D3*E3", 50.0)
+    return cells
+
+
+@pytest.mark.parametrize("label", ["Cost", "თანხა", "Total cost in USD"])
+def test_a_line_amount_headed_otherwise_is_still_checked(tmp_path: Path, label: str) -> None:
+    t = read_boq(_save(tmp_path / "t.xlsx", {"1. WORKS": _amount_sheet(label, 8085.0)}))
+    b = read_boq(_save(tmp_path / "b.xlsx", {"1. WORKS": _amount_sheet(label, 6085.0)}))
+    assert t.sheets["1. WORKS"].columns["amount"] == 6
+    [err] = [f for f in compare_bid(t, b).findings if f.rule_id == "BOQ.ARITHMETIC"]
+    assert err.expected == "8,085.00" and err.actual == "6,085.00"
+    assert "BOQ.AMOUNTS_NOT_READ" not in [f.rule_id for f in template_findings(t)]
+
+
+def test_a_sheet_whose_line_amount_is_not_recognised_says_so(tmp_path: Path) -> None:
+    t = read_boq(_save(tmp_path / "t.xlsx", {"1. WORKS": _amount_sheet("Extension", 8085.0)}))
+    assert "amount" not in t.sheets["1. WORKS"].columns
+    [note] = [f for f in template_findings(t) if f.rule_id == "BOQ.AMOUNTS_NOT_READ"]
+    assert note.severity == "info" and "1. WORKS" in note.message_en

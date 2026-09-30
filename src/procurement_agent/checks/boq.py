@@ -98,15 +98,25 @@ _HEADER_SYNONYMS: dict[str, tuple[str, ...]] = {
         "ერთეულის ფასი",
         "ერთ. ფასი",
         "ერთეულის ღირებულება",
+        "unit cost",
     ),
+    # the line amount by the names the Summary reader knows it by too ("Cost", "Sum", "თანხა")
     "amount": (
         "amount",
         "total",
         "total amount",
         "total price",
+        "cost",
+        "total cost",
+        "sum",
+        "total sum",
         "ღირებულება",
         "სულ",
         "ჯამი",
+        "თანხა",
+        "სულ თანხა",
+        "სულ ღირებულება",
+        "ჯამური ღირებულება",
     ),
 }
 _LABEL_TO_KEY = {label: key for key, labels in _HEADER_SYNONYMS.items() for label in labels}
@@ -1761,6 +1771,20 @@ def template_findings(template: BoqWorkbook) -> list[Finding]:
     for name, sheet in template.sheets.items():
         if not _reads_prices(sheet):
             out.append(_prices_not_read(name, template=True))
+        elif "amount" not in sheet.columns:
+            # rates read but no line amount: nothing to recompute a line or the sheet's closing
+            # total from - said, never skipped in silence
+            out.append(
+                _finding(
+                    "BOQ.AMOUNTS_NOT_READ",
+                    "info",
+                    f"გვერდზე {name} ღირებულების (სტრიქონის ჯამის) სვეტი ვერ ამოვიცანით — "
+                    "სტრიქონების და გვერდის ჯამის არითმეტიკა არ შემოწმებულა",
+                    f"sheet {name}: no line-amount column could be recognised - the lines' "
+                    "arithmetic and the sheet's closing total were not checked",
+                    actual=name,
+                )
+            )
     for sheet in template.sheets.values():
         for line in sheet.leaf_lines:
             for key, text in line.non_numeric:
