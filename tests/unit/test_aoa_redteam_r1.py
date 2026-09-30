@@ -297,3 +297,95 @@ class TestNewYearPeriod:
         )
         [finding] = _of(report, "AOA.ACT_DATE")
         assert finding.expected == "2027 წლის 31 იანვარი"
+
+
+# --- AOA-16: "VAT included" in the other words acts use ------------------------------------------
+
+_FEE_TAX = "საფასური შეადგენს 100 (ასი) ლარს გადასახადების ჩათვლით."
+
+
+def _vat_worded(wording: str) -> CheckReport:
+    act = ACT.replace(_FEE_TAX, f"საფასური შეადგენს 100 (ასი) ლარს{wording}.")
+    return _check(act, contractor_type="individual_entrepreneur_vat")
+
+
+class TestVatIncludedWordings:
+    def test_vat_included_in_other_words_is_the_wording_asked_for(self) -> None:
+        for wording in (
+            " (თანხა შეიცავს დღგ-ს)",
+            ", თანხაში შედის დღგ",
+            " (ფასში შედის დღგ)",
+            ", ჩათვლით დღგ",
+            " (დღგ შედის ღირებულებაში)",
+        ):
+            assert _of(_vat_worded(wording), "AOA.TAX_WORDING") == [], wording
+
+    def test_vat_left_out_in_those_words_is_an_error(self) -> None:
+        for wording in (" (თანხა არ შეიცავს დღგ-ს)", ", თანხაში არ შედის დღგ"):
+            [finding] = _of(_vat_worded(wording), "AOA.TAX_WORDING")
+            assert finding.severity == "error", wording
+
+    def test_entering_into_force_includes_nothing(self) -> None:
+        from procurement_agent.checks.contract_terms import tax_phrases
+
+        text = "ხელშეკრულება ძალაში შედის დღგ-ს გადამხდელად რეგისტრაციის დღიდან"
+        assert [p.kind for p in tax_phrases(text) if p.kind == "inclusion"] == []
+        text = "მომსახურება გაწეულია 2026 წლის 30 აპრილის ჩათვლით დღგ-ს გადამხდელის მიერ"
+        assert [p.kind for p in tax_phrases(text) if p.kind == "inclusion"] == []
+
+
+# --- AOA-17: the fee stated with its VAT broken out ----------------------------------------------
+
+
+class TestVatBreakdown:
+    def test_net_plus_vat_making_the_price_is_the_price(self) -> None:
+        for fee in (
+            "საფასური დღგ-ს გარეშე შეადგენს 84.75 ლარს, დღგ - 15.25 ლარს, სულ დღგ-ს ჩათვლით "
+            "100 (ასი) ლარს.",
+            "საფასური დღგ-ს გარეშე შეადგენს 84.75 ლარს. დღგ შეადგენს 15.25 ლარს. სულ დღგ-ს "
+            "ჩათვლით საფასური შეადგენს 100 (ასი) ლარს.",
+            "საფასური დღგ-ს გარეშე შეადგენს 84.75 ლარს, დღგ - 15.25 ლარს.",
+        ):
+            report = _check(ACT.replace(_FEE_TAX, fee))
+            assert _of(report, "AOA.FEE") == [], fee
+            assert _substantive(report) == [], fee
+
+    def test_the_breakdown_is_the_vat_entrepreneur_s_wording(self) -> None:
+        fee = (
+            "საფასური დღგ-ს გარეშე შეადგენს 84.75 ლარს, დღგ - 15.25 ლარს, სულ დღგ-ს ჩათვლით "
+            "100 (ასი) ლარს."
+        )
+        report = _check(ACT.replace(_FEE_TAX, fee), contractor_type="individual_entrepreneur_vat")
+        assert _substantive(report) == []
+
+    def test_parts_that_do_not_add_up_are_still_compared(self) -> None:
+        fee = (
+            "საფასური დღგ-ს გარეშე შეადგენს 84.75 ლარს, დღგ - 15.00 ლარს, სულ დღგ-ს ჩათვლით "
+            "100 (ასი) ლარს."
+        )
+        [finding] = _of(_check(ACT.replace(_FEE_TAX, fee)), "AOA.FEE")
+        assert finding.actual == "84.75 GEL"
+
+
+# --- AOA-19: the fee's correction keeps the currency and tetri words in the brackets -------------
+
+
+class TestFeeCorrectionWords:
+    def test_currency_and_tetri_words_are_kept(self) -> None:
+        act = ACT.replace("100 (ასი) ლარს", "700.00 (შვიდასი ლარი და 00 თეთრი)")
+        [finding] = _of(_check(act), "AOA.FEE")
+        assert finding.expected == "100.00 (ასი ლარი და 00 თეთრი)"
+
+    def test_the_currency_word_alone_is_kept(self) -> None:
+        act = ACT.replace("100 (ასი) ლარს", "700 (შვიდასი ლარი)")
+        [finding] = _of(_check(act), "AOA.FEE")
+        assert finding.expected == "100 (ასი ლარი)"
+
+    def test_the_words_with_tetri_follow_the_correct_amount(self) -> None:
+        from procurement_agent.checks.amounts import words_like
+
+        assert words_like(100.5, "შვიდასი ლარი და 00 თეთრი") == "ასი ლარი და 50 თეთრი"
+        assert words_like(100, "შვიდასი ლარი და ოცი თეთრი") == "ასი ლარი და ნული თეთრი"
+        assert words_like(100.2, "შვიდასი ლარი და ოცი თეთრი") == "ასი ლარი და ოცი თეთრი"
+        assert words_like(100.5, "შვიდასი") == "ასი ლარი და 50 თეთრი"
+        assert words_like(100, "შვიდასი აშშ დოლარი") == "ასი აშშ დოლარი"

@@ -30,6 +30,7 @@ __all__ = [
     "render_figure_like",
     "word_amounts",
     "words_for",
+    "words_like",
 ]
 
 #: The first run of digits (with grouping) in a string.
@@ -265,6 +266,30 @@ def words_for(value: float) -> str:
     cents = round((value - lari) * 100)
     base = number_to_words(lari)
     return f"{base} ლარი და {cents} თეთრი" if cents else base
+
+
+def words_like(value: float, example: str) -> str:
+    """``value`` written out the way the bracket ``example`` writes its amount: the number words
+    anew, the currency word and the tetri as the example has them - "შვიდასი ლარი და 00 თეთრი"
+    with 100 gives "ასი ლარი და 00 თეთრი". Tetri written in digits keep their width, tetri in
+    words are written in words. With no currency word in the example, ``words_for``."""
+    lari = int(value)
+    cents = round((value - lari) * 100)
+    split = _split_tetri(example)
+    head = split[0] if split is not None else example
+    currencies = list(_CURRENCY_WORD.finditer(head))
+    if not currencies:
+        return words_for(value)
+    out = f"{number_to_words(lari)} {currencies[-1].group(0)}"
+    tail = _TETRI_WORD.search(example)
+    if split is not None and tail is not None:
+        written = split[1]
+        if written.isdigit():
+            tetri = f"{cents:0{len(written)}d}"
+        else:
+            tetri = number_to_words(cents) if cents else "ნული"
+        return f"{out} და {tetri} {tail.group(0).strip()}"
+    return f"{out} და {cents} თეთრი" if cents else out
 
 
 def render_figure_like(value: float, example: str) -> str:

@@ -32,6 +32,7 @@ from procurement_agent.checks.amounts import (
     digits_and_words,
     render_figure_like,
     words_for,
+    words_like,
 )
 from procurement_agent.checks.aoa_llm import (
     SUBJECT_ID,
@@ -255,6 +256,9 @@ _NOT_THE_FEE: frozenset[AmountRole | None] = frozenset(
 )
 
 _NO_CONTRACT = "this rule compares the act against its contract, and none was supplied"
+
+#: How far after a fee before tax its "excl. VAT" may stand and still be its label.
+_NET_LABEL_REACH = 30
 
 #: What a party's field was compared against, as the messages name it: (Georgian, in the
 #: dative that "არ ემთხვევა" takes; English).
@@ -1094,15 +1098,41 @@ class AoaChecker:
 
     def _contract_price_values(self) -> list[float]:
         """The contract's prices as figures, as the fee rule reads them; empty without one."""
+        return [m.value for m in self._contract_prices()]
+
+    def _contract_prices(self) -> list[Money]:
+        """The contract's prices: the amounts called a price, or failing those, the ones plainly
+        not something else. Empty without a contract."""
         if self.contract is None:
             return []
         contract = self.contract.amounts()
-        prices = [r.money.value for r in contract if r.role == "price"]
-        if not prices:
-            prices = [
-                r.money.value for r in contract if r.role not in ("advance", "penalty", "tax")
-            ]
+        prices = [r.money for r in contract if r.role == "price"]
+        if not prices:  # nothing is called a price: take what is plainly not something else
+            prices = [r.money for r in contract if r.role not in ("advance", "penalty", "tax")]
         return prices
+
+    def _net_parts(self) -> list[RoledAmount]:
+        """The act's fee before tax, where the act breaks the tax out: an amount that with a tax
+        amount the act states adds up to another fee the act states, or to a price the contract
+        states - "დღგ-ს გარეშე 84.75 ლარს, დღგ - 15.25 ლარს, სულ დღგ-ს ჩათვლით 100 ლარს". It is
+        a part of the fee, not a second fee, and "დღგ-ს გარეშე" beside it says what it is."""
+        amounts = self.aoa.amounts()
+        taxes = [r.money for r in amounts if r.role == "tax"]
+        if not taxes:
+            return []
+        fees = [r for r in amounts if r.role in (None, "price")]
+        gross = [r.money for r in fees] + self._contract_prices()
+        return [
+            r
+            for r in fees
+            if any(
+                t.currency == r.money.currency == g.currency
+                and g is not r.money
+                and amounts_equal(r.money.value + t.value, g.value)
+                for t in taxes
+                for g in gross
+            )
+        ]
 
     def rule_required_fields(self) -> None:
         """Client rule 3: the act must name the project and the cadastral code."""
@@ -1366,8 +1396,10 @@ class AoaChecker:
         if self.contractor_type == "company":
             return  # rules 5-8 do not apply to a company; the summary says so (_NOT_APPLICABLE)
         rule = _TAX_RULES[self.contractor_type]
-        phrases = tax_phrases(self.aoa.text)
-        fees = self._fee_amounts()
+        nets = self._net_parts()
+        # "დღგ-ს გარეშე" beside the fee before tax says what that part is, not what the fee is
+        phrases = [p for p in tax_phrases(self.aoa.text) if not self._qualifies_net(p, nets)]
+        fees = [m for m in self._fee_amounts() if all(m != r.money for r in nets)]
         scopes = [fee_scope(self.aoa.sentences(), m.span) for m in fees]
         if not scopes:  # no fee found to read beside: the whole act is where the wording is
             scopes = [(0, len(self.aoa.text))]
@@ -1388,6 +1420,24 @@ class AoaChecker:
             expected=f"{fee.raw} {fix}" if fee else fix,
             span=fee.span if fee else None,
         )
+
+    def _qualifies_net(self, phrase: TaxPhrase, nets: list[RoledAmount]) -> bool:
+        """Whether an exclusion ("დღგ-ს გარეშე", "excl. VAT") is the label of a fee before tax:
+        in its sentence, before the figure with no other amount between, or right after it."""
+        if phrase.kind != "exclusion":
+            return False
+        starts = [r.money.span[0] for r in self.aoa.amounts()]
+        a, b = phrase.span
+        for r in nets:
+            start, end = r.money.span
+            lo, hi = (b, start) if b <= start else (end, a)
+            if any(lo <= x < hi for x in starts):
+                continue  # another amount stands between: the phrase is that one's
+            if b <= start and self._sentence_of(start)[0] <= a:
+                return True
+            if a >= end and a - end <= _NET_LABEL_REACH:
+                return True
+        return False
 
     def _fee_amounts(self) -> list[Money]:
         """The act's fee as written: the amounts called a price, or failing those, the ones
@@ -2296,9 +2346,7 @@ class AoaChecker:
             )
             return
         contract = self.contract.amounts()
-        prices = [r.money for r in contract if r.role == "price"]
-        if not prices:  # nothing is called a price: take what is plainly not something else
-            prices = [r.money for r in contract if r.role not in ("advance", "penalty", "tax")]
+        prices = self._contract_prices()
         if not prices:
             self._skip(
                 "AOA.FEE",
@@ -2306,7 +2354,9 @@ class AoaChecker:
                 "no price found in the contract to compare against",
             )
             return
-        fees = [r for r in act if r.role in (None, "price")]
+        # the fee before tax, beside the tax that makes it the fee, is the fee in parts
+        nets = self._net_parts()
+        fees = [r for r in act if r.role in (None, "price") and r not in nets]
         parts = [r for r in act if r.role in ("advance", "remainder")]
         matched = [r.money for r in fees if _states(prices, r.money)]
         wrong = [r for r in fees if not _states(prices, r.money)]
@@ -3075,7 +3125,9 @@ def _fee_like(value: float, written: str) -> str:
     words = _FEE_WORDS.match(rest.lstrip())
     if words is not None:
         gap = rest[: len(rest) - len(rest.lstrip())]
-        out += f"{gap}({words_for(value)})" + rest.lstrip()[words.end() :]
+        # the bracket's own currency and tetri words kept: "(ასი ლარი და 00 თეთრი)"
+        inner = words.group(0)[1:-1].strip()
+        out += f"{gap}({words_like(value, inner)})" + rest.lstrip()[words.end() :]
     else:
         out += rest
     return out.strip()

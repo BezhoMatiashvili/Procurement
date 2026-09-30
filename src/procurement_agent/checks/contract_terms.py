@@ -340,16 +340,25 @@ _QUOTED_NAME = re.compile(r"[„“«\"][^„“”«»\"\n]{1,80}[“”»\"]")
 _NET = re.compile(
     r"(?<![\w.@/])(?:net(?:to)?(?![a-z])|ნეტ(?:ო[ა-ჰ]*)?(?![ა-ჰ]))(?!\.\w)", re.IGNORECASE
 )
+#: The words a price is called by when a tax is said to be in it: "თანხაში შედის დღგ", "ფასში",
+#: "ღირებულებაში". Only these: "ძალაში შედის" (enters into force) includes nothing.
+_KA_MONEY = r"(?:თანხ|ფას|ღირებულებ|საფასურ|ანაზღაურებ)[ა-ჰ]*"
 #: The amount includes the tax: "გადასახადების ჩათვლით", "დღგ-ს გათვალისწინებით", "მოიცავს
-#: გადასახადებს", "მათ შორის დღგ-ს", "ითვალისწინებს გადასახადებს", "including all taxes", "VAT
+#: გადასახადებს", "თანხა შეიცავს დღგ-ს", "მათ შორის დღგ-ს", "ითვალისწინებს გადასახადებს",
+#: "თანხაში შედის დღგ", "დღგ შედის ღირებულებაში", ", ჩათვლით დღგ", "including all taxes", "VAT
 #: included", "gross fee". Up to four words may stand between "მოიცავს" and the tax: "მოიცავს
 #: საქართველოს კანონმდებლობით გათვალისწინებულ ყველა გადასახადს" is the contracts' boilerplate.
+#: "ჩათვლით" before the tax counts only where no word stands before it: after one, it closes a
+#: date ("30 აპრილის ჩათვლით დღგ-ს გადამხდელის ...").
 _INCLUSION = re.compile(
     "|".join(
         (
             rf"{_KA_TAX_RUN}\s+{_KA_INCLUDING}",
-            rf"(?<!არ )(?:მოიცავს|ითვალისწინებს|მათ\s+შორის)(?:\s+{_KA_WORD}){{0,4}}?\s+{_KA_TAX}"
-            rf"(?!\s+{_KA_EXCLUDING})",
+            rf"(?<!არ )(?:მოიცავს|შეიცავს|ითვალისწინებს|მათ\s+შორის)(?:\s+{_KA_WORD}){{0,4}}?"
+            rf"\s+{_KA_TAX}(?!\s+{_KA_EXCLUDING})",
+            rf"(?<![ა-ჰ])(?<!არ ){_KA_MONEY}\s+შედის\s+{_KA_TAX}",
+            rf"{_KA_TAX}\s+შედის\s+{_KA_MONEY}",
+            rf"(?<![ა-ჰ] )(?<![ა-ჰ]){_KA_INCLUDING}\s+{_KA_TAX}",
             rf"(?<!not )(?<![a-z])(?:including|inclusive\s+of|incl\.?)\s+{_EN_TAX_RUN}",
             rf"(?<![a-z]){_EN_TAX_RUN}\s+(?:is\s+|are\s+)?included(?![a-z])",
             r"(?<![a-z])gross\s+(?:amount|fee|remuneration|price|sum|value)(?![a-z])",
@@ -358,12 +367,15 @@ _INCLUSION = re.compile(
     re.IGNORECASE,
 )
 #: The amount excludes the tax: "საშემოსავლო და საპენსიო გადასახადების გარეშე", "არ მოიცავს
-#: დღგ-ს", "+ დღგ", "excluding VAT", "without taxes", "net of taxes", "VAT not included".
+#: დღგ-ს", "თანხაში არ შედის დღგ", "+ დღგ", "excluding VAT", "without taxes", "net of taxes",
+#: "VAT not included".
 _EXCLUSION = re.compile(
     "|".join(
         (
             rf"{_KA_TAX_RUN}\s+{_KA_EXCLUDING}",
-            rf"არ\s+(?:მოიცავს|ითვალისწინებს)(?:\s+{_KA_WORD}){{0,4}}?\s+{_KA_TAX}",
+            rf"არ\s+(?:მოიცავს|შეიცავს|ითვალისწინებს)(?:\s+{_KA_WORD}){{0,4}}?\s+{_KA_TAX}",
+            rf"(?<![ა-ჰ]){_KA_MONEY}\s+არ\s+შედის\s+{_KA_TAX}",
+            rf"{_KA_TAX}\s+არ\s+შედის(?:\s+{_KA_MONEY})?",
             r"\+\s*(?:დღგ|vat)(?![a-z])",
             rf"(?<![a-z])(?:excluding|exclusive\s+of|excl\.?|without|net\s+of|not\s+including)"
             rf"\s+{_EN_TAX_RUN}",
