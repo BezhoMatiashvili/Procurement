@@ -196,3 +196,60 @@ class TestPeriodOutsideTheTerm:
         """Near miss: when one year moved puts the period inside, that is the correction."""
         f = self._finding("2025 წლის 1 აპრილიდან 2025 წლის 30 აპრილის ჩათვლით")
         assert f.expected == "2026 წლის 1 აპრილიდან 2026 წლის 30 აპრილის"
+
+
+# --- AOA-R3-08: a figure before VAT is compared with the price before VAT -----------------------
+
+#: The pair with a price of 590 incl. VAT: 500 before VAT at 18%, and 90 of VAT.
+_VAT_CONTRACT = CONTRACT.replace("100 (ასი) ლარს", "590 (ხუთას ოთხმოცდაათი) ლარს")
+_GROSS = "საფასური შეადგენს 590 (ხუთას ოთხმოცდაათი) ლარს"
+_WRONG_GROSS = "საფასური შეადგენს 950 (ცხრაას ორმოცდაათი) ლარს"
+
+
+class TestFeeBeforeVat:
+    def test_a_net_slip_is_corrected_to_the_price_before_vat(self) -> None:
+        act = _fee(f"{_GROSS} დღგ-ს ჩათვლით (დღგ-ს გარეშე 505.00 ლარი).")
+        [finding] = _of(_check(act, _VAT_CONTRACT), "AOA.FEE")
+        assert (finding.quote, finding.expected) == ("505.00 ლარი", "500.00 ლარი")
+
+    def test_a_right_net_beside_a_wrong_fee_is_no_second_mistake(self) -> None:
+        act = _fee(f"{_WRONG_GROSS} დღგ-ს ჩათვლით (დღგ-ს გარეშე 500.00 ლარი).")
+        [finding] = _of(_check(act, _VAT_CONTRACT), "AOA.FEE")
+        assert finding.quote == "950 (ცხრაას ორმოცდაათი) ლარს"
+        assert finding.expected == "590 (ხუთას ოთხმოცდაათი) ლარს"
+
+    def test_a_vat_slip_in_a_breakdown_is_the_vats(self) -> None:
+        act = _fee(f"{_GROSS}, მათ შორის: ღირებულება დღგ-ს გარეშე 500.00 ლარი, დღგ 95.00 ლარი.")
+        [finding] = _of(_check(act, _VAT_CONTRACT), "AOA.FEE")
+        assert (finding.quote, finding.expected) == ("95.00 ლარი", "90.00 ლარი")
+
+    def test_the_net_is_taken_apart_at_the_rate_the_documents_write(self) -> None:
+        contract = _VAT_CONTRACT.replace("590 (ხუთას ოთხმოცდაათი)", "600 (ექვსასი)").replace(
+            "მათ შორის დღგ-ს", "მათ შორის დღგ-ს (20%)"
+        )
+        act = _fee("საფასური შეადგენს 600 (ექვსასი) ლარს დღგ-ს ჩათვლით (დღგ-ს გარეშე 505 ლარი).")
+        [finding] = _of(_check(act, contract), "AOA.FEE")
+        assert (finding.quote, finding.expected) == ("505 ლარი", "500 ლარი")
+
+    def test_a_right_breakdown_and_a_right_net_stay_clean(self) -> None:
+        """Near misses: the same wording with every figure right."""
+        for sentence in (
+            f"{_GROSS} დღგ-ს ჩათვლით (დღგ-ს გარეშე 500.00 ლარი).",
+            f"{_GROSS}, მათ შორის: ღირებულება დღგ-ს გარეშე 500.00 ლარი, დღგ 90.00 ლარი.",
+            f"{_GROSS} დღგ-ს ჩათვლით (500.00 ლარი დღგ-ს გარეშე).",
+        ):
+            report = _check(_fee(sentence), _VAT_CONTRACT)
+            assert _of(report, "AOA.FEE") == [], sentence
+
+    def test_a_slipped_net_beside_the_fee_is_no_tax_wording_contradiction(self) -> None:
+        act = _fee(f"{_GROSS} დღგ-ს ჩათვლით (დღგ-ს გარეშე 505.00 ლარი).")
+        report = _check(act, _VAT_CONTRACT, contractor_type="individual_entrepreneur_vat")
+        assert _of(report, "AOA.TAX_WORDING") == []
+        assert len(_of(report, "AOA.FEE")) == 1
+
+    def test_a_net_the_act_states_alone_is_still_its_fee(self) -> None:
+        """Round 2's decision stands: with no fee incl. VAT beside it, the act states its fee
+        before VAT, and that is compared with the price."""
+        act = _fee("საფასური დღგ-ს გარეშე შეადგენს 500 ლარს.")
+        [finding] = _of(_check(act, _VAT_CONTRACT), "AOA.FEE")
+        assert finding.actual == "500.00 GEL"

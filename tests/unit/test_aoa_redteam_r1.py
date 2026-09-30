@@ -361,12 +361,14 @@ class TestVatBreakdown:
         assert _substantive(report) == []
 
     def test_parts_that_do_not_add_up_are_still_compared(self) -> None:
+        """The fee and the net are right (100 at 18% is 84.75 before VAT): the VAT amount is the
+        slip, and the finding is on it (red team R3, AOA-R3-08)."""
         fee = (
             "საფასური დღგ-ს გარეშე შეადგენს 84.75 ლარს, დღგ - 15.00 ლარს, სულ დღგ-ს ჩათვლით "
             "100 (ასი) ლარს."
         )
         [finding] = _of(_check(ACT.replace(_FEE_TAX, fee)), "AOA.FEE")
-        assert finding.actual == "84.75 GEL"
+        assert (finding.actual, finding.expected) == ("15.00 GEL", "15.25 ლარს")
 
 
 # --- AOA-19: the fee's correction keeps the currency and tetri words in the brackets -------------

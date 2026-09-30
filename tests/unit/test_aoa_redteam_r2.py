@@ -102,7 +102,8 @@ class TestNetRestatedAtTheVatRate:
             "(ხუთას ოთხმოცდაათი) ლარს."
         )
         [finding] = _of(_check(act, _VAT_CONTRACT), "AOA.FEE")
-        assert finding.actual == "500.00 GEL"
+        # the fee and the net are right: the VAT amount is the slip (red team R3, AOA-R3-08)
+        assert (finding.actual, finding.expected) == ("80.00 GEL", "90 ლარს")
 
 
 # --- AOA-R2-08: the fee's correction is the one price it is a slip of ----------------------------

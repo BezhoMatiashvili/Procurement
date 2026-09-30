@@ -1322,6 +1322,65 @@ class AoaChecker:
             )
         ]
 
+    def _net_labelled(self) -> list[RoledAmount]:
+        """The act's fees an exclusion of VAT ("დღგ-ს გარეშე") labels, each phrase one figure:
+        the one it follows straight after ("500 ლარი დღგ-ს გარეშე"), else the first after it in
+        its sentence ("(დღგ-ს გარეშე 505 ლარი)", "რაც დღგ-ს გარეშე შეადგენს 500 ლარს"), else the
+        one before it within ``_NET_LABEL_REACH``. In "590 ლარს დღგ-ს ჩათვლით (დღგ-ს გარეშე 500
+        ლარი)" the phrase is the 500's, not the 590's (red team R3, AOA-R3-08)."""
+        amounts = self.aoa.amounts()
+        fees = [r for r in amounts if r.role in (None, "price")]
+        out: list[RoledAmount] = []
+        for phrase in tax_phrases(self.aoa.text):
+            if phrase.kind != "exclusion" or "vat" not in phrase.names:
+                continue
+            a, b = phrase.span
+            before = max(
+                (r for r in amounts if r.money.span[1] <= a),
+                key=lambda r: r.money.span[1],
+                default=None,
+            )
+            after = min(
+                (r for r in amounts if r.money.span[0] >= b),
+                key=lambda r: r.money.span[0],
+                default=None,
+            )
+            gap = self.aoa.text[before.money.span[1] : a] if before is not None else None
+            if before is not None and gap is not None and not re.sub(r"[\s,(]", "", gap):
+                meant: RoledAmount | None = before
+            elif after is not None and self._sentence_of(after.money.span[0])[0] <= a:
+                meant = after
+            elif before is not None and a - before.money.span[1] <= _NET_LABEL_REACH:
+                meant = before
+            else:
+                meant = None
+            if meant is not None and meant in fees and meant not in out:
+                out.append(meant)
+        return out
+
+    def _before_vat(self) -> list[RoledAmount]:
+        """Every figure the act gives as its fee before VAT: the parts of ``_net_parts``, and a
+        figure an exclusion of VAT labels (``_net_labelled``) beside another fee the act states
+        in its currency that no such label names - "… 590 ლარს დღგ-ს ჩათვლით (დღგ-ს გარეშე 505
+        ლარი)", right or not (red team R3, AOA-R3-08). It is compared with the price before VAT,
+        never with the price. A figure before VAT the act states alone is its fee, and stays
+        one (round 2)."""
+        nets = self._net_parts()
+        fees = [r for r in self.aoa.amounts() if r.role in (None, "price") and r not in nets]
+        labelled = [r for r in self._net_labelled() if r in fees]
+        beside_a_fee = [
+            r
+            for r in labelled
+            if any(g not in labelled and g.money.currency == r.money.currency for g in fees)
+        ]
+        return [*nets, *beside_a_fee]
+
+    def _vat_rate(self) -> float:
+        """The VAT rate a price is taken apart at: the one rate the documents write beside VAT
+        other than Georgia's 18%, else 18%."""
+        written = [r for r in self._vat_rates() if r != _VAT_RATE_DEFAULT]
+        return written[0] if len(written) == 1 else _VAT_RATE_DEFAULT
+
     def _vat_rates(self) -> list[float]:
         """The VAT rates a fee may be restated at: Georgia's 18%, and any rate the act or the
         contract writes beside VAT ("დღგ 18%", "20% VAT")."""
@@ -1606,7 +1665,7 @@ class AoaChecker:
         if self.contractor_type == "company":
             return  # rules 5-8 do not apply to a company; the summary says so (_NOT_APPLICABLE)
         rule = _TAX_RULES[self.contractor_type]
-        nets = self._net_parts()
+        nets = self._before_vat()
         # "დღგ-ს გარეშე" beside the fee before tax says what that part is, not what the fee is
         phrases = [p for p in tax_phrases(self.aoa.text) if not self._qualifies_net(p, nets)]
         fees = [m for m in self._fee_amounts() if all(m != r.money for r in nets)]
@@ -2748,9 +2807,11 @@ class AoaChecker:
                 "no price found in the contract to compare against",
             )
             return
-        # the fee before tax, beside the tax that makes it the fee, is the fee in parts
+        # the fee before tax, beside the tax that makes it the fee, is the fee in parts; a
+        # figure labelled before VAT beside the fee is compared with the price before VAT
         nets = self._net_parts()
-        fees = [r for r in act if r.role in (None, "price") and r not in nets]
+        before_vat = [r for r in self._before_vat() if r not in nets]
+        fees = [r for r in act if r.role in (None, "price") and r not in nets + before_vat]
         parts = [r for r in act if r.role in ("advance", "remainder")]
         matched = [r.money for r in fees if _states(prices, r.money)]
         wrong = [r for r in fees if not _states(prices, r.money)]
@@ -2767,6 +2828,85 @@ class AoaChecker:
         for r in fees:
             if r not in wrong:
                 self._fee_words_finding(r, prices)
+        for r in before_vat:
+            self._net_finding(r, prices, contract)
+        self._vat_amount_findings(fees, [*nets, *before_vat], prices)
+
+    def _net_finding(
+        self, r: RoledAmount, prices: list[Money], contract: list[RoledAmount]
+    ) -> None:
+        """A figure the act gives as its fee before VAT (``_before_vat``) against the contract's
+        prices before VAT: a price the contract states as such, or a price with VAT taken off at
+        a rate the documents allow. Its correction is the price before VAT, as the act writes the
+        figure - never the price itself, which written there would make the act wrong."""
+        m = r.money
+        same = list(dict.fromkeys(p.value for p in prices if p.currency == m.currency))
+        if not same:
+            self._fee_finding(r, prices, contract)  # another currency: the fee rule says so
+            return
+        rates = self._vat_rates()
+        if any(
+            amounts_equal(m.value, p) or any(_plus_vat(m.value, p, rate) for rate in rates)
+            for p in same
+        ):
+            return
+        rate = self._vat_rate()
+        nets = list(dict.fromkeys(round(p / (1 + rate), 2) for p in same))
+        meant = nets[0] if len(nets) == 1 else _nearest_price(m.value, nets)
+        span = self._fee_span(m)
+        fix = None if meant is None else _fee_like(meant, self.aoa.text[span[0] : span[1]])
+        actual = _money_text(m)
+        shown = ", ".join(f"{n:,.2f} {m.currency}" for n in nets)
+        self._add(
+            "AOA.FEE",
+            "error",
+            f"საფასური დღგ-ს გარეშე {actual} არ ემთხვევა ხელშეკრულებით განსაზღვრულ ღირებულებას "
+            f"დღგ-ს გარეშე ({shown})",
+            f"the fee before VAT {actual} matches no contract price before VAT ({shown})",
+            expected=fix,
+            actual=actual,
+            span=span,
+        )
+
+    def _vat_amount_findings(
+        self, fees: list[RoledAmount], nets: list[RoledAmount], prices: list[Money]
+    ) -> None:
+        """The VAT amount of a breakdown that does not add up: the act states its fee, the fee
+        before VAT and the VAT, and net + VAT is not the fee (GOLD_SPEC 3). When the fee is the
+        contract's price, the one wrong is the VAT when the net is right, and the finding is on
+        the VAT with the fee less the net as its correction (red team R3, AOA-R3-08); a wrong
+        net is ``_net_finding``'s, and when net + VAT make the fee the VAT follows the net."""
+        rates = self._vat_rates()
+        for t in (r for r in self.aoa.amounts() if r.role == "tax"):
+            cur = t.money.currency
+            gross = [g for g in fees if g.money.currency == cur and _states(prices, g.money)]
+            parts = [n for n in nets if n.money.currency == cur]
+            if not gross or not parts:
+                continue
+            at = t.money.span[0]
+            g = min(gross, key=lambda r: abs(r.money.span[0] - at)).money
+            n = min(parts, key=lambda r: abs(r.money.span[0] - at)).money
+            if amounts_equal(n.value + t.money.value, g.value):
+                continue
+            if not any(_plus_vat(n.value, g.value, rate) for rate in rates):
+                continue  # the net is wrong too: its own finding says so
+            vat = round(g.value - n.value, 2)
+            if amounts_equal(t.money.value, vat):
+                continue
+            actual = _money_text(t.money)
+            fix = _fee_like(vat, self.aoa.text[t.money.span[0] : t.money.span[1]])
+            self._add(
+                "AOA.FEE",
+                "error",
+                f"დღგ-ს თანხა {actual} არ ემთხვევა: {_money_text(n)} დღგ-ს გარეშე და {actual} "
+                f"დღგ ერთად არ შეადგენს საფასურს {_money_text(g)}; დღგ უნდა იყოს "
+                f"{vat:,.2f} {cur}",
+                f"the VAT amount {actual} does not fit: {_money_text(n)} before VAT plus {actual} "
+                f"VAT is not the fee {_money_text(g)}; the VAT is {vat:,.2f} {cur}",
+                expected=fix,
+                actual=actual,
+                span=t.money.span,
+            )
 
     def _fee_words_finding(self, r: RoledAmount, prices: list[Money]) -> None:
         """A fee whose figure is the contract's price while its words state another amount: the
