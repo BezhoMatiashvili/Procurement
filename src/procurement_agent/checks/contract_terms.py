@@ -312,7 +312,7 @@ def fee_scope(
 
 # --- tax wording --------------------------------------------------------------------------------
 
-TaxKind = Literal["net", "inclusion", "exclusion", "mention"]
+TaxKind = Literal["net", "inclusion", "exclusion", "exempt", "mention"]
 
 #: A Georgian tax word in any case: tax, tax-related, VAT (დღგ-ს, დღგ-ის, or spelled out),
 #: income tax, pension (საპენსიო შენატანი). The tail is possessive: a shorter word must never
@@ -332,8 +332,11 @@ _KA_EXCLUDING = r"(?:გარეშე|გამოკლებით|ჩაუ
 #: It starts at a tax word, so a date ("30 აპრილის ჩათვლით") never begins one, and it never runs
 #: past "including" or "excluding": "გადასახადის გარეშე, სხვა ხარჯების ჩათვლით" excludes the
 #: tax and includes the costs.
+#: A tax's rate, written beside it: "დღგ-ს (18%) ჩათვლით", "inclusive of 18% VAT".
+_RATE = r"(?:\s*\(?\s*\d{1,2}(?:[.,]\d{1,2})?\s*%\s*\)?)"
 _KA_TAX_RUN = (
-    rf"{_KA_TAX}(?:(?:,|\s+(?:და|ან))?\s+(?!{_KA_INCLUDING}|{_KA_EXCLUDING}){_KA_WORD}){{0,3}}?"
+    rf"{_KA_TAX}{_RATE}?"
+    rf"(?:(?:,|\s+(?:და|ან))?\s+(?!{_KA_INCLUDING}|{_KA_EXCLUDING}){_KA_WORD}){{0,3}}?"
 )
 _EN_TAX = r"(?:income\s+tax(?:es)?|pension\s+contributions?|value\s+added\s+tax|taxes|tax|vat)"
 #: "all applicable taxes", "income tax and pension contributions". Both runs are bounded: the
@@ -372,8 +375,9 @@ _INCLUSION = re.compile(
             # "დღგ შედის ღირებულებაში", and the adjective: "დღგ-იანი ღირებულება"
             rf"{_KA_TAX}\s+შედის",
             r"(?<![ა-ჰ])(?:დღგ|გადასახად[ა-ჰ]*?)-?იან(?:ი|მა|ს|ის|ით|ად)?(?![ა-ჰ])",
-            rf"(?<!not )(?<![a-z])(?:including|includes?|inclusive\s+of|incl\.?)\s+{_EN_TAX_RUN}",
-            rf"(?<![a-z]){_EN_TAX_RUN}\s+(?:is\s+|are\s+)?(?:included|inclusive)(?![a-z])",
+            rf"(?<!not )(?<![a-z])(?:including|includes?|inclusive\s+of|incl\.?)\s+{_RATE}?\s*"
+            rf"{_EN_TAX_RUN}",
+            rf"(?<![a-z]){_EN_TAX_RUN}{_RATE}?\s+(?:is\s+|are\s+)?(?:included|inclusive)(?![a-z])",
             # the act check's wordings: the price includes the tax, in either order
             rf"(?<![ა-ჰ])(?<!არ ){_KA_MONEY}\s+შედის\s+{_KA_TAX}",
             rf"{_KA_TAX}\s+შედის\s+{_KA_MONEY}",
@@ -392,14 +396,39 @@ _EXCLUSION = re.compile(
             rf"{_KA_TAX_RUN}\s+{_KA_EXCLUDING}",
             rf"არ\s+(?:მოიცავს|შეიცავს|ითვალისწინებს|შედის)(?:\s+{_KA_WORD}){{0,4}}?\s+{_KA_TAX}",
             rf"{_KA_TAX}\s+არ\s+შედის",
-            # "+ დღგ", and with its rate: "+ 18% დღგ"
-            r"\+\s*(?:\d{1,2}(?:[.,]\d{1,2})?\s*%\s*)?(?:დღგ|vat)(?![a-z])",
+            # "+ დღგ", and with its rate: "+ 18% დღგ"; "plus 18% VAT"
+            r"(?:\+|(?<![a-z])plus(?![a-z]))\s*(?:\d{1,2}(?:[.,]\d{1,2})?\s*%\s*)?(?:დღგ|vat)(?![a-z])",
+            # added with a verb: "რასაც დაემატება დღგ", "ემატება 18% დღგ", "დღგ-ს დამატებით",
+            # "დღგ დაერიცხება"
+            rf"(?<![ა-ჰ])(?:და)?(?:ემატება|ერიცხება)(?:\s+{_KA_WORD}){{0,2}}?\s+{_RATE}?\s*{_KA_TAX}",
+            rf"{_KA_TAX_RUN}\s+(?:დამატებით|(?:და)?(?:ემატება|ერიცხება))(?![ა-ჰ])",
             rf"(?<![a-z])(?:excluding|excludes?|exclusive\s+of|excl\.?|without|net\s+of"
-            rf"|not\s+including)\s+{_EN_TAX_RUN}",
-            rf"(?<![a-z]){_EN_TAX_RUN}\s+(?:is\s+|are\s+)?(?:not\s+included|excluded|exclusive)"
-            r"(?![a-z])",
+            rf"|not\s+including)\s+{_RATE}?\s*{_EN_TAX_RUN}",
+            rf"(?<![a-z]){_EN_TAX_RUN}{_RATE}?\s+(?:is\s+|are\s+)?(?:not\s+included|excluded"
+            r"|exclusive|(?:to\s+be\s+|is\s+)?added|on\s+top)(?![a-z])",
             rf"(?<![ა-ჰ]){_KA_MONEY}\s+არ\s+შედის\s+{_KA_TAX}",
             rf"(?<![a-z])(?:does|do)\s+not\s+include\s+{_EN_TAX_RUN}",
+        )
+    ),
+    re.IGNORECASE,
+)
+#: No VAT applies to the price: the contractor is no VAT payer, or the supply is exempt -
+#: "არ არის დღგ-ს გადამხდელი", "არ წარმოადგენს დღგ-ს გადამხდელს", "არ იბეგრება დღგ-ით", "დღგ-ით
+#: დაუბეგრავი", "გათავისუფლებულია დღგ-სგან", "არ ექვემდებარება დღგ-ით დაბეგვრას", "not registered
+#: as a VAT payer", "exempt from VAT", "VAT-exempt", "not subject to VAT". "არის დღგ-ს გადამხდელი"
+#: (is a payer) says nothing about the price, and "დღგ-ს გადამხდელის ნომერი" is a label.
+_KA_VAT = r"(?<![ა-ჰ])(?:დღგ|დამატებული\s+ღირებულების\s+გადასახად)[ა-ჰ-]*+"
+_EXEMPT = re.compile(
+    "|".join(
+        (
+            rf"(?<![ა-ჰ])არ\s+(?:არის|წარმოადგენს)\s+{_KA_VAT}\s+გადამხდელ(?:ი|ს)?(?![ა-ჰ])",
+            rf"(?<![ა-ჰ])არ\s+(?:იბეგრება|ექვემდებარება)\s+{_KA_VAT}(?:\s+დაბეგვრა[ა-ჰ]*)?",
+            rf"{_KA_VAT}\s+(?:დაუბეგრავ|გათავისუფლებ|არ\s+იბეგრება|არ\s+ექვემდებარება)[ა-ჰ]*",
+            rf"(?<![ა-ჰ])(?:დაუბეგრავ|გათავისუფლებ)[ა-ჰ]*\s+{_KA_VAT}",
+            r"(?<![a-z])not\s+(?:registered\s+(?:as\s+)?|being\s+)?an?\s+vat[\s-]+payer",
+            r"(?<![a-z])not\s+(?:registered\s+for|subject\s+to|liable\s+(?:to|for))\s+vat(?![a-z])",
+            r"(?<![a-z])(?:exempt(?:ed)?|free)\s+(?:from|of)\s+vat(?![a-z])",
+            r"(?<![a-z])vat[\s-]+(?:exempt(?:ed|ion)?|free)(?![a-z])",
         )
     ),
     re.IGNORECASE,
@@ -474,6 +503,10 @@ def tax_phrases(text: str) -> list[TaxPhrase]:
         add("inclusion", m)
     for m in _EXCLUSION.finditer(text):
         add("exclusion", m)
+    # an exemption keeps its tax word a mention: the act check's rule for a foreign organisation
+    # offends on any tax word, and an exemption still names the tax
+    for m in _EXEMPT.finditer(text):
+        add("exempt", m)
     worded = [p.span for p in found if p.kind in ("inclusion", "exclusion")]
     for m in _MENTION.finditer(text):
         if not _inside(m.span(), worded):

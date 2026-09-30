@@ -9,7 +9,7 @@ from procurement_agent.extraction.anchors import AnchorHit, preamble_end
 from procurement_agent.extraction.georgian import Case, lemma
 from procurement_agent.extraction.labels import LABELS
 from procurement_agent.extraction.normalize import QUOTE_CHARS, names_match, normalize_name
-from procurement_agent.extraction.rules import RuleHit
+from procurement_agent.extraction.rules import RuleHit, is_payment_terms_value
 from procurement_agent.extraction.schemas import DEFAULT_TARGETS, ExtractedFact, FactType
 from procurement_agent.ingestion.chunker import Chunk
 
@@ -134,6 +134,22 @@ def _header_end(chunks: list[Chunk]) -> int:
     return len(chunks[0].text) if len(chunks) > 1 else 0
 
 
+def _in_canonical_type(ftype: FactType, normalized: object, value: str) -> FactType:
+    """The type a value can stand as. A vat_status is one of ``VAT_STATUSES`` and a payment
+    term has its form (``rules.PAYMENT_TERMS_FORM``: "P5D working", "advance 30%"); a number in
+    their place - the rate beside "დღგ" ("+ 18% დღგ"), a share of the price ("30.0") - says
+    neither, and is kept as the generic value it is."""
+    if normalized is None:
+        return ftype
+    if ftype == FactType.vat_status and normalized not in VAT_STATUSES:
+        return FactType.percentage
+    if ftype == FactType.payment_terms and not is_payment_terms_value(normalized):
+        if isinstance(normalized, float):
+            return FactType.percentage if "%" in value else FactType.amount
+        return FactType.duration if str(normalized).startswith("P") else FactType.other
+    return ftype
+
+
 def rule_hits_to_facts(hits: dict[str, list[RuleHit]], chunks: list[Chunk]) -> list[ExtractedFact]:
     by_id = {c.id: c for c in chunks}
     header_id = chunks[0].id if chunks else None
@@ -143,10 +159,7 @@ def rule_hits_to_facts(hits: dict[str, list[RuleHit]], chunks: list[Chunk]) -> l
         chunk = by_id[cid]
         for h in hs:
             ftype, conf, note = h.type, h.confidence, h.note
-            if ftype == FactType.vat_status and h.normalized not in VAT_STATUSES:
-                # the rate next to "დღგ" ("+ 18% დღგ") says nothing about whether the price
-                # includes the tax: as a fact it is a percentage
-                ftype = FactType.percentage
+            ftype = _in_canonical_type(ftype, h.normalized, h.value)
             if ftype == FactType.date and cid == header_id and h.end <= header_end:
                 # An unlabeled date in the document header is almost always the document date
                 # ("ქ. თბილისი, 2026 წლის 15 მარტი"); keep it, but say so.
@@ -265,6 +278,9 @@ def merge(
     merged: list[ExtractedFact] = []
 
     def add(f: ExtractedFact) -> None:
+        canonical_type = _in_canonical_type(f.type, f.normalized, f.value)
+        if canonical_type != f.type:
+            f = f.model_copy(update={"type": canonical_type, "label": LABELS[canonical_type][0]})
         if f.type not in wanted:
             return
         existing = next((m for m in merged if _same_fact(m, f)), None)

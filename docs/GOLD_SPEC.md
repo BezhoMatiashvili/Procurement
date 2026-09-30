@@ -40,7 +40,7 @@ letters upper-cased. Nothing else - no stemming, no substring match, no case-end
 | `validity_period` | the contract's own validity ("ძალაში შედის … და მოქმედებს …", usually under "ხელშეკრულების მოქმედების ვადა"): ISO range, `..` for an open end ("until the obligations are fulfilled"), or ISO duration | `2026-08-01/..`, `2026-08-01/2027-02-01` |
 | `delivery_deadline` | ISO date, or ISO duration | `2026-04-30`, `P30D` |
 | `warranty_period` | ISO duration | `P24M` |
-| `payment_terms` | ISO duration + ` working`/` calendar`, plus `advance N%` when stated | `P5D working` |
+| `payment_terms` | ISO duration + ` working`/` calendar`, then ` advance N%` when an advance is stated; the share alone when no deadline is; never a bare number. A staged payment states the deadline of the balance (the payment after the advance) | `P5D working`, `P10D working advance 30%`, `advance 30%` |
 | `vat_status` | one of `incl`, `excl`, `none`, `net` | `incl` for "გადასახადების ჩათვლით" |
 | `total_amount`, `price` | number, `.` decimal, no separators (compared numerically) | `2400` |
 | `penalty` | number with `%` (per period after it if stated: `0.5% per day`) or an amount | `0.5% per day` |
@@ -117,6 +117,47 @@ How the parties and their requisites are read (red-team round 2):
   by side in one row - is read column by column, each cell its party's; a first column of row
   labels (`ს/კ`, `მისამართი`) labels each cell. An address ends at its cell, also where Docling
   writes a row as `<left cell>, <column header> = <right cell>`.
+
+How the rules read them (red-team round 2):
+
+* **Money.** A magnitude written as a word multiplies its figure (`48 ათას ლარს` -> `48000`,
+  `1,2 მილიონ ლარს`, `1.2 მლნ ლარს`, `GEL 2.5 million` -> `1200000`/`2500000`); `ათასობით`
+  (thousands of) and a bare `m` are no magnitude. An amount stated as a share of the value right
+  before it (`ღირებულების 5%-ის, 100 ლარის ოდენობით`, `5% of the Contract price, GEL 100`) or as
+  the tax the price holds (`მათ შორის დღგ 18% - 305.08 ლარი`, `საიდანაც დღგ - ...`, `of which VAT`)
+  is an `amount`, never `total_amount` or `price`. In a price table, a cell under a total column
+  is a line amount also when its row has no unit price or quantity - a lump-sum table - if the
+  row is keyed by an item number (`1`, `1.1`) or the table has a total row of its own; a table
+  with neither keeps the figure as the total.
+* **Percentages and penalties.** A rate written in words before its figure (`ნული მთელი ორი (0.2)
+  პროცენტის`, `zero point two (0.2) percent`) is the same rate; so is a rate in brackets
+  (`(18%)`). A cap on a penalty (`მაგრამ არაუმეტეს ღირებულების 10%-ისა`, `არ უნდა აღემატებოდეს`,
+  `not exceeding 10%`, `up to a maximum of 10%`) is a `percentage`, never a second penalty; a
+  cap word before a rate that carries its own period (`up to 0.5% per day`) leaves it the
+  penalty. A period is never read across another rate.
+* **VAT.** `none`: the contractor is no VAT payer or the supply is exempt (`არ არის დღგ-ს
+  გადამხდელი`, `არ იბეგრება დღგ-ით`, `დღგ-ით დაუბეგრავი`, `გათავისუფლებულია დღგ-სგან`, `არ
+  ექვემდებარება დღგ-ით დაბეგვრას`, `not registered as a VAT payer`, `exempt from VAT`, `not
+  subject to VAT`); `არის დღგ-ს გადამხდელი` and `დღგ-ს გადამხდელის ნომერი` say nothing about the
+  price. `excl` also when the tax is added with a verb (`რასაც დაემატება დღგ`, `ემატება 18% დღგ`,
+  `დღგ-ს დამატებით`, `plus 18% VAT`, `VAT to be added`). A rate inside the wording keeps its
+  meaning (`inclusive of 18% VAT`, `VAT 18% is included`, `დღგ-ს (18%) ჩათვლით` are `incl`).
+  The rate itself is a `percentage`; in a comparison, a rate one version writes beside the tax
+  and the other leaves out is no change of its own (the wording's `CMP.VAT` is), and a rate
+  changed (`18%` -> `20%`) is `CMP.PERCENT`.
+* **Payment terms.** A share is the advance's when an advance word names it (`30% ავანსი`,
+  `ავანსის სახით ღირებულების 30%`, `an advance payment of 30%`) with no remainder word or other
+  rate between; `დარჩენილი 70%` / `the remaining 70%` is the balance, a `percentage`. A share of
+  a payment with no advance word (`ღირებულების 50%-ის გადახდა`) is a `percentage`. In a
+  comparison, an advance changed is `advance 20%` -> `advance 30%`.
+* **Durations.** The event a count starts from is not what it measures: in `მონტაჟი -
+  მიწოდებიდან 10 დღის ვადაში` and `within 10 days after delivery` the 10 days are not a
+  `delivery_deadline`; `, ხოლო` / `, whereas` starts another clause, whose count the first
+  clause's keyword does not type.
+* **Contract numbers.** One Georgian letter between separators is part of the reference
+  (`N 12/2026-ა`, `N ს-45/2026`); two letters or more after a hyphen, and `-ს` or `-ი` at its
+  end, are a case ending and end it (`N 15/2026-ის` -> `15/2026`). Upper case applies to Latin
+  letters only.
 
 `vat_status` meanings: `incl` = the price includes VAT/taxes; `excl` = VAT is added on top;
 `none` = no VAT applies / exempt; `net` = a net amount, taxes withheld or not mentioned by rule
