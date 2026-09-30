@@ -57,6 +57,10 @@ def fold(value: object) -> str:
 # ------------------------------------------------------------------------------ cell values
 
 
+#: text a number reads two ways: one separator and exactly three digits after it
+TWO_WAY_NUMBER = re.compile(r"[+-]?[1-9]\d{0,2}[.,]\d{3}")
+
+
 class Text(str):
     """Text found in a number cell: never read as 0."""
 
@@ -776,6 +780,12 @@ def check_bid(tpl: Book, bid: Book, placeholders: set[tuple[str, int]] | None = 
                             "amount": r2(b.amount) if is_num(b.amount) else None,
                         }
                     )
+                costs[key] = 0.0
+                continue
+            if isinstance(t.qty, Text) and TWO_WAY_NUMBER.fullmatch(t.qty.strip()):
+                # GOLD_SPEC 5: a template quantity reading two ways ("1.250": 1.25 or 1,250)
+                # is evaluated for no bidder - never a blank quantity the bidder fills in. This
+                # writer reads no text as a number, so it never settles one by its row.
                 costs[key] = 0.0
                 continue
             tq = t.qty if is_num(t.qty) else None
