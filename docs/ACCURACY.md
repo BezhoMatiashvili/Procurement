@@ -580,13 +580,18 @@ is a synthetic unit test in `tests/unit/test_boq_reader_variants.py`. On the thr
 the findings did not change, only the wording of the closing-row reconciliation. These are
 fitting numbers in the same sense as above: the gold sets are this client's.
 
-Policy questions left open (the module follows the letter of GOLD_SPEC 5; the gold writer
-agrees):
+Policy questions left open:
 
 * Profit on cost + overheads, usual in Georgian estimates, is a `BOQ.RECONCILE` error on every
-  faithful bid that computes it so, because overheads and profit are held against TOTAL COST x
-  their rate. The markup and the ranking are right; the error is not. Accepting either base
-  (TOTAL COST, or TOTAL COST + overheads) and noting which was used is the recommended change.
+  faithful bid that computes it so, because `reconcile_summary` holds overheads and profit
+  against TOTAL COST x their rate. That base is the module's own documented decision, not
+  GOLD_SPEC 5's (which asks only that the rows follow from each other), and the gold writer
+  checks no rates at all. The markup and the ranking are right; the error is not. Accepting
+  either base (TOTAL COST, or TOTAL COST + overheads) and noting which was used is the
+  recommended change.
+
+The rest follow the letter of GOLD_SPEC 5, and the gold writer agrees:
+
 * A provisional sum the client fixes (amount typed, no rate) is unpriced for every bidder and
   makes every bid incomplete; the ranking is unaffected.
 * A lump sum typed on a group row over its formula is booked as "Summary vs sheets", not as a
