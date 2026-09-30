@@ -160,14 +160,30 @@ _CELL_REF = re.compile(r"(?<![A-Za-z_\d.])\$?([A-Z]{1,3})\$?(\d+)(?![\d(A-Za-z_]
 _SHEET_REF = re.compile(r"(?:'((?:[^']|'')+)'|([^\W\d][\w.]*))!\$?([A-Z]{1,3})\$?(\d+)")
 
 # Summary rows, recognised by their label (folded to lower case).
-_INCL_VAT = re.compile(
-    r"incl(?:\.|uding|usive)?\s*(?:of\s+)?vat|vat\s+incl|დღგ-?ს?\s*ჩათვლით", re.IGNORECASE
+#: The tax by its names: "VAT", "Value added tax", "დღგ", "დამატებული ღირებულების გადასახადი" -
+#: never the letters inside a word ("private", "Vatican").
+_VAT_NAME = (
+    r"(?<![a-zა-ჰ])(?:vat|value[\s-]+added[\s-]+tax|დღგ|"
+    r"დამატებული\s+ღირებულების\s+გადასახად[ა-ჰ]*)(?![a-zა-ჰ])"
 )
-_EXCL_VAT = re.compile(
-    r"excl(?:\.|uding|usive)?\s*(?:of\s+)?vat|without\s+vat|net\s+of\s+vat|დღგ-?ს?\s*გარეშე",
+#: A rate written into the label: "incl. 18% VAT", "Add 18% VAT".
+_LABEL_RATE = r"(?:\d{1,2}(?:[.,]\d+)?\s*%\s*)?"
+#: The Georgian "including" / "without" after the tax, in any case form: "დღგ-ს ჩათვლით",
+#: "დღგ-ის ჩათვლით", "გადასახადის ჩათვლით".
+_KA_VAT = r"(?:დღგ(?:-?ის|-?ს)?|გადასახადის)\s*"
+_INCL_VAT = re.compile(
+    rf"\b(?:incl(?:\.|uding|usive)?|with)\s*(?:of\s+)?(?:the\s+)?{_LABEL_RATE}{_VAT_NAME}"
+    rf"|{_VAT_NAME}\s+incl|{_KA_VAT}ჩათვლით",
     re.IGNORECASE,
 )
-_VAT = re.compile(r"^\s*(?:vat|დღგ)\b", re.IGNORECASE)
+_EXCL_VAT = re.compile(
+    rf"\b(?:excl(?:\.|uding|usive)?|without|before|net\s+of)\s*(?:of\s+)?(?:the\s+)?"
+    rf"{_LABEL_RATE}{_VAT_NAME}|{_KA_VAT}გარეშე",
+    re.IGNORECASE,
+)
+#: The VAT row: the tax's name opens the label, after an "Add" or its rate at most ("VAT 18%",
+#: "Value added tax @ 18%", "Add 18% VAT", "დამატებული ღირებულების გადასახადი 18%").
+_VAT = re.compile(rf"^\s*(?:add(?:ing)?\s+)?{_LABEL_RATE}{_VAT_NAME}", re.IGNORECASE)
 _TOTAL_COST = re.compile(r"\btotal\s+cost|ჯამური\s+ღირებულება", re.IGNORECASE)
 #: Overheads and profit by their usual names, English and Georgian: "Indirect costs", "General
 #: expenses", "არაპირდაპირი ხარჯები"; "Margin", "Mark-up", "გეგმიური დაგროვება" (the planned
@@ -1179,9 +1195,12 @@ _CHAIN = ("cost", "overheads", "profit", "excl", "vat", "incl")
 
 
 def _plays(role: str, label: str) -> bool:
+    """Whether a Summary row labelled ``label`` may play ``role`` in the chain. A TOTAL COST
+    row that says it is excl. VAT ("Total cost, excl. VAT") is the TOTAL COST - the cost is
+    before VAT - and ``summary_roles`` lets it play one part only."""
     incl, excl = _INCL_VAT.search(label), _EXCL_VAT.search(label)
     if role == "cost":
-        return bool(_TOTAL_COST.search(label)) and not incl and not excl
+        return bool(_TOTAL_COST.search(label)) and not incl
     if role == "overheads":
         return bool(_OVERHEADS.search(label))
     if role == "profit":
@@ -1677,9 +1696,29 @@ def compare_bid(template: BoqWorkbook, bid: BoqWorkbook) -> BidComparison:
                 out.findings.extend(_arithmetic_findings(b_line, ()))
 
     _evaluate(out, bid)
+    if bid.summary_sheet is not None and out.markup_factor is None:
+        out.findings.append(_not_ranked(out))
     out.findings.extend(reconcile_summary(bid))
     _list_findings(out)
     return out
+
+
+def _not_ranked(out: BidComparison) -> Finding:
+    """The bid has a Summary, but no markup could be taken from it: say which row is missing
+    rather than leave the bidder uncoloured without a word."""
+    if out.stated_incl_vat is None:
+        ka, en = "ჯამი დღგ-ს ჩათვლით", "the total incl. VAT"
+    else:
+        ka, en = "TOTAL COST", "TOTAL COST"
+    return _finding(
+        "BOQ.NOT_RANKED",
+        "warning",
+        f"{out.bidder}: Summary-ში ვერ ვიპოვეთ სტრიქონი „{ka}“ — კომპანიის ფასნამატი (ზედნადები, "
+        "მოგება, დღგ) ვერ გამოითვალა და კომპანია რანჟირებაში არ მონაწილეობს",
+        f"{out.bidder}: no Summary row states {en} - the bidder's markup (overheads, profit, "
+        "VAT) could not be worked out, so the bid is not ranked",
+        expected=en,
+    )
 
 
 def _summary_missing(name: str, bid: BoqWorkbook) -> Finding:
@@ -2389,6 +2428,9 @@ def _reconcile_chain(
                     want,
                 )
             )
+    if excl is None and cost is not None and _EXCL_VAT.search(cost.label):
+        # "Total cost, excl. VAT" straight on to VAT: the cost is the total VAT is added to
+        excl = cost
     rated(vat, excl)
     if incl is not None and incl.value is not None and excl is not None and excl.value is not None:
         want = excl.value + (vat.value or 0.0 if vat is not None else 0.0)

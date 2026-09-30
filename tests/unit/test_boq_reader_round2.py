@@ -16,13 +16,27 @@ import pytest
 from openpyxl import Workbook
 
 from procurement_agent.checks.boq import (
+    BoqWorkbook,
     _label_key,
+    _plays,
     compare_bid,
+    grand_total,
     norm_unit,
     read_boq,
+    reconcile_summary,
+    stated_total_cost,
+    summary_roles,
     template_findings,
 )
-from tests.unit.test_boq_reader_variants import Cells, Fx, _rules, _save
+from tests.boq_factory import Bid, build_real_boq
+from tests.unit.test_boq_reader_variants import (
+    Cells,
+    Fx,
+    _row,
+    _rules,
+    _save,
+    _summary_book,
+)
 
 # --- units ------------------------------------------------------------------------------------
 
@@ -241,3 +255,152 @@ def test_a_bill_whose_quantities_come_from_a_take_off_sheet_is_evaluated(tmp_pat
     comp = compare_bid(t, b)
     assert comp.evaluated_cost == pytest.approx(75 * 12.0 + 8 * 30.0)
     assert comp.findings == []
+
+
+# --- Summary rows worded another usual way ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("role", "label"),
+    [
+        ("cost", "Total cost, excl. VAT"),
+        ("cost", "TOTAL COST (EXCL. VAT)"),
+        ("cost", "Total cost without VAT"),
+        ("incl", "GRAND TOTAL WITH VAT"),
+        ("incl", "Total price incl. 18% VAT"),
+        ("incl", "Total including value added tax"),
+        ("incl", "საერთო ღირებულება დღგ-ის ჩათვლით"),
+        ("incl", "სულ დღგ-ს ჩათვლით"),
+        ("incl", "სულ ჯამი დამატებული ღირებულების გადასახადის ჩათვლით"),
+        ("excl", "Total price before VAT"),
+        ("excl", "სულ დღგ-ის გარეშე"),
+        ("vat", "Value added tax @ 18%"),
+        ("vat", "Add 18% VAT"),
+        ("vat", "18% VAT"),
+        ("vat", "დამატებული ღირებულების გადასახადი 18%"),
+        ("vat", "დღგ-ის თანხა"),
+        ("vat", "VAT (18%)"),
+    ],
+)
+def test_a_summary_row_worded_another_usual_way_plays_its_part(role: str, label: str) -> None:
+    assert _plays(role, label)
+
+
+@pytest.mark.parametrize(
+    ("role", "label"),
+    [
+        ("cost", "Total cost incl. VAT"),
+        ("incl", "Total without VAT"),
+        ("incl", "TOTAL PRICE EXCL. VAT"),
+        ("incl", "VAT 18%"),
+        ("incl", "Private works with valuation"),
+        ("vat", "Total price incl. 18% VAT"),
+        ("vat", "Total price excl. VAT"),
+        ("vat", "Vatican road works"),
+        ("vat", "Private garden"),
+        ("excl", "GRAND TOTAL WITH VAT"),
+    ],
+)
+def test_a_summary_row_does_not_play_a_part_its_words_only_resemble(role: str, label: str) -> None:
+    assert not _plays(role, label)
+
+
+def _chain(*rows: tuple[str, float, float | None]) -> BoqWorkbook:
+    """A Summary: one section of 1,000.00 and then ``rows`` as (label, value, rate)."""
+    out = [_row(9, "1", "WORKS", 1000.0)]
+    out += [_row(10 + i, "", label, value, rate=rate) for i, (label, value, rate) in enumerate(rows)]
+    return _summary_book(out)
+
+
+@pytest.mark.parametrize(
+    "cost_label", ["Total cost, excl. VAT", "TOTAL COST (EXCL. VAT)", "Total cost without VAT"]
+)
+def test_a_total_cost_row_that_says_excl_vat_is_the_total_cost(cost_label: str) -> None:
+    book = _chain(
+        (cost_label, 1000.0, None),
+        ("Overheads", 100.0, 0.10),
+        ("Profit", 50.0, 0.05),
+        ("TOTAL PRICE EXCL. VAT", 1150.0, None),
+        ("VAT", 207.0, 0.18),
+        ("TOTAL PRICE INCLUDING VAT", 1357.0, None),
+    )
+    assert {k: r.row for k, r in summary_roles(book).items()} == {
+        "cost": 10,
+        "overheads": 11,
+        "profit": 12,
+        "excl": 13,
+        "vat": 14,
+        "incl": 15,
+    }
+    assert stated_total_cost(book) == 1000.0 and grand_total(book) == 1357.0
+    assert reconcile_summary(book) == []
+
+
+def test_a_later_total_cost_excl_vat_row_is_the_excl_vat_total() -> None:
+    book = _chain(
+        ("TOTAL COST", 1000.0, None),
+        ("Overheads", 100.0, 0.10),
+        ("Total cost excl. VAT", 1100.0, None),
+        ("VAT", 198.0, 0.18),
+        ("Total incl. VAT", 1298.0, None),
+    )
+    roles = summary_roles(book)
+    assert (roles["cost"].row, roles["excl"].row) == (10, 12)
+    assert reconcile_summary(book) == []
+
+
+def test_vat_is_held_against_a_total_cost_row_that_says_excl_vat_when_nothing_else_does() -> None:
+    faithful = _chain(
+        ("Total cost, excl. VAT", 1000.0, None),
+        ("VAT 18%", 180.0, 0.18),
+        ("Total incl. VAT", 1180.0, None),
+    )
+    assert reconcile_summary(faithful) == []
+    wrong = _chain(
+        ("Total cost, excl. VAT", 1000.0, None),
+        ("VAT 18%", 170.0, 0.18),
+        ("Total incl. VAT", 1170.0, None),
+    )
+    [gap] = reconcile_summary(wrong)
+    assert "row 11" in gap.message_en and "row 10" in gap.message_en
+
+
+@pytest.mark.parametrize(
+    ("vat_label", "incl_label"),
+    [
+        ("Value added tax @ 18%", "TOTAL PRICE INCLUDING VAT"),
+        ("Add 18% VAT", "GRAND TOTAL WITH VAT"),
+        ("დამატებული ღირებულების გადასახადი 18%", "საერთო ღირებულება დღგ-ის ჩათვლით"),
+        ("VAT", "Total price incl. 18% VAT"),
+    ],
+)
+def test_a_chain_worded_another_usual_way_reconciles_and_ranks(
+    vat_label: str, incl_label: str
+) -> None:
+    book = _chain(
+        ("TOTAL COST", 1000.0, None),
+        ("TOTAL PRICE EXCL. VAT", 1000.0, None),
+        (vat_label, 180.0, 0.18),
+        (incl_label, 1180.0, None),
+    )
+    roles = summary_roles(book)
+    assert (roles["vat"].row, roles["incl"].row) == (12, 13)
+    assert grand_total(book) == 1180.0
+    assert reconcile_summary(book) == []
+
+
+def test_a_bid_whose_summary_states_no_total_incl_vat_says_why_it_is_not_ranked(
+    tmp_path: Path,
+) -> None:
+    t_path, b_path = tmp_path / "t.xlsx", tmp_path / "b.xlsx"
+    t_path.write_bytes(build_real_boq())
+    b_path.write_bytes(build_real_boq(Bid()))
+    t, b = read_boq(t_path, name="T"), read_boq(b_path, name="B")
+    incl = summary_roles(b)["incl"]
+    b.summary_rows = [r for r in b.summary_rows if r.row != incl.row]
+    comp = compare_bid(t, b)
+    assert comp.markup_factor is None
+    [note] = [f for f in comp.findings if f.rule_id == "BOQ.NOT_RANKED"]
+    assert note.severity == "warning" and "incl. VAT" in note.message_en
+    # a Summary with its whole chain says nothing of the kind
+    assert "BOQ.NOT_RANKED" not in _rules(compare_bid(t, read_boq(b_path, name="B")))
