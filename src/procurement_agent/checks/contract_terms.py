@@ -70,6 +70,11 @@ _ITEM_NUMBER = re.compile(r"(?<!\S)\d{1,2}\.(?=\s)")
 #: A letter standing alone before a stop abbreviates a word: "ქ. თბილისი" (city), "2026 წ."
 #: (year), an initial. "დღგ-ს." is not one: the letter there is the end of a word.
 _ABBREVIATION = re.compile(r"(?<!\S)[^\W\d_]\.(?=\s)")
+#: Letters chained with stops abbreviate words as well: "მ.შ." (including), "ე.წ." (so-called),
+#: "ე.ი.". Not "ა.შ." (and so on), which ends the sentence it closes as often as not.
+_CHAINED_ABBREVIATION = re.compile(r"(?<!\S)(?!ა\.შ\.)(?:[^\W\d_]\.){2,}(?=\s)")
+#: A short bracket on one line, "(იხ. დანართი N1)": a stop inside it closes no sentence.
+_BRACKET = re.compile(r"\([^()\n]{1,120}\)")
 
 
 def _opens_a_clause(text: str, start: int) -> bool:
@@ -85,7 +90,8 @@ def sentence_spans(text: str) -> list[tuple[int, int]]:
 
     A sentence ends at ".", ";", "!" or "?" followed by whitespace, except the stop that belongs
     to a clause number ("4.2.1."), to a list item number after a colon or a clause end ("1."),
-    or to a one-letter abbreviation ("ქ."). A clause number also starts a sentence of its own.
+    to a one-letter or a chained abbreviation ("ქ.", "მ.შ."), or that stands inside a short
+    bracket ("(იხ. დანართი N1)"). A clause number also starts a sentence of its own.
     """
     starts: set[int] = {0, len(text)}
     kept_stops: set[int] = set()
@@ -97,6 +103,10 @@ def sentence_spans(text: str) -> list[tuple[int, int]]:
             kept_stops.add(m.end() - 1)
     for m in _ABBREVIATION.finditer(text):
         kept_stops.add(m.end() - 1)
+    for m in _CHAINED_ABBREVIATION.finditer(text):
+        kept_stops.add(m.end() - 1)
+    for m in _BRACKET.finditer(text):
+        kept_stops.update(range(m.start() + 1, m.end() - 1))
     for m in _SENTENCE_END.finditer(text):
         if m.start() not in kept_stops:
             starts.add(m.end())
