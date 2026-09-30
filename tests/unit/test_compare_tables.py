@@ -322,6 +322,14 @@ def test_rows_of_nothing_but_numbers_swapped_are_never_paired_as_a_move() -> Non
     assert moved(run(document(numeric), document(swapped))) == []
 
 
+def test_a_row_of_nothing_but_numbers_that_moved_is_not_found_by_its_figures() -> None:
+    # its key is its columns, which any row of figures of that shape shares: not a move
+    figures = ["7", "10", "20"]
+    left = document([ROWS[0], figures, ROWS[1], ROWS[2]])
+    right = document([ROWS[0], ROWS[1], ROWS[2], figures])
+    assert moved(run(left, right)) == []
+
+
 def test_a_row_whose_words_another_row_shares_is_not_taken_for_a_move() -> None:
     # the row the other document writes twice may have moved to either place: no move
     twice = [
