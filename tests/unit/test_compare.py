@@ -366,14 +366,21 @@ def test_critical_findings_are_never_truncated_however_many_minor_ones_there_are
 
 
 def test_a_wholesale_replacement_is_not_dressed_up_as_line_edits() -> None:
-    """Past the pairing budget a block is reported as a removal and an addition.
+    """Past the pairing budget a block whose lines have nothing in common is reported as a
+    removal and an addition.
 
-    Scoring every left line against every right line is quadratic, and a block that large is a
-    replacement rather than a set of edits. The document-wide field pass is what still reports
-    the amount as *changed*, which is exactly why that pass does not depend on alignment.
+    Scoring every left line against every right line is quadratic, so such a block is paired
+    in order, and only lines alike enough pair (red team R3-05: a word inserted into each of
+    many clauses is still a set of line edits). Lines that pair with nothing are a replacement.
+    The document-wide field pass is what still reports the amount as *changed*, which is
+    exactly why that pass does not depend on alignment.
     """
     left = [f"სტრიქონი {i} ძველი ტექსტით და ღირებულება 12 400,00 ლარი" for i in range(60)]
-    right = [f"სტრიქონი {i} ახალი ტექსტით და ღირებულება 15 900,00 ლარი" for i in range(60)]
+    right = [
+        f"ყოველი შემდეგი აბზაცი #{i * 7}: მხარეთა წერილობითი შეთანხმებით, დამატებითი "
+        "პირობების გათვალისწინებით, საბოლოო ღირებულება 15 900,00 ლარი"
+        for i in range(60)
+    ]
     report = run(left, right)
 
     assert report.counts.changed == 0

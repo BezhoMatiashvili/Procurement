@@ -206,7 +206,7 @@ DEFAULT_MIN_SIMILARITY = 0.35
 #: A replace block is re-paired by similarity; below this two segments are unrelated and become
 #: a removal plus an addition rather than a rewrite.
 _PAIR_FLOOR = 0.5
-#: Re-pairing is quadratic. Past this many candidate pairs, fall back to positional pairing.
+#: Re-pairing is quadratic. Past this many candidate pairs, pair in order (``_pair_in_order``).
 _PAIR_BUDGET = 2500
 
 
@@ -1477,11 +1477,27 @@ def _value_spans(text: str) -> list[_Span]:
             spans.append(_Span(m.start(), m.end(), f"quantity {hit.normalized}"))
     spans.extend(_Span(*p.span, f"vat {p.kind}") for p in tax_phrases(text))
     out: list[_Span] = []
-    for span in sorted(spans, key=lambda s: (s.start, -s.end)):
+    for span in sorted((_whole_words(text, s) for s in spans), key=lambda s: (s.start, -s.end)):
         if out and span.start < out[-1].end:
             continue  # inside a value already masked
         out.append(span)
     return out
+
+
+def _whole_words(text: str, span: _Span) -> _Span:
+    """``span`` widened to the words it begins and ends in: no mask stops inside a word.
+
+    A reader's match may end at a word's stem - a penalty's "per week" is read from "კვირ" of
+    "კვირაზე" - and the case ending left outside the mask was a word of its own: "per day" →
+    "per week" was the penalty's change and, as "ეზე" had become "აზე", a text change too."""
+    start, end = span.start, span.end
+    if start < end and _LETTER.match(text, start):
+        while start > 0 and _LETTER.match(text, start - 1):
+            start -= 1
+    if start < end and _LETTER.match(text, end - 1):
+        while end < len(text) and _LETTER.match(text, end):
+            end += 1
+    return span if (start, end) == (span.start, span.end) else _Span(start, end, span.key)
 
 
 def _masked_values(text: str, *, keyed: bool) -> tuple[str, list[_Span]]:
@@ -2232,9 +2248,7 @@ def _pair_replace(left: Sequence[Segment], right: Sequence[Segment]) -> list[_Pa
         paired.extend(_pair_gap(left[i0:], right[j0:]))
         return paired
     if len(left) * len(right) > _PAIR_BUDGET:
-        # Too big to score pairwise, and a block this large is a wholesale replacement rather
-        # than a set of line edits. Say that, instead of inventing line-to-line correspondences.
-        return [(a, None, None) for a in left] + [(None, b, None) for b in right]
+        return _pair_in_order(left, right)
 
     scored: list[tuple[float, int, int]] = []
     for i, a in enumerate(left):
@@ -2260,6 +2274,62 @@ def _pair_replace(left: Sequence[Segment], right: Sequence[Segment]) -> list[_Pa
         (a, right[matched[i]] if i in matched else None, None) for i, a in enumerate(left)
     ]
     out.extend((None, b, None) for j, b in enumerate(right) if j not in taken)
+    return out
+
+
+#: How far ahead of the next unpaired line, on either side, ``_pair_in_order`` looks for its
+#: counterpart: lines inserted or deleted between two edited ones.
+_PAIR_REACH = 8
+
+
+def _alike(a: str, b: str) -> bool:
+    m = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    return (
+        m.real_quick_ratio() >= _PAIR_FLOOR
+        and m.quick_ratio() >= _PAIR_FLOOR
+        and m.ratio() >= _PAIR_FLOOR
+    )
+
+
+def _pair_in_order(left: Sequence[Segment], right: Sequence[Segment]) -> list[_Pair]:
+    """A block too large to score every line against every other, paired in order.
+
+    Each unpaired line on the left looks for its counterpart among the next few on the right,
+    nearest first, and the other way round; lines no counterpart is found for within reach
+    are a removal and an addition. Linear in the block's length.
+
+    A block this large used to be reported whole, as removed and added. A global edit - one
+    word inserted into each of 51 consecutive clauses - made such a block, and the two
+    versions then read as unrelated: every change in it was dropped, and a new penalty added
+    elsewhere was only a warning. A block whose lines really have nothing in common still comes
+    out removed and added, as nothing in it pairs.
+    """
+    lk = [key_of(a.text) for a in left]
+    rk = [key_of(b.text) for b in right]
+    out: list[_Pair] = []
+    i = j = 0
+    while i < len(left) and j < len(right):
+        found: tuple[int, int] | None = None
+        for reach in range(2 * _PAIR_REACH + 1):
+            for di in range(max(0, reach - _PAIR_REACH), min(reach, _PAIR_REACH) + 1):
+                ii, jj = i + di, j + reach - di
+                if ii < len(left) and jj < len(right) and _alike(lk[ii], rk[jj]):
+                    found = ii, jj
+                    break
+            if found is not None:
+                break
+        if found is None:
+            out.append((left[i], None, None))
+            out.append((None, right[j], None))
+            i, j = i + 1, j + 1
+            continue
+        ii, jj = found
+        out.extend((a, None, None) for a in left[i:ii])
+        out.extend((None, b, None) for b in right[j:jj])
+        out.append((left[ii], right[jj], None))
+        i, j = ii + 1, jj + 1
+    out.extend((a, None, None) for a in left[i:])
+    out.extend((None, b, None) for b in right[j:])
     return out
 
 
