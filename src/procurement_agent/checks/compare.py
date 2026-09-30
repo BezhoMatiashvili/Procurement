@@ -1559,7 +1559,11 @@ def _value_spans(text: str) -> list[_Span]:
             spans.append(_Span(m.start(), m.end(), f"quantity {hit.normalized}"))
     spans.extend(_Span(*p.span, f"vat {p.kind}") for p in tax_phrases(text))
     spans.extend(_figures_with_words(text))
-    spans.extend(_Span(*p.span, f"party {normalize_name(p.name)}") for p in find_parties(text))
+    spans.extend(
+        _Span(p.span[0], p.span[1], f"party {normalize_name(p.name)}")
+        for p in find_parties(text)
+        if p.span is not None and p.name
+    )
     spans = [_with_own_words(text, s) for s in spans]
     out: list[_Span] = []
     for span in sorted((_whole_words(text, s) for s in spans), key=lambda s: (s.start, -s.end)):
@@ -1800,8 +1804,8 @@ def _contexts(segments: Sequence[Segment]) -> dict[int, _Context]:
                 total=(segment.table, segment.table_row) in totals,
                 party=party if by_table[segment.table] >= 2 and party != segment.text else "",
             )
-        elif (party := _signed_under(segments, k)) is not None:
-            context = replace(context, party=party)
+        elif (heading := _signed_under(segments, k)) is not None:
+            context = replace(context, party=heading)
         if context != _NO_CONTEXT:
             out[id(segment)] = context
     return out
@@ -3320,9 +3324,13 @@ def _told_in_words(d: ValueDelta, numerals: list[ValueDelta]) -> bool:
         if w.rule_id != "CMP.AMOUNT_WORDS" or w.type is not FactType.duration:
             continue
         a, b = _SHOWN_FIGURE.search(w.left or ""), _SHOWN_FIGURE.search(w.right or "")
-        if a and b and amounts_equal(float(a.group(1)), before):
-            if amounts_equal(float(b.group(1)), after):
-                return True
+        if (
+            a is not None
+            and b is not None
+            and amounts_equal(float(a.group(1)), before)
+            and amounts_equal(float(b.group(1)), after)
+        ):
+            return True
     return False
 
 

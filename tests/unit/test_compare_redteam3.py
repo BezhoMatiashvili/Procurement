@@ -113,7 +113,8 @@ def test_a_penalty_period_changed_to_a_year_is_one_percent_change() -> None:
 
 
 def test_a_penalty_rate_and_period_changed_together_are_one_change() -> None:
-    right = edit(CONTRACT, "0.3% ოდენობით " + PENALTY, "0.4% ოდენობით ყოველ ვადაგადაცილებულ კვირაზე")
+    week = "0.4% ოდენობით ყოველ ვადაგადაცილებულ კვირაზე"
+    right = edit(CONTRACT, "0.3% ოდენობით " + PENALTY, week)
     assert found(run(CONTRACT, right)) == [
         ("CMP.PERCENT", "0.3% per day", "0.4% per week", "error")
     ]
@@ -361,8 +362,8 @@ def test_a_date_read_with_its_year_after_inclusive_is_until_that_day() -> None:
 
 
 def test_near_miss_two_dates_joined_by_and_stay_two_dates() -> None:
-    [hit] = [h for h in hits_of("შეხვედრები: 01.05.2026 და 31.05.2026.") if "/" in h.value] or [None]
-    assert hit is None
+    hits = hits_of("შეხვედრები: 01.05.2026 და 31.05.2026.")
+    assert not [h for h in hits if "/" in h.value]
 
 
 # --- mutation harness: a one-letter slip in the word that carries a value's wording ------------
