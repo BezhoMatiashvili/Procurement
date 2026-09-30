@@ -26,14 +26,14 @@ letters upper-cased. Nothing else - no stemming, no substring match, no case-end
 
 | type | canonical form | example |
 |---|---|---|
-| `party_name` | legal form + name, no quotes | `შპს ნიმუში დეველოპმენტ` |
-| `party_director` | full name, **nominative** | `გიორგი ნიმუშაძე` (not `…ნიმუშაძის`) |
-| `party_address` | as written, no quotes, no trailing punctuation | `ქ. თბილისი, ნიმუშის ქ. N5` |
-| `party_id_code` | digits only (9 or 11) | `123456789` |
-| `bank_account` | IBAN, no spaces, upper case | `GE00NB0000000000000000` |
+| `party_name` | legal form + name, no quotes; the legal form **abbreviated** however the document writes it (`შეზღუდული პასუხისმგებლობის საზოგადოება` is `შპს`, `სააქციო საზოგადოება` is `სს`) | `შპს ნიმუში დეველოპმენტ` |
+| `party_director` | full name, **nominative**, without a courtesy title (`ბატონი`, `ქალბატონ`, `ბ-ნ`); a name written with an initial keeps it (`გ. ნიმუშაძე`); the act check compares it with the contract's director whose first name starts with that letter, on the surname | `გიორგი ნიმუშაძე` (not `…ნიმუშაძის`) |
+| `party_address` | as written, no quotes, no trailing punctuation; it ends where another requisite (code, account, bank) begins | `ქ. თბილისი, ნიმუშის ქ. N5` |
+| `party_id_code` | digits only (9 or 11); a code printed in groups (`123 456 789`) is the same code | `123456789` |
+| `bank_account` | IBAN, no spaces, upper case; printed in groups or broken over a line it is read whole, to its country's fixed length (GE: 22), whether or not its checksum holds | `GE00NB0000000000000000` |
 | `bank_code` | BIC/SWIFT, upper case | `NBGEGE22` |
 | `cadastral_code` | dotted, as written | `01.02.03.456` |
-| `project_name` | **nominative**, no quotes, no postposition | `ზღვის ხედი` (not `ზღვის ხედისთვის`) |
+| `project_name` | **nominative**, no quotes, no postposition; also read behind a label (`პროექტის დასახელება: „…“`) and before `პროექტი` with the case ending after the quote (`„…“-ს პროექტი`) | `ზღვის ხედი` (not `ზღვის ხედისთვის`) |
 | `contract_date` | ISO date of the *contract's* signing | `2026-08-01` |
 | `act_date` | ISO date of the act's *own* signing | `2026-08-31` |
 | `execution_period` | the period the work is performed in - an act's service period, a contract's performance window ("შეასრულოს მომსახურება … -დან … ჩათვლით"): ISO range `start/end` (inclusive), or ISO duration when only a length is stated | `2026-08-01/2026-08-31`, `P6M` |
