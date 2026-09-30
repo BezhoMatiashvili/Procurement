@@ -210,17 +210,39 @@ strict_findings: true             # anything else reported (any severity) is a f
   `ივნის` is not a place inside `ივნისიდან`, nor a name's nominative inside its genitive. A name
   copied from another party (the customer's director written for the contractor) is marked only
   in the places of the party it is wrong for; where it stands in its own party's block it is right.
+* An amount's correction (red team R2) is the fee as the act writes it, whole: its words in
+  brackets wherever they stand (`100 ლარს (ასი)`, `GEL 100 (ასი)`, `100 ₾ (ასი)`), tetri written
+  after the lari rewritten from the price (`100 ლარი და 50 თეთრი` against a price of 100 is
+  corrected to `100 ლარი`). With several contract prices (a monthly price and a total) it is the
+  one the fee is a slip of - the fewest digit edits, a slip or two at most, then the smallest
+  difference - and none when no one price is meant; the message lists them. An error never
+  offers the act's own words as its correction.
 * Which rule owns which mistake:
   * wrong digits and/or words of the fee → `AOA.FEE` (+ `AOA.AMOUNT_WORDS` when digits and words
     disagree); words misspelled (`ასოი`) → `AOA.AMOUNT_WORDS`, an error, with the correct words
     (words that read as no number and as no misspelling of the figure are a warning: the reader
-    may be at fault);
+    may be at fault). Which half of a pair that disagrees is wrong is the contract's to say: a
+    figure it states - a price, or a count it writes in digits and words that agree
+    (`12 (თორმეტი) პოსტი`), or a number the contract's own item states, in digits alone too,
+    for a pair inside a listed service or the subject (`- 12 პოსტი` for the act's `- 15
+    (თორმეტი) პოსტი`) - is right, and the other half is corrected; with no such figure the
+    digits are taken as written. A number written elsewhere in the contract decides nothing;
+  * a figure the act labels as before VAT (`… ლარს დღგ-ს ჩათვლით (დღგ-ს გარეშე 500 ლარი)`) is
+    no second fee when another fee the act states is it with VAT added at 18%, or at a rate the
+    documents write beside VAT; with the VAT amount written out, net + VAT must make the fee.
+    VAT is `დღგ`, `დ.ღ.გ.` or `დ.ღ.გ`, with or without its case ending, before or after
+    `ჩათვლით`;
+  * a party's name is written whole: a word's final `ი` dropped (`შპს „ბეტა სერვის“`) is
+    `AOA.PARTY_NAME`, corrected to the contract's name, unless an ending is attached to the stem
+    (`„ბეტა სერვის“-ის`). A case ending inside the quotes (`„ბეტა სერვისის“`) is still the name;
   * a month name, a Latin/Cyrillic letter inside a Georgian word, or a prose typo →
     `AOA.SPELLING` with the corrected word, a warning. A prose typo whose correction neither
     the act nor the contract writes rests on the dictionary alone, which lacks words and forms:
     it is `info` with `needs_review` ("may be misspelled - check it");
   * the service period's year outside the contract term → `AOA.PERIOD_IN_TERM` (text = the
-    period as written, correction = with the in-term year); `AOA.ACT_DATE` only when the act's
+    period as written, correction = with the in-term year: every year moved when all of them
+    are wrong, one end's year when only that end's is); when no single year puts the period
+    inside the term, the correction is the term itself; `AOA.ACT_DATE` only when the act's
     own date is the odd one out;
   * a missing project name / cadastral code → `AOA.PROJECT_PRESENT` / `AOA.CADASTRAL_PRESENT`;
   * a bank code or plot code not the contract's → one `AOA.BANK` / `AOA.CADASTRAL` per value,

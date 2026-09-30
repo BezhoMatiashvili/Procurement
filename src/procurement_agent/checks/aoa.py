@@ -27,7 +27,9 @@ from itertools import pairwise
 from typing import Literal
 
 from procurement_agent.checks.amounts import (
+    CURRENCY,
     FIGURE,
+    DigitsAndWords,
     Money,
     digits_and_words,
     render_figure_like,
@@ -134,7 +136,7 @@ from procurement_agent.extraction.normalize import (
 from procurement_agent.extraction.ocr import misread_explains, repair_codes
 from procurement_agent.extraction.rules import RuleHit, find_dates, month_ka_correction
 from procurement_agent.extraction.schemas import FactType
-from procurement_agent.extraction.spellcheck import best_match, classify_difference
+from procurement_agent.extraction.spellcheck import Difference, best_match, classify_difference
 from procurement_agent.fx.provider import NullRateProvider, RateProvider
 
 ContractorType = Literal[
@@ -710,11 +712,14 @@ class AoaChecker:
         # One finding per mistake. The same text can be read twice - a clause repeated in an
         # annex, a table cell the parser emits in two places - and each copy sits at another
         # offset, so the key leaves the span out: with it, no copy would ever match.
+        if quote is None and span is not None:
+            quote = self.aoa.as_written(*span) or None
+        if severity == "error" and expected and quote and expected.split() == quote.split():
+            # a correction that is the act's own words corrects nothing: none is better
+            expected = None
         key = (rule_id, severity, en, expected, actual)
         if any(_finding_key(f) == key for f in self.findings):
             return
-        if quote is None and span is not None:
-            quote = self.aoa.as_written(*span) or None
         self.findings.append(
             Finding(
                 rule_id=rule_id,
@@ -769,6 +774,24 @@ class AoaChecker:
     def _find_span(self, needle: str) -> tuple[int, int] | None:
         i = self.aoa.text.find(needle)
         return (i, i + len(needle)) if i >= 0 else None
+
+    def _code_span(self, code: str) -> tuple[int, int] | None:
+        """Where the act writes an identification code, as printed: a code in groups ("123 456
+        789") is read compact, and only the party reader's span, or its digits found with the
+        group spaces between them, lead back to the characters the act has. Never the same
+        digits inside a longer number."""
+        for p in self.aoa.parties:
+            span = p.id_span
+            if (
+                p.id_code == code
+                and span is not None
+                and 0 <= span[0] < span[1]
+                and re.sub(r"\D", "", self.aoa.text[span[0] : span[1]]) == code
+            ):
+                return span
+        grouped = r"[ \u00a0]?".join(code)
+        m = re.search(rf"(?<!\d)(?<!\d[ \u00a0]){grouped}(?!\d)(?![ \u00a0]\d)", self.aoa.text)
+        return m.span() if m is not None else None
 
     def _account_span(self, iban: str) -> tuple[int, int] | None:
         """Where the act writes an account: an IBAN printed in groups or broken over a line is
@@ -1083,15 +1106,16 @@ class AoaChecker:
         doubles as an OCR guard: a misread digit no longer matches its own spelled-out form.
 
         The finding marks the half that is wrong and says how it should read. Which half that is
-        comes from the contract when there is one: words that state the contract's price and
-        digits that do not mean the digits are wrong; otherwise - and with no contract - the
-        figure is taken as written and the words are corrected to it. Words that are the right
-        number misspelled ("ასოი" for "ასი") are a spelling slip with its correction, not an
-        unreadable amount; a bracket that holds no numeral at all ("დანართი 1 (ტექნიკური
-        დავალება)") is no amount and is left alone.
+        comes from the contract when there is one: words that state a figure the contract
+        states - its price, or a count it writes in digits and words alike ("12 (თორმეტი)
+        პოსტი") - and digits that do not mean the digits are wrong; otherwise - and with no
+        contract - the figure is taken as written and the words are corrected to it. Words
+        that are the right number misspelled ("ასოი" for "ასი") are a spelling slip with its
+        correction, not an unreadable amount; a bracket that holds no numeral at all
+        ("დანართი 1 (ტექნიკური დავალება)") is no amount and is left alone.
         """
         checked = 0
-        prices = self._contract_price_values()
+        prices = self._contract_figures()
         for pair in digits_and_words(self.aoa.text):
             if not pair.numeral:
                 continue
@@ -1125,8 +1149,9 @@ class AoaChecker:
             checked += 1
             if amounts_equal(spelled, digits):
                 continue
-            words_are_right = any(amounts_equal(p, spelled) for p in prices) and not any(
-                amounts_equal(p, digits) for p in prices
+            figures = [*prices, *self._counterpart_figures(pair)]
+            words_are_right = any(amounts_equal(p, spelled) for p in figures) and not any(
+                amounts_equal(p, digits) for p in figures
             )
             if words_are_right:
                 wrong, span = pair.digits_raw, pair.digits_span
@@ -1152,6 +1177,43 @@ class AoaChecker:
                 "no 'digits (words)' amount found",
             )
 
+    def _contract_figures(self) -> list[float]:
+        """The figures the contract states for certain: its prices, and every figure it writes
+        in digits and words that agree. Empty without a contract."""
+        if self.contract is None:
+            return []
+        agreed = [
+            p.digits
+            for p in digits_and_words(self.contract.text)
+            if p.spelled is not None and amounts_equal(p.spelled, p.digits)
+        ]
+        return [*self._contract_price_values(), *agreed]
+
+    def _counterpart_figures(self, pair: DigitsAndWords) -> list[float]:
+        """The numbers the contract's counterpart of the act's listed service or subject that
+        holds ``pair`` states (``aoa_scope.align``), in digits alone or in words: the contract's
+        "- 4 სერვისის გვერდი" states the count the act's "- 6 (ოთხი) სერვისის გვერდი" is of. A
+        number written anywhere else in the contract is no counterpart. Empty without a
+        contract, or when the pair stands in no aligned item."""
+        if self.contract is None:
+            return []
+        reading = self._scope_reading()
+        aligned = [*reading.services, *([reading.subject] if reading.subject else [])]
+        for found in aligned:
+            if found.best is None:
+                continue
+            span = found.item.span or self._find_span(found.item.text)
+            if span is None or not (span[0] <= pair.span[0] and pair.span[1] <= span[1]):
+                continue
+            stated = [float(n) for n in found.best.numbers if re.fullmatch(r"\d+(?:\.\d+)?", n)]
+            agreed = [
+                p.digits
+                for p in digits_and_words(found.best.text)
+                if p.spelled is not None and amounts_equal(p.spelled, p.digits)
+            ]
+            return [*stated, *agreed]
+        return []
+
     def _contract_price_values(self) -> list[float]:
         """The contract's prices as figures, as the fee rule reads them; empty without one."""
         return [m.value for m in self._contract_prices()]
@@ -1171,12 +1233,18 @@ class AoaChecker:
         """The act's fee before tax, where the act breaks the tax out: an amount that with a tax
         amount the act states adds up to another fee the act states, or to a price the contract
         states - "დღგ-ს გარეშე 84.75 ლარს, დღგ - 15.25 ლარს, სულ დღგ-ს ჩათვლით 100 ლარს". It is
-        a part of the fee, not a second fee, and "დღგ-ს გარეშე" beside it says what it is."""
+        a part of the fee, not a second fee, and "დღგ-ს გარეშე" beside it says what it is.
+
+        With no tax amount stated, the fee before VAT is the figure an exclusion of VAT labels
+        ("… ლარს დღგ-ს ჩათვლით (დღგ-ს გარეშე 2 500 ლარი)") that is another fee the act states
+        less VAT at its rate (``_vat_rates``). The fee incl. VAT must be in the act: a figure
+        before VAT that only the contract's price makes whole is the act stating its fee before
+        VAT, and that is still compared. A VAT amount the act does state decides alone."""
         amounts = self.aoa.amounts()
         taxes = [r.money for r in amounts if r.role == "tax"]
-        if not taxes:
-            return []
         fees = [r for r in amounts if r.role in (None, "price")]
+        if not taxes:
+            return self._nets_at_vat_rate(fees)
         gross = [r.money for r in fees] + self._contract_prices()
         return [
             r
@@ -1189,6 +1257,40 @@ class AoaChecker:
                 for g in gross
             )
         ]
+
+    def _nets_at_vat_rate(self, fees: list[RoledAmount]) -> list[RoledAmount]:
+        """The fees an exclusion of VAT labels that another act fee, in the same currency, is
+        with VAT added (``_net_parts``)."""
+        labels = [
+            p for p in tax_phrases(self.aoa.text) if p.kind == "exclusion" and "vat" in p.names
+        ]
+        if not labels:
+            return []
+        rates = self._vat_rates()
+        return [
+            r
+            for r in fees
+            if any(self._labels_amount(p, r) for p in labels)
+            and any(
+                g is not r
+                and g.money.currency == r.money.currency
+                and any(_plus_vat(r.money.value, g.money.value, rate) for rate in rates)
+                for g in fees
+            )
+        ]
+
+    def _vat_rates(self) -> list[float]:
+        """The VAT rates a fee may be restated at: Georgia's 18%, and any rate the act or the
+        contract writes beside VAT ("დღგ 18%", "20% VAT")."""
+        rates = [_VAT_RATE_DEFAULT]
+        for doc in (self.aoa, self.contract):
+            if doc is None:
+                continue
+            for m in _VAT_RATE.finditer(doc.text):
+                rate = float((m.group(1) or m.group(2)).replace(",", ".")) / 100
+                if 0 < rate < 1 and rate not in rates:
+                    rates.append(rate)
+        return rates
 
     def rule_required_fields(self) -> None:
         """Client rule 3: the act must name the project and the cadastral code."""
@@ -1487,22 +1589,21 @@ class AoaChecker:
         )
 
     def _qualifies_net(self, phrase: TaxPhrase, nets: list[RoledAmount]) -> bool:
-        """Whether an exclusion ("დღგ-ს გარეშე", "excl. VAT") is the label of a fee before tax:
-        in its sentence, before the figure with no other amount between, or right after it."""
-        if phrase.kind != "exclusion":
-            return False
-        starts = [r.money.span[0] for r in self.aoa.amounts()]
+        """Whether an exclusion ("დღგ-ს გარეშე", "excl. VAT") is the label of a fee before tax."""
+        return phrase.kind == "exclusion" and any(self._labels_amount(phrase, r) for r in nets)
+
+    def _labels_amount(self, phrase: TaxPhrase, r: RoledAmount) -> bool:
+        """Whether ``phrase`` is the label of the amount ``r``: in its sentence, before the
+        figure with no other amount between, or right after it."""
+        starts = [x.money.span[0] for x in self.aoa.amounts()]
         a, b = phrase.span
-        for r in nets:
-            start, end = r.money.span
-            lo, hi = (b, start) if b <= start else (end, a)
-            if any(lo <= x < hi for x in starts):
-                continue  # another amount stands between: the phrase is that one's
-            if b <= start and self._sentence_of(start)[0] <= a:
-                return True
-            if a >= end and a - end <= _NET_LABEL_REACH:
-                return True
-        return False
+        start, end = r.money.span
+        lo, hi = (b, start) if b <= start else (end, a)
+        if any(lo <= x < hi for x in starts):
+            return False  # another amount stands between: the phrase is that one's
+        if b <= start and self._sentence_of(start)[0] <= a:
+            return True
+        return a >= end and a - end <= _NET_LABEL_REACH
 
     def _fee_amounts(self) -> list[Money]:
         """The act's fee as written: the amounts called a price, or failing those, the ones
@@ -1839,7 +1940,7 @@ class AoaChecker:
                     f"identification code not in the contract: {code}",
                     expected=closest,
                     actual=code,
-                    span=self._find_span(code),
+                    span=self._code_span(code),
                 )
 
         if not self.contract.parties:
@@ -2117,10 +2218,13 @@ class AoaChecker:
         if not actual or not expected:
             return
         diff = classify_difference(actual, expected)
+        if diff is None and rule_id in _NAME_RULES:
+            # a stem is in no case: the name to write is the contract's, as it stands
+            diff = self._name_cut_short(actual, expected)
+        elif diff is not None and rule_id in _NAME_RULES:
+            expected = in_case_of(actual, expected)
         if diff is None:
             return
-        if rule_id in _NAME_RULES:
-            expected = in_case_of(actual, expected)
         hint_ka = " (როგორც ჩანს, ორთოგრაფიული შეცდომაა)" if diff.looks_like_typo else ""
         hint_en = " (looks like a misspelling)" if diff.looks_like_typo else ""
         source_ka, source_en = _SOURCE[against]
@@ -2133,6 +2237,35 @@ class AoaChecker:
             actual=actual,
             span=self._find_span(actual),
         )
+
+    def _name_cut_short(self, actual: str, expected: str) -> Difference | None:
+        """A name with a word's final "ი" dropped: "შპს „ბეტა სერვის“" for "ბეტა სერვისი".
+
+        ``classify_difference`` takes each word in any of its forms, and the bare stem an
+        attribute takes ("ლაზურ რეზიდენსი") is one of them - but a company's name is written
+        whole: its words do not shed their ending inside the quotes. The stem is the name only
+        where an ending is attached to it ("„ბეტა სერვის“-ის", "სერვის-თან"); written bare
+        anywhere in the act, it is the name misspelt."""
+        written, meant = normalize_name(actual).split(), normalize_name(expected).split()
+        if len(written) != len(meant):
+            return None
+        cut = [
+            (w, m)
+            for w, m in zip(written, meant, strict=True)
+            if w != m and is_georgian_word(w) and m == f"{w}ი" and w[-1] not in "აეიოუ"
+        ]
+        if not cut:
+            return None
+        text = self.aoa.text
+        for w, _ in cut:
+            places = list(re.finditer(rf"(?<![ა-ჰ]){re.escape(w)}(?![ა-ჰ])", text))
+            # an ending attached after the stem, the closing quote between or not
+            attached = [
+                m for m in places if re.match(r"[“”\"»']?-?[ა-ჰ]", text[m.end() : m.end() + 3])
+            ]
+            if places and len(attached) < len(places):
+                return Difference(actual=actual, expected=expected, kind="typo", words=tuple(cut))
+        return None
 
     def rule_cadastral(self) -> None:
         """Every code the act names must be one the contract names, or lie inside one.
@@ -2590,14 +2723,7 @@ class AoaChecker:
         with the contract's price in words to write there. Words that do not read as a number
         are a misspelling, AOA.AMOUNT_WORDS's to report."""
         m = r.money
-        pair = next(
-            (
-                p
-                for p in digits_and_words(self.aoa.text)
-                if m.span[0] <= p.span[0] and p.span[1] <= m.span[1]
-            ),
-            None,
-        )
+        pair = self._pair_of(m)
         if pair is None or not pair.numeral or pair.spelled is None:
             return
         same = [p for p in prices if p.currency == m.currency]
@@ -2645,12 +2771,15 @@ class AoaChecker:
             )
             return
         shown = ", ".join(dict.fromkeys(_money_text(p) for p in prices))
-        expected = shown
-        same_currency = [p for p in prices if p.currency == m.currency]
-        if len({p.value for p in same_currency}) == 1:
-            # one price it should have been: the correction says it the way the act writes its
-            # fee, so it can be typed over the marked words as it stands
-            expected = _fee_like(same_currency[0].value, self.aoa.text[m.span[0] : m.span[1]])
+        span = self._fee_span(m)
+        same_currency = list(dict.fromkeys(p.value for p in prices if p.currency == m.currency))
+        # the price it should have been: the only one, or the one it is a slip of. The
+        # correction says it the way the act writes its fee, words and all, so it can be typed
+        # over the marked words as it stands; with no one price meant, the message lists them
+        meant = (
+            same_currency[0] if len(same_currency) == 1 else _nearest_price(m.value, same_currency)
+        )
+        fix = None if meant is None else _fee_like(meant, self.aoa.text[span[0] : span[1]])
         hint_ka = hint_en = ""
         for c in contract:
             if c.role is not None and c.role in _ROLE_NAME and _states([c.money], m):
@@ -2664,9 +2793,29 @@ class AoaChecker:
             f"{name_ka} {actual} არ ემთხვევა ხელშეკრულებით განსაზღვრულ ღირებულებას "
             f"({shown}){hint_ka}",
             f"{name_en} {actual} matches no price in the contract ({shown}){hint_en}",
-            expected=expected,
+            expected=fix,
             actual=actual,
-            span=m.span,
+            span=span,
+        )
+
+    def _fee_span(self, m: Money) -> tuple[int, int]:
+        """Where a fee is written, its words in brackets included wherever they stand: after
+        the figure, after the currency ("100 ლარს (ასი)"), or after a figure the currency comes
+        before ("GEL 100 (ასი)")."""
+        pair = self._pair_of(m)
+        if pair is None:
+            return m.span
+        return min(m.span[0], pair.span[0]), max(m.span[1], pair.span[1])
+
+    def _pair_of(self, m: Money) -> DigitsAndWords | None:
+        """The "digits (words)" pair whose figure is the amount ``m``'s."""
+        return next(
+            (
+                p
+                for p in digits_and_words(self.aoa.text)
+                if m.span[0] <= p.digits_span[0] and p.digits_span[1] <= m.span[1]
+            ),
+            None,
         )
 
     def rule_period_in_term(self) -> None:
@@ -2734,6 +2883,24 @@ class AoaChecker:
                 span=(first, last),
             )
             return
+        repair = _endpoint_year_into(period_hits, window)
+        if repair is not None:
+            # one end's year typed wrong ("2025 წლის 1 ივნისიდან 2026 წლის 30 ივნისის"): the
+            # period as written, corrected in that end only - the other end's same year stays
+            written, fixed = self._with_year_moved(reading, *repair)
+            if fixed != written:
+                self._add(
+                    "AOA.PERIOD_IN_TERM",
+                    "error",
+                    f"შესრულების პერიოდი {min(period)}..{max(period)} სცდება {name_ka} {shown}; "
+                    f"როგორც ჩანს, წელი არასწორადაა მითითებული: „{fixed}“",
+                    f"execution period {min(period)}..{max(period)} falls outside {name_en} "
+                    f"{shown}; the year looks mistyped: '{fixed}'",
+                    expected=fixed,
+                    actual=written,
+                    span=(first, last),
+                )
+                return
         self._add(
             "AOA.PERIOD_IN_TERM",
             "error",
@@ -2753,17 +2920,9 @@ class AoaChecker:
         to, the act's own date chose the repair, and it is AOA.PERIOD's."""
         if reading.repaired is None:  # pragma: no cover - called only with a repair
             return
-        hit, shift = reading.repaired
+        written, fixed = self._with_year_moved(reading, *reading.repaired)
         first = min(h.start for _, h in reading.hits)
         last = max(h.end for _, h in reading.hits)
-        year = str(next(d.year for d, h in reading.hits if h is hit))
-        endpoint = re.sub(
-            rf"(?<!\d){year}(?!\d)", str(int(year) + shift), self.aoa.as_written(hit.start, hit.end)
-        )
-        written = self.aoa.as_written(first, last)
-        fixed = (
-            self.aoa.as_written(first, hit.start) + endpoint + self.aoa.as_written(hit.end, last)
-        )
         shown = f"{min(reading.dates)}..{max(reading.dates)}"
         ka = (
             f"შესრულების პერიოდი მთავრდება მანამ, სანამ დაიწყება: „{written}“; როგორც ჩანს, "
@@ -2786,6 +2945,21 @@ class AoaChecker:
             actual=written,
             span=(first, last),
         )
+
+    def _with_year_moved(self, reading: _Period, hit: RuleHit, shift: int) -> tuple[str, str]:
+        """The period as the act writes it, and the same text with the year of the one end
+        ``hit`` moved by ``shift`` - in that end only, so a year both ends write is changed once."""
+        first = min(h.start for _, h in reading.hits)
+        last = max(h.end for _, h in reading.hits)
+        year = str(next(d.year for d, h in reading.hits if h is hit))
+        endpoint = re.sub(
+            rf"(?<!\d){year}(?!\d)", str(int(year) + shift), self.aoa.as_written(hit.start, hit.end)
+        )
+        written = self.aoa.as_written(first, last)
+        fixed = (
+            self.aoa.as_written(first, hit.start) + endpoint + self.aoa.as_written(hit.end, last)
+        )
+        return written, fixed
 
     def rule_act_date_in_term(self) -> None:
         """Client rule 10.5, the act itself: it must be dated inside the contract's term.
@@ -3345,23 +3519,41 @@ def _cadastral_covers(a: str, c: str) -> bool:
 _FEE_WORDS = re.compile(r"\(\s*[ა-ჰ][ა-ჰ0-9 ,.]*\)")
 
 
+#: The words after a fee's figure, the currency standing before them or not: " (ასი)",
+#: " ლარს (ასი)", " ₾ (ასი)".
+_FEE_WORDS_AFTER = re.compile(rf"(\s*(?:{CURRENCY}\s*)?)({_FEE_WORDS.pattern})")
+#: Tetri written in figures after the lari: " ლარი და 50 თეთრი".
+_TETRI_AFTER = re.compile(rf"(\s*{CURRENCY}\s+)და\s+(\d{{1,2}})(\s*თეთრ[ა-ჰ]*)")
+
+
 def _fee_like(value: float, written: str) -> str:
     """``value`` as the act writes its fee: "700 (შვიდასი) ლარს" with 100 gives "100 (ასი) ლარს".
 
-    The figure keeps the act's grouping and decimals, the words are written anew, and the
-    currency word keeps its case. Text the pattern does not recognise yields the bare figure.
+    The figure keeps the act's grouping and decimals, the words are written anew wherever they
+    stand ("700 ლარს (შვიდასი)" too), and the currency word keeps its case. Tetri written after
+    the lari ("700 ლარი და 50 თეთრი") are the value's own, and dropped when it has none. Text
+    the pattern does not recognise yields the bare figure.
     """
     figure = re.search(FIGURE, written)
     if figure is None:
         return _plain(value)
-    out = written[: figure.start()] + render_figure_like(value, figure.group(0))
     rest = written[figure.end() :]
-    words = _FEE_WORDS.match(rest.lstrip())
+    tetri = _TETRI_AFTER.match(rest)
+    if tetri is not None:
+        lari, cents = int(round(value, 2)), round(value * 100) % 100
+        out = written[: figure.start()] + render_figure_like(lari, figure.group(0))
+        if cents:
+            width = len(tetri.group(2))
+            out += f"{tetri.group(1)}და {cents:0{width}d}{tetri.group(3)}"
+        else:
+            out += tetri.group(1).rstrip()
+        return (out + rest[tetri.end() :]).strip()
+    out = written[: figure.start()] + render_figure_like(value, figure.group(0))
+    words = _FEE_WORDS_AFTER.match(rest)
     if words is not None:
-        gap = rest[: len(rest) - len(rest.lstrip())]
         # the bracket's own currency and tetri words kept: "(ასი ლარი და 00 თეთრი)"
-        inner = words.group(0)[1:-1].strip()
-        out += f"{gap}({words_like(value, inner)})" + rest.lstrip()[words.end() :]
+        inner = words.group(2)[1:-1].strip()
+        out += f"{words.group(1)}({words_like(value, inner)})" + rest[words.end() :]
     else:
         out += rest
     return out.strip()
@@ -3379,6 +3571,24 @@ def _sub_accounts(view: DocumentView) -> dict[str, set[str]]:
         if tail := _sub_account(hit):
             out.setdefault(hit.value, set()).add(tail)
     return out
+
+
+def _nearest_price(value: float, prices: Sequence[float]) -> float | None:
+    """The one of ``prices`` a fee of ``value`` is a slip of, for its correction: the fewest
+    digit edits (a swap of two neighbours is one), a slip or two at most, then the smallest
+    difference. None when two are equally near or none is near: the message lists them."""
+
+    def key(p: float) -> tuple[int, float]:
+        written, meant = _plain(value).replace(".", ""), _plain(p).replace(".", "")
+        edits = damerau(written, meant, cap=max(len(written), len(meant)))
+        return edits, abs(value - p) / max(abs(p), 0.01)
+
+    ranked = sorted((key(p), p) for p in dict.fromkeys(prices))
+    if not ranked or ranked[0][0][0] > 2:
+        return None
+    if len(ranked) > 1 and ranked[1][0] == ranked[0][0]:
+        return None
+    return ranked[0][1]
 
 
 def _bank_key(code: str) -> str:
@@ -3523,6 +3733,27 @@ def _year_shift_into(dates: list[date], window: tuple[date | None, date | None, 
     return fits[0] if len(fits) == 1 else None
 
 
+def _endpoint_year_into(
+    hits: list[tuple[date, RuleHit]], window: tuple[date | None, date | None, str]
+) -> tuple[RuleHit, int] | None:
+    """For a two-ended period that lies outside ``window``, the one end whose year, moved by a
+    year or two, puts the whole period inside it in order; None unless exactly one such move
+    exists (then no single year is the mistake, and the term is what the finding cites)."""
+    if len(hits) != 2:
+        return None
+    (start, start_hit), (end, end_hit) = hits
+    fits: list[tuple[RuleHit, int]] = []
+    for moved_start, hit in ((True, start_hit), (False, end_hit)):
+        if _within(start if moved_start else end, window):
+            continue
+        for k in (-1, 1, -2, 2):
+            a = _add_years(start, k) if moved_start else start
+            b = end if moved_start else _add_years(end, k)
+            if a <= b and _within(a, window) and _within(b, window):
+                fits.append((hit, k))
+    return fits[0] if len(fits) == 1 else None
+
+
 def _shift_years(written: str, years: list[int], shift: int) -> str:
     """``written`` with each of ``years`` moved by ``shift`` where it stands as a year."""
     out = written
@@ -3552,6 +3783,24 @@ def _term_window(term: ContractTerm) -> tuple[date | None, date | None, str] | N
 def _states(amounts: list[Money], m: Money) -> bool:
     """Whether ``amounts`` holds ``m``: the same figure in the same currency."""
     return any(a.currency == m.currency and amounts_equal(a.value, m.value) for a in amounts)
+
+
+#: Georgia's VAT rate, which a fee before VAT is restated at unless the documents name another.
+_VAT_RATE_DEFAULT = 0.18
+#: A VAT rate written beside VAT: "დღგ 18%", "დღგ-ს (18%)", "18% დღგ", "VAT 20%".
+_VAT_RATE = re.compile(
+    r"(?:დ\.?ღ\.?გ\.?|(?<![a-z])vat)(?:-?ი?ს)?\s*\(?\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*%"
+    r"|(\d{1,2}(?:[.,]\d{1,2})?)\s*%\s*(?:დ\.?ღ\.?გ|vat(?![a-z]))",
+    re.IGNORECASE,
+)
+
+
+def _plus_vat(net: float, gross: float, rate: float) -> bool:
+    """Whether ``gross`` is ``net`` with VAT at ``rate`` added, to the tetri, rounded either way
+    (the act may have worked out either figure from the other)."""
+    return amounts_equal(round(net * (1 + rate), 2), gross) or amounts_equal(
+        round(gross / (1 + rate), 2), net
+    )
 
 
 def _fee_parts_add_up(parts: list[RoledAmount], fees: list[Money], prices: list[Money]) -> bool:
