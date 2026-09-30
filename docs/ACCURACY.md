@@ -483,7 +483,7 @@ is an open policy question (red team COMPARE-27).
 
 ### Red team, round 1: what the comparison now reads (2026-09-30)
 
-Eighteen defects a red team found and a verifier reproduced, each with a unit test on invented
+Defects a red team found and a verifier reproduced, each with a unit test on invented
 text (`tests/unit/test_compare_redteam.py`, `test_compare_tables.py`):
 
 * **Values in canonical form.** A payment term, warranty, delivery deadline and quantity are
