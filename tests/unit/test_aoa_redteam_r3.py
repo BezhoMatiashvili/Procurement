@@ -253,3 +253,61 @@ class TestFeeBeforeVat:
         act = _fee("საფასური დღგ-ს გარეშე შეადგენს 500 ლარს.")
         [finding] = _of(_check(act, _VAT_CONTRACT), "AOA.FEE")
         assert finding.actual == "500.00 GEL"
+
+
+# --- AOA-R3-09: a price table whose currency only the column header names -----------------------
+
+_SIGNATURES = "„შემკვეთი“\nშპს „ალფა ჯგუფი“"
+
+
+def _table(*rows: str, act: str = ACT) -> str:
+    """The act with a price table before its signatures, written as Docling writes one."""
+    assert _SIGNATURES in act
+    return act.replace(_SIGNATURES, ". ".join(rows) + "\n" + _SIGNATURES)
+
+
+def _priced(figure: str, total: str = "სულ:") -> tuple[str, ...]:
+    return (
+        "1, დასახელება = ვებგვერდის მხარდაჭერა (აპრილი)",
+        f"1, ღირებულება (ლარი) = {figure}",
+        f", დასახელება = {total}",
+        f", ღირებულება (ლარი) = {figure}",
+    )
+
+
+class TestHeaderCurrencyTable:
+    def test_a_table_total_that_is_the_price_is_clean(self) -> None:
+        for figure in ("100", "100.00", "100-00"):
+            assert _substantive(_check(_table(*_priced(figure)))) == [], figure
+
+    def test_a_slip_in_the_table_total_is_the_fee_rules(self) -> None:
+        report = _check(_table(*_priced("170")))
+        [finding] = _of(report, "AOA.FEE")
+        assert (finding.severity, finding.quote, finding.expected) == ("error", "170", "100")
+
+    def test_the_header_may_name_the_currency_in_other_words(self) -> None:
+        rows = [r.replace("ღირებულება (ლარი)", "თანხა, ლარი") for r in _priced("170")]
+        [finding] = _of(_check(_table(*rows)), "AOA.FEE")
+        assert finding.quote == "170"
+
+    def test_a_table_with_no_total_row_is_said_not_compared(self) -> None:
+        report = _check(
+            _table(*_priced("170")[:2], "2, დასახელება = ჰოსტინგი", "2, ღირებულება (ლარი) = 30")
+        )
+        assert _of(report, "AOA.FEE") == []
+        assert any(s.rule_id == "AOA.FEE" and "170" in s.reason_en for s in report.skipped)
+
+    def test_a_total_before_tax_and_a_rate_column_are_no_fee(self) -> None:
+        """Near misses: a total row before VAT, a column of rates, a column naming no currency."""
+        for rows in (
+            _priced("84.75", total="სულ დღგ-ს გარეშე"),
+            [r.replace("ღირებულება (ლარი)", "დოლარის კურსი (ლარი)") for r in _priced("2.70")],
+            [r.replace("ღირებულება (ლარი)", "რაოდენობა") for r in _priced("170")],
+        ):
+            report = _check(_table(*rows))
+            assert _of(report, "AOA.FEE") == [], rows
+
+    def test_the_table_total_takes_no_tax_wording_from_the_prose_fee(self) -> None:
+        act = _table(*_priced("100"), act=_fee("საფასური შეადგენს 100 (ასი) ლარს დღგ-ს ჩათვლით."))
+        report = _check(act, contractor_type="individual_entrepreneur_vat")
+        assert _substantive(report) == []

@@ -13,7 +13,12 @@ from dataclasses import dataclass
 
 from procurement_agent.extraction.georgian import damerau, number_to_words, parse_number_words
 from procurement_agent.extraction.normalize import parse_georgian_number_words, parse_number
-from procurement_agent.extraction.rules import find_amounts
+from procurement_agent.extraction.rules import (
+    _TABLE_CELL,
+    _TOTAL_ROW,
+    _norm_currency,
+    find_amounts,
+)
 from procurement_agent.extraction.schemas import FactType
 
 __all__ = [
@@ -25,6 +30,7 @@ __all__ = [
     "Money",
     "digits_and_words",
     "figure_value",
+    "header_money",
     "looks_like_numeral",
     "money_amounts",
     "money_hits",
@@ -343,6 +349,71 @@ def digits_and_words(text: str) -> list[DigitsAndWords]:
             )
         )
     return out
+
+
+#: A currency a table's column header names: "ღირებულება (ლარი)", "თანხა, ლარი", "ღირებულება
+#: ლარში", "Amount (USD)".
+_HEADER_CURRENCY = re.compile(rf"(?<![ა-ჰA-Za-z])(?:{CURRENCY})(?![A-Za-z])")
+#: A column of rates, not of amounts: "დოლარის კურსი", "Rate (GEL)".
+_RATE_COLUMN = re.compile(r"კურს|(?<![a-z])rate(?![a-z])", re.IGNORECASE)
+#: A table cell's value that is a figure alone: "3 540", "3 450.00", "3 450-00", ended by the
+#: cell's stop or a space.
+_CELL_FIGURE = re.compile(rf"\s*({FIGURE_TETRI})(?!\d)(?=\.?(?:\s|$))")
+#: A currency right after a figure, which makes it the money reader's.
+_CURRENCY_AFTER = re.compile(rf"\s*{CURRENCY}")
+#: A total row that is not the document's total: the total before tax.
+_NOT_THE_TOTAL = re.compile(
+    r"გარეშე|გამოკლებით|(?<![a-z])(?:excl|excluding|without|before|net)(?![a-z])", re.IGNORECASE
+)
+
+
+def header_money(text: str) -> tuple[list[Money], list[Money]]:
+    """The figures of a price table whose column header names the currency ("ღირებულება (ლარი) =
+    3 540"), which the money reader leaves alone: nothing beside the figure says it is money
+    (red team R3, AOA-R3-09). Docling writes a table cell as "<row key>, <column header> =
+    <value>" (``rules._TABLE_CELL``); a row is the cells from one key on until the key changes
+    or a column comes round again. The text may be flattened to one line, so a cell's value is
+    read as the figure it starts with.
+
+    Returns the document's stated total - the figure in the last row a total word names ("სულ",
+    "ჯამი") that is not a total before tax - and, when no row is one, every such figure: a line
+    of a list is no total, and whoever reads it must say it was not compared. A figure with its
+    currency written beside it is the money reader's, and not read here."""
+    cells = list(_TABLE_CELL.finditer(text))
+    rows: list[list[tuple[str, str, str, re.Match[str] | None]]] = []
+    for c, nxt in zip(cells, [*cells[1:], None], strict=False):
+        key, header = c.group(1).strip(), c.group(2).strip()
+        end = nxt.start() if nxt is not None else len(text)
+        figure = _CELL_FIGURE.match(text, c.end(), end)
+        if figure is not None and _CURRENCY_AFTER.match(text, figure.end(1), end):
+            figure = None  # "3 540 ლარი": the money reader's
+        # the last cell of a flattened table runs on into the text after it
+        value = text[c.end() : end].strip().rstrip(".").strip()
+        if figure is not None and nxt is None:
+            value = figure.group(1)
+        cell = (key, header, value, figure)
+        row = rows[-1] if rows else None
+        if row is None or row[0][0] != key or any(h == header for _, h, _, _ in row):
+            rows.append([cell])
+        else:
+            row.append(cell)
+    totals: list[Money] = []
+    lines: list[Money] = []
+    for row in rows:
+        total = any(
+            _TOTAL_ROW.fullmatch(x) for x in (row[0][0], *(v for _, _, v, _ in row))
+        ) and not any(_NOT_THE_TOTAL.search(f"{k} {v}") for k, _, v, _ in row)
+        for _, header, _, figure in row:
+            named = _HEADER_CURRENCY.search(header)
+            if figure is None or named is None or _RATE_COLUMN.search(header):
+                continue
+            amount = figure_value(figure.group(1))
+            currency = _norm_currency(named.group(0))
+            if amount is None or currency is None:
+                continue
+            money = Money(value=amount, currency=currency, span=figure.span(1), raw=figure.group(1))
+            (totals if total else lines).append(money)
+    return (totals[-1:], []) if totals else ([], lines)
 
 
 def words_for(value: float) -> str:

@@ -33,6 +33,7 @@ from procurement_agent.checks.amounts import (
     DigitsAndWords,
     Money,
     digits_and_words,
+    header_money,
     render_figure_like,
     words_for,
     words_like,
@@ -2787,6 +2788,15 @@ class AoaChecker:
         if self.contract is None:  # run() calls the contract rules only with a contract
             raise RuntimeError(_NO_CONTRACT)
         act = [r for r in self.aoa.amounts() if r.role not in _NOT_THE_FEE]
+        # a price table's total whose currency only the column header names ("ღირებულება
+        # (ლარი)") is a fee the act states too (red team R3, AOA-R3-09)
+        table_totals, table_lines = header_money(self.aoa.text)
+        read = [r.money.span for r in self.aoa.amounts()]
+        act += [
+            RoledAmount(money=m, role="price")
+            for m in table_totals
+            if not any(a < m.span[1] and m.span[0] < b for a, b in read)
+        ]
         if not act:
             # A fee whose currency stands in another table cell is not read as money: say that
             # no fee could be read and let a person look, rather than call the act wrong.
@@ -2807,6 +2817,15 @@ class AoaChecker:
                 "no price found in the contract to compare against",
             )
             return
+        if table_lines:
+            shown = ", ".join(m.raw for m in table_lines[:5])
+            self._skip(
+                "AOA.FEE",
+                f"აქტის ცხრილში თანხები ({shown}) ვალუტას მხოლოდ სვეტის სათაურში ასახელებს და "
+                "ჯამის სტრიქონი არ აქვს: ხელშეკრულების ღირებულებას არ შედარდა",
+                f"the act's table gives amounts ({shown}) whose currency only the column header "
+                "names, with no total row: they were not compared with the contract's price",
+            )
         # the fee before tax, beside the tax that makes it the fee, is the fee in parts; a
         # figure labelled before VAT beside the fee is compared with the price before VAT
         nets = self._net_parts()
