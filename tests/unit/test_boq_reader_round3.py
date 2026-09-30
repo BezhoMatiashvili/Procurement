@@ -10,12 +10,17 @@ memory; every expected number is worked out here from the test's own data.
 from __future__ import annotations
 
 import pytest
+from openpyxl import Workbook
 
 from procurement_agent.checks.boq import (
+    BidComparison,
     BoqWorkbook,
     SummaryRow,
+    _colour,
+    _colour_extremes,
     _num,
     _plays,
+    cents,
     grand_total,
     norm_unit,
     reconcile_summary,
@@ -192,3 +197,33 @@ def test_a_chain_with_its_vat_row_or_total_worded_so_reconciles_and_ranks(
     assert (roles["vat"].row, roles["incl"].row) == (12, 13)
     assert grand_total(book) == 2360.0
     assert reconcile_summary(book) == []
+
+
+# --- bidders tied to the cent ---------------------------------------------------------------------
+
+#: the same half-cent total as two different float sums leave it
+_TIED = (32574.785, 32574.785000000003)
+
+
+def test_money_rounds_to_the_cent_half_up_whatever_float_noise_it_carries() -> None:
+    assert [cents(x) for x in _TIED] == [32574.79, 32574.79]
+    assert cents(0.125) == 0.13 and cents(-2.675) == -2.68
+    assert cents(1999.994999) == 1999.99  # not a half cent: rounds down
+
+
+def test_bidders_tied_to_the_cent_share_their_colour() -> None:
+    comps = [BidComparison(bidder=n) for n in ("A", "B", "C")]
+    for comp, total in zip(comps, (*_TIED, 34201.64), strict=True):
+        comp.common_scope_total, comp.common_scope_positions = total, 5
+    _colour(comps)
+    assert [c.colour for c in comps] == ["green", "green", "red"]
+
+
+def test_tied_cells_of_the_merged_workbook_share_their_colour() -> None:
+    ws = Workbook().active
+    assert ws is not None
+    for r, v in enumerate((*_TIED, 34201.64), start=1):
+        ws.cell(r, 1, v)
+    _colour_extremes(ws, [1, 2, 3], 1)
+    fills = [ws.cell(r, 1).fill.fgColor.rgb for r in (1, 2, 3)]
+    assert fills[0] == fills[1] != fills[2]

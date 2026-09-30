@@ -38,6 +38,7 @@ import math
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
@@ -454,8 +455,21 @@ def _qty(x: float | None) -> str:
     return "0" if text in ("-0", "") else text
 
 
+def cents(x: float) -> float:
+    """Money to the cent, half up - the one rounding every total is shown and compared with.
+
+    Float noise below 1e-9 is taken off first. Two bidders both at exactly 32,574.785 came out of
+    their sums as 32574.785 and 32574.785000000003, which ``round(x, 2)`` (binary, half even)
+    made .78 and .79: tied to the cent, one was green and the other uncoloured."""
+    return float(Decimal(repr(round(x, 9))).quantize(Decimal("0.01"), ROUND_HALF_UP))
+
+
+def _cents(x: float | None) -> float | None:
+    return None if x is None else cents(x)
+
+
 def _money(x: float) -> str:
-    return f"{x:,.2f}"
+    return f"{cents(x):,.2f}"
 
 
 def norm_unit(unit: str | None) -> str:
@@ -2275,7 +2289,7 @@ def _evaluate(out: BidComparison, bid: BoqWorkbook) -> None:
     gap = (out.stated_total_cost or 0.0) - out.evaluated_cost
     parts["other"] = gap - sum(parts.values())
     out.difference = {
-        k: round(v * markup, 2) or 0.0 for k, v in parts.items() if abs(v * markup) >= 0.005
+        k: cents(v * markup) or 0.0 for k, v in parts.items() if abs(cents(v * markup)) >= 0.01
     }
 
 
@@ -2752,7 +2766,7 @@ def _colour(comparisons: list[BidComparison]) -> None:
     ]
     if len(ranked) < 2:
         return
-    totals = [round(c.common_scope_total or 0.0, 2) for c in ranked]
+    totals = [cents(c.common_scope_total or 0.0) for c in ranked]
     high, low = max(totals), min(totals)
     if high == low:
         return
@@ -2890,7 +2904,7 @@ def _style_header(ws: object, row: int = 1) -> None:
 def _colour_extremes(ws: object, rows: list[int], col: int) -> None:
     """Highest red, lowest green - every tied cell the same colour, none when all are equal."""
     values = [(ws.cell(r, col).value, r) for r in rows]  # type: ignore[attr-defined]
-    numeric = [(round(v, 2), r) for v, r in values if isinstance(v, int | float) and v]
+    numeric = [(cents(v), r) for v, r in values if isinstance(v, int | float) and v]
     if len(numeric) < 2:
         return
     high, low = max(v for v, _ in numeric), min(v for v, _ in numeric)
@@ -2982,7 +2996,7 @@ def write_merged_workbook(
                     _put(ws, row, 6, "— missing —")
                     ws.cell(row, 6).fill = _HIGH
                 if ev is not None:
-                    _put(ws, row, 13, round(ev.cost, 2))
+                    _put(ws, row, 13, cents(ev.cost))
                     text = _STATUS_TEXT.get(ev.status, ev.status)
                     if ev.priced:
                         text += "; common scope" if ev.in_common_scope else "; outside common scope"
@@ -3126,17 +3140,15 @@ def _write_totals_block(ws: object, row: int, comps: list[BidComparison]) -> int
         _put(ws, row, 2, comp.bidder)
         _put(ws, row, 3, comp.stated_incl_vat)
         _put(ws, row, 4, round(comp.markup_factor, 6) if comp.markup_factor else None)
-        _put(
-            ws, row, 5, round(comp.evaluated_total, 2) if comp.evaluated_total is not None else None
-        )
+        _put(ws, row, 5, _cents(comp.evaluated_total))
         total = comp.common_scope_total
-        _put(ws, row, 6, round(total, 2) if total is not None else None)
+        _put(ws, row, 6, _cents(total))
         if comp.colour == "red":
             ws.cell(row, 6).fill = _HIGH  # type: ignore[attr-defined]
         elif comp.colour == "green":
             ws.cell(row, 6).fill = _LOW  # type: ignore[attr-defined]
         if comp.stated_incl_vat is not None and comp.evaluated_total is not None:
-            _put(ws, row, 7, round(comp.stated_incl_vat - comp.evaluated_total, 2) or 0.0)
+            _put(ws, row, 7, cents(comp.stated_incl_vat - comp.evaluated_total) or 0.0)
         _put(ws, row, 8, _explain(comp))
         row += 1
     return row
@@ -3292,7 +3304,7 @@ def main(argv: list[str] | None = None) -> int:
         total = comp.common_scope_total
         print(
             f"{comp.bidder}: {len(comp.findings)} finding(s), {errors} error(s); "
-            f"common-scope total {'-' if total is None else f'{total:,.2f}'}"
+            f"common-scope total {'-' if total is None else _money(total)}"
             f"{' (' + comp.colour + ')' if comp.colour else ''}"
         )
     print(f"unit-rate outliers across bidders: {len(outliers)}")

@@ -37,6 +37,7 @@ from procurement_agent.checks.boq import (
     BoqLine,
     BoqWorkbook,
     LineDiff,
+    cents,
     compare_all,
     rate_outliers,
     read_bid,
@@ -667,7 +668,9 @@ def _ref_from_line(line: BoqLine, status: str | None = None) -> BoqLineRef:
 
 
 def _round(value: float | None) -> float | None:
-    return round(value, 2) if value is not None else None
+    """Money to the cent the way the BOQ check ranks and colours it (``boq.cents``): two bidders
+    tied to the cent show the same cent."""
+    return cents(value) if value is not None else None
 
 
 def _no_basis_note(comp: BidComparison) -> SkipNote | None:
@@ -775,15 +778,15 @@ def run_boq(
                 total_stated_incl_vat=comp.stated_incl_vat,
                 total_stated_excl_vat=comp.stated_excl_vat,
                 total_stated_cost=comp.stated_total_cost,
-                total_recomputed=round(book.total, 2) if comp.evaluable else None,
+                total_recomputed=cents(book.total) if comp.evaluable else None,
                 markup_factor=comp.markup_factor,
-                evaluated_cost=round(comp.evaluated_cost, 2) if comp.evaluable else None,
+                evaluated_cost=cents(comp.evaluated_cost) if comp.evaluable else None,
                 evaluated_total=_round(comp.evaluated_total),
                 common_scope_cost=_round(comp.common_scope_cost),
                 common_scope_total=_round(comp.common_scope_total),
                 colour=comp.colour,
                 stated_minus_evaluated=(
-                    round(comp.stated_incl_vat - comp.evaluated_total, 2) or 0.0
+                    cents(comp.stated_incl_vat - comp.evaluated_total) or 0.0
                     if comp.stated_incl_vat is not None and comp.evaluated_total is not None
                     else None
                 ),
