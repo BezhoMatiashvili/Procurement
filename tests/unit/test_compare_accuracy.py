@@ -181,9 +181,10 @@ def test_digits_and_words_changed_together_are_one_amount_change() -> None:
     [f] = substantive(run(ACT, edit(2, "100 (ასი)", "300 (სამასი)")))
     assert f.rule_id == "CMP.AMOUNT"
     assert (as_number(f.expected), as_number(f.actual)) == (100, 300)
-    # the same for a period of days: the figure's own rule reports it, once
+    # the same for a period of days: the figure's own rule reports it, once - a payment term,
+    # as the sentence pays within it ("გადაიხდება"; COMPARE-04)
     [f] = substantive(run(ACT, edit(2, "5 (ხუთი)", "10 (ათი)")))
-    assert f.rule_id == "CMP.DURATION"
+    assert (f.rule_id, f.expected, f.actual) == ("CMP.PAYMENT", "P5D working", "P10D working")
 
 
 def test_digits_or_words_changed_alone_are_still_reported() -> None:
