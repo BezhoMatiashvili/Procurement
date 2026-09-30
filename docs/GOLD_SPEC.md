@@ -89,7 +89,10 @@ strict_findings: true             # anything else reported (any severity) is a f
   date in the act's date style (`2026 წლის 31 აგვისტო`), an amount as the act writes amounts
   (`100 (ასი) ლარს`).
 * `occurrences` is checked by annotating the act (`report/docx_annotate.py`) and counting the
-  comments whose anchored text contains `text`.
+  comments whose anchored text contains `text`. A place is where `text` stands as whole words:
+  `ივნის` is not a place inside `ივნისიდან`, nor a name's nominative inside its genitive. A name
+  copied from another party (the customer's director written for the contractor) is marked only
+  in the places of the party it is wrong for; where it stands in its own party's block it is right.
 * Which rule owns which mistake:
   * wrong digits and/or words of the fee → `AOA.FEE` (+ `AOA.AMOUNT_WORDS` when digits and words
     disagree); words misspelled (`ასოი`) → `AOA.AMOUNT_WORDS`, an error, with the correct words
@@ -100,7 +103,12 @@ strict_findings: true             # anything else reported (any severity) is a f
   * the service period's year outside the contract term → `AOA.PERIOD_IN_TERM` (text = the
     period as written, correction = with the in-term year); `AOA.ACT_DATE` only when the act's
     own date is the odd one out;
-  * a missing project name / cadastral code → `AOA.PROJECT_PRESENT` / `AOA.CADASTRAL_PRESENT`.
+  * a missing project name / cadastral code → `AOA.PROJECT_PRESENT` / `AOA.CADASTRAL_PRESENT`;
+  * a bank code or plot code not the contract's → one `AOA.BANK` / `AOA.CADASTRAL` per value,
+    correction = the one contract value it is nearest to (the contractor's own on a tie), none
+    when no single value is nearest; a BIC and its `XXX` branch form are the same code;
+  * an act not written in Georgian: what the rules read off Georgian wording (the parties'
+    codes, the project, the period) is a skip note saying so, never a finding.
 * The legacy `expected_findings:` / `forbidden_findings:` (rule ids only, `"*"` = must be
   completely clean) keep working and are checked as well.
 
