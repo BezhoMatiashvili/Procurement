@@ -396,3 +396,30 @@ def test_an_article_inserted_near_the_top_keeps_the_documents_versions() -> None
     added = [f.actual for f in report.findings if f.rule_id == "CMP.TEXT_ADDED"]
     assert added == ["2. ქვეკონტრაქტორები", "2.1. ქვეკონტრაქტორის ჩართვა დაუშვებელია."]
     assert not [f for f in report.findings if f.rule_id == "CMP.TEXT_REMOVED"]
+
+
+# --- COMPARE-06: a period whose year is written once is the same period ---------------------
+
+
+def test_a_period_with_its_year_written_once_is_the_same_period() -> None:
+    period = "2026 წლის 1 ივნისიდან 2026 წლის 30 ივნისის ჩათვლით"
+    for restated in (
+        "2026 წლის 1 ივნისიდან 30 ივნისის ჩათვლით",
+        "2026 წლის 1-დან 30 ივნისის ჩათვლით",
+        "1 ივნისიდან 30 ივნისის ჩათვლით, 2026 წელს",
+    ):
+        found = rules(run(ACT, edit(ACT, period, restated)))
+        assert found == [], restated
+    # "1-30 ივნისის პერიოდში" says the same period in other words: no value changed
+    found = rules(run(ACT, edit(ACT, period, "2026 წლის 1-30 ივნისის პერიოდში")))
+    assert [r for r in found if r[3] == "error"] == []
+
+
+def test_a_period_whose_end_takes_the_next_year_reads_it() -> None:
+    from procurement_agent.extraction.rules import find_dates
+
+    dates = [h.value for h in find_dates("შესრულდა 2026 წლის 20 დეკემბრიდან 15 იანვრის ჩათვლით.")]
+    assert dates == ["2026-12-20", "2027-01-15"]
+    # a day and month with its own year is read with it, not the other end's
+    dates = [h.value for h in find_dates("2026 წლის 1 მარტიდან 31 აგვისტოს 2025 წ.")]
+    assert dates == ["2026-03-01", "2025-08-31"]
