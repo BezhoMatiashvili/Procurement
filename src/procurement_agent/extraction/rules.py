@@ -81,10 +81,13 @@ _CTX = 80
 
 KEYWORDS: dict[FactType, tuple[str, ...]] = {
     FactType.warranty_period: ("გარანტი", "საგარანტიო", "warrant", "guarantee period"),
-    FactType.delivery_deadline: ("მიწოდებ", "მოწოდებ", "deliver", "delivery"),
+    # the verb as well as the noun: "ვალდებულია მიაწოდოს „საქონელი“ ... -მდე", "შეასრულოს
+    # „მომსახურება“ ... დღის ვადაში" state the deadline as plainly as "მიწოდების ვადა"
+    FactType.delivery_deadline: ("მიწოდებ", "მოწოდებ", "მიაწოდ", "მოაწოდ", "deliver", "delivery"),
     FactType.execution_period: (
         "შესრულებ",
         "შესრულდა",
+        "შეასრულ",
         "დასრულებ",
         "execution",
         "completion",
@@ -586,11 +589,11 @@ def find_percentages(text: str) -> list[RuleHit]:
         hits.append(
             RuleHit(
                 type=ft or FactType.percentage,
-                value=f"{v:g}%",
+                value=shown,
                 raw_text=m.group(0),
                 start=m.start(),
                 end=m.end(),
-                normalized=v,
+                normalized=normalized,
                 unit="%",
                 confidence=0.65 if ft else 0.45,
             )
