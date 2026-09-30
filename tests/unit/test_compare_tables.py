@@ -213,3 +213,57 @@ def test_a_director_renamed_in_a_signature_table_is_one_change() -> None:
     # every line of both documents is in the diff, the cell whole and its paragraphs alike
     assert sorted(r.left.index for r in report.rows if r.left) == [s.index for s in left]
     assert sorted(r.right.index for r in report.rows if r.right) == [s.index for s in right]
+
+
+def test_rows_numbered_with_a_full_stop_are_renumbered_not_changed_in_amount() -> None:
+    dotted = [[f"{row[0]}.", *row[1:]] for row in ROWS]
+    right = [[f"{n}.", *row[1:]] for n, row in enumerate([ROWS[0], *ROWS[2:]], start=1)]
+    assert found(run(document(dotted), document(right))) == [
+        (
+            "CMP.TEXT_REMOVED",
+            "2. | იატაკის დაგება | კვ.მ | 120 | 960 (ცხრაას სამოცი)",
+            None,
+            "warning",
+        )
+    ]
+
+
+def test_a_word_table_of_four_hundred_rows_is_read_and_aligned_quickly() -> None:
+    """Each table is indexed once: matched paragraph by paragraph against every cell, a priced
+    annex of a few hundred rows cost millions of comparisons on every compare."""
+    import time
+
+    from docling_core.types.doc.document import DoclingDocument, TableData
+    from docling_core.types.doc.document import TableCell as DoclingCell
+    from docling_core.types.doc.labels import DocItemLabel
+
+    from procurement_agent.ingestion.segmenter import segments_from_docling
+
+    def annex(bump: int) -> list[Segment]:
+        grid = [HEADER] + [
+            [str(r), f"სამუშაო ნომერი {r}", "ცალი", str(r + (1 if r == bump else 0)), f"{r * 3}"]
+            for r in range(1, 401)
+        ]
+        doc = DoclingDocument(name="t")
+        cells = [
+            DoclingCell(
+                text=text,
+                start_row_offset_idx=r,
+                end_row_offset_idx=r + 1,
+                start_col_offset_idx=c,
+                end_col_offset_idx=c + 1,
+            )
+            for r, row in enumerate(grid)
+            for c, text in enumerate(row)
+        ]
+        table = doc.add_table(data=TableData(num_rows=len(grid), num_cols=5, table_cells=cells))
+        for row in grid:
+            for text in row:
+                doc.add_text(label=DocItemLabel.PARAGRAPH, text=text, parent=table)
+        return segments_from_docling(doc)
+
+    started = time.perf_counter()
+    left, right = annex(0), annex(200)
+    report = run(left, right)
+    assert time.perf_counter() - started < 20
+    assert found(report) == [("CMP.AMOUNT", "200", "201", "error")]

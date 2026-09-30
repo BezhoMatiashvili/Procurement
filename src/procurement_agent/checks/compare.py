@@ -2078,7 +2078,9 @@ def _ordinal_columns(units: list[_Unit]) -> set[tuple[int | None, int | None]]:
         if unit[0].table_row is None:
             continue
         for cell in unit:
-            columns.setdefault((cell.table, cell.table_col), []).append(cell.text.strip())
+            # "1", "1." and "1)" alike
+            number = cell.text.strip().rstrip(".)").strip()
+            columns.setdefault((cell.table, cell.table_col), []).append(number)
 
     def counts(values: list[str]) -> bool:
         return len(values) >= 2 and values == [str(n) for n in range(1, len(values) + 1)]

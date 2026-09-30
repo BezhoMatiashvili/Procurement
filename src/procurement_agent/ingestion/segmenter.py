@@ -17,6 +17,7 @@ also "100", and a changed cell then showed up as a bare addition.
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -190,17 +191,13 @@ def _grid(table: Any) -> list[tuple[int, int, str]]:
 _HEADER_MAX = 60
 
 
-def _header_of(grid: list[tuple[int, int, str]], row: int, col: int) -> str | None:
-    if row == 0:
-        return None
-    return next(
-        (
-            text
-            for r, c, text in grid
-            if r == 0 and c == col and text and len(text) <= _HEADER_MAX and "\n" not in text
-        ),
-        None,
-    )
+def _headers(grid: list[tuple[int, int, str]]) -> dict[int, str]:
+    """Column -> its header: the first row's text, when it is short enough to be a name."""
+    return {
+        c: text
+        for r, c, text in grid
+        if r == 0 and text and len(text) <= _HEADER_MAX and "\n" not in text
+    }
 
 
 def _cells_of_text_items(doc: DoclingDocument, numbers: dict[str, int]) -> dict[str, TableCell]:
@@ -209,10 +206,12 @@ def _cells_of_text_items(doc: DoclingDocument, numbers: dict[str, int]) -> dict[
     Docling's DOCX backend gives a table's paragraphs as text items under the table, and those
     are what reach the diff. Each is the cell whose text - or one of whose lines - it is, the
     first not yet taken in reading order, so the same word in two rows ("ცალი") lands in each.
+    Each table is indexed once, line by line: a priced annex of a few hundred rows is a normal
+    document.
     """
     out: dict[str, TableCell] = {}
-    taken: set[tuple[str, int, int, int]] = set()
-    grids: dict[str, list[tuple[int, int, str]]] = {}
+    free: dict[str, dict[str, deque[tuple[int, int]]]] = {}
+    headers: dict[str, dict[int, str]] = {}
     for item in _items(doc):
         if not isinstance(item, TextItem) or not item.text.strip():
             continue
@@ -220,25 +219,19 @@ def _cells_of_text_items(doc: DoclingDocument, numbers: dict[str, int]) -> dict[
         if found is None or found[0] not in numbers:
             continue
         ref, table = found
-        grid = grids.setdefault(ref, _grid(table))
-        key = key_of(item.text)
-        for row, col, text in grid:
-            lines = [key_of(line) for line in text.splitlines()]
-            spot = next(
-                (
-                    n
-                    for n, line in enumerate(lines)
-                    if line == key and (ref, row, col, n) not in taken
-                ),
-                None,
-            )
-            if spot is None:
-                continue
-            taken.add((ref, row, col, spot))
-            out[item.self_ref] = TableCell(
-                numbers[ref], row + 1, col + 1, _header_of(grid, row, col)
-            )
-            break
+        if ref not in free:
+            grid = _grid(table)
+            spots: dict[str, deque[tuple[int, int]]] = {}
+            for row, col, text in grid:
+                for line in text.splitlines():
+                    spots.setdefault(key_of(line), deque()).append((row, col))
+            free[ref], headers[ref] = spots, _headers(grid)
+        waiting = free[ref].get(key_of(item.text))
+        if not waiting:
+            continue
+        row, col = waiting.popleft()
+        column = headers[ref].get(col) if row > 0 else None
+        out[item.self_ref] = TableCell(numbers[ref], row + 1, col + 1, column)
     return out
 
 
@@ -294,13 +287,14 @@ def segments_from_docling(doc: DoclingDocument) -> list[Segment]:
         table += 1
         covered = under_table.get(item.self_ref, set())
         grid = _grid(item)  # a spanned cell repeats across the rows and columns it covers
+        header = _headers(grid)
         for row, col, text in grid:
             if not text:
                 continue
             if key_of(text) in covered:
                 continue  # already emitted as a text item; see the module docstring
             path = f"T{table}/r{row + 1}/c{col + 1}"
-            where = TableCell(table, row + 1, col + 1, _header_of(grid, row, col))
+            where = TableCell(table, row + 1, col + 1, header.get(col) if row > 0 else None)
             records.append((text, "table_cell", path, heading, provenance_of(doc, [item]), where))
     return build(records)
 
