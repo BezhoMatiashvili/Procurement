@@ -450,9 +450,7 @@ def _quantity_hits(text: str) -> list[_Hit]:
     out: list[_Hit] = []
     for m in _QUANTITY.finditer(text):
         number = parse_number(m.group(1))
-        unit = next(
-            (u for i, (_p, u) in enumerate(_UNITS) if m.group(f"u{i}") is not None), None
-        )
+        unit = next((u for i, (_p, u) in enumerate(_UNITS) if m.group(f"u{i}") is not None), None)
         if number is None or unit is None:
             continue
         canonical = f"{number:g} {unit}"
@@ -1870,7 +1868,9 @@ def _align_linear(left: list[Segment], right: list[Segment]) -> tuple[list[_Pair
     ops = _opcodes(lk, rk)
     # the lines each side has that the other side does not have where they stand: a line of one
     # side written, unchanged, among them on the other has moved
-    unmatched_left = {lk[i] for tag, i1, i2, _j1, _j2 in ops if tag != "equal" for i in range(i1, i2)}
+    unmatched_left = {
+        lk[i] for tag, i1, i2, _j1, _j2 in ops if tag != "equal" for i in range(i1, i2)
+    }
     unmatched_right = {
         rk[j] for tag, _i1, _i2, j1, j2 in ops if tag != "equal" for j in range(j1, j2)
     }
@@ -2542,7 +2542,8 @@ def _findings_of(
     from procurement_agent.checks.document_facts import is_act  # checks import compare
 
     # read from the text folded as ``document_facts`` reads it: an act titled with an en dash
-    # ("მიღება – ჩაბარების") is an act to both passes, or none of its values is graded right
+    # between "მიღება" and "ჩაბარების" is an act to both passes, or none of its values is
+    # graded right
     cross_kind = bool(left_text and right_text) and is_act(
         normalize_confusables(left_text)
     ) != is_act(normalize_confusables(right_text))
@@ -2861,9 +2862,7 @@ def _explained_elsewhere(hunk: Hunk, deltas: list[ValueDelta]) -> bool:
         for left, right in [(_stem_words(d.left or ""), _stem_words(d.right or ""))]
         if left and right and left <= before and right <= after
     ]
-    return all(
-        any(old <= left and new <= right for left, right in stated) for old, new in changed
-    )
+    return all(any(old <= left and new <= right for left, right in stated) for old, new in changed)
 
 
 def _stem_words(text: str) -> frozenset[str]:
