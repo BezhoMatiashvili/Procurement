@@ -90,6 +90,20 @@ _HEADER_SYNONYMS: dict[str, tuple[str, ...]] = {
     # _norm_label strips surrounding whitespace, so "delivery " needs no entry of its own
     "rate_delivery": ("delivery", "transportation", "ტრანსპორტი", "ტრანსპორტირება", "მიწოდება"),
     "sum_delivery": ("delivery sum", "transportation sum"),
+    # the machines' share of a Georgian estimate's rate, beside materials and labour
+    "rate_machinery": (
+        "machinery",
+        "machines",
+        "plant",
+        "equipment",
+        "plant and equipment",
+        "machinery and equipment",
+        "მანქანა-მექანიზმები",
+        "მანქანა მექანიზმები",
+        "მექანიზმები",
+        "მანქანები",
+    ),
+    "sum_machinery": ("machinery sum", "plant sum", "equipment sum"),
     # a currency the label names ("Rate in USD", "ღირებულება ლარში") is taken off first
     "rate_total": (
         "rate",
@@ -120,21 +134,22 @@ _HEADER_SYNONYMS: dict[str, tuple[str, ...]] = {
     ),
 }
 _LABEL_TO_KEY = {label: key for key, labels in _HEADER_SYNONYMS.items() for label in labels}
+#: The parts a unit rate is built of, each with its rate ("rate_<part>") and its sum ("sum_<part>")
+#: column. Every list of component keys below is made from this one: a part listed by hand in
+#: one place and not another was how a machinery column priced a whole line.
+_COMPONENTS = ("materials", "labor", "delivery", "machinery")
+_COMPONENT_RATES = tuple(f"rate_{part}" for part in _COMPONENTS)
+_COMPONENT_SUMS = tuple(f"sum_{part}" for part in _COMPONENTS)
 #: The columns a number is read from; text in one of them is reported, never read as 0.
 _NUMERIC_KEYS = (
     "qty",
-    "rate_materials",
-    "sum_materials",
-    "rate_labor",
-    "sum_labor",
-    "rate_delivery",
-    "sum_delivery",
+    *(key for part in _COMPONENTS for key in (f"rate_{part}", f"sum_{part}")),
     "rate_total",
     "amount",
 )
-_RATE_KEYS = ("rate_total", "rate_materials", "rate_labor", "rate_delivery")
+_RATE_KEYS = ("rate_total", *_COMPONENT_RATES)
 #: The columns a template computes (quantity x rate): a number typed over one is flagged.
-_TOTAL_KEYS = ("sum_materials", "sum_labor", "sum_delivery", "amount")
+_TOTAL_KEYS = (*_COMPONENT_SUMS, "amount")
 
 _HEADER_SCAN_ROWS = 14
 _HEADER_SCAN_COLS = 30
@@ -371,23 +386,27 @@ def _num(v: object) -> float | None:
 #: (product, factor, factor): the number cells of a line that compute one another
 _ROW_PRODUCTS = (
     ("amount", "qty", "rate_total"),
-    ("sum_materials", "qty", "rate_materials"),
-    ("sum_labor", "qty", "rate_labor"),
-    ("sum_delivery", "qty", "rate_delivery"),
+    *((f"sum_{part}", "qty", f"rate_{part}") for part in _COMPONENTS),
 )
-_COMPONENT_RATES = ("rate_materials", "rate_labor", "rate_delivery")
-_COMPONENT_SUMS = ("sum_materials", "sum_labor", "sum_delivery")
 
 
-def _row_checks(v: dict[str, float | None]) -> list[tuple[set[str], float, float]]:
+def _row_checks(
+    v: dict[str, float | None], *, partial: bool = False
+) -> list[tuple[set[str], float, float]]:
     """What a line's number cells compute from one another, as (the cells used, the number
     stated, the number computed): amount = quantity x rate, a component's sum = quantity x its
-    rate, the rate = the component rates added, the amount = the component sums added."""
+    rate, the rate = the component rates added, the amount = the component sums added.
+
+    ``partial``: the sheet has price columns this reader did not recognise
+    (``_unread_price_columns``), so the components read may not be all the rate is made of - the
+    rate and the amount are then never held against their sum."""
     out: list[tuple[set[str], float, float]] = []
     for prod, a, b in _ROW_PRODUCTS:
         p, x, y = v.get(prod), v.get(a), v.get(b)
         if p is not None and x is not None and y is not None:
             out.append(({prod, a, b}, p, x * y))
+    if partial:
+        return out
     parts = [k for k in _COMPONENT_RATES if v.get(k) is not None]
     if parts:
         rate = sum(v[k] or 0.0 for k in parts)
@@ -402,10 +421,10 @@ def _row_checks(v: dict[str, float | None]) -> list[tuple[set[str], float, float
     return out
 
 
-def _row_computes(v: dict[str, float | None], key: str) -> bool:
+def _row_computes(v: dict[str, float | None], key: str, *, partial: bool = False) -> bool:
     """Whether some computation of the row that uses ``key`` holds, on numbers that are not all
     nought: an unpriced row (0 = 1.25 x nothing) tells nothing."""
-    for keys, stated, computed in _row_checks(v):
+    for keys, stated, computed in _row_checks(v, partial=partial):
         if key not in keys or (abs(stated) < 1e-9 and abs(computed) < 1e-9):
             continue
         if abs(stated - computed) <= max(_MONEY_TOL, 0.005 * max(abs(stated), abs(computed))):
@@ -413,7 +432,9 @@ def _row_computes(v: dict[str, float | None], key: str) -> bool:
     return False
 
 
-def _resolve_two_way(v: dict[str, float | None], raw: dict[str, object]) -> set[str]:
+def _resolve_two_way(
+    v: dict[str, float | None], raw: dict[str, object], *, partial: bool = False
+) -> set[str]:
     """Read each two-way text cell of a line ("1.250") the way the row itself computes it.
 
     The reading the row's cached computations agree with is taken - the sheet's own quantity x
@@ -426,7 +447,7 @@ def _resolve_two_way(v: dict[str, float | None], raw: dict[str, object]) -> set[
     while pending and progress:
         progress = False
         for key, readings in list(pending.items()):
-            fits = [x for x in readings if _row_computes({**v, key: x}, key)]
+            fits = [x for x in readings if _row_computes({**v, key: x}, key, partial=partial)]
             if len(fits) == 1:
                 v[key] = fits[0]
                 done.add(key)
@@ -517,6 +538,11 @@ class BoqLine:
     sum_materials: float | None = None
     sum_labor: float | None = None
     sum_delivery: float | None = None
+    rate_machinery: float | None = None
+    sum_machinery: float | None = None
+    #: the sheet has price columns this reader did not recognise (``_unread_price_columns``):
+    #: the component rates read may not be all the unit rate is made of
+    partial_rate: bool = False
     #: columns whose value was typed in rather than computed by a formula
     hardcoded: tuple[str, ...] = ()
     #: the computed columns (``_TOTAL_KEYS``) whose cell holds a formula
@@ -541,6 +567,11 @@ class BoqLine:
     def is_priced(self) -> bool:
         return bool(self.amount) or bool(self.rate_total)
 
+    @property
+    def component_rates(self) -> tuple[float | None, ...]:
+        """The line's rate per component, in ``_COMPONENTS`` order."""
+        return tuple(getattr(self, key) for key in _COMPONENT_RATES)
+
 
 @dataclass(slots=True)
 class BoqSheet:
@@ -553,6 +584,9 @@ class BoqSheet:
     #: is caught (``reconcile``) instead of shipping a total that looks right.
     subtotal: float | None = None
     subtotal_row: int | None = None
+    #: (column, its header text) of every column inside the price block that holds numbers but
+    #: that this reader did not recognise ("Energy" over Rate | Amount beside the materials)
+    unread_price_columns: tuple[tuple[int, str], ...] = ()
 
     @property
     def leaf_lines(self) -> list[BoqLine]:
@@ -676,28 +710,13 @@ def _is_label_row(ws: object, row: int) -> bool:
 #: Header labels that may group sub-columns under them ("Unit Rate" over Materials | Labour |
 #: Delivery | Total), and the key each kind of sub-label takes under them.
 _GROUP_KEYS: dict[str, dict[str, str]] = {
-    "rate_total": {
-        "materials": "rate_materials",
-        "labor": "rate_labor",
-        "delivery": "rate_delivery",
-        "total": "rate_total",
-    },
-    "amount": {
-        "materials": "sum_materials",
-        "labor": "sum_labor",
-        "delivery": "sum_delivery",
-        "total": "amount",
-    },
+    "rate_total": {**{part: f"rate_{part}" for part in _COMPONENTS}, "total": "rate_total"},
+    "amount": {**{part: f"sum_{part}" for part in _COMPONENTS}, "total": "amount"},
     "qty": {"total": "qty"},
 }
 #: What a sub-label is, whichever group it stands under.
 _FAMILY = {
-    "rate_materials": "materials",
-    "sum_materials": "materials",
-    "rate_labor": "labor",
-    "sum_labor": "labor",
-    "rate_delivery": "delivery",
-    "sum_delivery": "delivery",
+    **{f"{kind}_{part}": part for part in _COMPONENTS for kind in ("rate", "sum")},
     "rate_total": "total",
     "amount": "total",
 }
@@ -746,11 +765,7 @@ def _group(ws: object, row: int, col: int, key: str, below: int) -> dict[int, st
 #: A component that heads its own sub-columns ("Materials" over Rate | Amount, "მასალა" over
 #: "ერთ. ფასი | სულ" in a Georgian estimate): the component is the group, and its rate and amount
 #: are the component's rate and sum - never the unit rate and the line amount.
-_COMPONENT_GROUPS = {
-    "rate_materials": "materials",
-    "rate_labor": "labor",
-    "rate_delivery": "delivery",
-}
+_COMPONENT_GROUPS = {f"rate_{part}": part for part in _COMPONENTS}
 
 
 def _sub_key(group: str, sub: str) -> str | None:
@@ -759,6 +774,44 @@ def _sub_key(group: str, sub: str) -> str | None:
         part = _COMPONENT_GROUPS[group]
         return {"rate_total": f"rate_{part}", "amount": f"sum_{part}"}.get(sub)
     return _GROUP_KEYS[group].get(_FAMILY.get(sub, ""))
+
+
+def _unknown_component_columns(ws: object, row: int, below: int) -> set[int]:
+    """The sub-columns of cost components this reader has no name for, in header row ``row``.
+
+    A label it does not know heading its own Rate | Amount ("ერთ. ფასი | სულ") beside a known
+    component group ("მასალა" over the same) is one more component of the rate: its Rate is that
+    component's rate, never the unit rate, and its Amount never the line amount. Left to the
+    plain labels, its "Rate" bound the unit rate and one component priced the whole line. Its
+    columns stay unread (``_unread_price_columns`` says so). A lone unknown label over Rate |
+    Amount ("Bidder's price") is no component: its sub-columns are the rate and the amount."""
+
+    def rate_amount_subs(c: int) -> list[int] | None:
+        if ws.cell(below, c).value in (None, ""):  # type: ignore[attr-defined]
+            return None
+        subs = [
+            (sc, _label_key(v))
+            for sc in _span(ws, row, c)
+            if (v := ws.cell(below, sc).value) not in (None, "")  # type: ignore[attr-defined]
+        ]
+        keys = [k for _, k in subs]
+        if len(subs) < 2 or not set(keys) <= {"rate_total", "amount"} or len(set(keys)) < 2:
+            return None
+        return [sc for sc, _ in subs]
+
+    known = unknown = False
+    columns: set[int] = set()
+    for c in range(1, _HEADER_SCAN_COLS + 1):
+        value = ws.cell(row, c).value  # type: ignore[attr-defined]
+        if value in (None, "") or (subs := rate_amount_subs(c)) is None:
+            continue
+        key = _label_key(value)
+        if key in _COMPONENT_GROUPS:
+            known = True
+        elif key is None and isinstance(value, str) and _has_letter(value):
+            unknown = True
+            columns.update(subs)
+    return columns if known and unknown else set()
 
 
 def _continues_header(ws: object, row: int, above: int, first: dict[str, int]) -> bool:
@@ -823,6 +876,9 @@ def _map_headers(ws: object) -> tuple[dict[str, int], int]:
     consumed: set[tuple[int, int]] = set()
     for i, r in enumerate(block):
         below = block[i + 1] if i + 1 < len(block) else None
+        if below is not None:
+            for sub_col in _unknown_component_columns(ws, r, below):
+                consumed.add((below, sub_col))
         for c in range(1, _HEADER_SCAN_COLS + 1):
             key = _label_key(ws.cell(r, c).value)  # type: ignore[attr-defined]
             if not key or (r, c) in consumed:
@@ -1196,10 +1252,54 @@ def _numbered_line(
     return amount is not None and _own_row_formula(amount, row)
 
 
+def _header_text(ws: object, header: int, col: int) -> str:
+    """What the header block says over ``col``: each header row's label over it (a group label
+    spanning it included), top down - "Energy / Rate"."""
+    parts: list[str] = []
+    for r in range(max(1, header - 3), header + 1):
+        for c in range(col, 0, -1):
+            value = ws.cell(r, c).value  # type: ignore[attr-defined]
+            if value in (None, ""):
+                continue
+            if col in _span(ws, r, c) and isinstance(value, str) and _has_letter(value):
+                text = normalize_spaces(value).strip()
+                if text not in parts:
+                    parts.append(text)
+            break
+    return " / ".join(parts)[:60]
+
+
+def _unread_price_columns(
+    ws: object, cols: dict[str, int], header: int
+) -> tuple[tuple[int, str], ...]:
+    """The columns inside the price block - between the quantity and the last rate or amount
+    column - that hold numbers under the header but that no key was bound to: a cost component
+    this reader has no name for, or a column the bidder inserted. The component rates read are
+    then perhaps not all the unit rate is made of: the rate is never held against their sum, and
+    never built from them (``_unit_rate``)."""
+    prices = [cols[k] for k in _PRICE_KEYS if k in cols]
+    if not prices or "qty" not in cols:
+        return ()
+    low, high = min(cols["qty"], *prices), max(prices)
+    bound = set(cols.values())
+    out: list[tuple[int, str]] = []
+    for c in range(low + 1, high):
+        if c in bound:
+            continue
+        if any(
+            isinstance(v := ws.cell(r, c).value, int | float) and not isinstance(v, bool)  # type: ignore[attr-defined]
+            for r in range(header + 1, ws.max_row + 1)  # type: ignore[attr-defined]
+        ):
+            out.append((c, _header_text(ws, header, c)))
+    return tuple(out)
+
+
 def _read_sheet(
     book: BoqWorkbook, ws: object, wf: object, sheet_name: str, cols: dict[str, int], header: int
 ) -> BoqSheet:
     sheet = BoqSheet(name=sheet_name, columns=cols, header_row=header)
+    sheet.unread_price_columns = _unread_price_columns(ws, cols, header)
+    partial = bool(sheet.unread_price_columns)
     item_cols = _item_columns(cols)
 
     for r in range(header + 1, ws.max_row + 1):  # type: ignore[attr-defined]
@@ -1215,7 +1315,7 @@ def _read_sheet(
 
         raws = {key: ws.cell(r, c).value for key in _NUMERIC_KEYS if (c := cols.get(key))}  # type: ignore[attr-defined]
         values: dict[str, float | None] = {key: _num(raw) for key, raw in raws.items()}
-        read_two_way = _resolve_two_way(values, raws)
+        read_two_way = _resolve_two_way(values, raws, partial=partial)
 
         def val(key: str, _values: dict[str, float | None] = values) -> float | None:
             return _values.get(key)
@@ -1249,14 +1349,10 @@ def _read_sheet(
                 description=description,
                 unit=unit,
                 quantity=val("qty"),
-                rate_materials=val("rate_materials"),
-                rate_labor=val("rate_labor"),
-                rate_delivery=val("rate_delivery"),
                 rate_total=val("rate_total"),
                 amount=val("amount"),
-                sum_materials=val("sum_materials"),
-                sum_labor=val("sum_labor"),
-                sum_delivery=val("sum_delivery"),
+                **{key: val(key) for key in (*_COMPONENT_RATES, *_COMPONENT_SUMS)},
+                partial_rate=partial,
                 hardcoded=tuple(hardcoded),
                 formulas=tuple(k for k in formula_keys if k in _TOTAL_KEYS),
                 kind=_line_kind(ws, wf, cols, r, description, has_measure),
@@ -1785,6 +1881,8 @@ def template_findings(template: BoqWorkbook) -> list[Finding]:
                     actual=name,
                 )
             )
+        if sheet.unread_price_columns:
+            out.append(_columns_not_read(sheet, template=True))
     for sheet in template.sheets.values():
         for line in sheet.leaf_lines:
             for key, text in line.non_numeric:
@@ -1824,6 +1922,28 @@ _PRICE_KEYS = (*_RATE_KEYS, *_TOTAL_KEYS)
 def _reads_prices(sheet: BoqSheet) -> bool:
     """Whether any rate or amount column of the sheet was recognised."""
     return any(key in sheet.columns for key in _PRICE_KEYS)
+
+
+def _columns_not_read(sheet: BoqSheet, *, template: bool) -> Finding:
+    """Price columns this reader did not recognise (``_unread_price_columns``): the rate is not
+    held against its components, and without a rate column a line is priced at its amount over
+    its quantity."""
+    shown = ", ".join(
+        f"{get_column_letter(c)}" + (f" ({text})" if text else "")
+        for c, text in sheet.unread_price_columns
+    )
+    who_ka, who_en = ("შაბლონის ", "template ") if template else ("", "")
+    return _finding(
+        "BOQ.COLUMNS_NOT_READ",
+        "info",
+        f"{who_ka}გვერდზე {sheet.name} ფასის სვეტ(ებ)ი ვერ ამოვიცანით: {shown} — ერთეულის ფასი "
+        "კომპონენტების ჯამთან არ შემოწმებულა; ერთეულის ფასის სვეტის გარეშე ფასი = ღირებულება ÷ "
+        "რაოდენობა",
+        f"{who_en}sheet {sheet.name}: price column(s) not recognised: {shown} - the unit rate "
+        "was not checked against its components; without a rate column a line is priced at its "
+        "amount / quantity",
+        actual=shown,
+    )
 
 
 def _prices_not_read(name: str, *, template: bool) -> Finding:
@@ -1934,6 +2054,9 @@ def compare_bid(template: BoqWorkbook, bid: BoqWorkbook) -> BidComparison:
             )
             continue
         _compare_sheet(out, t_sheet, b_sheet)
+        if b_sheet.unread_price_columns and not t_sheet.unread_price_columns:
+            # a price column the bidder added (the template's own are said once, on it)
+            out.findings.append(_columns_not_read(b_sheet, template=False))
         gap = reconcile(b_sheet)
         if gap is not None:
             out.findings.append(gap)
@@ -2015,15 +2138,20 @@ def _qty_reads_two_ways(line: BoqLine) -> bool:
 def _unit_rate(line: BoqLine, columns: dict[str, int]) -> float | None:
     """The bidder's unit rate: the rate column, else the sum of the component rates.
 
-    A sheet with no rate column at all (only an amount) prices a line as amount / quantity.
+    A sheet with no rate column at all (only an amount) prices a line as amount / quantity, and
+    so does one whose component rates may not be the whole rate (``partial_rate``: a price
+    column this reader did not recognise) - their sum would leave that column's share out.
     """
     if line.rate_total:
         return line.rate_total
-    parts = (line.rate_materials, line.rate_labor, line.rate_delivery)
+    by_amount = line.amount / line.quantity if line.quantity and line.amount else None
+    if line.partial_rate:
+        return by_amount
+    parts = line.component_rates
     if any(parts):
         return sum(p or 0.0 for p in parts)
-    if not any(k in columns for k in _RATE_KEYS) and line.quantity and line.amount:
-        return line.amount / line.quantity
+    if not any(k in columns for k in _RATE_KEYS):
+        return by_amount
     return None
 
 
@@ -2520,12 +2648,13 @@ def _arithmetic_findings(line: BoqLine, typed_over: tuple[str, ...] | None = Non
         return rate * qty if rate is not None and qty is not None else None
 
     if qty:
-        check("materials sum", line.sum_materials, times(line.rate_materials))
-        check("labor sum", line.sum_labor, times(line.rate_labor))
-        check("delivery sum", line.sum_delivery, times(line.rate_delivery))
+        for part in _COMPONENTS:
+            check(f"{part} sum", getattr(line, f"sum_{part}"), times(getattr(line, f"rate_{part}")))
         check("line amount", line.amount, times(_stated_rate(line)))
-    rates = [line.rate_materials or 0, line.rate_labor or 0, line.rate_delivery or 0]
-    if line.rate_total is not None and any(rates):
+    rates = [r or 0 for r in line.component_rates]
+    if line.rate_total is not None and any(rates) and not line.partial_rate:
+        # beside a price column this reader did not recognise, the components read may not be
+        # the whole rate: held against their sum, a faithful rate became an error on every line
         check("total rate", line.rate_total, sum(rates))
     if hardcoded:
         out.append(
@@ -2545,11 +2674,12 @@ def _arithmetic_findings(line: BoqLine, typed_over: tuple[str, ...] | None = Non
 def _stated_rate(line: BoqLine) -> float | None:
     """The unit rate the line's own cells state: the rate column, else - on a sheet with no rate
     column, or with the rate left empty - the sum of the component rates. An amount that leaves
-    a component out (``=(E6+F6)*D6`` beside a delivery rate) is then recomputed too."""
+    a component out (``=(E6+F6)*D6`` beside a delivery rate) is then recomputed too - unless
+    the sheet has a price column this reader did not recognise (``partial_rate``)."""
     if line.rate_total is not None:
         return line.rate_total
-    parts = (line.rate_materials, line.rate_labor, line.rate_delivery)
-    if all(p is None for p in parts):
+    parts = line.component_rates
+    if line.partial_rate or all(p is None for p in parts):
         return None
     return sum(p or 0.0 for p in parts)
 

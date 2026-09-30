@@ -13,17 +13,22 @@ from pathlib import Path
 
 import pytest
 from openpyxl import Workbook
+from openpyxl.utils import get_column_letter
 
 from procurement_agent.checks.boq import (
     BidComparison,
+    BoqLine,
     BoqWorkbook,
     SummaryRow,
+    _arithmetic_findings,
     _colour,
     _colour_extremes,
     _label_key,
     _num,
     _plays,
+    _unit_rate,
     cents,
+    compare_all,
     compare_bid,
     grand_total,
     norm_unit,
@@ -328,3 +333,161 @@ def test_a_sheet_whose_line_amount_is_not_recognised_says_so(tmp_path: Path) -> 
     assert "amount" not in t.sheets["1. WORKS"].columns
     [note] = [f for f in template_findings(t) if f.rule_id == "BOQ.AMOUNTS_NOT_READ"]
     assert note.severity == "info" and "1. WORKS" in note.message_en
+
+
+# --- cost components: machinery, and one this reader has no name for -----------------------------
+
+#: (item, description, unit, quantity, unit rate)
+_WORKS = [("3.1", "Trench excavation", "m3", 120.0, 14.0), ("3.2", "Backfilling", "m3", 80.0, 6.5)]
+
+
+def _estimate(parts: tuple[str, ...], split: tuple[float, ...] | None, *, ka: bool) -> Cells:
+    """A Georgian estimate: each component a group over its own rate and sum, a closing total.
+
+    No | Description | Unit | Qty | <part 1> (Rate | Sum) | <part 2> (Rate | Sum) | ... | Total
+    """
+    head = ("№", "დასახელება", "განზ.", "რაოდენობა") if ka else (*_HEAD[:3], "Quantity")
+    rate, total_sum, total = ("ერთ. ფასი", "სულ", "ჯამი") if ka else ("Rate", "Amount", "Total")
+    cells: Cells = {(1, c): h for c, h in enumerate(head, 1)}
+    last = 5 + 2 * len(parts)
+    for i, part in enumerate(parts):
+        cells.update({(1, 5 + 2 * i): part, (2, 5 + 2 * i): rate, (2, 6 + 2 * i): total_sum})
+    cells[(1, last)] = total
+    for r, (item, text, unit, qty, price) in enumerate(_WORKS, start=3):
+        cells.update({(r, 1): item, (r, 2): text, (r, 3): unit, (r, 4): qty})
+        for i, share in enumerate(split or (0.0,) * len(parts)):
+            rate_col = get_column_letter(5 + 2 * i)
+            if split:
+                cells[(r, 5 + 2 * i)] = price * share
+            cells[(r, 6 + 2 * i)] = Fx(f"=D{r}*{rate_col}{r}", qty * price * share)
+        refs = "+".join(f"{get_column_letter(6 + 2 * i)}{r}" for i in range(len(parts)))
+        cells[(r, last)] = Fx(f"={refs}", qty * price * sum(split or ()))
+    return cells
+
+
+_COST = sum(q * p for _, _, _, q, p in _WORKS)
+
+
+@pytest.mark.parametrize(
+    ("parts", "ka"),
+    [
+        (("მასალა", "ხელფასი", "მანქანა-მექანიზმები"), True),
+        (("Materials", "Labour", "Plant"), False),
+        (("Materials", "Labour", "Equipment"), False),
+    ],
+)
+def test_a_machinery_component_is_part_of_the_rate(
+    tmp_path: Path, parts: tuple[str, ...], ka: bool
+) -> None:
+    """The machinery "Rate" under its own group is the machinery rate: bound as the unit rate,
+    it priced every line at the machines' share alone and flipped the colours."""
+    t = read_boq(_save(tmp_path / "t.xlsx", {"1. WORKS": _estimate(parts, None, ka=ka)}))
+    a = read_boq(_save(tmp_path / "a.xlsx", {"1. WORKS": _estimate(parts, (0.5, 0.2, 0.3), ka=ka)}))
+    c = read_boq(
+        _save(tmp_path / "c.xlsx", {"1. WORKS": _estimate(parts, (0.45, 0.4, 0.2), ka=ka)})
+    )
+    cols = t.sheets["1. WORKS"].columns
+    assert (cols["rate_machinery"], cols["sum_machinery"], cols["amount"]) == (9, 10, 11)
+    assert "rate_total" not in cols
+    comps = compare_all(t, [a, c])
+    assert [x.evaluated_cost for x in comps] == [pytest.approx(_COST), pytest.approx(_COST * 1.05)]
+    assert all(x.findings == [] for x in comps)
+
+
+def test_a_machinery_column_is_added_into_the_stated_rate() -> None:
+    line = BoqLine(
+        sheet="S",
+        row=2,
+        item_no="1",
+        description="Works",
+        unit="m3",
+        quantity=10.0,
+        rate_materials=7.0,
+        rate_labor=2.8,
+        rate_machinery=4.2,
+        rate_total=14.0,
+        amount=140.0,
+    )
+    assert _arithmetic_findings(line, ()) == []
+    assert _unit_rate(line, {}) == 14.0
+    wrong = BoqLine(
+        sheet="S",
+        row=2,
+        item_no="1",
+        description="Works",
+        unit="m3",
+        quantity=10.0,
+        rate_materials=7.0,
+        rate_labor=2.8,
+        rate_machinery=4.2,
+        rate_total=15.0,
+        amount=150.0,
+    )
+    assert [f.expected for f in _arithmetic_findings(wrong, ())] == ["14.00"]
+
+
+def test_a_component_this_reader_has_no_name_for_never_binds_the_unit_rate(
+    tmp_path: Path,
+) -> None:
+    """ "Energy" over Rate | Amount beside materials and labour: its sub-columns are neither the
+    unit rate nor the line amount, the line is priced at its total over its quantity, and the
+    reader says which columns it did not read."""
+    parts = ("Materials", "Labour", "Energy")
+    t = read_boq(_save(tmp_path / "t.xlsx", {"1. WORKS": _estimate(parts, None, ka=False)}))
+    a = read_boq(
+        _save(tmp_path / "a.xlsx", {"1. WORKS": _estimate(parts, (0.5, 0.2, 0.3), ka=False)})
+    )
+    sheet = t.sheets["1. WORKS"]
+    assert "rate_total" not in sheet.columns and sheet.columns["amount"] == 11
+    # the template's rates are blank: its Energy amounts are what shows the column is priced
+    assert [c for c, _ in sheet.unread_price_columns] == [10]
+    assert [c for c, _ in a.sheets["1. WORKS"].unread_price_columns] == [9, 10]
+    [note] = [f for f in template_findings(t) if f.rule_id == "BOQ.COLUMNS_NOT_READ"]
+    assert "Energy" in note.message_en
+    comp = compare_bid(t, a)
+    assert comp.evaluated_cost == pytest.approx(_COST)
+    assert "BOQ.ARITHMETIC" not in _rules(comp)
+
+
+def test_a_lone_unknown_label_over_rate_and_amount_is_still_the_rate_and_amount(
+    tmp_path: Path,
+) -> None:
+    cells: Cells = {(1, c): h for c, h in enumerate(_HEAD[:4], 1)}
+    cells.update({(1, 5): "Bidder's price", (2, 5): "Rate", (2, 6): "Amount"})
+    cells.update({(3, 1): "1.1", (3, 2): "Formwork", (3, 3): "m2", (3, 4): 10.0, (3, 5): 3.0})
+    cells[(3, 6)] = Fx("=D3*E3", 30.0)
+    sheet = read_boq(_save(tmp_path / "t.xlsx", {"1. WORKS": cells})).sheets["1. WORKS"]
+    assert (sheet.columns["rate_total"], sheet.columns["amount"]) == (5, 6)
+    assert sheet.unread_price_columns == ()
+
+
+def _one_row_components(extra: str, value: object, rate: float) -> Cells:
+    """No | Description | Unit | Qty | Materials | Labour | <extra> | Rate | Amount."""
+    head = (*_HEAD[:4], "Materials", "Labour", extra, "Rate", "Amount")
+    cells: Cells = {(1, c): h for c, h in enumerate(head, 1)}
+    cells.update({(2, 1): "1.1", (2, 2): "Brick wall", (2, 3): "m2", (2, 4): 10.0})
+    cells.update({(2, 5): 7.0, (2, 6): 2.8, (2, 7): value, (2, 8): rate})
+    cells[(2, 9)] = Fx("=D2*H2", 10.0 * rate)
+    return cells
+
+
+def test_a_price_column_this_reader_does_not_know_stops_the_rate_being_held_to_the_rest(
+    tmp_path: Path,
+) -> None:
+    """A rate that adds a column the reader did not recognise is no arithmetic error of the
+    bidder's: it was "total rate does not match (14.00 vs 9.80)" on every faithful line."""
+    cells = _one_row_components("Site costs", 4.2, 14.0)
+    book = read_boq(_save(tmp_path / "b.xlsx", {"1. WORKS": cells}))
+    sheet = book.sheets["1. WORKS"]
+    assert sheet.unread_price_columns == ((7, "Site costs"),)
+    [line] = sheet.lines
+    assert line.partial_rate and _arithmetic_findings(line, ()) == []
+
+
+def test_a_text_column_inside_the_price_block_keeps_the_rate_check(tmp_path: Path) -> None:
+    """Remarks written between the rates hold no price: a total rate that does not add up is
+    still the bidder's arithmetic."""
+    cells = _one_row_components("Remarks", "as drawing", 14.0)
+    [line] = read_boq(_save(tmp_path / "b.xlsx", {"1. WORKS": cells})).sheets["1. WORKS"].lines
+    assert not line.partial_rate
+    assert [f.expected for f in _arithmetic_findings(line, ())] == ["9.80"]
