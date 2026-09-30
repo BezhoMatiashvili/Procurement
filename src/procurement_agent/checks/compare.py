@@ -34,7 +34,7 @@ import time
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from datetime import date
+from datetime import date, timedelta
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -77,7 +77,7 @@ from procurement_agent.extraction.normalize import (
     parse_number,
     strip_quotes,
 )
-from procurement_agent.extraction.rules import RuleHit, find_dates, run_rules
+from procurement_agent.extraction.rules import _KA_MONTHS, RuleHit, run_rules
 from procurement_agent.extraction.schemas import FactType
 from procurement_agent.extraction.spellcheck import classify_difference
 from procurement_agent.ingestion.segmenter import Segment, document_text, key_of
@@ -369,7 +369,13 @@ class _Hit:
 
 
 def _bank_key(value: str) -> str:
-    return re.sub(r"[^A-Z0-9]", "", normalize_confusables(value).upper())
+    """A bank detail as it is compared: letters and digits only, and a BIC's branch form
+    "XXX" as its eight-letter code, the key the act check compares bank codes by (ISO 9362). A
+    code restated with its "XXX" was a critical bank change the act check calls no change."""
+    # imported here: checks.aoa imports compare_llm, which imports this module
+    from procurement_agent.checks.aoa import _bank_key as branch_folded
+
+    return branch_folded(re.sub(r"[^A-Z0-9]", "", normalize_confusables(value).upper()))
 
 
 def _value_key(ft: FactType, value: str, normalized: str | float | None) -> str:
@@ -414,10 +420,50 @@ def hits_of(text: str, *, reference: str = "") -> list[_Hit]:
         keep(_canonical(_Hit(a.type, a.value, a.normalized, a.unit, None, "anchor")))
     for hit in _rule_hits(text):
         keep(_canonical(hit))
+    for _start, _end, span in _month_periods(text):
+        keep(_Hit(FactType.execution_period, span, span, None, None, "rules"))
     for hit in _vat_hits(text):
         keep(hit)
     for hit in _quantity_hits(text):
         keep(hit)
+    return out
+
+
+#: What may follow a month named as a period, and belongs to it: "თვეში", "თვის განმავლობაში".
+_MONTH_TAIL = re.compile(r"\s*(?:თვეში|თვის\s+განმავლობაში|თვის|თვე)(?![ა-ჰ])")
+
+
+def _month_periods(text: str) -> list[tuple[int, int, str]]:
+    """The service periods ``text`` states as a whole month - "შესრულდა 2026 წლის მაისის
+    თვეში" - as (start, end, "first/last day"), read as ``checks.document_facts`` reads them for
+    the whole document: that month's first to last day, in a sentence about the work and not
+    about an advance.
+
+    The line reader did not know the form. An act's period restated "in May" was an execution
+    period removed on its line while the whole-document reading saw the same period on both
+    sides, and moved to June it was a period change and a "text changed" besides.
+    """
+    # imported here: document_facts reads through checks.aoa, which imports this module
+    from procurement_agent.checks.aoa import _ADVANCE_WORDS
+    from procurement_agent.checks.document_facts import _MONTH_PERIOD, _SERVICE_WORDS
+    from procurement_agent.extraction.rules import _month_ka
+
+    out: list[tuple[int, int, str]] = []
+    for m in _MONTH_PERIOD.finditer(text):
+        month = _month_ka(m.group("m"))
+        if month is None:
+            continue
+        starts = [c.end() for c in _CLAUSE_START.finditer(text, 0, m.start())]
+        stop = _CLAUSE_START.search(text, m.end())
+        sentence = text[starts[-1] if starts else 0 : stop.start() if stop else len(text)]
+        if not _SERVICE_WORDS.search(sentence) or _ADVANCE_WORDS.search(sentence):
+            continue
+        year = int(m.group("y"))
+        first = date(year, month, 1)
+        last = date(year + month // 12, month % 12 + 1, 1) - timedelta(days=1)
+        tail = _MONTH_TAIL.match(text, m.start("m") + len(m.group("m")))
+        end = tail.end() if tail else m.end()
+        out.append((m.start(), end, f"{first.isoformat()}/{last.isoformat()}"))
     return out
 
 
@@ -581,7 +627,8 @@ def _rule_hits(text: str) -> list[_Hit]:
         end = _range_end(text, rules, i)
         if end is None:
             ft = _payment_if_said(text, r, _total_if_said(text, r))
-            out.append(_Hit(ft, r.value, r.normalized, r.unit, r.currency, "rules"))
+            normalized = _advance_if_said(text, r, ft)
+            out.append(_Hit(ft, r.value, normalized, r.unit, r.currency, "rules"))
             i += 1
             continue
         j, ft = end
@@ -630,10 +677,33 @@ def _payment_if_said(text: str, hit: RuleHit, ft: FactType) -> FactType:
     """
     if ft is not FactType.duration:
         return ft
+    return FactType.payment_terms if _PAYMENT_WORDS.search(_sentence_of(text, hit)) else ft
+
+
+def _sentence_of(text: str, hit: RuleHit) -> str:
+    """The sentence ``hit`` stands in: from the last full stop, semicolon or line break before
+    it to the first after it."""
     starts = [m.end() for m in _CLAUSE_START.finditer(text, 0, hit.start)]
     end = _CLAUSE_START.search(text, hit.end)
-    sentence = text[starts[-1] if starts else 0 : end.start() if end else len(text)]
-    return FactType.payment_terms if _PAYMENT_WORDS.search(sentence) else ft
+    return text[starts[-1] if starts else 0 : end.start() if end else len(text)]
+
+
+def _advance_if_said(text: str, hit: RuleHit, ft: FactType) -> str | float | None:
+    """A share of the price paid in advance in the form ``docs/GOLD_SPEC.md`` gives payment
+    terms, "advance 20%": reported as a bare "20%" -> "30%", the change matched no gold entry
+    and did not say what the percentage was of. The words stay in the finding's note; a
+    percentage of a payment sentence that names no advance stays as it is written."""
+    if ft is not FactType.payment_terms or hit.unit != "%":
+        return hit.normalized
+    number = as_number(hit.value, hit.normalized)
+    if number is None:
+        return hit.normalized
+    # imported here: contract_terms imports compare_llm, which imports this module
+    from procurement_agent.checks.contract_terms import _ADVANCE
+
+    if not _ADVANCE.search(_sentence_of(text, hit)):
+        return hit.normalized
+    return f"advance {number:g}%"
 
 
 def _range_end(text: str, rules: list[RuleHit], i: int) -> tuple[int, FactType] | None:
@@ -657,16 +727,23 @@ def _range_end(text: str, rules: list[RuleHit], i: int) -> tuple[int, FactType] 
         return None
     gap = text[first.end : second.start]
     marked = _RANGE_GAP.fullmatch(gap) is not None or (
-        text[first.start : first.end].endswith("დან") and _RANGE_AFTER_FROM.fullmatch(gap)
+        text[first.start : first.end].rstrip().endswith("დან") and _RANGE_AFTER_FROM.fullmatch(gap)
     )
-    if marked and ft is FactType.date:
+    if marked and ft not in _PERIOD_TYPES:
         # two dates written as a range are a period whatever word names it ("გაწეულია
         # 01.11.2026 - 30.11.2026 პერიოდში"): the time the work is done, or the contract's
-        # validity where the words before say so
+        # validity where the words before say so. Never a point in time: a window "from 1 April
+        # to 30 September" near the word "contract" was a contract date holding a range, and
+        # one under delivery words a delivery deadline - each a type that holds one date
+        # (docs/GOLD_SPEC.md section 2)
         before = text[max(0, first.start - _VALIDITY_WINDOW) : first.start]
         valid = _VALIDITY_WORDS.search(before) is not None
         ft = FactType.validity_period if valid else FactType.execution_period
     return (j, ft) if marked else None
+
+
+#: The types that hold a period from one date to another.
+_PERIOD_TYPES = frozenset({FactType.execution_period, FactType.validity_period})
 
 
 #: Words that make a range the contract's validity rather than the time the work is done.
@@ -1273,45 +1350,144 @@ def _layout_key(text: str) -> str:
     return " ".join(_LAYOUT_TOKEN.findall(normalize_confusables(text).lower()))
 
 
-#: The word for "year" a date may be followed by: "2026 წ.", "2026 წელი".
-_YEAR_AFTER = re.compile(r"\s*(?:წლის|წელი|წ\.?)(?![ა-ჰ])")
+#: The year a period's dates take from after them: ", 2026 წელს".
 _YEAR_OF_DATES = re.compile(r",?\s*(?<!\d)(\d{4})\s*(?:წელს|წელი|წ\.)(?![ა-ჰ])")
 
 
-def _same_dates_rewritten(left: str, right: str) -> bool:
-    """True when the only difference is how the same dates are written.
+def _same_values_rewritten(left: str, right: str) -> bool:
+    """True when the only difference is how the same values are written.
 
-    "2026 წლის 31 მარტი", "31 მარტი, 2026 წ." and "31.03.2026" are one date: its
-    value is compared as a date and has not changed, so the line has nothing else to report.
+    "2026 წლის 31 მარტი", "31 მარტი, 2026 წ." and "31.03.2026" are one date; "2026 წლის 31
+    დეკემბრამდე" and "31.12.2026-მდე" one date with one postposition; a period from the first
+    of May to its last day and "2026 წლის მაისის თვეში" one period; "0.1%" and "0.1
+    პროცენტის" one rate; "ლარს" and "ლ." one currency; "12 600 ლარი და 50 თეთრი" and "12
+    600.50 ლარი" one amount. Each value is compared as the value it is and has not changed, and
+    the words around them are the same: the line has nothing else to report
+    (``_masked_values``).
     """
-    left_rest, left_dates = _without_dates(left)
-    right_rest, right_dates = _without_dates(right)
-    return (
-        bool(left_dates)
-        and left_dates == right_dates
-        and _layout_key(left_rest) == _layout_key(right_rest)
+    left_masked, left_values = _masked_values(left, keyed=True)
+    right_masked, right_values = _masked_values(right, keyed=True)
+    return bool(left_values or right_values) and _layout_key(left_masked) == _layout_key(
+        right_masked
     )
 
 
-def _without_dates(text: str) -> tuple[str, list[str]]:
-    """``text`` with its dates cut out, and the dates in ISO form, in order."""
-    folded = normalize_confusables(text)
-    kept: list[str] = []
-    dates: list[str] = []
-    pos = 0
-    for hit in sorted(find_dates(folded), key=lambda h: h.start):
-        if hit.start < pos or not _ISO_DATE.match(str(hit.normalized)):
+#: The stems of the Georgian month names, as the date reader knows them.
+_KA_MONTH_STEMS = tuple(_KA_MONTHS)
+
+
+@dataclass(frozen=True, slots=True)
+class _Span:
+    """Where a value stands in a text, and what it says: its canonical key."""
+
+    start: int
+    end: int
+    key: str
+
+
+#: What follows a date and belongs to it: the word for its year ("2026 წ."), a postposition
+#: fused on with or without a hyphen ("31.12.2026-მდე", "01.05.2026-დან", "30.06.2026-ის") and
+#: "ჩათვლით" (inclusive).
+_DATE_TAIL = re.compile(
+    r"(?:\s*(?:წლის|წელი|წ\.?)(?![ა-ჰ]))?"
+    r"(?:-?(?P<post>იდან|დან|ამდე|მდე|ის|ს|ში|ზე|ით)(?![ა-ჰ]))?"
+    r"(?P<incl>\s*\(?\s*ჩათვლით\s*\)?)?"
+)
+
+
+def _postposition(written: str, tail: re.Match[str] | None) -> str:
+    """What a date's postposition says of it: "from" (-დან), "until" (-მდე, ჩათვლით) or nothing
+    (a case ending). "2026 წლის 31 დეკემბრამდე" is fused into the month's name, "31.12.2026-მდე"
+    written after the figures; the two are one date until one day."""
+    post = (tail.group("post") or "") if tail else ""
+    for word in re.findall(r"[ა-ჰ]+", written):
+        if any(word.startswith(stem) for stem in _KA_MONTH_STEMS):
+            post = word
+    if post.endswith("დან"):
+        return "from"
+    if post.endswith("მდე") or (tail is not None and tail.group("incl")):
+        return "until"
+    return ""
+
+
+def _span_key(text: str, hit: RuleHit) -> str:
+    """A value's key for the masked text: everything a finding compares it by - its number or
+    code, its unit, currency and the days it counts - and nothing of how it is written."""
+    one = _canonical(_Hit(hit.type, hit.value, hit.normalized, hit.unit, hit.currency, "rules"))
+    if hit.type in _BANK:
+        return f"bank {_bank_key(hit.value)}"
+    number = as_number(hit.value, hit.normalized) if hit.type in _NUMERIC else None
+    value = f"{number:g}" if number is not None else str(one.normalized or one.value)
+    return f"{value} {hit.unit or ''} {hit.currency or ''} {_basis(one) or ''}"
+
+
+def _value_spans(text: str) -> list[_Span]:
+    """Every value ``text`` states, where it stands, read by the readers ``hits_of`` uses: the
+    rules' values with a period's two dates as one, a month named as a period, a quantity, the
+    tax wording, and a penalty's "per day". Each date carries the year word, postposition and
+    "ჩათვლით" written after it."""
+    # imported here: contract_terms imports compare_llm, which imports this module
+    from procurement_agent.checks.contract_terms import tax_phrases
+    from procurement_agent.extraction.rules import _PER_PERIOD
+
+    spans: list[_Span] = []
+    rules = run_rules(text)
+    i = 0
+    while i < len(rules):
+        r = rules[i]
+        closing = _range_end(text, rules, i)
+        if closing is not None:
+            second = rules[closing[0]]
+            tail = _DATE_TAIL.match(text, second.end)
+            end = tail.end() if tail else second.end
+            spans.append(_Span(r.start, end, f"period {r.normalized}/{second.normalized}"))
+            i = closing[0] + 1
             continue
-        kept.append(folded[pos : hit.start])
-        dates.append(str(hit.normalized))
-        year = _YEAR_AFTER.match(folded, hit.end)
-        pos = year.end() if year else hit.end
-    kept.append(folded[pos:])
-    years = {d[:4] for d in dates}
+        if _ISO_DATE.match(str(r.normalized)):
+            tail = _DATE_TAIL.match(text, r.end)
+            post = _postposition(text[r.start : r.end], tail)
+            end = tail.end() if tail else r.end
+            spans.append(_Span(r.start, end, f"date {r.normalized} {post}"))
+        else:
+            spans.append(_Span(r.start, r.end, _span_key(text, r)))
+            if r.type is FactType.penalty:
+                stop = _CLAUSE_START.search(text, r.end)
+                per = _PER_PERIOD.search(text, r.end, stop.start() if stop else len(text))
+                if per is not None:
+                    spans.append(_Span(per.start(), per.end(), "per"))
+        i += 1
+    spans.extend(_Span(a, b, f"period {span}") for a, b, span in _month_periods(text))
+    for m in _QUANTITY.finditer(text):
+        (hit,) = _quantity_hits(m.group(0)) or (None,)
+        if hit is not None:
+            spans.append(_Span(m.start(), m.end(), f"quantity {hit.normalized}"))
+    spans.extend(_Span(*p.span, f"vat {p.kind}") for p in tax_phrases(text))
+    out: list[_Span] = []
+    for span in sorted(spans, key=lambda s: (s.start, -s.end)):
+        if out and span.start < out[-1].end:
+            continue  # inside a value already masked
+        out.append(span)
+    return out
+
+
+def _masked_values(text: str, *, keyed: bool) -> tuple[str, list[_Span]]:
+    """``text`` folded as ``hits_of`` folds it, with every value it states cut out: replaced by
+    its key when ``keyed`` (two texts then read the same only where their values are the same),
+    by a bare mark otherwise (what is left is the words around the values)."""
+    folded = normalize_confusables(text)
+    spans = _value_spans(folded)
+    out: list[str] = []
+    pos = 0
+    for span in spans:
+        out.append(folded[pos : span.start])
+        out.append(f" §{span.key}§ " if keyed else " § ")
+        pos = span.end
+    out.append(folded[pos:])
+    years = {m.group(0) for s in spans for m in re.finditer(r"\d{4}(?=-\d\d-\d\d)", s.key)}
     # the year a period's dates take from after it, "1 მაისიდან 31 მაისის ჩათვლით, 2026 წელს",
     # is theirs
-    rest = _YEAR_OF_DATES.sub(lambda m: "" if m.group(1) in years else m.group(0), " ".join(kept))
-    return rest, dates
+    rest = _YEAR_OF_DATES.sub(lambda m: "" if m.group(1) in years else m.group(0), "".join(out))
+    return rest, spans
 
 
 _WORD_NUMBER_LABELS: dict[str, tuple[str, str]] = {
@@ -2584,7 +2760,7 @@ def _classify(
         _numeric_reformat(a.text, b.text)
         or _layout_key(a.text) == _layout_key(b.text)
         or _layout_key(plain_party_wording(a.text)) == _layout_key(plain_party_wording(b.text))
-        or _same_dates_rewritten(a.text, b.text)
+        or _same_values_rewritten(a.text, b.text)
     ):
         return "changed", "cosmetic", [], ["CMP.FORMATTING"], inline
     return "changed", "substantive", [], sorted({*hidden, "CMP.TEXT_CHANGED"}), inline

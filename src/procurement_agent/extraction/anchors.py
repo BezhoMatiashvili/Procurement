@@ -698,9 +698,10 @@ def first_party_start(text: str) -> int | None:
 
 
 #: A document's first numbered clause: "1.", "1.1." or "მუხლი 1" opening a line or a sentence,
-#: or following the year of a heading's date in text flattened to one line ("... 2026 1. ...").
+#: or following the year of a heading's date in text flattened to one line ("... 2026 1. ...")
+#: or its day, the date written ISO ("... 2026-03-03 1. ...").
 _FIRST_CLAUSE = re.compile(
-    r"(?:^|(?<=\n)|(?<=[.;:!?)“”\"]\s)|(?<=\d{4}\s))[ \t]*"
+    r"(?:^|(?<=\n)|(?<=[.;:!?)“”\"]\s)|(?<=\d{4}\s)|(?<=\d{4}-\d\d-\d\d\s))[ \t]*"
     r"(?:1\.(?:1\.?)?[ \t]*(?=[^\W\d_])|(?:მუხლი|article)[ \t]+1(?!\d))",
     re.IGNORECASE,
 )
