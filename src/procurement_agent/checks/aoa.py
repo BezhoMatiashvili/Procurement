@@ -2704,6 +2704,24 @@ class AoaChecker:
                 span=(first, last),
             )
             return
+        repair = _endpoint_year_into(period_hits, window)
+        if repair is not None:
+            # one end's year typed wrong ("2025 წლის 1 ივნისიდან 2026 წლის 30 ივნისის"): the
+            # period as written, corrected in that end only - the other end's same year stays
+            written, fixed = self._with_year_moved(reading, *repair)
+            if fixed != written:
+                self._add(
+                    "AOA.PERIOD_IN_TERM",
+                    "error",
+                    f"შესრულების პერიოდი {min(period)}..{max(period)} სცდება {name_ka} {shown}; "
+                    f"როგორც ჩანს, წელი არასწორადაა მითითებული: „{fixed}“",
+                    f"execution period {min(period)}..{max(period)} falls outside {name_en} "
+                    f"{shown}; the year looks mistyped: '{fixed}'",
+                    expected=fixed,
+                    actual=written,
+                    span=(first, last),
+                )
+                return
         self._add(
             "AOA.PERIOD_IN_TERM",
             "error",
@@ -2723,17 +2741,9 @@ class AoaChecker:
         to, the act's own date chose the repair, and it is AOA.PERIOD's."""
         if reading.repaired is None:  # pragma: no cover - called only with a repair
             return
-        hit, shift = reading.repaired
+        written, fixed = self._with_year_moved(reading, *reading.repaired)
         first = min(h.start for _, h in reading.hits)
         last = max(h.end for _, h in reading.hits)
-        year = str(next(d.year for d, h in reading.hits if h is hit))
-        endpoint = re.sub(
-            rf"(?<!\d){year}(?!\d)", str(int(year) + shift), self.aoa.as_written(hit.start, hit.end)
-        )
-        written = self.aoa.as_written(first, last)
-        fixed = (
-            self.aoa.as_written(first, hit.start) + endpoint + self.aoa.as_written(hit.end, last)
-        )
         shown = f"{min(reading.dates)}..{max(reading.dates)}"
         ka = (
             f"შესრულების პერიოდი მთავრდება მანამ, სანამ დაიწყება: „{written}“; როგორც ჩანს, "
@@ -2756,6 +2766,21 @@ class AoaChecker:
             actual=written,
             span=(first, last),
         )
+
+    def _with_year_moved(self, reading: _Period, hit: RuleHit, shift: int) -> tuple[str, str]:
+        """The period as the act writes it, and the same text with the year of the one end
+        ``hit`` moved by ``shift`` - in that end only, so a year both ends write is changed once."""
+        first = min(h.start for _, h in reading.hits)
+        last = max(h.end for _, h in reading.hits)
+        year = str(next(d.year for d, h in reading.hits if h is hit))
+        endpoint = re.sub(
+            rf"(?<!\d){year}(?!\d)", str(int(year) + shift), self.aoa.as_written(hit.start, hit.end)
+        )
+        written = self.aoa.as_written(first, last)
+        fixed = (
+            self.aoa.as_written(first, hit.start) + endpoint + self.aoa.as_written(hit.end, last)
+        )
+        return written, fixed
 
     def rule_act_date_in_term(self) -> None:
         """Client rule 10.5, the act itself: it must be dated inside the contract's term.
@@ -3512,6 +3537,27 @@ def _year_shift_into(dates: list[date], window: tuple[date | None, date | None, 
     """The whole number of years (1 or 2 either way) that moves every date into ``window``,
     when exactly one does: the signature of a year typed wrong ("2025" for "2026")."""
     fits = [k for k in (-1, 1, -2, 2) if all(_within(_add_years(d, k), window) for d in dates)]
+    return fits[0] if len(fits) == 1 else None
+
+
+def _endpoint_year_into(
+    hits: list[tuple[date, RuleHit]], window: tuple[date | None, date | None, str]
+) -> tuple[RuleHit, int] | None:
+    """For a two-ended period that lies outside ``window``, the one end whose year, moved by a
+    year or two, puts the whole period inside it in order; None unless exactly one such move
+    exists (then no single year is the mistake, and the term is what the finding cites)."""
+    if len(hits) != 2:
+        return None
+    (start, start_hit), (end, end_hit) = hits
+    fits: list[tuple[RuleHit, int]] = []
+    for moved_start, hit in ((True, start_hit), (False, end_hit)):
+        if _within(start if moved_start else end, window):
+            continue
+        for k in (-1, 1, -2, 2):
+            a = _add_years(start, k) if moved_start else start
+            b = end if moved_start else _add_years(end, k)
+            if a <= b and _within(a, window) and _within(b, window):
+                fits.append((hit, k))
     return fits[0] if len(fits) == 1 else None
 
 
