@@ -1305,25 +1305,58 @@ _PERIOD_WORDS = re.compile(
 _AFTER = 40
 
 
-def _numeral_kind(inner: str, after: str) -> str:
+#: A letter: words still to come in the segment after a number in words.
+_LETTER = re.compile(r"[^\W\d_]")
+
+
+@dataclass(frozen=True, slots=True)
+class _Context:
+    """What a number ending its segment counts may be said beside the segment: in the header of
+    its table column ("ღირებულება (ლარი)"), or at the start of the paragraph after it ("ლარს")."""
+
+    header: str = ""
+    following: str = ""
+
+
+_NO_CONTEXT = _Context()
+
+
+def _contexts(segments: Sequence[Segment]) -> dict[int, _Context]:
+    """Each segment's context (``_Context``), keyed by ``id``: a table cell's column header,
+    another segment's next paragraph."""
+    out: dict[int, _Context] = {}
+    for k, segment in enumerate(segments):
+        if segment.column is not None:
+            out[id(segment)] = _Context(header=segment.column)
+        elif k + 1 < len(segments) and segments[k + 1].table is None:
+            out[id(segment)] = _Context(following=segments[k + 1].text[:_AFTER])
+    return out
+
+
+def _numeral_kind(inner: str, after: str, header: str = "") -> str:
     """What a number in words counts, from the words inside and right after it: money, a
-    period of time, or anything else (copies, pages)."""
+    period of time, or anything else (copies, pages). A number that ends its table cell counts
+    what its column's header says: "800 (რვაასი)" under "ღირებულება (ლარი)" is lari."""
     if _CURRENCY_WORDS.search(inner) or _CURRENCY_WORDS.match(after.strip()):
         return "amount"
     if _PERIOD_WORDS.match(after.strip()):
         return "duration"
+    if header and _CURRENCY_WORDS.search(header) and not _LETTER.search(after):
+        return "amount"
     return "count"
 
 
-def _spelled_numbers(text: str) -> list[tuple[str, str]]:
-    """Every bracketed number in words, with what follows it: [("ასი", "ლარს ..."), ...].
+def _spelled_numbers(text: str, context: _Context = _NO_CONTEXT) -> list[tuple[str, str, str]]:
+    """Every bracketed number in words, with what follows it and its column's header:
+    [("ასი", "ლარს ...", ""), ...]. A bracket that ends its segment is followed by the start
+    of the next paragraph: "800 (რვაასი)" on its own line before "ლარს" is lari.
 
     The bracket right after a figure holds that figure written out, so it is read as a number in
     words even misspelled out of recognition - "100 (აი)" - as long as it is a misspelling of
     the figure's own words: "დანართი 1 (ტექნიკური დავალება)" is not. Missed, such a typo was
     read as the words removed, and as the amount is still written beside it, not reported at all.
     """
-    out: list[tuple[str, str]] = []
+    out: list[tuple[str, str, str]] = []
     for m in _PARENTHESIS.finditer(text):
         inner = m.group(1).strip()
         if (
@@ -1331,7 +1364,10 @@ def _spelled_numbers(text: str) -> list[tuple[str, str]]:
             or _spelled_value(inner) is not None  # "ასი ლარი და 00 თეთრი": currency and tetri
             or _misspells_figure(text[: m.start()], inner)
         ):
-            out.append((inner, text[m.end() : m.end() + _AFTER]))
+            after = text[m.end() : m.end() + _AFTER]
+            if context.following and not _LETTER.search(after):
+                after = f"{after} {context.following}"
+            out.append((inner, after, context.header))
     return out
 
 
@@ -1359,7 +1395,12 @@ def _spelled_value(inner: str) -> float | None:
     return read_words(inner)[1]
 
 
-def word_amount_deltas(left: str, right: str) -> list[ValueDelta]:
+def word_amount_deltas(
+    left: str,
+    right: str,
+    left_context: _Context = _NO_CONTEXT,
+    right_context: _Context = _NO_CONTEXT,
+) -> list[ValueDelta]:
     """Differences between the numbers the two texts spell out in brackets.
 
     Paired by content, not by position: a revision that misspelled "(ასი)" as "(ასოი)" used to
@@ -1368,18 +1409,23 @@ def word_amount_deltas(left: str, right: str) -> list[ValueDelta]:
     misspelling it is. Each number is labelled by what it counts: a fee, a period of days, or a
     plain count - "5 (ხუთი) სამუშაო დღე" is no amount.
     """
-    return [d for d, _read in _word_number_changes(left, right)]
+    return [d for d, _read in _word_number_changes(left, right, left_context, right_context)]
 
 
 #: A number in words that changed, and what it read as before and after when both sides read.
 _WordChange = tuple[ValueDelta, tuple[float, float] | None]
 
 
-def _word_number_changes(left: str, right: str) -> list[_WordChange]:
-    lp, rp = _spelled_numbers(left), _spelled_numbers(right)
-    if [x for x, _ in lp] == [x for x, _ in rp]:
+def _word_number_changes(
+    left: str,
+    right: str,
+    left_context: _Context = _NO_CONTEXT,
+    right_context: _Context = _NO_CONTEXT,
+) -> list[_WordChange]:
+    lp, rp = _spelled_numbers(left, left_context), _spelled_numbers(right, right_context)
+    if [x for x, *_ in lp] == [x for x, *_ in rp]:
         return []
-    sm = difflib.SequenceMatcher(None, [x for x, _ in lp], [x for x, _ in rp], autojunk=False)
+    sm = difflib.SequenceMatcher(None, [x for x, *_ in lp], [x for x, *_ in rp], autojunk=False)
     out: list[_WordChange] = []
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == "equal":
@@ -1392,7 +1438,9 @@ def _word_number_changes(left: str, right: str) -> list[_WordChange]:
     return out
 
 
-def _spelled_delta(a: tuple[str, str] | None, b: tuple[str, str] | None) -> _WordChange | None:
+def _spelled_delta(
+    a: tuple[str, str, str] | None, b: tuple[str, str, str] | None
+) -> _WordChange | None:
     va = _spelled_value(a[0]) if a else None
     vb = _spelled_value(b[0]) if b else None
     kind = _numeral_kind(*(b or a))  # type: ignore[misc]
@@ -1613,6 +1661,16 @@ def numeral_word_deltas(left: str, right: str) -> list[ValueDelta]:
 
 
 _BARE_NUMBER_LABEL = ("Number", "რიცხვი")
+#: A figure and, in brackets after it, the figure written out: "800 (რვაასი)".
+_FIGURE_WITH_WORDS = re.compile(rf"^\s*({FIGURE})\s*\(([^()]{{2,80}})\)\s*$")
+
+
+def _figure_alone(text: str) -> str:
+    """``text`` without the words its one figure is written out in, if that is all it is."""
+    m = _FIGURE_WITH_WORDS.match(text)
+    if m is None or not _spelled_numbers(text):
+        return text
+    return m.group(1)
 
 
 def bare_number_delta(
@@ -1636,7 +1694,12 @@ def bare_number_delta(
 
     ``left_number``/``right_number`` are a spreadsheet cell's own values. They win over reading
     the text back, which misreads "12.345" as twelve thousand (see ``_number_of``).
+
+    A figure written with its words, "800 (რვაასი)", is that figure: the cell a price is
+    written in that way changed from 800 to 900 with its words left behind, and was only
+    "text changed".
     """
+    left, right = _figure_alone(left), _figure_alone(right)
     a = left_number if left_number is not None else parse_number(left.strip())
     b = right_number if right_number is not None else parse_number(right.strip())
     exact = left_number is not None and right_number is not None
@@ -1894,14 +1957,14 @@ def _pair_replace(left: Sequence[Segment], right: Sequence[Segment]) -> list[_Pa
         return [(left[0], right[0], None)]
     anchors = _renumbered(left, right)
     if anchors:
-        out: list[_Pair] = []
+        paired: list[_Pair] = []
         i0 = j0 = 0
         for i, j in anchors:
-            out.extend(_pair_gap(left[i0:i], right[j0:j]))
-            out.append((left[i], right[j], None))
+            paired.extend(_pair_gap(left[i0:i], right[j0:j]))
+            paired.append((left[i], right[j], None))
             i0, j0 = i + 1, j + 1
-        out.extend(_pair_gap(left[i0:], right[j0:]))
-        return out
+        paired.extend(_pair_gap(left[i0:], right[j0:]))
+        return paired
     if len(left) * len(right) > _PAIR_BUDGET:
         # Too big to score pairwise, and a block this large is a wholesale replacement rather
         # than a set of line edits. Say that, instead of inventing line-to-line correspondences.
@@ -2240,16 +2303,23 @@ def _rules_of(deltas: list[ValueDelta], *, base: str) -> list[str]:
 
 
 def _classify(
-    a: Segment | None, b: Segment | None, *, ocr: bool
+    a: Segment | None,
+    b: Segment | None,
+    *,
+    ocr: bool,
+    contexts: dict[int, _Context] | None = None,
 ) -> tuple[ChangeKind, Materiality, list[ValueDelta], list[str], list[InlineOp]]:
+    contexts = contexts or {}
+    ca = contexts.get(id(a), _NO_CONTEXT) if a is not None else _NO_CONTEXT
+    cb = contexts.get(id(b), _NO_CONTEXT) if b is not None else _NO_CONTEXT
     if a is None:
         if b is None:
             raise ValueError("a diff pair has neither side")
-        deltas = deltas_between("", b.text) + word_amount_deltas("", b.text)
+        deltas = deltas_between("", b.text) + word_amount_deltas("", b.text, right_context=cb)
         mat: Materiality = "critical" if any(d.is_critical for d in deltas) else "substantive"
         return "added", mat, deltas, _rules_of(deltas, base="CMP.TEXT_ADDED"), []
     if b is None:
-        deltas = deltas_between(a.text, "") + word_amount_deltas(a.text, "")
+        deltas = deltas_between(a.text, "") + word_amount_deltas(a.text, "", left_context=ca)
         mat = "critical" if any(d.is_critical for d in deltas) else "substantive"
         return "removed", mat, deltas, _rules_of(deltas, base="CMP.TEXT_REMOVED"), []
 
@@ -2283,7 +2353,9 @@ def _classify(
         right_number=b.number,
     )
     words = [
-        d for d, read in _word_number_changes(a.text, b.text) if not _restated(read, values + bare)
+        d
+        for d, read in _word_number_changes(a.text, b.text, ca, cb)
+        if not _restated(read, values + bare)
     ]
     deltas = (
         values
@@ -2305,7 +2377,11 @@ def _classify(
 
 
 def _build(
-    pairs: list[_Pair], moves: dict[int, int], *, ocr: bool
+    pairs: list[_Pair],
+    moves: dict[int, int],
+    *,
+    ocr: bool,
+    contexts: dict[int, _Context] | None = None,
 ) -> tuple[list[DiffRow], list[Hunk], Counts]:
     partner: dict[int, int] = {}
     for i, j in moves.items():
@@ -2438,7 +2514,7 @@ def _build(
             i += 1
             continue
 
-        kind, materiality, deltas, rules, inline = _classify(a, b, ocr=ocr)
+        kind, materiality, deltas, rules, inline = _classify(a, b, ocr=ocr, contexts=contexts)
         made += 1
         hid = f"h{made}"
         hunks.append(
@@ -3101,7 +3177,7 @@ class _Written:
         if self._spelled is None:
             self._spelled = {
                 _spelled_display(words, value)
-                for words, _after in _spelled_numbers(self._text)
+                for words, *_ in _spelled_numbers(self._text)
                 if (value := parse_number_words(words)) is not None
             }
         return self._spelled
@@ -3211,7 +3287,8 @@ def compare(
     moves = _detect_moves(pairs)
     if ocr is None:
         ocr = "pdf" in (left_kind, right_kind)
-    rows, hunks, counts = _build(pairs, moves, ocr=ocr)
+    contexts = {} if spreadsheets else {**_contexts(left), **_contexts(right)}
+    rows, hunks, counts = _build(pairs, moves, ocr=ocr, contexts=contexts)
 
     alignment: Alignment = "versions" if ratio >= min_similarity else "unrelated"
     if alignment == "unrelated" and not mixed:

@@ -37,6 +37,7 @@ from procurement_agent.ingestion.excel_reader import Sheet
 __all__ = [
     "Segment",
     "SegmentKind",
+    "TableCell",
     "build",
     "document_text",
     "pdf_has_text_layer",
@@ -73,6 +74,24 @@ class Segment:
     #: the cell's numeric value (spreadsheets only). ``text`` is how the number is displayed,
     #: and "12.345" is ambiguous to ``parse_number``; compare numbers through this instead.
     number: float | None = None
+    # --- a Word or PDF table's cell, whether the parser gave it as the cell or as a paragraph
+    # inside it: the table (numbered from 1), the row and column (from 1), and the header of the
+    # column - its first row's text - for the rows below it. A figure's currency is often only
+    # there ("ღირებულება (ლარი)"), and a row is aligned as a row by these.
+    table: int | None = None
+    table_row: int | None = None
+    table_col: int | None = None
+    column: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TableCell:
+    """Where in a Word or PDF table a segment sits (see ``Segment.table``)."""
+
+    table: int
+    row: int
+    col: int
+    column: str | None = None
 
 
 #: The alignment key. Whitespace only — deliberately *not* ``normalize_confusables``, because
@@ -82,14 +101,19 @@ def key_of(text: str) -> str:
     return normalize_spaces(text)
 
 
-_Record = tuple[str, SegmentKind, str, str | None, Provenance | None]
+_Record = (
+    tuple[str, SegmentKind, str, str | None, Provenance | None]
+    | tuple[str, SegmentKind, str, str | None, Provenance | None, TableCell | None]
+)
 
 
 def build(records: Iterable[_Record]) -> list[Segment]:
     """Assign indices and offsets. Empty text is dropped rather than aligned against."""
     out: list[Segment] = []
     pos = 0
-    for text, kind, path, heading, prov in records:
+    for record in records:
+        text, kind, path, heading, prov = record[:5]
+        cell = record[5] if len(record) > 5 else None
         stripped = text.strip()
         if not stripped:
             continue
@@ -103,6 +127,10 @@ def build(records: Iterable[_Record]) -> list[Segment]:
                 provenance=prov,
                 start=pos,
                 end=pos + len(stripped),
+                table=cell.table if cell else None,
+                table_row=cell.row if cell else None,
+                table_col=cell.col if cell else None,
+                column=cell.column if cell else None,
             )
         )
         pos += len(stripped) + 1  # the "\n" that document_text joins with
@@ -134,8 +162,89 @@ def _text_under_tables(doc: DoclingDocument) -> dict[str, set[str]]:
     return out
 
 
+def _table_node(item: Any, doc: DoclingDocument) -> tuple[str, Any] | None:
+    """The table a text item is nested under, as (its ref, the table), if any."""
+    parent = item.parent
+    while parent is not None:
+        node = parent.resolve(doc)
+        if getattr(getattr(node, "data", None), "table_cells", None) is not None:
+            return parent.cref, node
+        parent = getattr(node, "parent", None)
+    return None
+
+
+def _grid(table: Any) -> list[tuple[int, int, str]]:
+    """A table's cells as (row, column, text), in reading order, each spanned cell once."""
+    seen: set[tuple[int, int]] = set()
+    out: list[tuple[int, int, str]] = []
+    for cell in table.data.table_cells:
+        at = (cell.start_row_offset_idx, cell.start_col_offset_idx)
+        if at in seen:
+            continue
+        seen.add(at)
+        out.append((at[0], at[1], (cell.text or "").strip()))
+    return sorted(out)
+
+
+def _header_of(grid: list[tuple[int, int, str]], row: int, col: int) -> str | None:
+    if row == 0:
+        return None
+    return next((text for r, c, text in grid if r == 0 and c == col and text), None)
+
+
+def _cells_of_text_items(doc: DoclingDocument, numbers: dict[str, int]) -> dict[str, TableCell]:
+    """Text item ref -> the table cell it is a paragraph of.
+
+    Docling's DOCX backend gives a table's paragraphs as text items under the table, and those
+    are what reach the diff. Each is the cell whose text - or one of whose lines - it is, the
+    first not yet taken in reading order, so the same word in two rows ("ცალი") lands in each.
+    """
+    out: dict[str, TableCell] = {}
+    taken: set[tuple[str, int, int, int]] = set()
+    grids: dict[str, list[tuple[int, int, str]]] = {}
+    for item in _items(doc):
+        if not isinstance(item, TextItem) or not item.text.strip():
+            continue
+        found = _table_node(item, doc)
+        if found is None or found[0] not in numbers:
+            continue
+        ref, table = found
+        grid = grids.setdefault(ref, _grid(table))
+        key = key_of(item.text)
+        for row, col, text in grid:
+            lines = [key_of(line) for line in text.splitlines()]
+            spot = next(
+                (
+                    n
+                    for n, line in enumerate(lines)
+                    if line == key and (ref, row, col, n) not in taken
+                ),
+                None,
+            )
+            if spot is None:
+                continue
+            taken.add((ref, row, col, spot))
+            out[item.self_ref] = TableCell(
+                numbers[ref], row + 1, col + 1, _header_of(grid, row, col)
+            )
+            break
+    return out
+
+
 def segments_from_docling(doc: DoclingDocument) -> list[Segment]:
     under_table = _text_under_tables(doc)
+    numbers = {
+        item.self_ref: n
+        for n, item in enumerate(
+            (
+                i
+                for i in _items(doc)
+                if getattr(getattr(i, "data", None), "table_cells", None) is not None
+            ),
+            start=1,
+        )
+    }
+    in_cell = _cells_of_text_items(doc, numbers)
 
     records: list[_Record] = []
     heading: str | None = None
@@ -155,7 +264,16 @@ def segments_from_docling(doc: DoclingDocument) -> list[Segment]:
                 kind = "list_item"
             else:
                 kind = "text"
-            records.append((text, kind, f"¶{para}", heading, provenance_of(doc, [item])))
+            records.append(
+                (
+                    text,
+                    kind,
+                    f"¶{para}",
+                    heading,
+                    provenance_of(doc, [item]),
+                    in_cell.get(item.self_ref),
+                )
+            )
             continue
 
         data = getattr(item, "data", None)
@@ -164,17 +282,15 @@ def segments_from_docling(doc: DoclingDocument) -> list[Segment]:
             continue
         table += 1
         covered = under_table.get(item.self_ref, set())
-        seen: set[tuple[int, int]] = set()
-        for cell in cells:
-            at = (cell.start_row_offset_idx, cell.start_col_offset_idx)
-            text = (cell.text or "").strip()
-            if not text or at in seen:
-                continue  # a spanned cell repeats across the rows and columns it covers
-            seen.add(at)
+        grid = _grid(item)  # a spanned cell repeats across the rows and columns it covers
+        for row, col, text in grid:
+            if not text:
+                continue
             if key_of(text) in covered:
                 continue  # already emitted as a text item; see the module docstring
-            path = f"T{table}/r{at[0] + 1}/c{at[1] + 1}"
-            records.append((text, "table_cell", path, heading, provenance_of(doc, [item])))
+            path = f"T{table}/r{row + 1}/c{col + 1}"
+            where = TableCell(table, row + 1, col + 1, _header_of(grid, row, col))
+            records.append((text, "table_cell", path, heading, provenance_of(doc, [item]), where))
     return build(records)
 
 
