@@ -48,6 +48,20 @@ letters upper-cased. Nothing else - no stemming, no substring match, no case-end
 | `contract_number` | as written, upper case, no spaces | `PR-2026/017` |
 | `subject` | the subject clause as written (see scoring) | |
 
+Dates are read as Georgian documents write them: a day in quotes (`„30“ ივნისი, 2026 წ.`,
+both quotes required), an ordinal first day (`2026 წლის 1-ლი მაისი`), and a two-digit year
+only where the word for year follows it (`12.05.26 წ.` is 2026-05-12). An unlabelled date is
+the document's own (`contract_date`, or `act_date` for an act) only when it stands in the
+preamble, before the first party or the first numbered clause; a date in a clause is not, and
+with neither boundary no date is promoted. A contract's party may be a person or an individual
+entrepreneur named without quotes (`ფ/პ …`, `ი/მ …`). An act's service period is read by its
+form whatever the verb (`შესრულდა`, `შესრულებულია`, `გაწეულ იქნა`, `განხორციელდა`, `ჩატარდა`,
+`… პერიოდი: 01.06.2026 - 30.06.2026`): one range, never its two dates apart; a period stated
+as a month (`2026 წლის ივნისის თვეში`) is that month's first to last day. A performance window
+whose first day is written but cannot be read starts open (`../2026-09-30`), never at the
+signing. An act is an act when its title stands near the top or on a line of its own below a
+letterhead, before the first clause.
+
 `vat_status` meanings: `incl` = the price includes VAT/taxes; `excl` = VAT is added on top;
 `none` = no VAT applies / exempt; `net` = a net amount, taxes withheld or not mentioned by rule
 (natural person, foreign organisation).
@@ -87,7 +101,11 @@ strict_findings: true             # anything else reported (any severity) is a f
   `fold(quote or actual)`, and `fold(expected) == fold(correction)` when `correction` is given.
 * `correction` is written in the act's form: a name in the case the act uses at that place, a
   date in the act's date style (`2026 წლის 31 აგვისტო`), an amount as the act writes amounts
-  (`100 (ასი) ლარს`).
+  (`100 (ასი) ლარს`). A date's style includes its month's case and its day's form: an act
+  signed "2026 წლის 31 აგვისტოს" (the dative; the vowel stem's dative and genitive are one
+  word, and a postposition or a noun after the date makes it the genitive) is corrected to
+  `2026 წლის 30 სექტემბერს`, a quoted or zero-padded day keeps its quotes or its zero
+  (`„30“ ივნისი, 2026 წ.`).
 * `occurrences` is checked by annotating the act (`report/docx_annotate.py`) and counting the
   comments whose anchored text contains `text`.
 * Which rule owns which mistake:
@@ -125,7 +143,9 @@ A value both documents carry must never be reported "added" or "removed"; one en
 one finding. An amount's words misspelled ("(ასი)" -> "(ასოი)") are `CMP.AMOUNT_WORDS`, an error,
 as the act check grades the same slip; a count's or a period's words misspelled are
 `CMP.SPELLING`, a warning. Two dates written as a range are one period (`CMP.DURATION`, label
-"Execution period", or "Validity period" when validity words precede it).
+"Execution period", or "Validity period" when validity words precede it). A document's own date
+changed where no word names it (the heading's "ქ. თბილისი, 2026 წლის 12 თებერვალი") is
+`CMP.DATE` labelled "Contract date" ("Act date" for an act), as on a labelled line.
 
 ## 5. BOQ gold (per set, JSON) and the evaluation policy
 

@@ -198,6 +198,36 @@ genuinely different account once the act and the contract disagree.
 Bank codes are different: a BIC is 8 or 11 characters and the client's documents carry real
 ones, so a malformed code is an error. That rule is what surfaced `AAAGE22` in Mistake #3.
 
+### A date's place says whose it is, its form says what it is
+
+The red team's second round found a family of date failures with one root each, all fixed by
+rule (`tests/unit/test_dates_and_periods.py`):
+
+* **The header is a place in the document, not the first chunk.** The extraction promoted every
+  unlabelled date of chunk 0 to `contract_date`; a contract short enough to be one chunk had its
+  performance window's dates reported as extra, conflicting contract dates. The header now ends
+  at the first party or the first numbered clause (`anchors.preamble_end`), the same boundary
+  the signing-date reader uses; when neither is found in a one-chunk document nothing is
+  promoted. A party is also a person or an individual entrepreneur named without quotes, so a
+  contract between them gets its signing date and its validity "from signing".
+* **An act's service period is known by its form.** The period was read only after an
+  enumerated verb (`შესრულდა`, ...); `შესრულებულია`, `გაწეულ იქნა`, `განხორციელდა` lost it or
+  split it into two single dates. A range in a sentence that dates neither the act nor an
+  advance is now the period whatever the verb, and a month stated as the period ("ივნისის
+  თვეში") is that whole month - a decision, since the spec was silent on it.
+* **A missing first day is not the signing day.** A performance window whose first day was
+  written but not read ("1-ლი ივნისიდან" before ordinals were read) started at the signing date:
+  a confident wrong value. It now starts open; only a window with no first day written at all
+  runs from the signing.
+* **Corrections keep the act's case and day style.** The vowel-stem month's dative and genitive
+  are one word (`აგვისტოს`); the word after the act's date decides it (a postposition or a noun
+  makes it genitive, otherwise dative), so the correction is `30 სექტემბერს`, not
+  `30 სექტემბრის`.
+
+**Not measured.** How often a letterhead above an act's title is longer than fifteen lines, or
+how often a document states its own date after the parties in a way the signing-words reader
+does not know: both return no value rather than a guessed one.
+
 ### Scanned PDFs cannot carry Word comments
 
 The client asked for findings marked in the document itself. `report/docx_annotate.py` writes
