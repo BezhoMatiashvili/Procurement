@@ -499,7 +499,44 @@ def parse_georgian_number_words(text: str) -> int | None:
     return total + current
 
 
+# --- identification codes -----------------------------------------------------------------------
+
+#: The labels a party's identification code is written behind, in every spelling the documents
+#: use: "ს/კ", "ს.კ.", "ს/ნ", "პ/ნ"; "საიდენტიფიკაციო" alone or with "კოდი", "ნომერი" or "№",
+#: in any case ("საიდენტიფიკაციო კოდით", "ნომრის"), and abbreviated "საიდ. კოდი", "საიდ. №";
+#: "პირადი ნომერი"; English "ID", "ID code", "identification number", "tax ID". One pattern
+#: for every reader - the party reader, the rules, the act check - so that a label one of them
+#: reads is never a code another misses (red team R2, AOA-R2-01). An abbreviation stands as a
+#: word of its own: "ს/კ" is not the end of a longer word.
+ID_LABEL = (
+    r"(?:(?<![ა-ჰ])(?:ს\s*[/.]\s*[კნ]|პ\s*/\s*ნ)(?![ა-ჰ])\.?"
+    r"|(?<![ა-ჰ])საიდ(?:ენტიფიკაციო(?![ა-ჰ])|\.)\s*"
+    r"(?:(?:კოდ|ნომ(?:ერ|რ))(?:ი|ის|ით|ად)?(?![ა-ჰ])|№)?"
+    r"|(?<![ა-ჰ])პირადი\s*ნომ(?:ერ|რ)(?:ი|ის|ით|ად)?(?![ა-ჰ])"
+    # English labels start at a word boundary: "paid 204567890" is not "ID 204567890"
+    r"|(?<![A-Za-z])(?:ID(?![A-Za-z])\s*(?:code|no\.?|number|№)?"
+    r"|identification\s*(?:code|number|no\.?)|tax\s*id(?![A-Za-z])))"
+)
+#: between the label and the code: a number sign ("ს/კ N 204567890", "№"), a colon or a dash
+_ID_SEPARATOR = r"(?:\s*(?:N|№|#)(?![A-Za-z]))?\s*[:\-]?\s*"
+#: the code: 9 digits (a company) or 11 (a person), compact or a company's printed in threes
+_ID_VALUE = r"(\d{9}|\d{11}|\d{3} \d{3} \d{3})(?!\d)"
+#: An identification code behind its label; group 1 is the code as written (``id_code_digits``).
+ID_CODE_RE = re.compile(ID_LABEL + _ID_SEPARATOR + _ID_VALUE, re.IGNORECASE)
+
+
+def id_code_digits(code: str) -> str:
+    """A code as its digits alone: "406 444 789" is 406444789."""
+    return re.sub(r"\D", "", code)
+
+
 # --- IBAN ---------------------------------------------------------------------------------------
+
+#: ISO 4217 codes a Georgian bank prints after an account to name its currency sub-account
+#: ("GE00NB0000000000000000GEL"). The account is the IBAN; the code is no part of it.
+IBAN_CURRENCY_SUFFIXES = frozenset(
+    {"GEL", "USD", "EUR", "GBP", "CHF", "RUB", "TRY", "AZN", "AMD", "UAH", "CNY"}
+)
 
 _IBAN_CLEAN = re.compile(r"[^A-Z0-9]")
 
