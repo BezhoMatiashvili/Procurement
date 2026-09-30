@@ -133,7 +133,7 @@ from procurement_agent.extraction.normalize import (
 from procurement_agent.extraction.ocr import misread_explains, repair_codes
 from procurement_agent.extraction.rules import RuleHit, find_dates, month_ka_correction
 from procurement_agent.extraction.schemas import FactType
-from procurement_agent.extraction.spellcheck import best_match, classify_difference
+from procurement_agent.extraction.spellcheck import Difference, best_match, classify_difference
 from procurement_agent.fx.provider import NullRateProvider, RateProvider
 
 ContractorType = Literal[
@@ -2109,10 +2109,13 @@ class AoaChecker:
         if not actual or not expected:
             return
         diff = classify_difference(actual, expected)
+        if diff is None and rule_id in _NAME_RULES:
+            # a stem is in no case: the name to write is the contract's, as it stands
+            diff = self._name_cut_short(actual, expected)
+        elif diff is not None and rule_id in _NAME_RULES:
+            expected = in_case_of(actual, expected)
         if diff is None:
             return
-        if rule_id in _NAME_RULES:
-            expected = in_case_of(actual, expected)
         hint_ka = " (როგორც ჩანს, ორთოგრაფიული შეცდომაა)" if diff.looks_like_typo else ""
         hint_en = " (looks like a misspelling)" if diff.looks_like_typo else ""
         source_ka, source_en = _SOURCE[against]
@@ -2125,6 +2128,35 @@ class AoaChecker:
             actual=actual,
             span=self._find_span(actual),
         )
+
+    def _name_cut_short(self, actual: str, expected: str) -> Difference | None:
+        """A name with a word's final "ი" dropped: "შპს „ბეტა სერვის“" for "ბეტა სერვისი".
+
+        ``classify_difference`` takes each word in any of its forms, and the bare stem an
+        attribute takes ("ლაზურ რეზიდენსი") is one of them - but a company's name is written
+        whole: its words do not shed their ending inside the quotes. The stem is the name only
+        where an ending is attached to it ("„ბეტა სერვის“-ის", "სერვის-თან"); written bare
+        anywhere in the act, it is the name misspelt."""
+        written, meant = normalize_name(actual).split(), normalize_name(expected).split()
+        if len(written) != len(meant):
+            return None
+        cut = [
+            (w, m)
+            for w, m in zip(written, meant, strict=True)
+            if w != m and is_georgian_word(w) and m == f"{w}ი" and w[-1] not in "აეიოუ"
+        ]
+        if not cut:
+            return None
+        text = self.aoa.text
+        for w, _ in cut:
+            places = list(re.finditer(rf"(?<![ა-ჰ]){re.escape(w)}(?![ა-ჰ])", text))
+            # an ending attached after the stem, the closing quote between or not
+            attached = [
+                m for m in places if re.match(r"[“”\"»']?-?[ა-ჰ]", text[m.end() : m.end() + 3])
+            ]
+            if places and len(attached) < len(places):
+                return Difference(actual=actual, expected=expected, kind="typo", words=tuple(cut))
+        return None
 
     def rule_cadastral(self) -> None:
         """Every code the act names must be one the contract names, or lie inside one.
