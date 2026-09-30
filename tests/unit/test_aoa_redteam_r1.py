@@ -7,6 +7,8 @@ account invented.
 
 from __future__ import annotations
 
+import re
+
 from procurement_agent.checks.aoa import check_aoa
 from procurement_agent.checks.findings import CheckReport, Finding
 from tests.unit.test_aoa_check import ACT, CONTRACT
@@ -457,3 +459,75 @@ class TestCopiedDirector:
         assert all(f.places is None for f in findings)
         marked = _annotated(tmp_path, act, findings, text=False)
         assert marked == ["დავით მელაშვილი", "დავით მელაშვილი", "დავით მელაშვილის"]
+
+
+# --- AOA-15: an act the rules cannot read says so, rather than calling its codes missing ---------
+
+_ENGLISH_ACT = """ACCEPTANCE ACT
+Northwind Ltd, identification code 123456789 (the "Customer"), and Blue Harbour Ltd,
+identification code 987654321 (the "Contractor"), under the Agreement for the Customer's project
+"Hill Garden" (cadastral code 01.02.03.456), state the following:
+1. The Contractor has rendered the Services under the Agreement.
+2. The fee is GEL 100.00 including VAT, paid to SWIFT: AAAAGE22; IBAN: GE29NB0000000101904917.
+3. This Act was signed on 30 April 2026.
+"""
+
+
+class TestActNotInGeorgian:
+    def test_no_codes_error_on_an_act_in_english(self) -> None:
+        report = _check(_ENGLISH_ACT)
+        assert _of(report, "AOA.ID_CODES") == []
+        [note] = [s for s in report.skipped if s.rule_id == "AOA.ID_CODES"]
+        assert "Georgian" in note.reason_en
+
+    def test_what_the_rules_cannot_read_is_a_note_not_a_finding(self) -> None:
+        """No finding at all on the act: the project and the period it states are not missing,
+        they are written in words the rules do not read, and each rule says so."""
+        report = _check(_ENGLISH_ACT)
+        assert _substantive(report) == []
+        skipped = {s.rule_id for s in report.skipped}
+        assert {"AOA.ID_CODES", "AOA.PROJECT_PRESENT", "AOA.PERIOD"} <= skipped
+
+    def test_a_georgian_act_without_a_period_still_warns(self) -> None:
+        act = ACT.replace(
+            "მომსახურება შესრულდა 2026 წლის 1 აპრილიდან 2026 წლის 30 აპრილის ჩათვლით.\n", ""
+        )
+        assert [f.severity for f in _of(_check(act), "AOA.PERIOD")] == ["warning"]
+
+    def test_a_georgian_act_without_codes_is_still_an_error(self) -> None:
+        act = ACT.replace("საიდენტიფიკაციო კოდი: 123456789; ", "").replace(
+            "საიდენტიფიკაციო კოდი: 987654321, ", ""
+        )
+        [finding] = _of(_check(act), "AOA.ID_CODES")
+        assert finding.severity == "error"
+        assert all(s.rule_id != "AOA.ID_CODES" for s in _check(act).skipped)
+
+
+# --- the messages print values as text, never as Python lists ------------------------------------
+
+_PYTHON_SYNTAX = re.compile(r"\['|'\]|\{'|frozenset\(|set\(\)")
+
+
+class TestMessagesArePlainText:
+    def test_values_compared_with_several_are_written_as_text(self) -> None:
+        contract = _BOTH_BANKS.replace("(ს/კ: 01.02.03.456)", "(ს/კ: 01.02.03.456 და 01.02.03.457)")
+        acts = (
+            ACT.replace("GE29NB0000000101904917", "GE29NB0000000101904971"),
+            ACT.replace("ბანკის კოდი: AAAAGE22;", "ბანკის კოდი: AAABGE22;"),
+            ACT.replace("(ს/კ: 01.02.03.456)", "(ს/კ: 01.02.03.475)"),
+            ACT.replace("GE29NB0000000101904917", "GE11CC0000000123456789"),
+        )
+        for act in acts:
+            report = _check(act, contract)
+            assert _substantive(report), act
+            for f in report.findings:
+                for message in (f.message_ka, f.message_en):
+                    assert not _PYTHON_SYNTAX.search(message), message
+            for s in report.skipped:
+                for reason in (s.reason_ka, s.reason_en):
+                    assert not _PYTHON_SYNTAX.search(reason), reason
+
+    def test_the_bank_message_names_the_act_s_value_and_the_contract_s(self) -> None:
+        act = ACT.replace("ბანკის კოდი: AAAAGE22;", "ბანკის კოდი: AAABGE22;")
+        [finding] = _of(_check(act, _BOTH_BANKS), "AOA.BANK")
+        assert finding.message_en == "bank code differs: AAABGE22 vs contract AAAAGE22, CCCCGE22"

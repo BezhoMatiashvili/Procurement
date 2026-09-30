@@ -450,6 +450,21 @@ _ID_LABELLED = re.compile(
 )
 
 
+#: The share of an act's letters that must be Georgian for the rules to read it: a Georgian act
+#: writes its bank codes, IBANs and an English word or two in Latin letters, far below half.
+_GEORGIAN_SHARE = 0.5
+
+
+def _reads_georgian(text: str) -> bool:
+    """Whether ``text`` is written in Georgian: most of its letters are Georgian. The rules read
+    Georgian labels; an act in English has none of them to read."""
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return True  # nothing to judge by: the rules report what they find, as they always did
+    georgian = sum(1 for c in letters if "\u10a0" <= c <= "\u10ff" or "\u1c90" <= c <= "\u1cbf")
+    return georgian >= _GEORGIAN_SHARE * len(letters)
+
+
 def _labelled_codes(text: str) -> set[str]:
     """Identification codes read straight off their labels, for a document whose parties the
     party parser could not make out (a name without quotes, say): the codes are still there."""
@@ -712,6 +727,22 @@ class AoaChecker:
             return False
         meant = lemma(expected)
         return any(misread_explains(actual, inflect(meant, case)) for case in CASES)
+
+    def _unread(self, rule_id: str, what_ka: str, what_en: str) -> bool:
+        """For a rule that found nothing: when the act is not written in Georgian, say that the
+        rule could not read it (a skip note) and return True. The rules read Georgian labels and
+        wording ("ს/კ", "შესრულდა", "პროექტ"); an act in English has none of them, and nothing
+        found there is not something missing from it."""
+        if _reads_georgian(self.aoa.text):
+            return False
+        self._skip(
+            rule_id,
+            f"აქტი ქართულად არ არის დაწერილი, {what_ka} კი მხოლოდ ქართული ტექსტიდან იკითხება: "
+            "არ შემოწმდა",
+            f"the act is not written in Georgian, and {what_en} can be read only from Georgian "
+            "text: not checked",
+        )
+        return True
 
     def _skip(self, rule_id: str, why_ka: str, why_en: str) -> None:
         note = SkipNote(rule_id=rule_id, reason_ka=why_ka, reason_en=why_en)
@@ -1138,7 +1169,9 @@ class AoaChecker:
 
     def rule_required_fields(self) -> None:
         """Client rule 3: the act must name the project and the cadastral code."""
-        if not self.aoa.anchors(FactType.project_name):
+        if not self.aoa.anchors(FactType.project_name) and not self._unread(
+            "AOA.PROJECT_PRESENT", "პროექტის დასახელება", "the project name"
+        ):
             self._add(
                 "AOA.PROJECT_PRESENT",
                 "warning",
@@ -1702,12 +1735,17 @@ class AoaChecker:
         c_ids = self.contract.id_codes() or _labelled_codes(self.contract.text)
         a_ids = self.aoa.id_codes() or _labelled_codes(self.aoa.text)
         if not a_ids:
-            self._add(
+            if not self._unread(
                 "AOA.ID_CODES",
-                "error",
-                "აქტში საიდენტიფიკაციო კოდები ვერ მოიძებნა",
-                "no identification codes found in the act",
-            )
+                "მხარეთა საიდენტიფიკაციო კოდები",
+                "the parties' identification codes",
+            ):
+                self._add(
+                    "AOA.ID_CODES",
+                    "error",
+                    "აქტში საიდენტიფიკაციო კოდები ვერ მოიძებნა",
+                    "no identification codes found in the act",
+                )
         elif c_ids and not a_ids <= c_ids:
             # one finding per code, marked where the act writes it, with the contract's code it
             # most likely stands for: a transposed digit is one code to fix, not a list to read
@@ -2012,8 +2050,8 @@ class AoaChecker:
             self._add(
                 "AOA.CADASTRAL",
                 "error",
-                f"საკადასტრო კოდი განსხვავდება: {extra} vs ხელშეკრულება {sorted(c)}",
-                f"cadastral code differs: {extra} vs contract {sorted(c)}",
+                f"საკადასტრო კოდი განსხვავდება: {x} vs ხელშეკრულება {', '.join(sorted(c))}",
+                f"cadastral code differs: {x} vs contract {', '.join(sorted(c))}",
                 expected=_closest(x, sorted(c)),
                 actual=x,
                 span=self._find_span(x),
@@ -2228,25 +2266,21 @@ class AoaChecker:
             extra = sorted(x for x in a if _bank_key(x) not in known)
             if a and c and extra:
                 mismatched = True
-                hint_ka = hint_en = ""
-                if (
-                    unit == "IBAN"
-                    and any(iban_is_valid(x) for x in c)
-                    and not any(iban_is_valid(x) for x in a)
-                ):
-                    hint_ka, hint_en = (
-                        " (აქტის IBAN არავალიდურია)",
-                        " (the act's IBAN is not valid)",
-                    )
                 payee = self._payee_bank(unit)
                 for x in extra:
+                    hint_ka = hint_en = ""
+                    if unit == "IBAN" and any(iban_is_valid(y) for y in c) and not iban_is_valid(x):
+                        hint_ka, hint_en = (
+                            " (აქტის IBAN არავალიდურია)",
+                            " (the act's IBAN is not valid)",
+                        )
                     # the one contract value this one stands for - a slip in the contractor's
                     # account is not corrected to a list that holds the customer's own
                     self._add(
                         "AOA.BANK",
                         "error",
-                        f"{ka} განსხვავდება: {sorted(a)} vs ხელშეკრულება {sorted(c)}{hint_ka}",
-                        f"{en} differs: {sorted(a)} vs contract {sorted(c)}{hint_en}",
+                        f"{ka} განსხვავდება: {x} vs ხელშეკრულება {', '.join(sorted(c))}{hint_ka}",
+                        f"{en} differs: {x} vs contract {', '.join(sorted(c))}{hint_en}",
                         expected=_closest(x, sorted(c), preferred=payee),
                         actual=x,
                         span=self._find_span(x),
@@ -2309,10 +2343,11 @@ class AoaChecker:
             self._add(
                 "AOA.BANK",
                 "error",
-                f"აქტში მითითებული ანგარიში ხელშეკრულებით დამკვეთს ეკუთვნის: {act_accounts}; "
-                f"შემსრულებლის ანგარიშია {payee_accounts}",
-                f"the act's account belongs to the customer in the contract: {act_accounts}; "
-                f"the contractor's account is {payee_accounts}",
+                f"აქტში მითითებული ანგარიში ხელშეკრულებით დამკვეთს ეკუთვნის: "
+                f"{', '.join(act_accounts)}; შემსრულებლის ანგარიშია {', '.join(payee_accounts)}",
+                f"the act's account belongs to the customer in the contract: "
+                f"{', '.join(act_accounts)}; the contractor's account is "
+                f"{', '.join(payee_accounts)}",
                 expected=", ".join(payee_accounts),
                 actual=", ".join(act_accounts),
                 span=self._find_span(act_accounts[0]),
@@ -2513,6 +2548,8 @@ class AoaChecker:
         reading = self._period()
         period_hits, period = reading.hits, reading.dates
         if not period:
+            if self._unread("AOA.PERIOD", "შესრულების პერიოდი", "the execution period"):
+                return
             self._add(
                 "AOA.PERIOD",
                 "warning",
