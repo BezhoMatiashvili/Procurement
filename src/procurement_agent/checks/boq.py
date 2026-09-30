@@ -89,9 +89,8 @@ _HEADER_SYNONYMS: dict[str, tuple[str, ...]] = {
     # _norm_label strips surrounding whitespace, so "delivery " needs no entry of its own
     "rate_delivery": ("delivery", "transportation", "ტრანსპორტი", "ტრანსპორტირება", "მიწოდება"),
     "sum_delivery": ("delivery sum", "transportation sum"),
+    # a currency the label names ("Rate in USD", "ღირებულება ლარში") is taken off first
     "rate_total": (
-        "rate in us $",
-        "rate in usd",
         "rate",
         "unit rate",
         "unit price",
@@ -99,7 +98,15 @@ _HEADER_SYNONYMS: dict[str, tuple[str, ...]] = {
         "ერთ. ფასი",
         "ერთეულის ღირებულება",
     ),
-    "amount": ("amount in us $", "amount in usd", "amount", "total", "ღირებულება", "სულ", "ჯამი"),
+    "amount": (
+        "amount",
+        "total",
+        "total amount",
+        "total price",
+        "ღირებულება",
+        "სულ",
+        "ჯამი",
+    ),
 }
 _LABEL_TO_KEY = {label: key for key, labels in _HEADER_SYNONYMS.items() for label in labels}
 #: The columns a number is read from; text in one of them is reported, never read as 0.
@@ -153,14 +160,30 @@ _CELL_REF = re.compile(r"(?<![A-Za-z_\d.])\$?([A-Z]{1,3})\$?(\d+)(?![\d(A-Za-z_]
 _SHEET_REF = re.compile(r"(?:'((?:[^']|'')+)'|([^\W\d][\w.]*))!\$?([A-Z]{1,3})\$?(\d+)")
 
 # Summary rows, recognised by their label (folded to lower case).
-_INCL_VAT = re.compile(
-    r"incl(?:\.|uding|usive)?\s*(?:of\s+)?vat|vat\s+incl|დღგ-?ს?\s*ჩათვლით", re.IGNORECASE
+#: The tax by its names: "VAT", "Value added tax", "დღგ", "დამატებული ღირებულების გადასახადი" -
+#: never the letters inside a word ("private", "Vatican").
+_VAT_NAME = (
+    r"(?<![a-zა-ჰ])(?:vat|value[\s-]+added[\s-]+tax|დღგ|"
+    r"დამატებული\s+ღირებულების\s+გადასახად[ა-ჰ]*)(?![a-zა-ჰ])"
 )
-_EXCL_VAT = re.compile(
-    r"excl(?:\.|uding|usive)?\s*(?:of\s+)?vat|without\s+vat|net\s+of\s+vat|დღგ-?ს?\s*გარეშე",
+#: A rate written into the label: "incl. 18% VAT", "Add 18% VAT".
+_LABEL_RATE = r"(?:\d{1,2}(?:[.,]\d+)?\s*%\s*)?"
+#: The Georgian "including" / "without" after the tax, in any case form: "დღგ-ს ჩათვლით",
+#: "დღგ-ის ჩათვლით", "გადასახადის ჩათვლით".
+_KA_VAT = r"(?:დღგ(?:-?ის|-?ს)?|გადასახადის)\s*"
+_INCL_VAT = re.compile(
+    rf"\b(?:incl(?:\.|uding|usive)?|with)\s*(?:of\s+)?(?:the\s+)?{_LABEL_RATE}{_VAT_NAME}"
+    rf"|{_VAT_NAME}\s+incl|{_KA_VAT}ჩათვლით",
     re.IGNORECASE,
 )
-_VAT = re.compile(r"^\s*(?:vat|დღგ)\b", re.IGNORECASE)
+_EXCL_VAT = re.compile(
+    rf"\b(?:excl(?:\.|uding|usive)?|without|before|net\s+of)\s*(?:of\s+)?(?:the\s+)?"
+    rf"{_LABEL_RATE}{_VAT_NAME}|{_KA_VAT}გარეშე",
+    re.IGNORECASE,
+)
+#: The VAT row: the tax's name opens the label, after an "Add" or its rate at most ("VAT 18%",
+#: "Value added tax @ 18%", "Add 18% VAT", "დამატებული ღირებულების გადასახადი 18%").
+_VAT = re.compile(rf"^\s*(?:add(?:ing)?\s+)?{_LABEL_RATE}{_VAT_NAME}", re.IGNORECASE)
 _TOTAL_COST = re.compile(r"\btotal\s+cost|ჯამური\s+ღირებულება", re.IGNORECASE)
 #: Overheads and profit by their usual names, English and Georgian: "Indirect costs", "General
 #: expenses", "არაპირდაპირი ხარჯები"; "Margin", "Mark-up", "გეგმიური დაგროვება" (the planned
@@ -174,18 +197,29 @@ _PROFIT = re.compile(r"profit|margin|mark-?up|მოგება|გეგმი
 _HOMOGLYPHS = str.maketrans(
     "\u0430\u043c\u0442\u043a\u0441\u0435\u043e\u0440\u0445\u0443", "amtkceopxy"
 )
-#: Unit spellings that mean the same measure. "item" and "pcs" are deliberately NOT merged: a
-#: lump sum and a count are different things, and the difference is worth a question. A metre
-#: and a linear metre are one measure (so says the mutation harness too).
+#: Unit spellings that mean the same measure: one table per measure, its English names singular
+#: and plural and its Georgian abbreviation and full word ("t", "tn", "ტ", "ტნ", "ტონა"). "item"
+#: and "pcs" are deliberately NOT merged: a lump sum and a count are different things, and the
+#: difference is worth a question; nor is a set a count of pieces. A metre and a linear metre
+#: are one measure (so says the mutation harness too). Plurals are listed, never derived by
+#: dropping an "s": "ls" (lump sum) is not "l" (a litre).
 _UNIT_ALIASES: dict[str, str] = {
     **dict.fromkeys(("m2", "m²", "sqm", "m^2", "მ2", "მ²", "კვმ"), "m2"),
     **dict.fromkeys(("m3", "m³", "cum", "cbm", "m^3", "მ3", "მ³", "კუბმ"), "m3"),
     **dict.fromkeys(
         ("lm", "rm", "lnm", "linm", "runm", "გრძმ", "m", "მ", "მეტრი", "metre", "meter"), "lm"
     ),
-    **dict.fromkeys(("t", "tn", "ton", "tons", "tonne", "tonnes", "ტ", "ტონა"), "t"),
+    **dict.fromkeys(("km", "კმ", "kilometre", "kilometer", "კილომეტრი"), "km"),
+    **dict.fromkeys(("ha", "ჰა", "hectare", "hectares", "ჰექტარი"), "ha"),
+    **dict.fromkeys(
+        ("l", "ltr", "lit", "litre", "litres", "liter", "liters", "ლ", "ლიტ", "ლიტრი"), "l"
+    ),
+    **dict.fromkeys(("t", "tn", "ton", "tons", "tonne", "tonnes", "ტ", "ტნ", "ტონა"), "t"),
     **dict.fromkeys(("kg", "კგ"), "kg"),
     **dict.fromkeys(("month", "months", "mo", "mon", "mth", "თვე", "თვ"), "month"),
+    **dict.fromkeys(("week", "weeks", "wk", "wks", "კვირა"), "week"),
+    **dict.fromkeys(("day", "days", "დღე", "დღ"), "day"),
+    **dict.fromkeys(("set", "sets", "kit", "kits", "კომპლ", "კომპლექტი", "კომპ"), "set"),
     **dict.fromkeys(
         ("pcs", "pc", "nr", "no", "piece", "pieces", "ც", "ცალი", "\u0448\u0442"), "pcs"
     ),
@@ -193,18 +227,41 @@ _UNIT_ALIASES: dict[str, str] = {
 }
 
 
-#: A currency a header names after its label: "ერთეულის ფასი, აშშ დოლარი", "Amount (USD)".
+#: A currency, as a header names it: "GEL", "US $", "₾", "აშშ დოლარი", and the Georgian locative
+#: "ლარში" / "დოლარში" ("in lari", "in dollars").
+_CURRENCY = r"(?:აშშ\s+)?(?:დოლარ[ა-ჰ]*|ლარ[ა-ჰ]*|ევრო[ა-ჰ]*|usd|gel|eur|us\s*\$|\$|₾|€)"
+#: A currency a header names after its label, however it is attached: "ერთეულის ფასი, აშშ
+#: დოლარი", "Amount (USD)", "Rate in GEL", "Amount EUR", "ღირებულება ლარში". Only at the end: a
+#: label that goes on after the currency ("Unit rates in USD (excl. VAT)", the group label over
+#: the component rates) is not the rate itself.
 _LABEL_CURRENCY = re.compile(
-    r"\s*[,(]\s*(?:აშშ\s+)?(?:დოლარ[ა-ჰ]*|ლარ[ა-ჰ]*|ევრო|usd|gel|eur|us\s*\$|\$|₾|€)\s*\)?\s*$",
-    re.IGNORECASE,
+    rf"\s*(?:[,(]\s*|\s+in\s+|\s+){_CURRENCY}\s*\)?\s*$|^\s*(?:\$|₾|€)\s*", re.IGNORECASE
 )
 
 
 def _norm_label(v: object) -> str:
     """A header label as compared: "Qty." and "Unit:" are "qty" and "unit", and "ღირებულება, აშშ
-    დოლარი" is "ღირებულება"."""
+    დოლარი", "Amount in GEL" and "ღირებულება ლარში" are the amount whatever currency they name.
+    """
     label = normalize_spaces(str(v or "")).strip().lower().rstrip(":.").strip()
     return _LABEL_CURRENCY.sub("", label).strip()
+
+
+#: Text a number reads from two ways: one separator and exactly three digits after it ("1.250",
+#: "5,000") is a thousands group, or three decimals as an estimating program exports a quantity.
+#: A spreadsheet computes with it by its own locale, so the text alone cannot tell which.
+_TWO_WAY_NUMBER = re.compile(r"[+-]?[1-9]\d{0,2}[.,]\d{3}")
+
+
+def _two_readings(v: object) -> tuple[float, float] | None:
+    """The two numbers text such as "1.250" reads as - (1.25, 1250.0) - else None."""
+    if not isinstance(v, str):
+        return None
+    text = normalize_spaces(v).strip()
+    if not _TWO_WAY_NUMBER.fullmatch(text):
+        return None
+    decimal = text.replace(",", ".")
+    return float(decimal), float(decimal.replace(".", ""))
 
 
 def _num(v: object) -> float | None:
@@ -212,7 +269,78 @@ def _num(v: object) -> float | None:
         return None
     if isinstance(v, int | float):
         return float(v)
+    if _two_readings(v) is not None:
+        # "1.250" is 1.25 or 1,250: never guessed. Only the row it stands in can tell
+        # (``_resolve_two_way``); read as thousands, 1.25 t of rebar priced as 1,250 t.
+        return None
     return parse_number(str(v))
+
+
+#: (product, factor, factor): the number cells of a line that compute one another
+_ROW_PRODUCTS = (
+    ("amount", "qty", "rate_total"),
+    ("sum_materials", "qty", "rate_materials"),
+    ("sum_labor", "qty", "rate_labor"),
+    ("sum_delivery", "qty", "rate_delivery"),
+)
+_COMPONENT_RATES = ("rate_materials", "rate_labor", "rate_delivery")
+_COMPONENT_SUMS = ("sum_materials", "sum_labor", "sum_delivery")
+
+
+def _row_checks(v: dict[str, float | None]) -> list[tuple[set[str], float, float]]:
+    """What a line's number cells compute from one another, as (the cells used, the number
+    stated, the number computed): amount = quantity x rate, a component's sum = quantity x its
+    rate, the rate = the component rates added, the amount = the component sums added."""
+    out: list[tuple[set[str], float, float]] = []
+    for prod, a, b in _ROW_PRODUCTS:
+        p, x, y = v.get(prod), v.get(a), v.get(b)
+        if p is not None and x is not None and y is not None:
+            out.append(({prod, a, b}, p, x * y))
+    parts = [k for k in _COMPONENT_RATES if v.get(k) is not None]
+    if parts:
+        rate = sum(v[k] or 0.0 for k in parts)
+        stated, qty, amount = v.get("rate_total"), v.get("qty"), v.get("amount")
+        if stated is not None:
+            out.append(({"rate_total", *parts}, stated, rate))
+        elif qty is not None and amount is not None:
+            out.append(({"amount", "qty", *parts}, amount, qty * rate))
+    sums = [k for k in _COMPONENT_SUMS if v.get(k) is not None]
+    if sums and v.get("amount") is not None:
+        out.append(({"amount", *sums}, v["amount"] or 0.0, sum(v[k] or 0.0 for k in sums)))
+    return out
+
+
+def _row_computes(v: dict[str, float | None], key: str) -> bool:
+    """Whether some computation of the row that uses ``key`` holds, on numbers that are not all
+    nought: an unpriced row (0 = 1.25 x nothing) tells nothing."""
+    for keys, stated, computed in _row_checks(v):
+        if key not in keys or (abs(stated) < 1e-9 and abs(computed) < 1e-9):
+            continue
+        if abs(stated - computed) <= max(_MONEY_TOL, 0.005 * max(abs(stated), abs(computed))):
+            return True
+    return False
+
+
+def _resolve_two_way(v: dict[str, float | None], raw: dict[str, object]) -> set[str]:
+    """Read each two-way text cell of a line ("1.250") the way the row itself computes it.
+
+    The reading the row's cached computations agree with is taken - the sheet's own quantity x
+    rate = amount says whether its quantity was 1.25 or 1,250. When neither or both agree (an
+    unpriced row, nothing beside it to check), the cell stays text: never read as a number the
+    workbook does not bear out. ``v`` is updated in place; returns the keys read."""
+    pending = {k: r for k, text in raw.items() if (r := _two_readings(text)) is not None}
+    done: set[str] = set()
+    progress = True
+    while pending and progress:
+        progress = False
+        for key, readings in list(pending.items()):
+            fits = [x for x in readings if _row_computes({**v, key: x}, key)]
+            if len(fits) == 1:
+                v[key] = fits[0]
+                done.add(key)
+                del pending[key]
+                progress = True
+    return done
 
 
 def _is_text_in_number_cell(v: object) -> bool:
@@ -389,11 +517,6 @@ class BoqWorkbook:
         return self.formula_cells > 0 and self.uncached_cells > self.formula_cells * _UNCACHED_SHARE
 
 
-def _cell_value(ws: object, cols: dict[str, int], row: int, key: str) -> float | None:
-    column = cols.get(key)
-    return _num(ws.cell(row, column).value) if column else None  # type: ignore[attr-defined]
-
-
 #: A unit column headed the long or the short way: "Unit of measurement", "U.o.M.", "Measure",
 #: "განზ. ერთ.", "ზომის ერთ.", "ზ/ე", "ერთ.". Tried only after the exact labels, and never on a
 #: label that names money ("ერთ. ფასი" is the rate).
@@ -497,7 +620,9 @@ def _group(ws: object, row: int, col: int, key: str, below: int) -> dict[int, st
     over Materials | Labour | Delivery | Total as the materials rate. With no Total beneath it
     the key stays unbound (a rate is then built from its components). None: not a group.
     """
-    if key not in _GROUP_KEYS or ws.cell(below, col).value in (None, ""):  # type: ignore[attr-defined]
+    if key not in _GROUP_KEYS and key not in _COMPONENT_GROUPS:
+        return None
+    if ws.cell(below, col).value in (None, ""):  # type: ignore[attr-defined]
         return None
     subs = [
         (c, ws.cell(below, c).value)  # type: ignore[attr-defined]
@@ -506,16 +631,29 @@ def _group(ws: object, row: int, col: int, key: str, below: int) -> dict[int, st
     ]
     if len(subs) < 2:
         return None
-    under = _GROUP_KEYS[key]
-    bound = {
-        c: under[family]
-        for c, v in subs
-        if (sub := _label_key(v)) and (family := _FAMILY.get(sub, "")) in under
-    }
+    bound = {c: bind for c, v in subs if (sub := _label_key(v)) and (bind := _sub_key(key, sub))}
     if key != "qty" and not bound:
         return None  # "Amount" over "USD | GEL": not a breakdown this reader knows
     # every sub-column belongs to the group, bound or not ("Block A | Block B" under Quantity)
     return {c: bound.get(c, "") for c, _ in subs}
+
+
+#: A component that heads its own sub-columns ("Materials" over Rate | Amount, "მასალა" over
+#: "ერთ. ფასი | სულ" in a Georgian estimate): the component is the group, and its rate and amount
+#: are the component's rate and sum - never the unit rate and the line amount.
+_COMPONENT_GROUPS = {
+    "rate_materials": "materials",
+    "rate_labor": "labor",
+    "rate_delivery": "delivery",
+}
+
+
+def _sub_key(group: str, sub: str) -> str | None:
+    """The key a sub-label read as ``sub`` takes under a group label read as ``group``."""
+    if group in _COMPONENT_GROUPS:
+        part = _COMPONENT_GROUPS[group]
+        return {"rate_total": f"rate_{part}", "amount": f"sum_{part}"}.get(sub)
+    return _GROUP_KEYS[group].get(_FAMILY.get(sub, ""))
 
 
 def _continues_header(ws: object, row: int, above: int, first: dict[str, int]) -> bool:
@@ -592,8 +730,16 @@ def _map_headers(ws: object) -> tuple[dict[str, int], int]:
                 consumed.add((below, sub_col))  # type: ignore[arg-type]
                 if sub_key:
                     grouped.setdefault(sub_key, sub_col)
-    cols.update(grouped)
-    return cols, max(block[-1], _column_number_row(ws, block[-1]))
+    # A column holds one number: what a group binds wins, and a label that would bind a column
+    # already bound is dropped. Binding "Rate" under "Materials" as the unit rate once gave one
+    # column two keys, and the materials rate priced the whole line.
+    out = dict(grouped)
+    taken = set(grouped.values())
+    for key, c in cols.items():
+        if key not in out and c not in taken:
+            out[key] = c
+            taken.add(c)
+    return out, max(block[-1], _column_number_row(ws, block[-1]))
 
 
 def _column_number_row(ws: object, after: int) -> int:
@@ -704,14 +850,62 @@ def _own_row_formula(formula: str, row: int) -> bool:
     return bool(rows) and set(rows) == {row}
 
 
-def _sums_other_rows(formula: str, row: int) -> bool:
-    """A quantity that adds up other rows (``=SUM(G13:G19)``, ``=G13+G14``, a SUM over a name):
-    the row is a parent. One that adds up its own row's cells (``=D7+E7``, the quantities of
-    two buildings side by side) is the position's own quantity."""
+#: A name in a formula that is not a function (followed by "("), a cell, a sheet (followed by
+#: "!") or a range end (after ":"): a defined name, ``=SUM(Block1_Qty)``.
+_NAME_IN_FORMULA = re.compile(r"(?<![\w.'!$:\\])([A-Za-z_\\][\w.]*)(?![\w.!(])(?!\s*\()")
+_CELL_NAME = re.compile(r"^\$?[A-Za-z]{1,3}\$?\d+$|^(?:true|false)$", re.IGNORECASE)
+
+
+def _resolve_names(formula: str, wf: object) -> str | None:
+    """The formula with every defined name replaced by the cells it names (the sheet's own names
+    first, then the workbook's); None when a name cannot be followed."""
+    sheet_names = getattr(wf, "defined_names", None) or {}
+    book_names = getattr(getattr(wf, "parent", None), "defined_names", None) or {}
+    unresolved = False
+
+    def swap(m: re.Match[str]) -> str:
+        nonlocal unresolved
+        name = m.group(1)
+        if _CELL_NAME.match(name):
+            return name
+        found = sheet_names.get(name) or book_names.get(name)
+        target = getattr(found, "attr_text", None)
+        if not target:
+            unresolved = True
+            return name
+        return str(target)
+
+    # a quoted sheet name ('Take-off') is no name: only the text between them is searched
+    parts = re.split(r"('(?:[^']|'')*')", re.sub(r'"[^"]*"', "", formula))
+    body = "".join(p if i % 2 else _NAME_IN_FORMULA.sub(swap, p) for i, p in enumerate(parts))
+    return None if unresolved else body
+
+
+def _unqualify_own_sheet(formula: str, sheet: str) -> str:
+    """``'1. WORKS'!F8:F12`` on the sheet "1. WORKS" is ``F8:F12``: rows of this sheet."""
+    body = formula.replace("'" + sheet.replace("'", "''") + "'!", "")
+    if re.fullmatch(r"[^\W\d][\w.]*", sheet):
+        body = re.sub(rf"(?<![\w.']){re.escape(sheet)}!", "", body)
+    return body
+
+
+def _sums_other_rows(formula: str, row: int, wf: object = None) -> bool:
+    """A quantity that adds up other rows of the bill (``=SUM(G13:G19)``, ``=G13+G14``, a SUM
+    over a name for such rows): the row is a parent. One that adds up its own row's cells
+    (``=D7+E7``, the quantities of two buildings side by side) is the position's own quantity,
+    and so is one added up from a take-off sheet (``=SUM('Take-off'!D2:D5)``) or from numbers
+    (``=SUM(30,30,30)``): no row of the bill is added up. Those used to read as parents - "no row
+    of this sheet" was taken for a SUM over a name - and the position fell out of the evaluation.
+    A defined name is followed to the cells it names; one that cannot be is taken for the parent
+    it most likely is."""
     if not _SUM_OF_ROWS.search(formula):
         return False
-    rows = _formula_rows(formula)
-    return not rows or set(rows) != {row}
+    body = _resolve_names(formula, wf)
+    if body is None:
+        return True
+    title = getattr(wf, "title", None)
+    rows = _formula_rows(_unqualify_own_sheet(body, title) if title else body)
+    return bool(rows) and set(rows) != {row}
 
 
 #: A quantity times a rate, "=O23*G23": a position's amount, whatever rows it points at. One
@@ -736,7 +930,7 @@ def _line_kind(
     qty_col = cols.get("qty")
     if qty_col:
         qty_formula = _formula_text(wf.cell(row, qty_col))  # type: ignore[attr-defined]
-        if qty_formula is not None and _sums_other_rows(qty_formula, row):
+        if qty_formula is not None and _sums_other_rows(qty_formula, row, wf):
             # "=SUM(G13:G19)": the quantity adds up the items under it - a parent, whose items
             # are the positions. As a position it was always "unpriced", its items being priced.
             return "heading"
@@ -910,30 +1104,28 @@ def _read_sheet(
             continue
         if not _has_letter(description) and (
             # a bare number is a column number, never a description
-            _num(description) is not None or not _numbered_line(ws, wf, r, cols, item_cols)
+            parse_number(description) is not None or not _numbered_line(ws, wf, r, cols, item_cols)
         ):
             continue
 
-        def val(
-            key: str, _row: int = r, _ws: object = ws, _cols: dict[str, int] = cols
-        ) -> float | None:
-            return _cell_value(_ws, _cols, _row, key)
+        raws = {key: ws.cell(r, c).value for key in _NUMERIC_KEYS if (c := cols.get(key))}  # type: ignore[attr-defined]
+        values: dict[str, float | None] = {key: _num(raw) for key, raw in raws.items()}
+        read_two_way = _resolve_two_way(values, raws)
+
+        def val(key: str, _values: dict[str, float | None] = values) -> float | None:
+            return _values.get(key)
 
         hardcoded: list[str] = []
         formula_keys: list[str] = []
         non_numeric: list[tuple[str, str]] = []
-        for key in _NUMERIC_KEYS:
-            c = cols.get(key)
-            if not c:
-                continue
-            raw = ws.cell(r, c).value  # type: ignore[attr-defined]
-            is_formula = wf.cell(r, c).data_type == "f"  # type: ignore[attr-defined]
+        for key, raw in raws.items():
+            is_formula = wf.cell(r, cols[key]).data_type == "f"  # type: ignore[attr-defined]
             if is_formula:
                 book.formula_cells += 1
                 formula_keys.append(key)
                 if raw is None:
                     book.uncached_cells += 1
-            if _is_text_in_number_cell(raw):
+            if key not in read_two_way and _is_text_in_number_cell(raw):
                 non_numeric.append((key, normalize_spaces(str(raw)).strip()[:40]))
             # the cell's type, not its text: a *string* cell reading "=5" is typed-in text
             if key in _TOTAL_KEYS and val(key) not in (None, 0) and not is_formula:
@@ -977,10 +1169,17 @@ def _closing_line(sheet: BoqSheet, linked_rows: set[int]) -> BoqLine | None:
     labelled as a total ("TOTAL CARRIED TO SUMMARY", "სულ ჯამი"). Read by the SUB-TOTAL label
     alone, a sheet closed any other way was never reconciled, and a SUM range one row short
     passed without a word. A VAT row is never the closing total: the positions are without VAT.
+
+    Several SUB-TOTAL rows are the sections' own ("Sub-total Section 1", "ქვეჯამი II თავი"),
+    and the sheet is closed by role as above: the last section's sub-total held against every
+    position of the sheet was a false gap on each faithful bid. Their grand total is the row the
+    Summary links to, else the last total after them; with none, the last sub-total still is.
     """
-    for line in reversed(sheet.lines):
-        if _SUBTOTAL.match(line.description) and line.quantity is None:
-            return line
+    subtotals = [
+        ln for ln in sheet.lines if _SUBTOTAL.match(ln.description) and ln.quantity is None
+    ]
+    if len(subtotals) == 1:
+        return subtotals[0]
     last = max((ln.row for ln in sheet.lines if ln.kind == "position"), default=0)
     after = [
         ln
@@ -995,7 +1194,9 @@ def _closing_line(sheet: BoqSheet, linked_rows: set[int]) -> BoqLine | None:
     if linked:
         return linked[-1]
     labelled = [ln for ln in after if _CLOSING.match(ln.description)]
-    return labelled[-1] if labelled else None
+    if labelled:
+        return labelled[-1]
+    return subtotals[-1] if subtotals else None
 
 
 def _summary_columns(ws: object) -> tuple[int | None, int | None, int | None, int]:
@@ -1107,9 +1308,12 @@ _CHAIN = ("cost", "overheads", "profit", "excl", "vat", "incl")
 
 
 def _plays(role: str, label: str) -> bool:
+    """Whether a Summary row labelled ``label`` may play ``role`` in the chain. A TOTAL COST
+    row that says it is excl. VAT ("Total cost, excl. VAT") is the TOTAL COST - the cost is
+    before VAT - and ``summary_roles`` lets it play one part only."""
     incl, excl = _INCL_VAT.search(label), _EXCL_VAT.search(label)
     if role == "cost":
-        return bool(_TOTAL_COST.search(label)) and not incl and not excl
+        return bool(_TOTAL_COST.search(label)) and not incl
     if role == "overheads":
         return bool(_OVERHEADS.search(label))
     if role == "profit":
@@ -1456,10 +1660,28 @@ def template_findings(template: BoqWorkbook) -> list[Finding]:
                     actual=name,
                 )
             )
+    for name, sheet in template.sheets.items():
+        if not _reads_prices(sheet):
+            out.append(_prices_not_read(name, template=True))
     for sheet in template.sheets.values():
         for line in sheet.leaf_lines:
             for key, text in line.non_numeric:
-                if key == "qty":
+                if key == "qty" and (two := _two_readings(text)):
+                    ka, en = _where(line)
+                    low, high = _qty(two[0]), _qty(two[1])
+                    out.append(
+                        _finding(
+                            "BOQ.NON_NUMERIC",
+                            "warning",
+                            f"შაბლონი, {ka}: მოცულობა ტექსტია „{text}“ — {low} თუ {high}, "
+                            "სტრიქონიდან ვერ დგინდება; პოზიცია არცერთ კომპანიასთან არ ფასდება",
+                            f"template, {en}: the quantity is the text '{text}' - {low} or "
+                            f"{high}, and its row does not tell which; the position is not "
+                            "evaluated for any bidder",
+                            actual=text,
+                        )
+                    )
+                elif key == "qty":
                     ka, en = _where(line)
                     out.append(
                         _finding(
@@ -1471,6 +1693,30 @@ def template_findings(template: BoqWorkbook) -> list[Finding]:
                         )
                     )
     return out
+
+
+#: The columns a price is read from: a rate, an amount, or their components.
+_PRICE_KEYS = (*_RATE_KEYS, *_TOTAL_KEYS)
+
+
+def _reads_prices(sheet: BoqSheet) -> bool:
+    """Whether any rate or amount column of the sheet was recognised."""
+    return any(key in sheet.columns for key in _PRICE_KEYS)
+
+
+def _prices_not_read(name: str, *, template: bool) -> Finding:
+    """A sheet with quantities but no rate or amount column this reader recognised: the
+    reader's gap, never "section left unpriced" on bidders who priced every line."""
+    who_ka, who_en = ("შაბლონის ", "template ") if template else ("", "")
+    return _finding(
+        "BOQ.PRICES_NOT_READ",
+        "warning",
+        f"{who_ka}გვერდზე {name} ერთეულის ფასის და ღირებულების სვეტები ვერ ამოვიცანით — "
+        "ფასები არ წაკითხულა და გვერდი შეფასებაში არ მონაწილეობს",
+        f"{who_en}sheet {name}: no rate or amount column could be recognised - its prices were "
+        "not read and the sheet takes no part in the evaluation",
+        actual=name,
+    )
 
 
 def compare_bid(template: BoqWorkbook, bid: BoqWorkbook) -> BidComparison:
@@ -1578,9 +1824,29 @@ def compare_bid(template: BoqWorkbook, bid: BoqWorkbook) -> BidComparison:
                 out.findings.extend(_arithmetic_findings(b_line, ()))
 
     _evaluate(out, bid)
+    if bid.summary_sheet is not None and out.markup_factor is None:
+        out.findings.append(_not_ranked(out))
     out.findings.extend(reconcile_summary(bid))
     _list_findings(out)
     return out
+
+
+def _not_ranked(out: BidComparison) -> Finding:
+    """The bid has a Summary, but no markup could be taken from it: say which row is missing
+    rather than leave the bidder uncoloured without a word."""
+    if out.stated_incl_vat is None:
+        ka, en = "ჯამი დღგ-ს ჩათვლით", "the total incl. VAT"
+    else:
+        ka, en = "TOTAL COST", "TOTAL COST"
+    return _finding(
+        "BOQ.NOT_RANKED",
+        "warning",
+        f"{out.bidder}: Summary-ში ვერ ვიპოვეთ სტრიქონი „{ka}“ — კომპანიის ფასნამატი (ზედნადები, "
+        "მოგება, დღგ) ვერ გამოითვალა და კომპანია რანჟირებაში არ მონაწილეობს",
+        f"{out.bidder}: no Summary row states {en} - the bidder's markup (overheads, profit, "
+        "VAT) could not be worked out, so the bid is not ranked",
+        expected=en,
+    )
 
 
 def _summary_missing(name: str, bid: BoqWorkbook) -> Finding:
@@ -1619,6 +1885,11 @@ def _rate_text_blocks(line: BoqLine) -> bool:
     return not line.rate_total and bool(keys & set(_RATE_KEYS))
 
 
+def _qty_reads_two_ways(line: BoqLine) -> bool:
+    """Whether the line's quantity is text such as "1.250" that its row could not settle."""
+    return any(key == "qty" and _two_readings(text) for key, text in line.non_numeric)
+
+
 def _unit_rate(line: BoqLine, columns: dict[str, int]) -> float | None:
     """The bidder's unit rate: the rate column, else the sum of the component rates.
 
@@ -1637,19 +1908,30 @@ def _unit_rate(line: BoqLine, columns: dict[str, int]) -> float | None:
 #: The template's invitation to list what it does not describe: "The tender is to list here
 #: below any other items", "Other costs if necessary", "სხვა, აღწერაში არ შეტანილი". A bidder
 #: need not price it, and one who does has added work of their own. Matched by what it asks,
-#: not by fixed phrases: "any other" item, work or cost anywhere; or a description that *opens*
-#: with "Other(s)" / "სხვა" and asks the bidder to specify or list, or says it is not included
-#: above / in this BOQ / elsewhere. Only the opening word counts: "Paint to walls and other
-#: surfaces, colour to be specified by the Engineer" is a described position, and read as a
-#: placeholder it would drop out of the evaluation and the common scope. "სხვადასხვა" (sundry
-#: items the template describes) is never one.
+#: not by fixed phrases, and only where it asks it of the bidder:
+#:
+#: * "any other" item, work or cost anywhere ("Any other undescribed items");
+#: * the bidder addressed: "the tender(er) / bidder is to list", "list here", "to be listed
+#:   here / below / by the tenderer" - "texts to be listed by the Engineer" is described work;
+#: * "Undescribed" and "სხვა ხარჯები" as the opening words - "removal of undescribed
+#:   obstructions" and "... და სხვა ხარჯები" qualify a described position;
+#: * "აღწერაში არ შეტანილი" (not in the description) anywhere, and "Other costs if necessary";
+#: * a description that *opens* with "Other(s)" / "სხვა" and asks the bidder to specify or list,
+#:   or says it is not included above / in this BOQ / elsewhere.
+#:
+#: Only the opening word counts: "Paint to walls and other surfaces, colour to be specified by
+#: the Engineer" is a described position, and read as a placeholder it would drop out of the
+#: evaluation and the common scope. "სხვადასხვა" (sundry items the template describes) is never
+#: one. A line under a heading that invites is one too (``_placeholder_rows``).
 _PLACEHOLDER = re.compile(
-    r"any\s+other\s+(?:item|work|cost)s?\b|list(?:ed)?\s+here|to\s+be\s+listed|undescribed|"
-    r"other\s+costs\s+if\s+necessary|"
+    r"any\s+other\s+(?:[a-z]+\s+)?(?:item|work|cost)s?\b|"
+    r"\b(?:tender(?:er)?|bidder)s?\s+(?:is\s+|are\s+)?to\s+list\b|\blist\s+here\b|"
+    r"\bto\s+be\s+listed\s+(?:here|below|by\s+the\s+(?:tenderer|bidder))\b|"
+    r"^\W*undescribed\b|other\s+costs\s+if\s+necessary|"
     r"^\W*others?\b.*\b(?:specify|to\s+be\s+(?:specified|listed)|"
     r"not\s+(?:otherwise\s+)?(?:included|covered|described|listed|mentioned)\s+"
     r"(?:above|elsewhere|in\s+(?:this|the)\s+(?:boq|bill|list|schedule|tender)))\b|"
-    r"აღწერაში\s+არ\s+შეტანილ|(?<![ა-ჰ])სხვა\s+ხარჯ|"
+    r"აღწერაში\s+არ\s+შეტანილ|^\W*სხვა\s+ხარჯ|"
     r"^\W*სხვა(?![ა-ჰ]).*(?:არ\s+არის\s+გათვალისწინებ|მიუთითეთ|ჩამოწერეთ|ჩამოთვალეთ|"
     r"დააკონკრეტეთ)",
     re.IGNORECASE,
@@ -1657,6 +1939,26 @@ _PLACEHOLDER = re.compile(
 #: A section row that is itself priced ("A8 Progress and Final Photographs"), whose own items are
 #: numbered under it ("8.1").
 _SECTION_POSITION = re.compile(r"^[A-Z](\d+)$")
+
+
+def _placeholder_rows(lines: list[BoqLine]) -> set[int]:
+    """The template's positions that invite the bidder's own items (GOLD_SPEC 5): by their own
+    text, or by the heading they stand under.
+
+    "Undescribed items (Bidder to list and price)" over "Item 1", "Item 2": the invitation is
+    the heading's, and each line under it is a slot for the bidder's own work - read as a
+    filled-in quantity, a bidder's extra counted in their evaluation and flipped the colours. A
+    heading reaches the positions below it until the next row that is not a position (the
+    group's Sub-total, the next heading) or the next priced section row ("A3").
+    """
+    out: set[int] = set()
+    inviting = False
+    for line in lines:
+        if line.kind != "position" or _SECTION_POSITION.match(line.item_no.strip()):
+            inviting = bool(_PLACEHOLDER.search(line.description))
+        if line.kind == "position" and (inviting or _PLACEHOLDER.search(line.description)):
+            out.add(line.row)
+    return out
 
 
 def _position_groups(lines: list[BoqLine]) -> dict[int, str]:
@@ -1759,6 +2061,7 @@ def _compare_sheet(out: BidComparison, t_sheet: BoqSheet, b_sheet: BoqSheet) -> 
             out.non_numeric.append((b_line, key, text))
 
     # the evaluation of every template position on the sheet
+    placeholders = _placeholder_rows(t_sheet.lines)
     for t in t_sheet.leaf_lines:
         b = by_template_row.get(t.row)
         if b is None:
@@ -1770,7 +2073,7 @@ def _compare_sheet(out: BidComparison, t_sheet: BoqSheet, b_sheet: BoqSheet) -> 
             continue
         rate = _unit_rate(b, b_sheet.columns)
         text_cols = {key for key, _ in b.non_numeric}
-        if _PLACEHOLDER.search(t.description):
+        if t.row in placeholders:
             if b.amount or rate:
                 out.priced_optional.append(b)
             out.positions.append(
@@ -1784,6 +2087,16 @@ def _compare_sheet(out: BidComparison, t_sheet: BoqSheet, b_sheet: BoqSheet) -> 
                     rate,
                     0.0,
                     "optional_priced" if (b.amount or rate) else "optional",
+                )
+            )
+            continue
+        if _qty_reads_two_ways(t):
+            # the template's own quantity reads 1.25 or 1,250 and its row cannot tell which: not
+            # evaluated for any bidder - never at a quantity a thousand times off, and never at
+            # the bidder's own amount as if the template had left it blank
+            out.positions.append(
+                PositionEval(
+                    t.sheet, t.row, t.item_no, t.description, None, b.row, rate, 0.0, "non_numeric"
                 )
             )
             continue
@@ -1839,7 +2152,11 @@ def _compare_sheet(out: BidComparison, t_sheet: BoqSheet, b_sheet: BoqSheet) -> 
     ]
 
     priced = [line for line in b_sheet.lines if line.is_priced]
-    if not priced and any(line.quantity for line in t_sheet.lines):
+    if not _reads_prices(b_sheet):
+        # the reader's gap, not the bidder's: said once, on the template, when it is the same
+        if _reads_prices(t_sheet):
+            out.findings.append(_prices_not_read(b_sheet.name, template=False))
+    elif not priced and any(line.quantity for line in t_sheet.lines):
         out.unpriced_sheets.append(t_sheet.name)
 
 
@@ -2286,6 +2603,9 @@ def _reconcile_chain(
                     want,
                 )
             )
+    if excl is None and cost is not None and _EXCL_VAT.search(cost.label):
+        # "Total cost, excl. VAT" straight on to VAT: the cost is the total VAT is added to
+        excl = cost
     rated(vat, excl)
     if incl is not None and incl.value is not None and excl is not None and excl.value is not None:
         want = excl.value + (vat.value or 0.0 if vat is not None else 0.0)

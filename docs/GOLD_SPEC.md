@@ -372,24 +372,51 @@ Policy (client BOQ rules 2, 3, 5, 6 and the user's decision of 2026-09-28):
   (`BOQ.HEADING_PRICED`) and never evaluated. An amount formula must refer to a cell of its own
   row: one over a defined name (`=SUM(Block1_Amounts)`) or over other rows is a subtotal. A
   quantity that adds up other rows (`=SUM(G13:G19)`) makes the row a parent; one that adds its
-  own row's cells (`=D7+E7`, a quantity split per building) is the position's quantity.
+  own row's cells (`=D7+E7`, a quantity split per building) is the position's quantity, and so
+  is one that adds cells of another sheet (`=SUM('Take-off'!D2:D5)`, a take-off or measurement
+  sheet) or plain numbers (`=SUM(30,30,30,30)`). A quantity over a defined name makes a parent
+  only where the name stands for other rows of the same sheet.
 * **Reading the sheet.** A row with an item number and a quantity, a unit or an own-row amount
   is a line whatever its description reads ("Ø12", "600×300"); a repeated header block or
   column-number row further down is not. A header label with sub-labels beneath it ("Unit rate"
   over Materials | Labour | Delivery | Total, "Quantity" over Block A | Block B | Total) is a
   group: its key is the sub-column labelled Total, the components take the component keys, and
-  with no Total the key stays unbound. A heading under a one-row header that happens to read
+  with no Total the key stays unbound. A component heading its own sub-columns ("Materials"
+  over Rate | Amount, "მასალა" / "ხელფასი" over "ერთ. ფასი | სულ") is a group too: its rate
+  and amount are that component's rate and sum, never the unit rate or the line amount, and a
+  lone "Total" / "ჯამი" beside the groups is the amount. A column takes one key only. A rate or
+  amount column is read whatever currency its label names, however attached ("Rate in GEL",
+  "Total amount, GEL", "Amount (USD)", "ღირებულება ლარში"); a label that goes on after the
+  currency ("Unit rates in USD (excl. VAT)") is not the column itself. A priced sheet with no
+  rate or amount column this reading recognises says so (`BOQ.PRICES_NOT_READ`, warning, on
+  the template when it is the template's layout) - never "section left unpriced" on bidders
+  who priced it. A heading under a one-row header that happens to read
   like a label ("Materials" in the Description column) is content, not header. The item number
   is the first cell between the No column and the description shaped like one ("1.1", "A1"),
   so a column inserted inside that block moves nothing.
+* **Numbers typed as text.** Text in a number cell that reads one way ("1,250.50",
+  "12.5", "0.125") is that number. Text with one separator and exactly three digits after
+  it ("1.250", "5,000") reads two ways - 1.25 or 1,250 - and is never guessed: it takes
+  the reading its own row computes with (the cached quantity x rate = amount, a component's
+  sum, the component rates added), and with neither or both readings agreeing (an unpriced
+  row, nothing beside it) it stays text (`BOQ.NON_NUMERIC`). A template quantity left so is
+  evaluated for no bidder (status `non_numeric`, cost 0, out of the common scope, named once
+  on the template); it is neither a blank quantity for the bidder to fill in nor a position
+  the bidders left unpriced.
 * **Placeholders** are optional. A placeholder is a position whose text, or whose heading's
-  text, invites the bidder's own items: "any other items", "to be listed here by the tenderer",
-  "other costs if necessary", "აღწერაში არ შეტანილი", "სხვა ხარჯები"; "any other item(s),
-  work(s) or cost(s)" in any wording; or a description that opens with "Other(s)" / "სხვა" and
-  asks the bidder to specify or list, or says it is not included above / in this BOQ /
-  elsewhere. "Other" further into a described position ("Paint to walls and other surfaces,
-  colour to be specified by the Engineer") is no invitation. It is not "სხვადასხვა
-  ხარჯები", which is sundry items the template describes. Left blank, a placeholder is nothing
+  text, invites the bidder's own items: "any other items" ("any other undescribed items"),
+  "to be listed here by the tenderer", "other costs if necessary", "აღწერაში არ შეტანილი";
+  "any other item(s), work(s) or cost(s)" in any wording; the bidder addressed ("the tender
+  is to list", "Bidder to list and price", "list here", "to be listed here / below / by the
+  tenderer"); "Undescribed ..." and "სხვა ხარჯები" as the opening words; or a description
+  that opens with "Other(s)" / "სხვა" and asks the bidder to specify or list, or says it is not
+  included above / in this BOQ / elsewhere. The same words further into a described position
+  are no invitation: "Paint to walls and other surfaces, colour to be specified by the
+  Engineer", "texts to be listed by the Engineer", "removal of undescribed obstructions",
+  "მობილიზაცია ... და სხვა ხარჯები". It is not "სხვადასხვა ხარჯები", which is sundry items
+  the template describes. A heading's invitation reaches every position below it (at any
+  quantity) up to the next row that is not a position - the group's Sub-total, the next
+  heading - or the next priced section row. Left blank, a placeholder is nothing
   missing: it is neither unpriced nor unfilled. Priced, it is the bidder's own additional work. Like
   an added line (client rule 3), it is listed (`priced_optional`, `BOQ.OPTIONAL_PRICED`), kept out
   of `evaluated_cost` and the common scope, and shown in the difference breakdown.
@@ -402,9 +429,12 @@ Policy (client BOQ rules 2, 3, 5, 6 and the user's decision of 2026-09-28):
 * A bid unit cell left blank where the template states a unit is a unit change (`bid_unit: ""`,
   a warning); a unit written where the template left none is listed apart (`unit_filled`).
   Units are compared after folding their spellings: case, spaces and dots; Cyrillic letters
-  that print as Latin ("м2"); and one measure's names (m2/მ2/sqm; m3/მ3; m/lm/გრძმ; t/tn/ტ/ტონა;
-  kg/კგ; month/თვე; pcs/nr/ც/ცალი; hr/სთ). "item" and "pcs" stay apart: a lump sum is not a
-  count. A priced sheet with no recognisable unit column says units were not compared there
+  that print as Latin ("м2"); and one measure's names, English plurals among them (m2/მ2/sqm;
+  m3/მ3; m/lm/გრძმ; t/tn/ტ/ტნ/ტონა; kg/კგ; km/კმ; ha/ჰა; l/ltr/ლ/ლიტრი; day/days/დღე;
+  week/კვირა; month/months/თვე; set/kit/კომპლ./კომპლექტი; pcs/nr/ც/ცალი; hr/სთ). Plurals
+  are listed, never made by dropping an "s" ("ls", a lump sum, is not a litre). "item" and
+  "pcs" stay apart: a lump sum is not a count, and neither is a set. A priced sheet with no
+  recognisable unit column says units were not compared there
   (`BOQ.UNITS_NOT_COMPARED`, info).
 * Unit rate `r` = the bidder's rate column ("Rate in USD"); when empty, the sum of the
   materials, labour and delivery rates; on a sheet with no rate column at all, amount ÷ the
@@ -440,14 +470,25 @@ Policy (client BOQ rules 2, 3, 5, 6 and the user's decision of 2026-09-28):
   by the first row labelled for a part still open. A later "TOTAL COST INCL. OVERHEADS &
   PROFIT" or "Advance payment 20% of the price incl. VAT" plays no part. Overheads and profit
   go by their usual names too ("Indirect costs", "Margin", "გეგმიური დაგროვება",
-  "არაპირდაპირი ხარჯები"). The total excl. VAT is held against TOTAL COST plus every valued
-  row between the two (a contingency, a renamed markup), a row restating the running sum not
+  "არაპირდაპირი ხარჯები"). The tax goes by its names, not only the acronym ("VAT", "Value
+  added tax", "დღგ", "დამატებული ღირებულების გადასახადი"): a VAT row may open with "Add"
+  or its rate ("Add 18% VAT", "Value added tax @ 18%"), and the total incl. VAT may say
+  "with", "including", "incl. 18%" or "დღგ-ის ჩათვლით" ("GRAND TOTAL WITH VAT"). A TOTAL
+  COST row that also says excl. VAT ("Total cost, excl. VAT") is TOTAL COST; a later "Total
+  cost excl. VAT" row, once TOTAL COST is taken, is the total excl. VAT. A bid whose Summary
+  has no row the chain can take its total incl. VAT or TOTAL COST from is not ranked, and
+  says which row is missing (`BOQ.NOT_RANKED`, warning). The total excl. VAT is held against
+  TOTAL COST plus every valued row between the two (a contingency, a renamed markup), a row
+  restating the running sum not
   added twice. The top-level sections TOTAL COST adds up are numbered ("1", "2") or lettered
   ("A", "B"), all the way the first one is.
 * `sheet_amounts` (Σ of the bidder's own position amounts) must equal `sheet_subtotals` (the
   sheet's own closing total: its SUB-TOTAL row, else the sum row after the last position that
   the Summary links to, else the last one labelled as a total - "TOTAL CARRIED TO SUMMARY",
-  "სულ ჯამი", "ჯამი") to the cent; a difference is either the bidder's arithmetic (reported)
+  "სულ ჯამი", "ჯამი"; where several rows say SUB-TOTAL / ქვეჯამი, they are the sections' own
+  and the sheet is closed by the same role order - the sum row after the last position the
+  Summary links to, else the last one labelled as a total, else the last sub-total) to the
+  cent; a difference is either the bidder's arithmetic (reported)
   or a reader bug (a defect). Money is compared to the cent however large the sum, never with
   a tolerance that grows with it. A line amount is recomputed from quantity × the rate column,
   or × the sum of the component rates where there is no rate.

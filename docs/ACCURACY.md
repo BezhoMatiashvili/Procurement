@@ -904,6 +904,66 @@ The rest follow the letter of GOLD_SPEC 5, and the gold writer agrees:
   priced non-position; renumbered positions after an inserted line are removed + added; an amount
   typed with every rate cell empty is unpriced.
 
+### Red team, round 2 (BOQ-R2-01 to BOQ-R2-16)
+
+The same harnesses after the fixes: `evaluate_boq.py` 102/102, 102/102 and 127/127;
+`mutate_boq.py --seed 13 --per-class 3` 50 valid mutants, 17 classes, 100% pass, 0 false
+positives, 0 control false positives (one `swap` mutant is set aside by the harness itself as
+invalid, before and after these changes). On the gold sets nothing moved: none of their
+workbooks has a number typed as text with three decimals, a second SUB-TOTAL on a sheet, or a
+placeholder only its heading marks. Each defect is a synthetic test in
+`tests/unit/test_boq_reader_round2.py`; the rules are in GOLD_SPEC 5.
+
+* A number typed as text with one separator and three digits after it ("1.250") was read as
+  thousands by the prose number parser: 1.25 t of rebar priced as 1,250 t, and the colours
+  flipped. Such text is now read the way its own row computes it (quantity x rate = amount),
+  and stays text where the row cannot tell (an unpriced template row). A template quantity
+  left so is evaluated for no bidder rather than guessed; the gold writer does the same.
+* A heading that invites the bidder's own items ("Undescribed items (Bidder to list and
+  price)") now makes the lines under it placeholders, up to the group's Sub-total. The
+  invitation's words count only where they address the bidder or open the text: "texts to be
+  listed by the Engineer" and "removal of undescribed obstructions" are described work.
+* A quantity from a take-off sheet or added up from numbers is the position's own; component
+  column groups (Materials: Rate | Amount) bind the component's rate and sum; "Rate in GEL" and
+  "ღირებულება ლარში" are the rate and amount columns; Summary rows worded "GRAND TOTAL WITH
+  VAT", "Value added tax @ 18%", "Total cost, excl. VAT" play their parts; units such as
+  t/ტნ, day/days, set/კომპლ. fold; sections closed by their own sub-totals under a grand total
+  reconcile against the grand total. A priced sheet whose price columns are not recognised
+  (`BOQ.PRICES_NOT_READ`) and a bid left unranked for want of a Summary row (`BOQ.NOT_RANKED`)
+  now say so.
+
+The gold writer does not yet choose a sheet's closing row by role: it reads up to the last
+SUB-TOTAL row, which it also uses to bound the rows it reads. On a sheet with section
+sub-totals under a grand total its `sheet_subtotals` is the last section's; no gold set has such
+a sheet.
+
+Policy questions round 2 left open, with the recommended answer:
+
+* **Discount rows on the Summary (BOQ-R2-12).** A "Discount 5%" row and a "TOTAL ... AFTER
+  DISCOUNT" row after the total incl. VAT play no part today, so the pre-discount total is
+  ranked, silently. Recommended: a discount row (discount, rebate, ფასდაკლება) is part of the
+  chain, and a restated total "after discount" replaces the part it restates - the discounted
+  incl.-VAT total sets the markup, and VAT is held against the discounted excl.-VAT total. At
+  the least, a discount below the total incl. VAT is a warning naming both totals.
+* **A negative rate on a position (BOQ-R2-13).** It counts as a price today (non-zero r) and
+  lowers the common-scope total with no finding. Recommended: a negative rate or amount on a
+  template position is not a price for the work - `BOQ.NEGATIVE_RATE` (warning), the position
+  out of the common scope, still shown in the full evaluated total and the breakdown.
+* **A partly priced section group (BOQ-R2-14, by design).** Pricing one item of a group prices
+  the group, so its other items cost nothing in the common scope. Recommended if revisited: the
+  section row and its items are alternatives, the items among themselves are not - the group
+  is priced when its section row is priced or every item is; otherwise the unpriced items are
+  listed and the group leaves the common scope.
+* **A sheet tab renamed with a trailing space (BOQ-R2-15).** It is a removed and an added sheet
+  today, and every bidder's common scope loses its positions. Recommended: match sheets by exact
+  name, else by folded name (trimmed, whitespace collapsed, case) where the match is one to
+  one, reported as `BOQ.SHEET_RENAMED` (info).
+* **Sections closed by their own totals with no grand total (BOQ-R2-16).** The last section's
+  total is the closing row by the letter of GOLD_SPEC 5, so a faithful bid gets two
+  `BOQ.RECONCILE` errors. Recommended: where a sheet has several top-level sum rows (none summed
+  by a later row) and no single closing total, the sheet's total is their sum, and a Summary row
+  that adds several sheet rows is held against their sum.
+
 ## Known gaps
 
 * The scanned PDFs are not yet in the gold set; OCR only runs inside the Docker image, so they

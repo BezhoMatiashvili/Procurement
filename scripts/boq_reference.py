@@ -57,6 +57,10 @@ def fold(value: object) -> str:
 # ------------------------------------------------------------------------------ cell values
 
 
+#: text a number reads two ways: one separator and exactly three digits after it
+TWO_WAY_NUMBER = re.compile(r"[+-]?[1-9]\d{0,2}[.,]\d{3}")
+
+
 class Text(str):
     """Text found in a number cell: never read as 0."""
 
@@ -386,6 +390,23 @@ def classify_template(sheet: Sheet) -> None:
 
 # ---------------------------------------------------------------------------- summary sheet
 
+#: GOLD_SPEC 5: the Summary's rows by their usual labels (folded: Latin upper-cased). The tax by
+#: its names, never the letters inside a word ("PRIVATE").
+_TAX = (
+    r"(?<![A-Zა-ჰ])(?:VAT|VALUE[ -]ADDED[ -]TAX|დღგ|"
+    r"დამატებული ღირებულების გადასახად[ა-ჰ]*)(?![A-Zა-ჰ])"
+)
+_PCT = r"(?:\d{1,2}(?:[.,]\d+)?\s*%\s*)?"
+INCL_VAT = re.compile(
+    rf"\b(?:INCL(?:\.|UDING|USIVE)?|WITH)\s*(?:OF )?{_PCT}{_TAX}|{_TAX} INCL"
+    r"|(?:დღგ(?:-?ის|-?ს)?|გადასახადის)\s*ჩათვლით"
+)
+EXCL_VAT = re.compile(
+    rf"\b(?:EXCL(?:\.|UDING|USIVE)?|WITHOUT|BEFORE|NET OF)\s*(?:OF )?{_PCT}{_TAX}"
+    r"|(?:დღგ(?:-?ის|-?ს)?|გადასახადის)\s*გარეშე"
+)
+VAT_ROW = re.compile(rf"(?:ADD )?{_PCT}{_TAX}")
+
 
 def read_summary(ws_v, ws_f, sheet_names: list[str], priced: set[str]) -> SummaryInfo | None:
     total_col = desc_col = None
@@ -419,12 +440,12 @@ def read_summary(ws_v, ws_f, sheet_names: list[str], priced: set[str]) -> Summar
             role = "overheads"
         elif "PROFIT" in label:
             role = "profit"
-        elif label == "VAT":
-            role = "vat"
-        elif "VAT" in label and "EXCL" in label:
+        elif EXCL_VAT.search(label):
             role = "excl_vat"
-        elif "VAT" in label and "INCL" in label:
+        elif INCL_VAT.search(label):
             role = "incl_vat"
+        elif VAT_ROW.match(label):
+            role = "vat"
         if role:
             if role in roles:
                 notes.append(f"Summary: second row labelled like {role} at row {r} ignored")
@@ -761,6 +782,12 @@ def check_bid(tpl: Book, bid: Book, placeholders: set[tuple[str, int]] | None = 
                     )
                 costs[key] = 0.0
                 continue
+            if isinstance(t.qty, Text) and TWO_WAY_NUMBER.fullmatch(t.qty.strip()):
+                # GOLD_SPEC 5: a template quantity reading two ways ("1.250": 1.25 or 1,250)
+                # is evaluated for no bidder - never a blank quantity the bidder fills in. This
+                # writer reads no text as a number, so it never settles one by its row.
+                costs[key] = 0.0
+                continue
             tq = t.qty if is_num(t.qty) else None
             blank_tpl = tq is None or abs(tq) < 1e-12
             if blank_tpl:
@@ -1084,7 +1111,9 @@ def build_gold(folder: Path, template: Path | None, verbose: bool = False) -> di
     return gold
 
 
-PLACEHOLDER_HEADINGS = ("UNDESCRIBED", "ANY OTHER")
+#: a heading inviting the bidder's own items, in either language ("აღწერაში არ შეტანილი" -
+#: not in the description)
+PLACEHOLDER_HEADINGS = ("UNDESCRIBED", "ANY OTHER", "აღწერაში არ შეტანილ")
 PLACEHOLDER_ROWS = ("ANY OTHER ITEMS", "TENDER IS TO LIST", "OTHER COSTS IF NECESSARY")
 
 DECISIONS = [
