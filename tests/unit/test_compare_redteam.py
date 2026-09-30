@@ -326,3 +326,24 @@ def test_words_that_only_begin_like_a_unit_are_no_quantity() -> None:
     ):
         found = rules(run([line], [line.replace("5", "6")]))
         assert "CMP.QUANTITY" not in [r[0] for r in found], line
+
+
+# --- COMPARE-04: an act's "საფასური გადაიხდება ... N დღის ვადაში" is a payment term -------------
+
+
+def test_an_acts_payment_term_worded_with_gadaixdeba_is_a_payment_term() -> None:
+    act = edit(ACT, "5 (ხუთი) სამუშაო", "10 (ათი) სამუშაო")
+    assert rules(run(ACT, act)) == [("CMP.PAYMENT", "P5D working", "P10D working", "error")]
+
+
+def test_a_contract_and_its_act_that_disagree_on_the_payment_term_is_one_change() -> None:
+    act = edit(ACT, "5 (ხუთი) სამუშაო", "10 (ათი) სამუშაო")
+    report = run(CONTRACT, act)
+    payment = [
+        (f.expected, f.actual, f.severity) for f in report.findings if f.rule_id == "CMP.PAYMENT"
+    ]
+    assert payment == [("P5D working", "P10D working", "error")]
+    # nothing else restates it: no unclassified duration, no period in words added or removed
+    labels = ("Duration (unclassified)", "Period in words")
+    assert not [f for f in report.findings if f.message_en.startswith(labels)]
+    assert not [f for f in run(CONTRACT, ACT).findings if f.rule_id == "CMP.PAYMENT"]

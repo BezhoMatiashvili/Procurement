@@ -574,7 +574,7 @@ def _rule_hits(text: str) -> list[_Hit]:
         r = rules[i]
         end = _range_end(text, rules, i)
         if end is None:
-            ft = _total_if_said(text, r)
+            ft = _payment_if_said(text, r, _total_if_said(text, r))
             out.append(_Hit(ft, r.value, r.normalized, r.unit, r.currency, "rules"))
             i += 1
             continue
@@ -606,6 +606,28 @@ def _total_if_said(text: str, hit: RuleHit) -> FactType:
     if _TOTAL_WORDS.search(before) and not _UNIT_WORDS.search(before):
         return FactType.total_amount
     return hit.type
+
+
+#: A sentence about paying: "საფასური გადაიხდება", "ანგარიშსწორება მოხდება", "payable within".
+_PAYMENT_WORDS = re.compile(
+    r"გადაიხდ|გადახდ|ანგარიშსწორ|(?<![a-z])(?:paid|payable|payments?|pay)(?![a-z])", re.I
+)
+
+
+def _payment_if_said(text: str, hit: RuleHit, ft: FactType) -> FactType:
+    """A length of time the sentence it is in pays within, as a payment term.
+
+    The keyword nearest a duration types it, and "საფასური გადაიხდება აქტის გაფორმებიდან 7
+    სამუშაო დღის ვადაში" - the way an act says it - has none the rules know ("გადაიხდება" is
+    not "გადახდა"): the act's payment term was an unclassified duration, a change of it
+    "Duration (unclassified)", and against the contract a payment term "removed".
+    """
+    if ft is not FactType.duration:
+        return ft
+    starts = [m.end() for m in _CLAUSE_START.finditer(text, 0, hit.start)]
+    end = _CLAUSE_START.search(text, hit.end)
+    sentence = text[starts[-1] if starts else 0 : end.start() if end else len(text)]
+    return FactType.payment_terms if _PAYMENT_WORDS.search(sentence) else ft
 
 
 def _range_end(text: str, rules: list[RuleHit], i: int) -> tuple[int, FactType] | None:
