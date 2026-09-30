@@ -2952,15 +2952,47 @@ class AoaChecker:
                     span=(first, last),
                 )
                 return
+        # no one year is the mistake: the correction is the term itself, written the way the
+        # act writes its period, over the whole period as written (red team R3, AOA-R3-11)
+        written, fixed = self._period_as_term(period_hits, lo, hi)
         self._add(
             "AOA.PERIOD_IN_TERM",
             "error",
             f"შესრულების პერიოდი {min(period)}..{max(period)} სცდება {name_ka} {shown}",
             f"execution period {min(period)}..{max(period)} falls outside {name_en} {shown}",
-            expected=shown,
-            actual=f"{min(period)}..{max(period)}",
-            span=(outside[0].start, outside[0].end),
+            expected=fixed,
+            actual=written,
+            span=(first, last),
         )
+
+    def _period_as_term(
+        self, hits: list[tuple[date, RuleHit]], lo: date | None, hi: date | None
+    ) -> tuple[str, str]:
+        """The period as the act writes it, and the same text with its ends moved to the term's
+        ``lo`` and ``hi``, each end in its own date style - its case, its postposition
+        ("-დან"), its separators. An end the term leaves open stays as written. A month written
+        with no day ("2026 წლის ივნისის თვეში") has no day to move: the term is written out in
+        the act's long style instead ("2026 წლის 1 ივნისიდან 2027 წლის 31 მაისის ჩათვლით")."""
+        text = self.aoa.text
+        ordered = sorted((h for _, h in hits), key=lambda h: (h.start, h.end))
+        a, b = ordered[0], ordered[-1]
+        written = self.aoa.as_written(a.start, b.end)
+
+        def moved(d: date | None, h: RuleHit) -> str:
+            if d is None:
+                return self.aoa.as_written(h.start, h.end)
+            return render_date_like(d, h.raw_text, following=text[h.end : h.end + 40])
+
+        if (a.start, a.end) == (b.start, b.end):
+            words = re.findall(rf"[{GEORGIAN}]+", a.raw_text)
+            if any(w in MONTH_FORMS for w in words) and lo and hi:
+                # the month's genitive stem, "ივნის" of "ივნისის", carries both ends' forms
+                start = render_date_like(lo, f"{lo.year} წლის 1 მაისიდან")
+                end = render_date_like(hi, f"{hi.year} წლის 1 მაისის", following="ჩათვლით")
+                return written, f"{start} {end} ჩათვლით"
+            return written, f"{moved(lo, a)} - {moved(hi, a)}"
+        fixed = moved(lo, a) + self.aoa.as_written(a.end, b.start) + moved(hi, b)
+        return written, fixed
 
     def _period_year_repair(
         self, reading: _Period, window: tuple[date | None, date | None, str] | None

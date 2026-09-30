@@ -154,3 +154,45 @@ class TestSigningVerbSlip:
         ):
             report = _check(_UNLABELLED.replace(_SIGNED, words))
             assert report.summary.get("act_date") != "2026-04-30", words
+
+
+# --- AOA-R3-11: a period no single year puts inside the term ------------------------------------
+
+_PERIOD = "2026 წლის 1 აპრილიდან 2026 წლის 30 აპრილის ჩათვლით"
+
+
+class TestPeriodOutsideTheTerm:
+    """The contract's term is 2026-03-01..2026-09-01; each period starts before it, and no year
+    moved puts it inside."""
+
+    def _finding(self, period: str) -> Finding:
+        [finding] = _of(_check(ACT.replace(_PERIOD, period)), "AOA.PERIOD_IN_TERM")
+        return finding
+
+    def test_the_whole_period_is_quoted_and_the_term_written_in_its_style(self) -> None:
+        f = self._finding("2026 წლის 20 თებერვლიდან 2026 წლის 30 აპრილის ჩათვლით")
+        assert f.quote == "2026 წლის 20 თებერვლიდან 2026 წლის 30 აპრილის"
+        assert f.expected == "2026 წლის 1 მარტიდან 2026 წლის 1 სექტემბრის"
+        assert f.actual == f.quote
+
+    def test_a_numeric_period_is_corrected_in_figures(self) -> None:
+        f = self._finding("20.02.2026-დან 30.04.2026-ის ჩათვლით")
+        assert (f.quote, f.expected) == ("20.02.2026-დან 30.04.2026", "01.03.2026-დან 01.09.2026")
+
+    def test_a_month_with_no_day_gets_the_term_written_out(self) -> None:
+        f = self._finding("2026 წლის თებერვლის თვეში")
+        assert f.quote == "2026 წლის თებერვლის"
+        assert f.expected == "2026 წლის 1 მარტიდან 2026 წლის 1 სექტემბრის ჩათვლით"
+
+    def test_no_correction_is_iso(self) -> None:
+        for period in (
+            "2026 წლის 20 თებერვლიდან 2026 წლის 30 აპრილის ჩათვლით",
+            "20.02.2026-დან 30.04.2026-ის ჩათვლით",
+            "2026 წლის თებერვლის თვეში",
+        ):
+            assert ".." not in (self._finding(period).expected or "")
+
+    def test_a_year_typed_wrong_is_still_corrected_in_that_year(self) -> None:
+        """Near miss: when one year moved puts the period inside, that is the correction."""
+        f = self._finding("2025 წლის 1 აპრილიდან 2025 წლის 30 აპრილის ჩათვლით")
+        assert f.expected == "2026 წლის 1 აპრილიდან 2026 წლის 30 აპრილის"

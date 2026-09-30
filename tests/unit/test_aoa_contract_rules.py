@@ -209,11 +209,12 @@ class TestPeriodInTerm:
             period="2026 წლის 1 ოქტომბრიდან 2026 წლის 31 ოქტომბრის ჩათვლით",
         )
         finding = _only(_check(act), "AOA.PERIOD_IN_TERM")
+        # the period as written, and the term in the act's own date style (red team R3, AOA-R3-11)
         assert (finding.expected, finding.actual) == (
-            "2026-03-01..2026-09-01",
-            "2026-10-01..2026-10-31",
+            "2026 წლის 1 მარტიდან 2026 წლის 1 სექტემბრის",
+            "2026 წლის 1 ოქტომბრიდან 2026 წლის 31 ოქტომბრის",
         )
-        assert "the contract's performance period" in finding.message_en
+        assert "the contract's performance period 2026-03-01..2026-09-01" in finding.message_en
 
     def test_without_a_performance_window_a_validity_with_an_end_bounds_the_period(self) -> None:
         act = _act(
@@ -221,8 +222,8 @@ class TestPeriodInTerm:
             period="2027 წლის 1 იანვრიდან 2027 წლის 31 იანვრის ჩათვლით",
         )
         finding = _only(_check(act, CONTRACT.replace(_PERFORMANCE, "")), "AOA.PERIOD_IN_TERM")
-        assert finding.expected == "2026-03-01..2026-12-31"
-        assert "the contract term" in finding.message_en
+        assert finding.expected == "2026 წლის 1 მარტიდან 2026 წლის 31 დეკემბრის"
+        assert "the contract term 2026-03-01..2026-12-31" in finding.message_en
 
     @pytest.mark.parametrize(
         "clause",
@@ -239,7 +240,8 @@ class TestPeriodInTerm:
             "2026 წლის 1 დეკემბრიდან 2026 წლის 31 დეკემბრის ჩათვლით",
         ).replace("აქტი გაფორმდა 2026 წლის 30 აპრილი", "აქტი გაფორმდა 2026 წლის 31 დეკემბერი")
         finding = _only(_check(act, contract), "AOA.PERIOD_IN_TERM")
-        assert finding.expected == "2026-03-01..2026-09-01"
+        assert finding.expected == "2026 წლის 1 მარტიდან 2026 წლის 1 სექტემბრის"
+        assert "2026-03-01..2026-09-01" in finding.message_en
 
     @pytest.mark.parametrize(
         "tail",
