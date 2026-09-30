@@ -1169,12 +1169,18 @@ class AoaChecker:
         """The act's fee before tax, where the act breaks the tax out: an amount that with a tax
         amount the act states adds up to another fee the act states, or to a price the contract
         states - "დღგ-ს გარეშე 84.75 ლარს, დღგ - 15.25 ლარს, სულ დღგ-ს ჩათვლით 100 ლარს". It is
-        a part of the fee, not a second fee, and "დღგ-ს გარეშე" beside it says what it is."""
+        a part of the fee, not a second fee, and "დღგ-ს გარეშე" beside it says what it is.
+
+        With no tax amount stated, the fee before VAT is the figure an exclusion of VAT labels
+        ("… ლარს დღგ-ს ჩათვლით (დღგ-ს გარეშე 2 500 ლარი)") that is another fee the act states
+        less VAT at its rate (``_vat_rates``). The fee incl. VAT must be in the act: a figure
+        before VAT that only the contract's price makes whole is the act stating its fee before
+        VAT, and that is still compared. A VAT amount the act does state decides alone."""
         amounts = self.aoa.amounts()
         taxes = [r.money for r in amounts if r.role == "tax"]
-        if not taxes:
-            return []
         fees = [r for r in amounts if r.role in (None, "price")]
+        if not taxes:
+            return self._nets_at_vat_rate(fees)
         gross = [r.money for r in fees] + self._contract_prices()
         return [
             r
@@ -1187,6 +1193,40 @@ class AoaChecker:
                 for g in gross
             )
         ]
+
+    def _nets_at_vat_rate(self, fees: list[RoledAmount]) -> list[RoledAmount]:
+        """The fees an exclusion of VAT labels that another act fee, in the same currency, is
+        with VAT added (``_net_parts``)."""
+        labels = [
+            p for p in tax_phrases(self.aoa.text) if p.kind == "exclusion" and "vat" in p.names
+        ]
+        if not labels:
+            return []
+        rates = self._vat_rates()
+        return [
+            r
+            for r in fees
+            if any(self._labels_amount(p, r) for p in labels)
+            and any(
+                g is not r
+                and g.money.currency == r.money.currency
+                and any(_plus_vat(r.money.value, g.money.value, rate) for rate in rates)
+                for g in fees
+            )
+        ]
+
+    def _vat_rates(self) -> list[float]:
+        """The VAT rates a fee may be restated at: Georgia's 18%, and any rate the act or the
+        contract writes beside VAT ("დღგ 18%", "20% VAT")."""
+        rates = [_VAT_RATE_DEFAULT]
+        for doc in (self.aoa, self.contract):
+            if doc is None:
+                continue
+            for m in _VAT_RATE.finditer(doc.text):
+                rate = float((m.group(1) or m.group(2)).replace(",", ".")) / 100
+                if 0 < rate < 1 and rate not in rates:
+                    rates.append(rate)
+        return rates
 
     def rule_required_fields(self) -> None:
         """Client rule 3: the act must name the project and the cadastral code."""
@@ -1485,22 +1525,21 @@ class AoaChecker:
         )
 
     def _qualifies_net(self, phrase: TaxPhrase, nets: list[RoledAmount]) -> bool:
-        """Whether an exclusion ("დღგ-ს გარეშე", "excl. VAT") is the label of a fee before tax:
-        in its sentence, before the figure with no other amount between, or right after it."""
-        if phrase.kind != "exclusion":
-            return False
-        starts = [r.money.span[0] for r in self.aoa.amounts()]
+        """Whether an exclusion ("დღგ-ს გარეშე", "excl. VAT") is the label of a fee before tax."""
+        return phrase.kind == "exclusion" and any(self._labels_amount(phrase, r) for r in nets)
+
+    def _labels_amount(self, phrase: TaxPhrase, r: RoledAmount) -> bool:
+        """Whether ``phrase`` is the label of the amount ``r``: in its sentence, before the
+        figure with no other amount between, or right after it."""
+        starts = [x.money.span[0] for x in self.aoa.amounts()]
         a, b = phrase.span
-        for r in nets:
-            start, end = r.money.span
-            lo, hi = (b, start) if b <= start else (end, a)
-            if any(lo <= x < hi for x in starts):
-                continue  # another amount stands between: the phrase is that one's
-            if b <= start and self._sentence_of(start)[0] <= a:
-                return True
-            if a >= end and a - end <= _NET_LABEL_REACH:
-                return True
-        return False
+        start, end = r.money.span
+        lo, hi = (b, start) if b <= start else (end, a)
+        if any(lo <= x < hi for x in starts):
+            return False  # another amount stands between: the phrase is that one's
+        if b <= start and self._sentence_of(start)[0] <= a:
+            return True
+        return a >= end and a - end <= _NET_LABEL_REACH
 
     def _fee_amounts(self) -> list[Money]:
         """The act's fee as written: the amounts called a price, or failing those, the ones
@@ -3430,6 +3469,24 @@ def _term_window(term: ContractTerm) -> tuple[date | None, date | None, str] | N
 def _states(amounts: list[Money], m: Money) -> bool:
     """Whether ``amounts`` holds ``m``: the same figure in the same currency."""
     return any(a.currency == m.currency and amounts_equal(a.value, m.value) for a in amounts)
+
+
+#: Georgia's VAT rate, which a fee before VAT is restated at unless the documents name another.
+_VAT_RATE_DEFAULT = 0.18
+#: A VAT rate written beside VAT: "დღგ 18%", "დღგ-ს (18%)", "18% დღგ", "VAT 20%".
+_VAT_RATE = re.compile(
+    r"(?:დ\.?ღ\.?გ\.?|(?<![a-z])vat)(?:-?ი?ს)?\s*\(?\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*%"
+    r"|(\d{1,2}(?:[.,]\d{1,2})?)\s*%\s*(?:დ\.?ღ\.?გ|vat(?![a-z]))",
+    re.IGNORECASE,
+)
+
+
+def _plus_vat(net: float, gross: float, rate: float) -> bool:
+    """Whether ``gross`` is ``net`` with VAT at ``rate`` added, to the tetri, rounded either way
+    (the act may have worked out either figure from the other)."""
+    return amounts_equal(round(net * (1 + rate), 2), gross) or amounts_equal(
+        round(gross / (1 + rate), 2), net
+    )
 
 
 def _fee_parts_add_up(parts: list[RoledAmount], fees: list[Money], prices: list[Money]) -> bool:
