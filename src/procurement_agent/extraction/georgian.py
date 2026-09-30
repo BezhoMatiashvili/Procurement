@@ -385,6 +385,9 @@ _PARTICLES = ("", "ვე", "ც")
 
 
 def _month_forms(nominative: str, oblique: str) -> dict[str, Case]:
+    """Every correct form of one month and its case. The vowel stem's genitive and dative are
+    one word ("აგვისტოს"): it is listed as the genitive here, and ``_MONTH_DATIVE`` lists it
+    again as the dative."""
     if nominative.endswith("ო"):  # the one vowel stem, აგვისტო
         base: dict[str, Case] = {nominative: "nom"}
         base.update({nominative + e: c for c, e in _VOWEL_CASES.items() if c != "dat"})
@@ -417,6 +420,18 @@ MONTH_FORMS: dict[str, tuple[int, Case]] = {
     for form, case in _month_forms(nom, obl).items()
 }
 _MONTH_NOMINATIVE = {month: nom for month, nom, _ in _MONTHS}
+#: The dative of a vowel-stem month: the genitive's word ("2026 წლის 31 აგვისტოს" is the day an
+#: act was signed as often as the day a period ends "31 აგვისტოს ჩათვლით").
+_MONTH_DATIVE = {month: nom + _VOWEL_CASES["dat"] for month, nom, _ in _MONTHS if nom.endswith("ო")}
+#: The plain form of each month in each case (no particle, the short genitive).
+_MONTH_FORM_OF: dict[tuple[int, Case], str] = {
+    **{
+        (m, c): form
+        for form, (m, c) in reversed(MONTH_FORMS.items())
+        if not form.endswith(("ვე", "ც", "ისა"))
+    },
+    **{(m, "dat"): form for m, form in _MONTH_DATIVE.items()},
+}
 #: How far a word may be from a month form and still be that month misspelled. Two edits cover
 #: a typo in the stem plus one in the ending ("აგვუისტას" for "აგვისტოს").
 _MONTH_TYPO_DISTANCE = 2
@@ -427,10 +442,30 @@ _NOT_MONTHS = frozenset({"მარტო", "მარტოდ", "მარტ�
 
 def month_form(month: int, case: Case) -> str:
     """The plain form of ``month`` in ``case`` (no particle, the short genitive)."""
-    for form, (m, c) in MONTH_FORMS.items():
-        if m == month and c == case and not form.endswith(("ვე", "ც", "ისა")):
-            return form
-    return _MONTH_NOMINATIVE[month]
+    return _MONTH_FORM_OF.get((month, case), _MONTH_NOMINATIVE[month])
+
+
+#: Words after a day and month that take its genitive: a postposition ("31 აგვისტოს ჩათვლით",
+#: "... შემდეგ", "... მდგომარეობით") or a noun the date qualifies ("31 აგვისტოს აქტი", "...
+#: ხელშეკრულება", "... თარიღით").
+_GENITIVE_BEFORE_WORD = re.compile(
+    r"^(?:ჩათვლით|შემდეგ|მდგომარეობ|თარიღ|აქტ|ხელშეკრულებ|წერილ|ოქმ|ანგარიშ|ინვოის|"
+    r"ბრძანებ|გადაწყვეტილებ|№|N(?![ა-ჰ]))"
+)
+
+
+def month_case(word: str, *, following: str = "") -> Case:
+    """The case a correct month form is written in. The vowel stem's "აგვისტოს" is the
+    genitive or the dative, and ``following``, the text after the date, tells which: a
+    postposition or a noun the date qualifies asks for the genitive; otherwise - a verb, the end
+    of the sentence - the day is the dative ("აქტი გაფორმდა 2026 წლის 31 აგვისტოს")."""
+    low = word.lower()
+    _, case = MONTH_FORMS.get(low, (0, "nom"))
+    plain = next((low[: -len(p)] for p in _PARTICLES if p and low.endswith(p)), low)
+    ambiguous = case == "gen" and plain in _MONTH_DATIVE.values()
+    if ambiguous and not _GENITIVE_BEFORE_WORD.match(following.lstrip(" \t\n,")):
+        return "dat"
+    return case
 
 
 @dataclass(frozen=True, slots=True)
@@ -525,17 +560,34 @@ def damerau(a: str, b: str, *, cap: int = 3) -> int:
 
 _STYLE_NUMERIC = re.compile(r"^\s*(\d{1,2})([./-])(\d{1,2})\2(\d{4})")
 _STYLE_ISO = re.compile(r"^\s*\d{4}-\d{2}-\d{2}")
-_STYLE_YMD = re.compile(rf"^\s*(\d{{4}})(\s*(?:წლის|წ\.)\s*)(\d{{1,2}})(\s*)([{GEORGIAN}]+)")
+#: A day as a Georgian date writes it: "30", "05", in quotes ("„30“"), or as an ordinal ("1-ლი").
+_STYLE_DAY = r"(?P<open>„|,,|\"|“|«)?(?P<day>\d{1,2})(?P<close>“|”|\"|''|»)?(?:\s*-\s*(?:ლი|ე))?"
+_STYLE_YMD = re.compile(
+    rf"^\s*(?P<year>\d{{4}})(?P<sep>\s*(?:წლის|წ\.)\s*){_STYLE_DAY}(?P<gap>\s*)"
+    rf"(?P<month>[{GEORGIAN}]+)"
+)
 _STYLE_DMY = re.compile(
-    rf"^\s*(\d{{1,2}})(\s*)([{GEORGIAN}]+)(,?\s*)(\d{{4}})(\s*(?:წელი|წლის|წ\.)?)"
+    rf"^\s*{_STYLE_DAY}(?P<gap>\s*)(?P<month>[{GEORGIAN}]+)(?P<sep>,?\s*)(?P<year>\d{{4}})"
+    r"(?P<tail>\s*(?:წელი|წლის|წ\.)?)"
 )
 
 
-def render_date_like(d: date, example: str) -> str:
+def _styled_day(d: date, m: re.Match[str]) -> str:
+    """The day as the example writes its own: zero-padded when that one is ("05"), in the same
+    quotes when it is quoted ("„05“")."""
+    day = f"{d.day:02d}" if m.group("day").startswith("0") else str(d.day)
+    if m.group("open") and m.group("close"):
+        return f"{m.group('open')}{day}{m.group('close')}"
+    return day
+
+
+def render_date_like(d: date, example: str, *, following: str = "") -> str:
     """``d`` written the way ``example`` writes a date, keeping its month's case.
 
     "2026 წლის 5 სექტემბერი" as the example gives "2026 წლის 31 აგვისტო"; "05.09.2026" gives
-    "31.08.2026". An example in no recognised style yields the ISO date.
+    "31.08.2026"; "„05“ ივლისი, 2026 წ." gives "„30“ ივნისი, 2026 წ.". ``following`` is the word
+    after the example in its document: it tells the case of a month form that can be either of
+    two (``month_case``). An example in no recognised style yields the ISO date.
     """
     ex = normalize_spaces(example)
     if m := _STYLE_NUMERIC.match(ex):
@@ -545,11 +597,13 @@ def render_date_like(d: date, example: str) -> str:
     if _STYLE_ISO.match(ex):
         return d.isoformat()
     if m := _STYLE_YMD.match(ex):
-        case = MONTH_FORMS.get(m.group(5).lower(), (0, "nom"))[1]
-        return f"{d.year}{m.group(2)}{d.day}{m.group(4)}{month_form(d.month, case)}"
+        written = month_form(d.month, month_case(m.group("month"), following=following))
+        return f"{d.year}{m.group('sep')}{_styled_day(d, m)}{m.group('gap')}{written}"
     if m := _STYLE_DMY.match(ex):
-        case = MONTH_FORMS.get(m.group(3).lower(), (0, "nom"))[1]
-        return f"{d.day}{m.group(2)}{month_form(d.month, case)}{m.group(4)}{d.year}{m.group(6)}"
+        written = month_form(d.month, month_case(m.group("month"), following=following))
+        return (
+            f"{_styled_day(d, m)}{m.group('gap')}{written}{m.group('sep')}{d.year}{m.group('tail')}"
+        )
     return d.isoformat()
 
 

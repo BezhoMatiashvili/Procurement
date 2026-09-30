@@ -20,7 +20,7 @@ from typing import Literal
 
 from procurement_agent.checks.amounts import Money, money_hits
 from procurement_agent.checks.compare_llm import _NEGATIONS
-from procurement_agent.extraction.anchors import first_party_start
+from procurement_agent.extraction.anchors import preamble_end
 from procurement_agent.extraction.rules import (
     KEYWORDS,
     RuleHit,
@@ -580,13 +580,14 @@ def _merge(ranges: list[TermRange]) -> TermRange | None:
 
 
 def _signing_date(text: str, hits: list[RuleHit]) -> date | None:
-    """The date the preamble states: the first one, if it comes before the first party.
+    """The date the preamble states: the first one, if it comes before the first party or the
+    first numbered clause (``anchors.preamble_end``).
 
     The fact classifier cannot tell it: with no keyword near it, ``rules._classify`` calls the
     preamble's date an execution period. Its place is what marks it. None when no date comes
     before the parties - never a guess, because a wrong signing date calls a correct act early.
     """
-    end = first_party_start(text)
+    end = preamble_end(text)
     if end is None or not hits or hits[0].end > end:
         return None
     return _date_of(hits[0])

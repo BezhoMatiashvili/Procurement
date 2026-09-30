@@ -1106,7 +1106,9 @@ class AoaChecker:
             f"act dated {act_date} but the service period ends {end}; it should be dated "
             f"the last day of the month the period ends in ({expected})",
             # written the way the act writes its date: "2026 წლის 31 აგვისტო", not ISO
-            expected=render_date_like(expected, act_hit.raw_text),
+            expected=render_date_like(
+                expected, act_hit.raw_text, following=self.aoa.text[act_hit.end : act_hit.end + 40]
+            ),
             actual=act_hit.raw_text,
             span=(act_hit.start, act_hit.end),
         )

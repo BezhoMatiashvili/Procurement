@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 from procurement_agent.extraction import weights
-from procurement_agent.extraction.anchors import AnchorHit
+from procurement_agent.extraction.anchors import AnchorHit, preamble_end
 from procurement_agent.extraction.georgian import lemma
 from procurement_agent.extraction.labels import LABELS
 from procurement_agent.extraction.normalize import names_match, normalize_name
@@ -117,15 +117,29 @@ def _add_note(fact: ExtractedFact, note: str) -> None:
         fact.note = f"{fact.note}; {note}"
 
 
+def _header_end(chunks: list[Chunk]) -> int:
+    """Where the document header ends in the first chunk: at the first party or the first
+    numbered clause (``anchors.preamble_end``). A short contract is one chunk, and the dates of
+    its clauses are no header's. A first chunk that names neither is all header when the
+    document goes on past it, and none when it is the whole document."""
+    if not chunks:
+        return 0
+    end = preamble_end(chunks[0].text)
+    if end is not None:
+        return end
+    return len(chunks[0].text) if len(chunks) > 1 else 0
+
+
 def rule_hits_to_facts(hits: dict[str, list[RuleHit]], chunks: list[Chunk]) -> list[ExtractedFact]:
     by_id = {c.id: c for c in chunks}
     header_id = chunks[0].id if chunks else None
+    header_end = _header_end(chunks)
     facts: list[ExtractedFact] = []
     for cid, hs in hits.items():
         chunk = by_id[cid]
         for h in hs:
             ftype, conf, note = h.type, h.confidence, h.note
-            if ftype == FactType.date and cid == header_id:
+            if ftype == FactType.date and cid == header_id and h.end <= header_end:
                 # An unlabeled date in the document header is almost always the document date
                 # ("ქ. თბილისი, 2026 წლის 15 მარტი"); keep it, but say so.
                 ftype, conf, note = (

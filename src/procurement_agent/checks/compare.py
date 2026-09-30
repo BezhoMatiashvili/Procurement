@@ -807,6 +807,9 @@ def deltas_between(
 _WHOLE_DOCUMENT_TYPES = frozenset(
     {FactType.execution_period, FactType.validity_period, FactType.penalty}
 )
+#: A document's own dates, known by where they stand rather than by a word beside them: the
+#: contract's in its preamble ("ქ. თბილისი, 2026 წლის 12 თებერვალი"), the act's where it is signed.
+_DOCUMENT_DATES = frozenset({FactType.contract_date, FactType.act_date})
 
 
 def document_deltas(left_text: str, right_text: str) -> tuple[list[ValueDelta], list[SkipNote]]:
@@ -834,14 +837,23 @@ def document_deltas(left_text: str, right_text: str) -> tuple[list[ValueDelta], 
             f"failed ({type(e).__name__}); they were compared line by line",
         )
         return _deltas(left_hits, right_hits, types=FIELD_TYPES), [note]
-    return (
-        _deltas(
-            _in_place_of(left_hits, left_facts),
-            _in_place_of(right_hits, right_facts),
-            types=FIELD_TYPES,
-        ),
-        [],
-    )
+    whole = [
+        _in_place_of(hits, [f for f in facts if f.type in _WHOLE_DOCUMENT_TYPES])
+        for hits, facts in ((left_hits, left_facts), (right_hits, right_facts))
+    ]
+    return _deltas(*whole, types=FIELD_TYPES) + _dates_changed(left_facts, right_facts), []
+
+
+def _dates_changed(left: list[_Hit], right: list[_Hit]) -> list[ValueDelta]:
+    """A document's own date changed between the versions: one each side, and different. The
+    line it stands on may name it by no word ("Date (unclassified)"); this names it."""
+    out: list[ValueDelta] = []
+    for ft in sorted(_DOCUMENT_DATES, key=lambda t: t.value):
+        ls = [h for h in left if h.type is ft]
+        rs = [h for h in right if h.type is ft]
+        if len(ls) == 1 and len(rs) == 1 and (d := _delta(ls[0], rs[0])) is not None:
+            out.append(d)
+    return out
 
 
 def _document_facts(text: str) -> list[_Hit]:
@@ -855,7 +867,7 @@ def _document_facts(text: str) -> list[_Hit]:
     return [
         _Hit(f.type, f.normalized, f.normalized, None, None, "document")
         for f in document_facts(text)
-        if f.type in _WHOLE_DOCUMENT_TYPES
+        if f.type in _WHOLE_DOCUMENT_TYPES | _DOCUMENT_DATES
     ]
 
 
@@ -2621,6 +2633,19 @@ def _role_delta(roles: list[_Reassigned]) -> ValueDelta:
     )
 
 
+def _named_dates(hunks: list[Hunk], field_deltas: list[ValueDelta]) -> list[Hunk]:
+    """A line's date that no word names, which the document-wide reading knows as the
+    contract's or the act's own ("ქ. თბილისი, 2026 წლის 12 თებერვალი"), carries that name."""
+    named = {dedup_key(d): d for d in field_deltas if d.type in _DOCUMENT_DATES}
+    if not named:
+        return hunks
+    out: list[Hunk] = []
+    for h in hunks:
+        deltas = [named.get(dedup_key(d), d) if d.type is FactType.date else d for d in h.deltas]
+        out.append(h.model_copy(update={"deltas": deltas}) if deltas != h.deltas else h)
+    return out
+
+
 def _carry_role_change(
     hunks: list[Hunk], counts: Counts, change: ValueDelta, roles: list[_Reassigned]
 ) -> list[Hunk]:
@@ -2863,6 +2888,7 @@ def compare(
     else:
         field_deltas, notes = document_deltas(left_text, right_text)
         skipped.extend(notes)
+        hunks = _named_dates(hunks, field_deltas)
         roles = _sides_reassigned(left_text, right_text)
         if roles:
             change = _role_delta(roles)
