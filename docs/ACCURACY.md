@@ -229,6 +229,59 @@ keeps its signatory. A two-column signature table that Docling serialises row by
 ("<left cell>, <column header> = <right cell>") gives each column's director to that column's
 party.
 
+### Parties and requisites: one reader per fact, a table read by its columns
+
+The red team's second round (AOA-R2-01 to -04 and -06, EXTRACTION-R2-11; tests in
+`tests/unit/test_redteam_r2_parties.py`) found the parties' readers disagreeing, each fix below
+one rule in one place:
+
+* **One label pattern for an identification code.** The party reader knew `ს/კ` and
+  `საიდენტიფიკაციო კოდი`; the rules and the act check also knew `ს.კ.` and `ID`. A slip behind
+  `ს.კ.` in the act was missed, and the same label in the contract put an error on a correct
+  act, corrected to the customer's code. `normalize.ID_CODE_RE` is now the only pattern, read
+  by all three, and knows `ს/ნ`, `საიდ. კოდი`, `საიდენტიფიკაციო კოდით`, `ს/კ N`. An English
+  `ID` needs a word boundary (`PAID 204…` is no label; the act check's own copy read it). The
+  act check takes every code the contract writes behind a label, and the act's too when its
+  party reader found fewer parties with codes than the contract has. A code for a party whose
+  code the contract does not state is a skip note, never corrected to the other party's. An
+  act not in Georgian stays a skip note even where an English label gives a code (round 1's
+  decision).
+* **An account ends at its country's length, a currency code after it included.** Georgian
+  banks print the sub-account's currency after the IBAN (`GE…17GEL`); it read as a 25-character
+  account, an error on a correct act either way. The anchors and the rules now stop at 22 and
+  leave a known ISO 4217 code out; the finding still quotes the account as printed. Two
+  documents naming different sub-accounts of one account is an `AOA.BANK` warning: before, it
+  was an error only by accident.
+* **A company with its legal form after its name** (`„ნიმუში“ შპს`) is a party. A name without
+  quotes is still not read (nothing marks where it ends). Its neighbour's window then holds its
+  requisites and its signatory: the signatory, right or with a slip, nearer to that unread
+  party's than to the neighbour's, is a skip note, never an error corrected to the neighbour's
+  director.
+* **A head under another title.** A public body's chairman, a university's rector, a head, a
+  president, a managing partner: `anchors._DIRECTOR` reads them as it reads a director.
+  `ხელმძღვანელი` and `მმართველი` are also adjectives, so a name after them is taken only where
+  its place says so, and a vowel stem's genitive (`ორგანოს`) is no first name. A deputy or an
+  acting head is read apart (`Party.deputies`) and compared only with a deputy the contract
+  names; one the contract does not name is a skip note, since signing in the head's place can
+  be right.
+* **A table with a party per column is written column by column.** Docling writes a table row
+  by row, `<left cell>, <column header> = <right cell>`, so in a requisites grid every requisite
+  of the customer's stood right after the contractor's name: the customer's code was read as
+  the contractor's (`AOA.ID_CODE_PARTY` on a correct act) and a slip in the grid was missed.
+  Round 1 gave each column's director to its party; the chunker now fixes the text at its
+  source (`chunker.PartyColumnsTableSerializer`): a table whose one row holds two sides or two
+  party names in different columns is written column by column, each cell ended with `;` (a
+  line break alone is lost when the act check flattens the text, and the readers end an
+  address and a name at `;`), with a row-label column written as each cell's label. A role and
+  a name in one row are one party, so a table with a party per row keeps the triplets. An
+  address also ends at a triplet's cell boundary, for a table still written row by row.
+
+**Not measured.** A Word comment's places are counted in the file's reading order, row by row;
+the text now reads a party grid column by column. A name written in both columns on different
+rows is counted in another order, so a finding that marks only some of its places (a director
+copied from the other party, AOA-09) could mark the other one. No client act has shown it; the
+strict evaluation's occurrence counts are unchanged.
+
 ### A date's place says whose it is, its form says what it is
 
 The red team's second round found a family of date failures with one root each, all fixed by

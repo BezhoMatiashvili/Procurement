@@ -86,6 +86,31 @@ How the rules read what the canonical forms need (red-team round 1):
 * **Contract numbers.** A slash with a space either side is part of the reference
   (`N 15 / 2026` -> `15/2026`); a bare space ends it.
 
+How the parties and their requisites are read (red-team round 2):
+
+* **Identification codes.** One label pattern serves every reader (`normalize.ID_LABEL`): `ს/კ`,
+  `ს.კ.`, `ს.კ`, `ს/ნ`, `პ/ნ`, `საიდენტიფიკაციო` alone or with `კოდი`/`ნომერი`/`№` in any case
+  (`კოდით`, `ნომრის`), `საიდ. კოდი`, `საიდ. №`, `პირადი ნომერი`, English `ID`, `ID code`,
+  `identification number`, `tax ID`, with an optional `N`/`№`/`#`, colon or dash before the
+  digits. An abbreviation is a word of its own (`ბს/კ` is none) and `საიდან` is no label.
+* **Accounts.** A currency code written straight after an account (`GE…17GEL`, `GE…17 USD`) is
+  a sub-account's, no part of the IBAN: the account is its first 22 characters. Letters that
+  are no currency code (`…17GELA`) or a digit too many stay part of it.
+* **Party names.** A company is also named with its legal form after the quoted name
+  (`„ნიმუში“ შპს` is `შპს ნიმუში`). A name with no quotes at all is not read: nothing marks
+  where it ends.
+* **Signatories.** A party's head signs as `დირექტორი` (also `გენერალური`/`აღმასრულებელი`),
+  `თავმჯდომარე`, `ხელმძღვანელი`, `რექტორი`, `პრეზიდენტი` or `მმართველი`, in any case;
+  `პრორექტორი`, `ვიცე-პრეზიდენტი` and a title after another body's genitive (`პროექტის
+  ხელმძღვანელი`) are not the party's head. `ხელმძღვანელი` and `მმართველი` are adjectives too
+  (`ხელმძღვანელი პირი`, `მმართველი ორგანო`): a name after them needs its place (a colon,
+  `სახით`, the end of its line) or a second mention. A deputy or an acting head (`დირექტორის
+  მოადგილე`, `… მოვალეობის შემსრულებელი`) is not `party_director`.
+* **Requisites tables.** A table with one party per column - two sides or two party names side
+  by side in one row - is read column by column, each cell its party's; a first column of row
+  labels (`ს/კ`, `მისამართი`) labels each cell. An address ends at its cell, also where Docling
+  writes a row as `<left cell>, <column header> = <right cell>`.
+
 `vat_status` meanings: `incl` = the price includes VAT/taxes; `excl` = VAT is added on top;
 `none` = no VAT applies / exempt; `net` = a net amount, taxes withheld or not mentioned by rule
 (natural person, foreign organisation).
@@ -153,7 +178,16 @@ strict_findings: true             # anything else reported (any severity) is a f
     a value near none is corrected to the contractor's own, or to the only contract value; no
     correction when that still leaves a choice. A BIC and its `XXX` branch form are one code;
   * an act not written in Georgian: what the rules read off Georgian wording (the parties'
-    codes, the project, the period) is a skip note saying so, never a finding.
+    codes, the project, the period) is a skip note saying so, never a finding - an English
+    label's code included;
+  * a code the act gives a party whose code the contract does not state is a skip note, never
+    corrected to the other party's code; a signatory nearest to the one the contract names for
+    a party the act does not name in a readable form (no quotes) is a skip note, never
+    corrected to the neighbour's; a deputy or an acting head is compared only with a deputy the
+    contract names, and otherwise leaves a skip note;
+  * one account whose currency sub-account the two documents name differently (`…17GEL`
+    against `…17USD`) → `AOA.BANK`, a warning, text = the act's currency code, correction = the
+    contract's; the account written with a sub-account in one document only is the same account.
 * The legacy `expected_findings:` / `forbidden_findings:` (rule ids only, `"*"` = must be
   completely clean) keep working and are checked as well.
 
