@@ -264,6 +264,36 @@ def _two_readings(v: object) -> tuple[float, float] | None:
     return float(decimal), float(decimal.replace(".", ""))
 
 
+#: Text that reads one way as a number (GOLD_SPEC 5): plain digits with at most one separator,
+#: a decimal one ("12.5", "1234,5", "0.125"); or digits in groups of three under one grouping
+#: character - a space, "," or "." - and at most one decimal separator, the other character,
+#: at the end ("1,250.50", "1.250,50", "1 250"). Anything else reads no clear way and stays
+#: text: a separator left trailing or doubled ("1450.00.", "7.5,"), groups that are not threes
+#: ("14.50.0", "12,34,567"), two grouping characters mixed ("1,250.000.5"), and three decimals
+#: after the groups ("1 250.000": one more group, or three decimals?).
+_ONE_WAY_NUMBER = re.compile(
+    r"(?P<sign>[+-]?)(?:(?P<int>\d+)(?:[.,](?P<frac>\d+))?|"
+    r"(?P<groups>\d{1,3}(?P<g>[ ,.])\d{3}(?:(?P=g)\d{3})*)"
+    r"(?:(?!(?P=g))[.,](?P<gfrac>\d{1,2}|\d{4,}))?)"
+)
+
+
+def _one_way_number(text: str) -> float | None:
+    """The number text reads as when it reads one way (``_ONE_WAY_NUMBER``), else None.
+
+    Read here rather than by ``parse_number``, which strips every separator it cannot place: a
+    rate typed "1450.00." was read as 145,000 and evaluated so, and "1234.567" as 1,234,567."""
+    m = _ONE_WAY_NUMBER.fullmatch(normalize_spaces(text).strip())
+    if m is None:
+        return None
+    if m.group("int") is not None:
+        integer, frac = m.group("int"), m.group("frac")
+    else:
+        integer, frac = m.group("groups").replace(m.group("g"), ""), m.group("gfrac")
+    out = float(f"{integer}.{frac}" if frac else integer)
+    return -out if m.group("sign") == "-" else out
+
+
 def _num(v: object) -> float | None:
     if v is None or v == "" or isinstance(v, bool):  # TRUE in a quantity cell is not 1
         return None
@@ -273,7 +303,7 @@ def _num(v: object) -> float | None:
         # "1.250" is 1.25 or 1,250: never guessed. Only the row it stands in can tell
         # (``_resolve_two_way``); read as thousands, 1.25 t of rebar priced as 1,250 t.
         return None
-    return parse_number(str(v))
+    return _one_way_number(str(v))
 
 
 #: (product, factor, factor): the number cells of a line that compute one another
