@@ -2376,6 +2376,15 @@ def _align_with_rows(left: list[Segment], right: list[Segment]) -> tuple[list[_P
         for u in ru[j1:j2]
         for s in u
     }
+    moved = _moved_rows(lu, ru, lk, rk, ops)
+    moved_to = {j: i for i, j in moved.items()}
+
+    def from_row(i: int) -> list[_Pair]:
+        return [(c, None, _moved_group(lu[i], ordinals)) for c in lu[i]]
+
+    def to_row(j: int) -> list[_Pair]:
+        return [(None, c, _moved_group(lu[moved_to[j]], ordinals)) for c in ru[j]]
+
     pairs: list[_Pair] = []
     for tag, i1, i2, j1, j2 in ops:
         if tag == "equal":
@@ -2383,41 +2392,107 @@ def _align_with_rows(left: list[Segment], right: list[Segment]) -> tuple[list[_P
                 pairs.extend(_pair_rows(a, b, ordinals))
             continue
         if tag == "delete":
-            pairs.extend(p for u in lu[i1:i2] for p in _one_side(u, left=True))
+            for i in range(i1, i2):
+                pairs.extend(from_row(i) if i in moved else _one_side(lu[i], left=True))
             continue
         if tag == "insert":
-            pairs.extend(p for u in ru[j1:j2] for p in _one_side(u, left=False))
+            for j in range(j1, j2):
+                pairs.extend(to_row(j) if j in moved_to else _one_side(ru[j], left=False))
             continue
-        la, rb = lu[i1:i2], ru[j1:j2]
-        if (
-            len(la) == len(rb)
-            and all(
-                (x[0].table_row is None) == (y[0].table_row is None)
-                for x, y in zip(la, rb, strict=True)
-            )
-            and all(x[0].table_row is not None for x in la)
-        ):
-            # the same rows with a word changed in each: still the rows they were
-            for a, b in zip(la, rb, strict=True):
-                pairs.extend(_pair_rows(a, b, ordinals))
-            continue
-        ls = [s for u in la for s in u]
-        rs = [s for u in rb for s in u]
-        if len(ls) + len(rs) > 2 and _laid_out_anew(ls, rs):
-            group = f"{_LAYOUT}{ls[0].index}"
-            pairs.extend(
-                (ls[k] if k < len(ls) else None, rs[k] if k < len(rs) else None, group)
-                for k in range(max(len(ls), len(rs)))
-            )
-        else:
-            pairs.extend(_pair_replace_with_moves(ls, rs, unmatched_left, unmatched_right))
+        # a row that moved is taken out first, as ``_pair_replace_with_moves`` takes a line out
+        for i in range(i1, i2):
+            if i in moved:
+                pairs.extend(from_row(i))
+        la = [lu[i] for i in range(i1, i2) if i not in moved]
+        rb = [ru[j] for j in range(j1, j2) if j not in moved_to]
+        pairs.extend(_replaced_rows(la, rb, ordinals, unmatched_left, unmatched_right))
+        pairs.extend(p for j in range(j1, j2) if j in moved_to for p in to_row(j))
     total = len(left) + len(right)
     same = sum(
         1
         for a, b, group in pairs
         if a is not None and b is not None and group is None and key_of(a.text) == key_of(b.text)
     )
+    # a row that only moved is the same text in both documents, cell for cell
+    same += sum(
+        1
+        for i, j in moved.items()
+        for a, b in zip(lu[i], ru[j], strict=False)
+        if key_of(a.text) == key_of(b.text)
+    )
     return pairs, _similarity_of([("equal", 0, same, 0, same)], pairs, total)
+
+
+def _replaced_rows(
+    la: list[_Unit],
+    rb: list[_Unit],
+    ordinals: set[tuple[int | None, int | None]],
+    unmatched_left: set[str],
+    unmatched_right: set[str],
+) -> list[_Pair]:
+    """The pairs of a block of units one document replaced with another's."""
+    if not la or not rb:
+        return [
+            *(p for u in la for p in _one_side(u, left=True)),
+            *(p for u in rb for p in _one_side(u, left=False)),
+        ]
+    if (
+        len(la) == len(rb)
+        and all(
+            (x[0].table_row is None) == (y[0].table_row is None)
+            for x, y in zip(la, rb, strict=True)
+        )
+        and all(x[0].table_row is not None for x in la)
+    ):
+        # the same rows with a word changed in each: still the rows they were
+        return [p for a, b in zip(la, rb, strict=True) for p in _pair_rows(a, b, ordinals)]
+    ls = [s for u in la for s in u]
+    rs = [s for u in rb for s in u]
+    if len(ls) + len(rs) > 2 and _laid_out_anew(ls, rs):
+        group = f"{_LAYOUT}{ls[0].index}"
+        return [
+            (ls[k] if k < len(ls) else None, rs[k] if k < len(rs) else None, group)
+            for k in range(max(len(ls), len(rs)))
+        ]
+    return _pair_replace_with_moves(ls, rs, unmatched_left, unmatched_right)
+
+
+#: The group of a table row that moved: its cells where it stood, then where it stands now.
+_MOVED_ROW = "moved-row:"
+
+
+def _moved_group(unit: _Unit, ordinals: set[tuple[int | None, int | None]]) -> str:
+    """The group both places of a moved row carry: the row, and which of its columns number
+    the table's rows (a row number that moved with its row is laid out anew, not changed)."""
+    columns = ",".join(str(c.table_col) for c in unit if (c.table, c.table_col) in ordinals)
+    return f"{_MOVED_ROW}{unit[0].index}:{columns}"
+
+
+def _moved_rows(
+    lu: list[_Unit], ru: list[_Unit], lk: list[str], rk: list[str], ops: list[_Opcode]
+) -> dict[int, int]:
+    """Table rows that stand elsewhere in the other document, left unit -> right unit.
+
+    Two rows swapped, or one moved to the end of its table, are a row removed where it stood
+    and added where it stands: the same row, reported as two warnings, and if its price changed
+    as well, as the row's text and never as the price. A row is found where it moved by its
+    words (``_unit_key``) - only a key that one row alone carries in each document, and only
+    a row with words: rows of nothing but numbers share a key and would be paired at random.
+    """
+    left_rows = [i for tag, i1, i2, _j1, _j2 in ops if tag != "equal" for i in range(i1, i2)]
+    right_rows = [j for tag, _i1, _i2, j1, j2 in ops if tag != "equal" for j in range(j1, j2)]
+    left_count, right_count = Counter(lk), Counter(rk)
+    where = {
+        rk[j]: j for j in right_rows if ru[j][0].table_row is not None and right_count[rk[j]] == 1
+    }
+    return {
+        i: where[lk[i]]
+        for i in left_rows
+        if lu[i][0].table_row is not None
+        and lk[i].startswith(f"\x00{_ROW}")
+        and left_count[lk[i]] == 1
+        and lk[i] in where
+    }
 
 
 def _pair_replace_with_moves(
@@ -2782,6 +2857,9 @@ def _build(
     hunks: list[Hunk] = []
     counts = Counts()
     hunk_of: dict[int, str] = {}
+    # a moved row's hunk number, and the hunk of each of its cells that changed as it moved
+    moved_rows: dict[str, int] = {}
+    cell_hunk: dict[int, str] = {}
     made = 0
     i = 0
     while i < len(pairs):
@@ -2811,6 +2889,28 @@ def _build(
                     "insert" if ra is None else "delete" if rb is None else "replace"
                 )
                 rows.append(DiffRow(tag=shape, left=_ref(ra), right=_ref(rb), hunk_id=hid))
+            i = end
+            continue
+
+        if group is not None and group.startswith(_MOVED_ROW):
+            end = i
+            while end < len(pairs) and pairs[end][2] == group:
+                end += 1
+            if group not in moved_rows:
+                moved_rows[group] = made + 1
+                made = _moved_row_hunks(
+                    group, pairs, made, hunks, counts, cell_hunk, ocr=ocr, contexts=contexts
+                )
+            for ra, rb, _g in pairs[i:end]:
+                cell = rb if rb is not None else ra
+                rows.append(
+                    DiffRow(
+                        tag="delete" if ra is not None else "insert",
+                        left=_ref(ra),
+                        right=_ref(rb),
+                        hunk_id=cell_hunk.get(id(cell), f"h{moved_rows[group]}"),
+                    )
+                )
             i = end
             continue
 
@@ -2978,6 +3078,73 @@ def _build(
         setattr(counts, kind, getattr(counts, kind) + 1)
         i += 1
     return rows, hunks, counts
+
+
+def _moved_row_hunks(
+    group: str,
+    pairs: list[_Pair],
+    made: int,
+    hunks: list[Hunk],
+    counts: Counts,
+    cell_hunk: dict[int, str],
+    *,
+    ocr: bool,
+    contexts: dict[int, _Context] | None,
+) -> int:
+    """The hunks of a table row that moved: the move, and each cell it changed on the way.
+
+    Both places the row stands in carry ``group``; its cells are paired column by column as an
+    aligned row's are (``_pair_rows``), so a price changed in a row that also moved is the
+    price's change, and a row number that moved with its row is laid out anew. Returns the
+    number of the last hunk made; each changed cell's hunk is recorded in ``cell_hunk`` under
+    the id of its new cell (its old one when the column is gone).
+    """
+    left = tuple(a for a, _b, g in pairs if g == group and a is not None)
+    right = tuple(b for _a, b, g in pairs if g == group and b is not None)
+    columns = group.rsplit(":", 1)[-1]
+    ordinals = {(left[0].table, int(c)) for c in columns.split(",") if c}
+    whole = [replace(unit[0], text=" | ".join(c.text for c in unit)) for unit in (left, right)]
+    made += 1
+    hunks.append(
+        Hunk(
+            id=f"h{made}",
+            kind="moved",
+            materiality="cosmetic",
+            rules=["CMP.MOVED"],
+            left=_ref(whole[0]),
+            right=_ref(whole[1]),
+            moved_from=_row_path(left[0]),
+            moved_to=_row_path(right[0]),
+        )
+    )
+    counts.moved += 1
+    for a, b, g in _pair_rows(left, right, ordinals):
+        if g is not None or (a is not None and b is not None and _pair_equal(a, b)):
+            continue  # a cell that moved with its row as it was, or its row number
+        kind, materiality, deltas, rules, inline = _classify(a, b, ocr=ocr, contexts=contexts)
+        made += 1
+        hunks.append(
+            Hunk(
+                id=f"h{made}",
+                kind=kind,
+                materiality=materiality,
+                rules=rules,
+                left=_ref(a),
+                right=_ref(b),
+                inline=inline,
+                deltas=deltas,
+            )
+        )
+        setattr(counts, materiality, getattr(counts, materiality) + 1)
+        setattr(counts, kind, getattr(counts, kind) + 1)
+        cell = b if b is not None else a
+        cell_hunk[id(cell)] = f"h{made}"
+    return made
+
+
+def _row_path(cell: Segment) -> str:
+    """Where a table row stands: its first cell's path without the column, "T1/r3"."""
+    return re.sub(r"/c\d+$", "", cell.path)
 
 
 # --- findings -------------------------------------------------------------------------------
@@ -3706,7 +3873,7 @@ def _says_more(hunk: Hunk, shown: list[ValueDelta], *, whole: bool) -> bool:
     """
     if hunk.left is None or hunk.right is None:
         return not whole
-    left =_masked_values(hunk.left.text, keyed=False)[0] if hunk.left else ""
+    left = _masked_values(hunk.left.text, keyed=False)[0] if hunk.left else ""
     right = _masked_values(hunk.right.text, keyed=False)[0] if hunk.right else ""
     lt, rt = _layout_key(left).split(), _layout_key(right).split()
     told = {

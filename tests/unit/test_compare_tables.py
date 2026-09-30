@@ -267,3 +267,77 @@ def test_a_word_table_of_four_hundred_rows_is_read_and_aligned_quickly() -> None
     report = run(left, right)
     assert time.perf_counter() - started < 20
     assert found(report) == [("CMP.AMOUNT", "200", "201", "error")]
+
+
+# --- COMPARE-R2-13 / R2-08: a row that moved is a move, and what changed in it is still read ----
+
+
+def moved(report) -> list[tuple[str | None, str | None]]:  # type: ignore[no-untyped-def]
+    return [(f.expected, f.actual) for f in report.findings if f.rule_id == "CMP.MOVED"]
+
+
+def every_line_once(report, left: list[Segment], right: list[Segment]) -> None:  # type: ignore[no-untyped-def]
+    assert sorted(r.left.index for r in report.rows if r.left) == [s.index for s in left]
+    assert sorted(r.right.index for r in report.rows if r.right) == [s.index for s in right]
+
+
+def test_two_rows_swapped_are_a_move_not_a_row_removed_and_added() -> None:
+    left, right = document(ROWS), document([ROWS[0], ROWS[2], ROWS[1], ROWS[3]])
+    report = run(left, right)
+    assert found(report) == []
+    assert len(moved(report)) == 1
+    every_line_once(report, left, right)
+
+
+def test_a_row_moved_to_the_end_of_its_table_is_a_move() -> None:
+    left, right = document(ROWS), document([ROWS[0], ROWS[2], ROWS[3], ROWS[1]])
+    report = run(left, right)
+    assert found(report) == []
+    assert len(moved(report)) == 1
+    every_line_once(report, left, right)
+
+
+def test_rows_swapped_and_renumbered_are_a_move_not_a_changed_number() -> None:
+    swapped = [["3", *ROWS[3][1:]], ["4", *ROWS[2][1:]]]
+    report = run(document(ROWS), document([*ROWS[:2], *swapped]))
+    assert found(report) == []
+    assert len(moved(report)) == 1
+
+
+def test_a_price_changed_in_a_row_that_also_moved_is_the_price_s_change() -> None:
+    changed = ["4", "ფანჯრების შეცვლა", "ცალი", "9", "1400"]
+    left, right = document(ROWS), document([ROWS[0], ROWS[1], changed, ROWS[2]])
+    report = run(left, right)
+    assert found(report) == [("CMP.AMOUNT", "1350", "1400", "error")]
+    assert len(moved(report)) == 1
+    every_line_once(report, left, right)
+
+
+def test_rows_of_nothing_but_numbers_swapped_are_never_paired_as_a_move() -> None:
+    numeric = [["1", "10", "20", "30", "40"], ["2", "50", "60", "70", "80"], ROWS[2]]
+    swapped = [["1", "50", "60", "70", "80"], ["2", "10", "20", "30", "40"], ROWS[2]]
+    assert moved(run(document(numeric), document(swapped))) == []
+
+
+def test_a_row_whose_words_another_row_shares_is_not_taken_for_a_move() -> None:
+    # the row the other document writes twice may have moved to either place: no move
+    twice = [
+        ROWS[0],
+        ["2", *ROWS[2][1:]],
+        ["3", *ROWS[3][1:]],
+        ["4", *ROWS[1][1:]],
+        ["5", *ROWS[1][1:]],
+    ]
+    report = run(document(ROWS), document(twice))
+    assert moved(report) == []
+    assert sorted(r for r, *_ in found(report)) == [
+        "CMP.TEXT_ADDED",
+        "CMP.TEXT_ADDED",
+        "CMP.TEXT_REMOVED",
+    ]
+
+
+def test_a_row_really_removed_is_still_one_row_removed() -> None:
+    report = run(document(ROWS), document([ROWS[0], ROWS[1], ROWS[3]]))
+    assert [r for r, *_ in found(report)] == ["CMP.TEXT_REMOVED"]
+    assert moved(report) == []

@@ -20,8 +20,7 @@ CONTRACT = [
     "1.1. მიმწოდებელი ვალდებულია მიაწოდოს შემსყიდველს სასკოლო მერხები.",
     "2. ღირებულება და ანგარიშსწორება",
     "2.1. ხელშეკრულების ჯამური ღირებულება შეადგენს 8 400 (რვა ათას ოთხასი) ლარს დღგ-ს ჩათვლით.",
-    "2.2. ანგარიშსწორება მოხდება მიღება-ჩაბარების აქტის გაფორმებიდან 10 (ათი) სამუშაო დღის "
-    "ვადაში.",
+    "2.2. ანგარიშსწორება მოხდება მიღება-ჩაბარების აქტის გაფორმებიდან 10 (ათი) სამუშაო დღის ვადაში.",
     "2.3. შემსყიდველი უხდის მიმწოდებელს ავანსს ღირებულების 15%-ის ოდენობით.",
     "2.4. მიმწოდებლის საბანკო რეკვიზიტები: ბანკის კოდი: ZXCVGE33.",
     "3. საგარანტიო ვადა",
@@ -87,9 +86,7 @@ def test_a_bic_with_another_branch_or_bank_is_still_a_change() -> None:
 
 def test_an_advance_change_is_reported_as_advance_percent() -> None:
     right = edit(CONTRACT, "15%-ის", "25%-ის")
-    assert found(run(CONTRACT, right)) == [
-        ("CMP.PAYMENT", "advance 15%", "advance 25%", "error")
-    ]
+    assert found(run(CONTRACT, right)) == [("CMP.PAYMENT", "advance 15%", "advance 25%", "error")]
 
 
 def test_an_english_advance_change_is_reported_as_advance_percent() -> None:
@@ -278,8 +275,11 @@ def test_a_rate_changed_with_the_word_percent_is_still_a_change() -> None:
 
 
 def test_a_penalty_moved_onto_the_other_party_with_its_rate_is_two_findings() -> None:
-    right = edit(CONTRACT, "მიმწოდებელს ეკისრება პირგასამტეხლო ღირებულების 0.3%",
-                 "შემსყიდველს ეკისრება პირგასამტეხლო ღირებულების 0.4%")
+    right = edit(
+        CONTRACT,
+        "მიმწოდებელს ეკისრება პირგასამტეხლო ღირებულების 0.3%",
+        "შემსყიდველს ეკისრება პირგასამტეხლო ღირებულების 0.4%",
+    )
     report = run(CONTRACT, right)
     assert [(r, s) for r, _b, _a, s in found(report)] == [
         ("CMP.PERCENT", "error"),
@@ -292,8 +292,11 @@ def test_a_penalty_moved_onto_the_other_party_with_its_rate_is_two_findings() ->
 
 
 def test_a_price_raised_and_newly_excluding_a_cost_is_two_findings() -> None:
-    right = edit(CONTRACT, "8 400 (რვა ათას ოთხასი) ლარს დღგ-ს ჩათვლით.",
-                 "9 400 (ცხრა ათას ოთხასი) ლარს დღგ-ს ჩათვლით, რომელიც არ მოიცავს მონტაჟის ხარჯებს.")
+    right = edit(
+        CONTRACT,
+        "8 400 (რვა ათას ოთხასი) ლარს დღგ-ს ჩათვლით.",
+        "9 400 (ცხრა ათას ოთხასი) ლარს დღგ-ს ჩათვლით, რომელიც არ მოიცავს მონტაჟის ხარჯებს.",
+    )
     rules = [(r, s) for r, _b, _a, s in found(run(CONTRACT, right))]
     assert rules == [("CMP.AMOUNT", "error"), ("CMP.TEXT_CHANGED", "warning")]
 
