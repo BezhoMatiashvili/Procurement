@@ -13,6 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from openpyxl import Workbook
 
 from procurement_agent.checks.boq import (
     _label_key,
@@ -151,3 +152,92 @@ def test_a_sheet_whose_price_columns_are_not_recognised_says_so_not_that_it_is_u
     notes = [f for f in template_findings(t) if f.rule_id == "BOQ.PRICES_NOT_READ"]
     assert [(f.severity, f.actual) for f in notes] == [("warning", "1. WORKS")]
     assert "BOQ.SECTION_UNPRICED" not in _rules(compare_bid(t, b))
+
+
+# --- a quantity taken from elsewhere ----------------------------------------------------------
+
+
+def _kind(qty_formula: str, *, names: dict[str, str] | None = None, local: bool = False) -> str:
+    """The kind of row 7 of a sheet "1. WORKS" whose quantity is ``qty_formula`` and whose amount
+    is its own row's product; ``names`` are defined names (sheet-scoped with ``local``)."""
+    from openpyxl.workbook.defined_name import DefinedName
+
+    from procurement_agent.checks.boq import _line_kind
+
+    values, formulas = Workbook(), Workbook()
+    wf = formulas.active
+    assert wf is not None
+    wf.title = "1. WORKS"
+    for name, target in (names or {}).items():
+        scope = wf.defined_names if local else formulas.defined_names
+        scope[name] = DefinedName(name, attr_text=target)
+    wf.cell(7, 6, qty_formula)
+    wf.cell(7, 8, "=G7*F7")
+    cols = {"desc": 2, "qty": 6, "amount": 8}
+    return _line_kind(values.active, wf, cols, 7, "Waterproofing membrane", True)
+
+
+@pytest.mark.parametrize(
+    "formula",
+    [
+        "=SUM('Take-off'!D2:D5)",
+        "=SUM(Measure!D2:D5)",
+        "=SUM(30,30,30,30)",
+        "=SUM(12.5, 7.5)",
+        "=SUM('Take-off'!D2,'Take-off'!D9)",
+    ],
+)
+def test_a_quantity_added_up_from_a_take_off_sheet_or_constants_is_the_positions_own(
+    formula: str,
+) -> None:
+    """No row of the bill is added up: the row is a position. Read as a parent, it fell out of
+    the evaluation, and the sheet no longer reconciled on any faithful bid."""
+    assert _kind(formula) == "position"
+
+
+@pytest.mark.parametrize(
+    "formula",
+    [
+        "=SUM(F8:F12)",
+        "=SUM('1. WORKS'!F8:F12)",  # its own sheet, named: still the rows below it
+        "=F8+F9",
+        "=SUM(Unknown_Block)",  # a name that cannot be followed: the parent it most likely is
+    ],
+)
+def test_a_quantity_adding_up_rows_of_its_own_sheet_is_still_a_parent(formula: str) -> None:
+    assert _kind(formula) == "heading"
+
+
+def test_a_quantity_over_a_defined_name_is_a_parent_only_where_the_name_is_rows_of_this_sheet() -> (
+    None
+):
+    here = {"Block_Q": "'1. WORKS'!$F$8:$F$12"}
+    there = {"Survey_Q": "'Take-off'!$D$2:$D$5"}
+    assert _kind("=SUM(Block_Q)", names=here) == "heading"
+    assert _kind("=SUM(Block_Q)", names=here, local=True) == "heading"
+    assert _kind("=SUM(Survey_Q)", names=there) == "position"
+    assert _kind("=SUM(Survey_Q)", names=there, local=True) == "position"
+
+
+def test_a_bill_whose_quantities_come_from_a_take_off_sheet_is_evaluated(tmp_path: Path) -> None:
+    def book(rate: float | None) -> dict[str, Cells]:
+        takeoff: Cells = {(1, 1): "Wall", (1, 4): "Area", (2, 4): 30.0, (3, 4): 45.0}
+        cells = _lari_sheet("Rate", "Amount", None)
+        cells[(2, 4)] = Fx("=SUM('Take-off'!D2:D3)", 75.0)
+        cells[(3, 4)] = Fx("=SUM(4,4)", 8.0)
+        amounts = []
+        for r, qty, price in ((2, 75.0, 12.0), (3, 8.0, 30.0)):
+            if rate is not None:
+                cells[(r, 5)] = price * rate
+            amounts.append(price * (rate or 0.0) * qty)
+            cells[(r, 6)] = Fx(f"=E{r}*D{r}", amounts[-1])
+        cells[(4, 2)] = "SUB-TOTAL"
+        cells[(4, 6)] = Fx("=SUM(F2:F3)", sum(amounts))
+        return {"1. WORKS": cells, "Take-off": takeoff}
+
+    t = read_boq(_save(tmp_path / "t.xlsx", book(None)), name="T")
+    b = read_boq(_save(tmp_path / "b.xlsx", book(1.0)), name="B")
+    assert [ln.kind for ln in t.sheets["1. WORKS"].lines[:2]] == ["position", "position"]
+    comp = compare_bid(t, b)
+    assert comp.evaluated_cost == pytest.approx(75 * 12.0 + 8 * 30.0)
+    assert comp.findings == []

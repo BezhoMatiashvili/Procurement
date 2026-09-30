@@ -728,14 +728,62 @@ def _own_row_formula(formula: str, row: int) -> bool:
     return bool(rows) and set(rows) == {row}
 
 
-def _sums_other_rows(formula: str, row: int) -> bool:
-    """A quantity that adds up other rows (``=SUM(G13:G19)``, ``=G13+G14``, a SUM over a name):
-    the row is a parent. One that adds up its own row's cells (``=D7+E7``, the quantities of
-    two buildings side by side) is the position's own quantity."""
+#: A name in a formula that is not a function (followed by "("), a cell, a sheet (followed by
+#: "!") or a range end (after ":"): a defined name, ``=SUM(Block1_Qty)``.
+_NAME_IN_FORMULA = re.compile(r"(?<![\w.'!$:\\])([A-Za-z_\\][\w.]*)(?![\w.!(])(?!\s*\()")
+_CELL_NAME = re.compile(r"^\$?[A-Za-z]{1,3}\$?\d+$|^(?:true|false)$", re.IGNORECASE)
+
+
+def _resolve_names(formula: str, wf: object) -> str | None:
+    """The formula with every defined name replaced by the cells it names (the sheet's own names
+    first, then the workbook's); None when a name cannot be followed."""
+    sheet_names = getattr(wf, "defined_names", None) or {}
+    book_names = getattr(getattr(wf, "parent", None), "defined_names", None) or {}
+    unresolved = False
+
+    def swap(m: re.Match[str]) -> str:
+        nonlocal unresolved
+        name = m.group(1)
+        if _CELL_NAME.match(name):
+            return name
+        found = sheet_names.get(name) or book_names.get(name)
+        target = getattr(found, "attr_text", None)
+        if not target:
+            unresolved = True
+            return name
+        return str(target)
+
+    # a quoted sheet name ('Take-off') is no name: only the text between them is searched
+    parts = re.split(r"('(?:[^']|'')*')", re.sub(r'"[^"]*"', "", formula))
+    body = "".join(p if i % 2 else _NAME_IN_FORMULA.sub(swap, p) for i, p in enumerate(parts))
+    return None if unresolved else body
+
+
+def _unqualify_own_sheet(formula: str, sheet: str) -> str:
+    """``'1. WORKS'!F8:F12`` on the sheet "1. WORKS" is ``F8:F12``: rows of this sheet."""
+    body = formula.replace("'" + sheet.replace("'", "''") + "'!", "")
+    if re.fullmatch(r"[^\W\d][\w.]*", sheet):
+        body = re.sub(rf"(?<![\w.']){re.escape(sheet)}!", "", body)
+    return body
+
+
+def _sums_other_rows(formula: str, row: int, wf: object = None) -> bool:
+    """A quantity that adds up other rows of the bill (``=SUM(G13:G19)``, ``=G13+G14``, a SUM
+    over a name for such rows): the row is a parent. One that adds up its own row's cells
+    (``=D7+E7``, the quantities of two buildings side by side) is the position's own quantity,
+    and so is one added up from a take-off sheet (``=SUM('Take-off'!D2:D5)``) or from numbers
+    (``=SUM(30,30,30)``): no row of the bill is added up. Those used to read as parents - "no row
+    of this sheet" was taken for a SUM over a name - and the position fell out of the evaluation.
+    A defined name is followed to the cells it names; one that cannot be is taken for the parent
+    it most likely is."""
     if not _SUM_OF_ROWS.search(formula):
         return False
-    rows = _formula_rows(formula)
-    return not rows or set(rows) != {row}
+    body = _resolve_names(formula, wf)
+    if body is None:
+        return True
+    title = getattr(wf, "title", None)
+    rows = _formula_rows(_unqualify_own_sheet(body, title) if title else body)
+    return bool(rows) and set(rows) != {row}
 
 
 #: A quantity times a rate, "=O23*G23": a position's amount, whatever rows it points at. One
@@ -760,7 +808,7 @@ def _line_kind(
     qty_col = cols.get("qty")
     if qty_col:
         qty_formula = _formula_text(wf.cell(row, qty_col))  # type: ignore[attr-defined]
-        if qty_formula is not None and _sums_other_rows(qty_formula, row):
+        if qty_formula is not None and _sums_other_rows(qty_formula, row, wf):
             # "=SUM(G13:G19)": the quantity adds up the items under it - a parent, whose items
             # are the positions. As a position it was always "unpriced", its items being priced.
             return "heading"
