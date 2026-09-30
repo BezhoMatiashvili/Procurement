@@ -6,9 +6,9 @@ import re
 
 from procurement_agent.extraction import weights
 from procurement_agent.extraction.anchors import AnchorHit
-from procurement_agent.extraction.georgian import lemma
+from procurement_agent.extraction.georgian import Case, lemma
 from procurement_agent.extraction.labels import LABELS
-from procurement_agent.extraction.normalize import names_match, normalize_name
+from procurement_agent.extraction.normalize import QUOTE_CHARS, names_match, normalize_name
 from procurement_agent.extraction.rules import RuleHit
 from procurement_agent.extraction.schemas import DEFAULT_TARGETS, ExtractedFact, FactType
 from procurement_agent.ingestion.chunker import Chunk
@@ -167,7 +167,8 @@ def anchor_hits_to_facts(
         for h in hs:
             value, normalized = h.value, h.normalized
             if h.type in _NOMINATIVE_TYPES:
-                value = normalized = lemma(h.value)
+                cases = _project_cases(h.raw_text) if h.type == FactType.project_name else None
+                value = normalized = lemma(h.value, cases=cases)
             facts.append(
                 ExtractedFact(
                     type=h.type,
@@ -183,6 +184,32 @@ def anchor_hits_to_facts(
                 )
             )
     return facts
+
+
+#: The project word with a case ending of its own ("პროექტის", "პროექტი"), or bare ("პროექტ").
+_PROJECT_HEAD = re.compile(r"\s*პრო[ეა]{1,3}ქტ([ა-ჰ]*)")
+#: A name in apposition after an inflected head is a nominative ("პროექტის „ზღვის ხედი“
+#: ფარგლებში"); some writers put it in the genitive or add a postposition, whose endings are
+#: never a nominative's. An ergative, a dative or an adverbial is not written there, and reading
+#: one cut "„მთის პანორამა“" to "მთის პანორაი" and "„ზღვის ექსპრეს“" to "ზღვის ექსპრე".
+_APPOSITION_CASES: tuple[Case, ...] = (
+    "gen", "gen_tvis", "gen_gan", "gen_ken", "dat_shi", "dat_ze", "dat_tan", "ins_dan", "adv_mde",
+)  # fmt: skip
+#: A quoted name before the project word is its attribute, a genitive: "„ზღვის ხედის“ პროექტი".
+_ATTRIBUTE_CASES: tuple[Case, ...] = ("gen",)
+
+
+def _project_cases(raw_text: str) -> tuple[Case, ...] | None:
+    """The cases a project name can be in where the document writes it (``raw_text``, the words
+    the anchor read). After the bare "პროექტ" the name carries the phrase's case itself
+    ("პროექტ „ზღვის ხედისთვის“"), so any case; None when the place is not recognised."""
+    stripped = raw_text.lstrip()
+    if stripped[:1] and stripped[:1] in QUOTE_CHARS:
+        return _ATTRIBUTE_CASES
+    m = _PROJECT_HEAD.match(stripped)
+    if m is None or not m.group(1):
+        return None
+    return _APPOSITION_CASES
 
 
 #: Types whose values are codes a label names: one value is one type.
