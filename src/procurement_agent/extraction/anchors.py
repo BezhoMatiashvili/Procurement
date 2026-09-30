@@ -845,18 +845,57 @@ def first_party_start(text: str) -> int | None:
     before it, which is how a reader tells the signing date from every other date. A party is
     named as ``find_parties`` names one: a legal form and a quoted name, or a person or an
     individual entrepreneur by first name and surname ("ფ/პ ანა ბერიძე").
+
+    Parties the title names ("ხელშეკრულება N 7 შპს „…“-სა და შპს „…“-ს შორის") are part of the
+    title, and the preamble goes on past them (``_title_end``).
     """
-    quoted = _PARTY_NAME.search(text)
+    after = _title_end(text)
+    quoted = _PARTY_NAME.search(text, after)
     person = next(
         (
             m
-            for m in _PERSON_PARTY.finditer(text)
+            for m in _PERSON_PARTY.finditer(text, after)
             if not any(w in _NOT_A_NAME for w in m.group(2).split())
         ),
         None,
     )
     starts = [m.start() for m in (quoted, person) if m is not None]
     return min(starts, default=None)
+
+
+#: A title that names the parties: the contract word and its number right before the first
+#: party ("ხელშეკრულება N 7 შპს „…“-სა და ...") ...
+_TITLE_WORD_BEFORE = re.compile(r"ხელშეკრულება(?![ა-ჰ])[ \t]*(?:(?:N|№)[ \t]*\S+[ \t]*)?$")
+#: ... the parties joined by "-სა და ... -ს შორის" (between), on one line, no clause between ...
+_TITLE_TEXT = r"(?:(?![.;:]\s)[^\n(])*?"
+_BETWEEN = re.compile(rf"{_TITLE_TEXT}(?<![ა-ჰ])და(?![ა-ჰ]){_TITLE_TEXT}(?<![ა-ჰ])შორის(?![ა-ჰ])")
+#: ... or the contract word after the parties: "... შორის გაფორმებული (მომსახურების)
+#: ხელშეკრულება".
+_TITLE_WORD_AFTER = re.compile(
+    r"[ \t]+(?:გაფორმებული|დადებული)[ \t]+(?:[ა-ჰ]+[ \t]+)?ხელშეკრულება(?![ა-ჰ])"
+)
+_TITLE_REACH = 200
+
+
+def _title_end(text: str) -> int:
+    """Where a title that names the parties ends - after its "შორის" - or 0 when the first
+    party is not named in a title. A party block written the same way ("... დაიდო შპს „…“-სა
+    (შემდგომში „შემკვეთი“) და ... შორის") defines the parties' roles in brackets, and the
+    bracket keeps it out; so does a document word other than the contract's number before it."""
+    first = _PARTY_NAME.search(text)
+    if first is None:
+        return 0
+    line_start = text.rfind("\n", 0, first.start()) + 1
+    limit = min(len(text), first.end() + _TITLE_REACH)
+    between = _BETWEEN.match(text, first.end(), limit)
+    if between is None:
+        return 0
+    if _TITLE_WORD_BEFORE.search(text, max(line_start, first.start() - 60), first.start()):
+        return between.end()
+    opens_line = not text[line_start : first.start()].strip()
+    if opens_line and _TITLE_WORD_AFTER.match(text, between.end()):
+        return between.end()
+    return 0
 
 
 #: A document's first numbered clause: "1.", "1.1." or "მუხლი 1" opening a line or a sentence,

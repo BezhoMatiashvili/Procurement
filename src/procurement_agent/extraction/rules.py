@@ -384,10 +384,18 @@ def find_amounts(text: str) -> list[RuleHit]:
 
 # --- dates -------------------------------------------------------------------------------------
 
+#: The word for "year" after a date's year, always taken whole: "წ.", the abbreviation without its
+#: stop ("წ" before a non-letter), or "წელი" / "წელს" / "წლის" (and "-ვე"). The bare letter alone
+#: was taken as the abbreviation inside "წელს", so the date ended mid-word ("2026 წ") and its
+#: correction dropped the rest ("2026 ").
+_YEAR_WORD = r"წ(?:\.|(?:ელი|ელს|ლის|ლისა)(?:ვე)?(?![ა-ჰ])|(?![ა-ჰ]))"
+#: ... and the same without the bare letter, which alone is too little to make "26" a year.
+_YEAR_WORD_SPELLED = r"წ(?:\.|(?:ელი|ელს|ლის|ლისა)(?:ვე)?(?![ა-ჰ]))"
 _DATE_NUMERIC = re.compile(r"(?<!\d)(\d{1,2})[./-](\d{1,2})[./-](\d{4})(?!\d)")
-#: A two-digit year, only where the word for "year" says it is one: "12.05.26 წ.".
+#: A two-digit year, only where the word for "year" says it is one: "12.05.26 წ.". The word is
+#: part of the date, so a correction written like it keeps it ("30.06.26 წ.").
 _DATE_NUMERIC_SHORT_YEAR = re.compile(
-    r"(?<![\d./-])(\d{1,2})[./-](\d{1,2})[./-](\d{2})(?![\d./-])(?=\s*წ(?:ლის|ელი|\.))"
+    rf"(?<![\d./-])(\d{{1,2}})[./-](\d{{1,2}})[./-](\d{{2}})(?![\d./-])\s*{_YEAR_WORD_SPELLED}"
 )
 _DATE_ISO = re.compile(r"(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)")
 #: The day of a Georgian date: "30", in quotes as a contract heads its date ("„30“ ივნისი",
@@ -402,8 +410,8 @@ _DATE_KA_YMD = re.compile(
     re.IGNORECASE,
 )
 _DATE_KA_DMY = re.compile(
-    rf"(?<!\d){_KA_DAY}\.?\s*(?P<m>{_KA_MONTH_FUZZY}),?\s*(?P<y>\d{{4}})\s*"
-    r"(?:წ(?:ელი|ლის|\.)?)?",
+    rf"(?<!\d){_KA_DAY}\.?\s*(?P<m>{_KA_MONTH_FUZZY}),?\s*(?P<y>\d{{4}})(?!\d)"
+    rf"(?:\s*{_YEAR_WORD})?",
     re.IGNORECASE,
 )
 _DATE_EN_DMY = re.compile(
@@ -465,6 +473,37 @@ def _range_ends_without_year(
         if a is not None and b is not None:
             out.append(((m.start(1), m.end(2)), a, text[m.start(1) : m.end(2)]))
             out.append(((m.start(3), m.end(4)), b, text[m.start(3) : m.end(4)]))
+    return out
+
+
+#: A day and a dash right before a date that opens with its own day: "1-15 ივნისი, 2026 წ.",
+#: "01-15.06.2026", "1 - 15 June 2026". Nothing that makes the number something else stands
+#: before it: a digit, a stop, a slash, a dash or a letter ("1.5-15", "N12-15", "01.06-15.06").
+_DAY_RANGE_FIRST = re.compile(r"(?<![\w./\-\u2013])(\d{1,2})\s?[-\u2013]\s?$")
+#: A number marker before the day makes it a number: "N 3-15 ივნისი".
+_NUMBER_BEFORE = re.compile(r"(?:№|#|(?<![A-Za-zა-ჰ])N)\s*$")
+_LEADING_DAY = re.compile(r"\d{1,2}(?!\d)")
+
+
+def _day_range_firsts(
+    text: str, found: dict[tuple[int, int], tuple[date, str, str | None]]
+) -> list[tuple[tuple[int, int], date, str]]:
+    """The first day of a range written as two days before one month and year - "1-15 ივნისი,
+    2026 წ.", "01-15.06.2026" - in that date's month and year. Unread, the period was its last
+    day alone. Its span runs up to the last day's, so the two quote the period as written."""
+    out: list[tuple[tuple[int, int], date, str]] = []
+    for (start, _end), (last, raw, _note) in list(found.items()):
+        lead = _LEADING_DAY.match(raw)
+        if lead is None or int(lead.group(0)) != last.day:
+            continue  # the date does not open with its own day (ISO, "June 15, 2026", „15“)
+        m = _DAY_RANGE_FIRST.search(text, max(0, start - 8), start)
+        if m is None or _NUMBER_BEFORE.search(text, max(0, m.start() - 4), m.start(1)):
+            continue
+        first_day = int(m.group(1))
+        if not 1 <= first_day < last.day:
+            continue
+        first = last.replace(day=first_day)
+        out.append(((m.start(1), start), first, text[m.start(1) : start].strip()))
     return out
 
 
@@ -553,6 +592,8 @@ def find_dates(text: str) -> list[RuleHit]:
     for m in _DATE_NUMERIC_SHORT_YEAR.finditer(text):
         add(m, _safe_date(2000 + int(m.group(3)), int(m.group(2)), int(m.group(1))))
     for span, dt, raw in _range_ends_without_year(text, found):
+        found.setdefault(span, (dt, raw, None))
+    for span, dt, raw in _day_range_firsts(text, found):
         found.setdefault(span, (dt, raw, None))
 
     hits: list[RuleHit] = []

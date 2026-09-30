@@ -611,42 +611,110 @@ def damerau(a: str, b: str, *, cap: int = 3) -> int:
 
 # --- dates in a document's own style ------------------------------------------------------------
 
-_STYLE_NUMERIC = re.compile(r"^\s*(\d{1,2})([./-])(\d{1,2})\2(\d{4})")
+#: The word for "year" after a date's year, as the example writes it ("წ.", "წელს", "წლის").
+_STYLE_YEAR_WORD = r"(?P<tail>\s*წ(?:\.|[ა-ჰ]*))?"
+#: A numeric date: "05.09.2026", "5/9/2026", and a two-digit year before its year word,
+#: "05.09.26 წ.".
+_STYLE_NUMERIC = re.compile(
+    rf"^\s*(?P<day>\d{{1,2}})(?P<sep>[./-])(?P<month>\d{{1,2}})(?P=sep)(?P<year>\d{{4}}|\d{{2}})"
+    rf"(?!\d){_STYLE_YEAR_WORD}"
+)
 _STYLE_ISO = re.compile(r"^\s*\d{4}-\d{2}-\d{2}")
 #: A day as a Georgian date writes it: "30", "05", in quotes ("„30“"), or as an ordinal ("1-ლი").
-_STYLE_DAY = r"(?P<open>„|,,|\"|“|«)?(?P<day>\d{1,2})(?P<close>“|”|\"|''|»)?(?:\s*-\s*(?:ლი|ე))?"
+_STYLE_DAY = (
+    r"(?P<open>„|,,|\"|“|«)?(?P<day>\d{1,2})(?P<close>“|”|\"|''|»)?(?P<ordinal>\s*-\s*(?:ლი|ე))?"
+)
 _STYLE_YMD = re.compile(
     rf"^\s*(?P<year>\d{{4}})(?P<sep>\s*(?:წლის|წ\.)\s*){_STYLE_DAY}(?P<gap>\s*)"
     rf"(?P<month>[{GEORGIAN}]+)"
 )
 _STYLE_DMY = re.compile(
     rf"^\s*{_STYLE_DAY}(?P<gap>\s*)(?P<month>[{GEORGIAN}]+)(?P<sep>,?\s*)(?P<year>\d{{4}})"
-    r"(?P<tail>\s*(?:წელი|წლის|წ\.)?)"
+    rf"{_STYLE_YEAR_WORD}"
 )
+#: An English date: "5 July 2026", "5th Jul. 2026", "July 5, 2026".
+_EN_ORDINAL = r"(?P<ordinal>st|nd|rd|th)?"
+_STYLE_EN_DMY = re.compile(
+    rf"^\s*(?P<day>\d{{1,2}}){_EN_ORDINAL}(?P<gap>\s+)(?P<month>[A-Za-z]+)(?P<dot>\.?)"
+    r"(?P<sep>,?\s+)(?P<year>\d{4})"
+)
+_STYLE_EN_MDY = re.compile(
+    rf"^\s*(?P<month>[A-Za-z]+)(?P<dot>\.?)(?P<gap>\s+)(?P<day>\d{{1,2}}){_EN_ORDINAL}"
+    r"(?P<sep>,?\s+)(?P<year>\d{4})"
+)
+_EN_MONTH_NAMES = (
+    "january", "february", "march", "april", "may", "june",
+    "july", "august", "september", "october", "november", "december",
+)  # fmt: skip
 
 
 def _styled_day(d: date, m: re.Match[str]) -> str:
     """The day as the example writes its own: zero-padded when that one is ("05"), in the same
-    quotes when it is quoted ("„05“")."""
+    quotes when it is quoted ("„05“"), and an ordinal first day as one ("1-ლი") - an ordinal is
+    written only for the first, so another day is written plain."""
     day = f"{d.day:02d}" if m.group("day").startswith("0") else str(d.day)
+    if m.group("ordinal") and d.day == 1:
+        day += m.group("ordinal")
     if m.group("open") and m.group("close"):
         return f"{m.group('open')}{day}{m.group('close')}"
     return day
+
+
+def _english_month(d: date, written: str) -> str | None:
+    """``d``'s month named as ``written`` names its own: in full or abbreviated to three letters,
+    in its capitals; None when ``written`` is no English month."""
+    low = written.lower()
+    full = next(
+        (n for n in _EN_MONTH_NAMES if low == n or (len(low) >= 3 and n.startswith(low))), None
+    )
+    if full is None:
+        return None
+    name = _EN_MONTH_NAMES[d.month - 1]
+    if low != full:
+        name = name[:3]
+    if written.isupper() and len(written) > 1:
+        return name.upper()
+    if written[:1].isupper():
+        return name.capitalize()
+    return name
+
+
+def _english_ordinal(day: int) -> str:
+    if 11 <= day % 100 <= 13:
+        return "th"
+    return {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+
+
+def _render_english(d: date, m: re.Match[str]) -> str | None:
+    month = _english_month(d, m.group("month"))
+    if month is None:
+        return None
+    day = f"{d.day:02d}" if m.group("day").startswith("0") else str(d.day)
+    if m.group("ordinal"):
+        day += _english_ordinal(d.day)
+    month += m.group("dot")
+    if m.re is _STYLE_EN_DMY:
+        return f"{day}{m.group('gap')}{month}{m.group('sep')}{d.year}"
+    return f"{month}{m.group('gap')}{day}{m.group('sep')}{d.year}"
 
 
 def render_date_like(d: date, example: str, *, following: str = "") -> str:
     """``d`` written the way ``example`` writes a date, keeping its month's case.
 
     "2026 წლის 5 სექტემბერი" as the example gives "2026 წლის 31 აგვისტო"; "05.09.2026" gives
-    "31.08.2026"; "„05“ ივლისი, 2026 წ." gives "„30“ ივნისი, 2026 წ.". ``following`` is the word
-    after the example in its document: it tells the case of a month form that can be either of
-    two (``month_case``). An example in no recognised style yields the ISO date.
+    "31.08.2026"; "„05“ ივლისი, 2026 წ." gives "„30“ ივნისი, 2026 წ."; "05.09.26 წ." gives
+    "31.08.26 წ."; "5 September 2026" gives "31 August 2026". ``following`` is the word after the
+    example in its document: it tells the case of a month form that can be either of two
+    (``month_case``). Every form ``rules.find_dates`` reads has its style here; an example in
+    none yields the ISO date.
     """
     ex = normalize_spaces(example)
     if m := _STYLE_NUMERIC.match(ex):
-        day = f"{d.day:02d}" if len(m.group(1)) == 2 else str(d.day)
-        month = f"{d.month:02d}" if len(m.group(3)) == 2 else str(d.month)
-        return f"{day}{m.group(2)}{month}{m.group(2)}{d.year}"
+        day = f"{d.day:02d}" if len(m.group("day")) == 2 else str(d.day)
+        month = f"{d.month:02d}" if len(m.group("month")) == 2 else str(d.month)
+        year = f"{d.year % 100:02d}" if len(m.group("year")) == 2 else str(d.year)
+        sep = m.group("sep")
+        return f"{day}{sep}{month}{sep}{year}{m.group('tail') or ''}"
     if _STYLE_ISO.match(ex):
         return d.isoformat()
     if m := _STYLE_YMD.match(ex):
@@ -654,9 +722,11 @@ def render_date_like(d: date, example: str, *, following: str = "") -> str:
         return f"{d.year}{m.group('sep')}{_styled_day(d, m)}{m.group('gap')}{written}"
     if m := _STYLE_DMY.match(ex):
         written = month_form(d.month, month_case(m.group("month"), following=following))
-        return (
-            f"{_styled_day(d, m)}{m.group('gap')}{written}{m.group('sep')}{d.year}{m.group('tail')}"
-        )
+        tail = m.group("tail") or ""
+        return f"{_styled_day(d, m)}{m.group('gap')}{written}{m.group('sep')}{d.year}{tail}"
+    for pattern in (_STYLE_EN_DMY, _STYLE_EN_MDY):
+        if (m := pattern.match(ex)) and (english := _render_english(d, m)) is not None:
+            return english
     return d.isoformat()
 
 

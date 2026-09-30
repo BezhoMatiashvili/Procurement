@@ -50,17 +50,24 @@ letters upper-cased. Nothing else - no stemming, no substring match, no case-end
 
 Dates are read as Georgian documents write them: a day in quotes (`„30“ ივნისი, 2026 წ.`,
 both quotes required), an ordinal first day (`2026 წლის 1-ლი მაისი`), and a two-digit year
-only where the word for year follows it (`12.05.26 წ.` is 2026-05-12). An unlabelled date is
-the document's own (`contract_date`, or `act_date` for an act) only when it stands in the
-preamble, before the first party or the first numbered clause; a date in a clause is not, and
-with neither boundary no date is promoted. A contract's party may be a person or an individual
+only where the word for year follows it (`12.05.26 წ.` is 2026-05-12). The word for year is
+part of the date and is read whole (`5 ივლისს, 2026 წელს`, never `… 2026 წ`). A day range before
+one month and year (`1-15 ივნისი, 2026 წ.`, `01-15.06.2026`) is one period, first day to last. An
+unlabelled date is the document's own (`contract_date`, or `act_date` for an act) only when it
+stands in the preamble, before the first party or the first numbered clause; a date in a clause
+is not, and with neither boundary no date is promoted. Parties the title names
+(`ხელშეკრულება N 7 შპს „…“-სა და შპს „…“-ს შორის`) are part of the title: the preamble ends at
+the party block. A contract's party may be a person or an individual
 entrepreneur named without quotes (`ფ/პ …`, `ი/მ …`). An act's service period is read by its
 form whatever the verb (`შესრულდა`, `შესრულებულია`, `გაწეულ იქნა`, `განხორციელდა`, `ჩატარდა`,
 `… პერიოდი: 01.06.2026 - 30.06.2026`): one range, never its two dates apart; a period stated
 as a month (`2026 წლის ივნისის თვეში`) is that month's first to last day. A performance window
 whose first day is written but cannot be read starts open (`../2026-09-30`), never at the
-signing. An act is an act when its title stands near the top or on a line of its own below a
-letterhead, before the first clause.
+signing. A contract's performance window is set by a performance verb, also in the future
+passive (`შესრულდება`, `განხორციელდება`, `ჩატარდება`, `დაიწყება … დასრულდება`) where the
+sentence names the work and is not the validity clause; a numeric date's end is written with
+its case too (`31.12.2026-ის ჩათვლით`, `31.12.2026 წლის ჩათვლით`). An act is an act when its
+title stands near the top or on a line of its own below a letterhead, before the first clause.
 
 How the rules read what the canonical forms need (red-team round 1):
 
@@ -154,7 +161,9 @@ strict_findings: true             # anything else reported (any severity) is a f
   signed "2026 წლის 31 აგვისტოს" (the dative; the vowel stem's dative and genitive are one
   word, and a postposition or a noun after the date makes it the genitive) is corrected to
   `2026 წლის 30 სექტემბერს`, a quoted or zero-padded day keeps its quotes or its zero
-  (`„30“ ივნისი, 2026 წ.`).
+  (`„30“ ივნისი, 2026 წ.`), and its year word and year digits (`30 ივნისს, 2026 წელს`,
+  `30.06.26 წ.`); an English date stays English (`30 June 2026`). A correction is ISO only
+  where the act wrote ISO.
 * `occurrences` is checked by annotating the act (`report/docx_annotate.py`) and counting the
   comments whose anchored text contains `text`. A place is where `text` stands as whole words:
   `ივნის` is not a place inside `ივნისიდან`, nor a name's nominative inside its genitive. A name
