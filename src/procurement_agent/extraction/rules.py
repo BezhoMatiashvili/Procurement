@@ -251,10 +251,34 @@ _PAREN = (
     # nothing else can be meant
     rf"(?:\)|[:;|\]}}](?=\s*(?:{_CUR_RE})))\s*)?"
 )
-_AMOUNT_AFTER = re.compile(
-    rf"(?<![\d.,])({_NUM_RE})\s*{_PAREN}({_CUR_RE})(?![A-Za-zა-ჰ])", re.IGNORECASE
+#: A magnitude written as a word after the figure: "48 ათას ლარს", "1.2 მლნ ლარს", "1,2 მილიონ
+#: ლარს", "2.5 million GEL". Only these words: "ათასობით" (thousands of) is no magnitude, and a
+#: bare "m" is as often metres.
+_MAGNITUDES: tuple[tuple[re.Pattern[str], float], ...] = (
+    (re.compile(r"ათას|ათ\.|thousand", re.IGNORECASE), 1e3),
+    (re.compile(r"მილიონ|მლნ|million|mln", re.IGNORECASE), 1e6),
+    (re.compile(r"მილიარდ|მლრდ|billion|bn", re.IGNORECASE), 1e9),
 )
-_AMOUNT_BEFORE = re.compile(rf"({_CUR_BEFORE_RE})\s*({_NUM_RE})(?![\d])", re.IGNORECASE)
+_MAGNITUDE_RE = (
+    r"(?:(?:ათას|მილიონ|მილიარდ)(?:ი|ს|ის|ით|ად)?(?![ა-ჰ])|ათ\.|მლნ\.?|მლრდ\.?"
+    r"|(?:thousand|million|billion|mln|bn)(?![A-Za-z]))"
+)
+_AMOUNT_AFTER = re.compile(
+    rf"(?<![\d.,])({_NUM_RE})(?:\s*({_MAGNITUDE_RE}))?\s*{_PAREN}({_CUR_RE})(?![A-Za-zა-ჰ])",
+    re.IGNORECASE,
+)
+_AMOUNT_BEFORE = re.compile(
+    rf"({_CUR_BEFORE_RE})\s*({_NUM_RE})(?![\d])(?:\s*({_MAGNITUDE_RE}))?", re.IGNORECASE
+)
+
+
+def _magnitude(word: str | None) -> float:
+    """What a magnitude word multiplies its figure by; 1 with none."""
+    if not word:
+        return 1.0
+    return next((factor for pat, factor in _MAGNITUDES if pat.match(word)), 1.0)
+
+
 #: "2 400.00 (ორი ათას ოთხასი ლარი და 00 თეთრი)": the currency is written inside the words,
 #: with tetri, and nothing after the bracket names it. The bracket must open with words.
 _AMOUNT_CUR_INSIDE = re.compile(
@@ -294,8 +318,11 @@ def _with_tetri(text: str, number: str, end: int, value: float) -> tuple[float, 
 
 
 #: A cell of a serialised table row: "1, ერთეულის ფასი = 30.00 ლარი. 1, ჯამი = 3 000.00 ლარი" -
-#: the row's key, then the column's name, then the value; each cell ends in ". ".
-_TABLE_CELL = re.compile(r"(?:^|(?<=\.\s))([^,=.\n]{0,60}),\s([^=\n]{1,80}?)\s=\s", re.MULTILINE)
+#: the row's key, then the column's name, then the value; each cell ends in ". ". A key holds no
+#: full stop, except the item number it may be ("1.1").
+_TABLE_CELL = re.compile(
+    r"(?:^|(?<=\.\s))(\d{1,3}(?:\.\d{1,3})+|[^,=.\n]{0,60}),\s([^=\n]{1,80}?)\s=\s", re.MULTILINE
+)
 #: A column that makes a row a priced line: its unit price, quantity or unit.
 _LINE_COLUMN = re.compile(
     r"ფას|რაოდენობ|ერთეულ|price|rate|quantity|qty|unit",
@@ -308,10 +335,16 @@ _TOTAL_ROW = re.compile(
 )
 
 
+#: A row keyed by an item number: "1", "2.", "1.1", "3)".
+_ITEM_NUMBER = re.compile(r"\d{1,3}(?:\.\d{1,3})*[.)]?")
+
+
 def _is_line_total(text: str, start: int) -> bool:
-    """Whether the amount at ``start`` is a line total of a price table: a cell of a column a
-    total word names ("ჯამი"), in a row that has a unit price or a quantity and that no total
-    word names. The document's total is the row "სულ" or a figure in the prose."""
+    """Whether the amount at ``start`` is a line amount of a price table: a cell of a column a
+    total word names ("ჯამი"), in a row that no total word names and that is a line - it has a
+    unit price or a quantity, it is keyed by an item number, or the table has a total row of
+    its own. A lump-sum table ("N | დასახელება | ჯამი") has neither price nor quantity, and its
+    lines are still lines. The document's total is the row "სულ" or a figure in the prose."""
     line_start = text.rfind("\n", 0, start) + 1
     line_end = text.find("\n", start)
     line = text[line_start : len(text) if line_end < 0 else line_end]
@@ -323,21 +356,59 @@ def _is_line_total(text: str, start: int) -> bool:
         return False
     row = own.group(1).strip()
     siblings = [c for c in cells if c.group(1).strip() == row]
-    values = [
-        line[c.end() : nxt.start() if nxt else len(line)].strip(" .")
+    values = {
+        c: line[c.end() : nxt.start() if nxt else len(line)].strip(" .")
         for c, nxt in zip(cells, [*cells[1:], None], strict=True)
-        if c.group(1).strip() == row
-    ]
-    if _TOTAL_ROW.fullmatch(row) or any(_TOTAL_ROW.fullmatch(v) for v in values):
+    }
+
+    def names_a_total(key: str) -> bool:
+        return _TOTAL_ROW.fullmatch(key) is not None or any(
+            _TOTAL_ROW.fullmatch(v) for c, v in values.items() if c.group(1).strip() == key
+        )
+
+    if names_a_total(row):
         return False
-    return any(_LINE_COLUMN.search(c.group(2)) for c in siblings if c is not own)
+    if any(_LINE_COLUMN.search(c.group(2)) for c in siblings if c is not own):
+        return True
+    if _ITEM_NUMBER.fullmatch(row):
+        return True
+    return any(names_a_total(key) for key in {c.group(1).strip() for c in cells} - {row})
+
+
+#: A figure that restates a share of the value written right before it: "ღირებულების 5%-ის,
+#: 100 ლარის ოდენობით", "დღგ 18% - 305.08 ლარი", "5% of the Contract price, GEL 100.00", "30%,
+#: ანუ 3 000 ლარი"; or a tax the price holds: "მათ შორის დღგ - 305.08 ლარი", "of which VAT: 18
+#: GEL". Only right before it: "ღირებულება (18% დღგ-ს ჩათვლით) შეადგენს 1 000 ლარს" is the
+#: price, and so is "Price including VAT: 118 GEL".
+_SHARE_BEFORE = re.compile(
+    r"(?:\d{1,3}(?:[.,]\d{1,2})?\s*(?:%|პროცენტ[ა-ჰ]*|per\s?cent)(?:-?[ა-ჰ]+)?"
+    r"(?:\s+of\s+(?:the\s+)?(?:total\s+)?(?:contract\s+)?(?:value|price|amount|sum|fee))?"
+    r"|(?<![ა-ჰa-z])(?:მათ\s+შორის|საიდანაც|აქედან|of\s+which)\s+(?:დღგ|vat)(?:-?ის|-?ს)?"
+    r"(?:\s+(?:თანხა|ოდენობა|amount))?)"
+    r"[\s,:;=\u2013\u2014-]*"
+    r"(?:(?:ანუ|რაც\s+შეადგენს|i\.\s*e\.|that\s+is|namely|which\s+is)[\s,:]*)?"
+    r"(?:(?:GEL|USD|EUR|GBP|₾|\$|€|£)\s*)?$",
+    re.IGNORECASE,
+)
+_SHARE_REACH = 80
+
+
+def _is_share(text: str, start: int) -> bool:
+    """Whether the amount at ``start`` restates a share of the value (a guarantee, an advance,
+    the VAT inside the price) rather than stating the value. Its nearest keyword is the value's
+    ("ღირებულების 5%-ის, 100 ლარის ოდენობით"), which names the base of the share, not the amount."""
+    return _SHARE_BEFORE.search(text, max(0, start - _SHARE_REACH), start) is not None
 
 
 def find_amounts(text: str) -> list[RuleHit]:
     hits: list[RuleHit] = []
     seen: set[tuple[int, int]] = set()
-    patterns = ((_AMOUNT_AFTER, 1, 2), (_AMOUNT_CUR_INSIDE, 1, 2), (_AMOUNT_BEFORE, 2, 1))
-    for pat, num_group, cur_group in patterns:
+    patterns = (
+        (_AMOUNT_AFTER, 1, 3, 2),
+        (_AMOUNT_CUR_INSIDE, 1, 2, None),
+        (_AMOUNT_BEFORE, 2, 1, 3),
+    )
+    for pat, num_group, cur_group, magnitude_group in patterns:
         for m in pat.finditer(text):
             span = (m.start(), m.end())
             if any(_overlaps(span, other) for other in seen):
@@ -354,6 +425,9 @@ def find_amounts(text: str) -> list[RuleHit]:
             value = parse_number(number)
             if value is None:
                 continue
+            magnitude = _magnitude(m.group(magnitude_group) if magnitude_group else None)
+            if magnitude != 1.0:
+                value = round(value * magnitude, 2)
             cur = _norm_currency(m.group(cur_group))
             if pat is _AMOUNT_AFTER and cur == "GEL":
                 value, tetri_end = _with_tetri(text, number, span[1], value)
@@ -363,6 +437,8 @@ def find_amounts(text: str) -> list[RuleHit]:
                 continue  # "20 ლ." with no word about money: litres as likely as lari
             if ft == FactType.total_amount and _is_line_total(text, span[0]):
                 ft = None
+            if ft in (FactType.total_amount, FactType.price) and _is_share(text, span[0]):
+                ft = None  # a guarantee, an advance or the VAT, as a share of the value
             seen.add(span)
             hits.append(
                 RuleHit(
