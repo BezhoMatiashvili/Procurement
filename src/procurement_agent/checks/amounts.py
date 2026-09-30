@@ -17,6 +17,7 @@ from procurement_agent.extraction.rules import find_amounts
 from procurement_agent.extraction.schemas import FactType
 
 __all__ = [
+    "CURRENCY",
     "FIGURE",
     "NUM_IN_TEXT",
     "DigitsAndWords",
@@ -50,6 +51,15 @@ _DIGITS_THEN_WORDS = re.compile(
     # a scan reads the closing bracket as ":" or "|" now and then; before a currency word
     # nothing else can be meant
     r"(?:\)|[:;|\]}](?=\s*(?:აშშ\s+)?(?:ლარ|დოლარ|ევრო)))"
+)
+#: A currency as it stands beside a figure: a word in any case ("ლარს", "აშშ დოლარი"), a code
+#: or a sign.
+CURRENCY = r"(?:(?:აშშ\s+)?(?:ლარ|დოლარ|ევრო)[ა-ჰ]*|GEL|USD|EUR|₾|\$|€)"
+#: "100 ლარს (ასი)", "100 ₾ (ასი)": the currency between the figure and its words. Only a bracket
+#: that reads as a numeral makes such a pair (``digits_and_words``): "100 ლარი (ერთი თვის)" is
+#: no amount in words.
+_DIGITS_CURRENCY_WORDS = re.compile(
+    rf"(?<![\d.,])({FIGURE})(?!\d)\s*{CURRENCY}\s*\(\s*([ა-ჰ][ა-ჰ0-9 ,.]{{1,80}}?)\s*\)"
 )
 #: Currency words inside the brackets: "(ასი ლარი)", "(ათასი აშშ დოლარი)".
 _CURRENCY_WORD = re.compile(r"(?:აშშ\s+)?(?:ლარ|დოლარ|ევრო|ფუნტ|რუბლ)[ა-ჰ]*")
@@ -234,9 +244,16 @@ def read_words(inner: str) -> tuple[str, float | None]:
 
 
 def digits_and_words(text: str) -> list[DigitsAndWords]:
-    """Every figure immediately restated in words. Pairs whose digits do not parse are left out."""
+    """Every figure immediately restated in words, or with only its currency between the two
+    ("100 ლარს (ასი)"). Pairs whose digits do not parse are left out."""
     out: list[DigitsAndWords] = []
-    for m in _DIGITS_THEN_WORDS.finditer(text):
+    direct = list(_DIGITS_THEN_WORDS.finditer(text))
+    across = [
+        m
+        for m in _DIGITS_CURRENCY_WORDS.finditer(text)
+        if looks_like_numeral(read_words(m.group(2).strip())[0])
+    ]
+    for m in sorted([*direct, *across], key=lambda m: m.start()):
         digits = parse_number(m.group(1))
         if digits is None:
             continue

@@ -27,7 +27,9 @@ from itertools import pairwise
 from typing import Literal
 
 from procurement_agent.checks.amounts import (
+    CURRENCY,
     FIGURE,
+    DigitsAndWords,
     Money,
     digits_and_words,
     render_figure_like,
@@ -708,11 +710,14 @@ class AoaChecker:
         # One finding per mistake. The same text can be read twice - a clause repeated in an
         # annex, a table cell the parser emits in two places - and each copy sits at another
         # offset, so the key leaves the span out: with it, no copy would ever match.
+        if quote is None and span is not None:
+            quote = self.aoa.as_written(*span) or None
+        if severity == "error" and expected and quote and expected.split() == quote.split():
+            # a correction that is the act's own words corrects nothing: none is better
+            expected = None
         key = (rule_id, severity, en, expected, actual)
         if any(_finding_key(f) == key for f in self.findings):
             return
-        if quote is None and span is not None:
-            quote = self.aoa.as_written(*span) or None
         self.findings.append(
             Finding(
                 rule_id=rule_id,
@@ -2521,14 +2526,7 @@ class AoaChecker:
         with the contract's price in words to write there. Words that do not read as a number
         are a misspelling, AOA.AMOUNT_WORDS's to report."""
         m = r.money
-        pair = next(
-            (
-                p
-                for p in digits_and_words(self.aoa.text)
-                if m.span[0] <= p.span[0] and p.span[1] <= m.span[1]
-            ),
-            None,
-        )
+        pair = self._pair_of(m)
         if pair is None or not pair.numeral or pair.spelled is None:
             return
         same = [p for p in prices if p.currency == m.currency]
@@ -2576,12 +2574,15 @@ class AoaChecker:
             )
             return
         shown = ", ".join(dict.fromkeys(_money_text(p) for p in prices))
-        expected = shown
-        same_currency = [p for p in prices if p.currency == m.currency]
-        if len({p.value for p in same_currency}) == 1:
-            # one price it should have been: the correction says it the way the act writes its
-            # fee, so it can be typed over the marked words as it stands
-            expected = _fee_like(same_currency[0].value, self.aoa.text[m.span[0] : m.span[1]])
+        span = self._fee_span(m)
+        same_currency = list(dict.fromkeys(p.value for p in prices if p.currency == m.currency))
+        # the price it should have been: the only one, or the one it is a slip of. The
+        # correction says it the way the act writes its fee, words and all, so it can be typed
+        # over the marked words as it stands; with no one price meant, the message lists them
+        meant = (
+            same_currency[0] if len(same_currency) == 1 else _nearest_price(m.value, same_currency)
+        )
+        expected = None if meant is None else _fee_like(meant, self.aoa.text[span[0] : span[1]])
         hint_ka = hint_en = ""
         for c in contract:
             if c.role is not None and c.role in _ROLE_NAME and _states([c.money], m):
@@ -2597,7 +2598,27 @@ class AoaChecker:
             f"{name_en} {actual} matches no price in the contract ({shown}){hint_en}",
             expected=expected,
             actual=actual,
-            span=m.span,
+            span=span,
+        )
+
+    def _fee_span(self, m: Money) -> tuple[int, int]:
+        """Where a fee is written, its words in brackets included wherever they stand: after
+        the figure, after the currency ("100 ლარს (ასი)"), or after a figure the currency comes
+        before ("GEL 100 (ასი)")."""
+        pair = self._pair_of(m)
+        if pair is None:
+            return m.span
+        return min(m.span[0], pair.span[0]), max(m.span[1], pair.span[1])
+
+    def _pair_of(self, m: Money) -> DigitsAndWords | None:
+        """The "digits (words)" pair whose figure is the amount ``m``'s."""
+        return next(
+            (
+                p
+                for p in digits_and_words(self.aoa.text)
+                if m.span[0] <= p.digits_span[0] and p.digits_span[1] <= m.span[1]
+            ),
+            None,
         )
 
     def rule_period_in_term(self) -> None:
@@ -3276,26 +3297,62 @@ def _cadastral_covers(a: str, c: str) -> bool:
 _FEE_WORDS = re.compile(r"\(\s*[ა-ჰ][ა-ჰ0-9 ,.]*\)")
 
 
+#: The words after a fee's figure, the currency standing before them or not: " (ასი)",
+#: " ლარს (ასი)", " ₾ (ასი)".
+_FEE_WORDS_AFTER = re.compile(rf"(\s*(?:{CURRENCY}\s*)?)({_FEE_WORDS.pattern})")
+#: Tetri written in figures after the lari: " ლარი და 50 თეთრი".
+_TETRI_AFTER = re.compile(rf"(\s*{CURRENCY}\s+)და\s+(\d{{1,2}})(\s*თეთრ[ა-ჰ]*)")
+
+
 def _fee_like(value: float, written: str) -> str:
     """``value`` as the act writes its fee: "700 (შვიდასი) ლარს" with 100 gives "100 (ასი) ლარს".
 
-    The figure keeps the act's grouping and decimals, the words are written anew, and the
-    currency word keeps its case. Text the pattern does not recognise yields the bare figure.
+    The figure keeps the act's grouping and decimals, the words are written anew wherever they
+    stand ("700 ლარს (შვიდასი)" too), and the currency word keeps its case. Tetri written after
+    the lari ("700 ლარი და 50 თეთრი") are the value's own, and dropped when it has none. Text
+    the pattern does not recognise yields the bare figure.
     """
     figure = re.search(FIGURE, written)
     if figure is None:
         return _plain(value)
-    out = written[: figure.start()] + render_figure_like(value, figure.group(0))
     rest = written[figure.end() :]
-    words = _FEE_WORDS.match(rest.lstrip())
+    tetri = _TETRI_AFTER.match(rest)
+    if tetri is not None:
+        lari, cents = int(round(value, 2)), round(value * 100) % 100
+        out = written[: figure.start()] + render_figure_like(lari, figure.group(0))
+        if cents:
+            width = len(tetri.group(2))
+            out += f"{tetri.group(1)}და {cents:0{width}d}{tetri.group(3)}"
+        else:
+            out += tetri.group(1).rstrip()
+        return (out + rest[tetri.end() :]).strip()
+    out = written[: figure.start()] + render_figure_like(value, figure.group(0))
+    words = _FEE_WORDS_AFTER.match(rest)
     if words is not None:
-        gap = rest[: len(rest) - len(rest.lstrip())]
         # the bracket's own currency and tetri words kept: "(ასი ლარი და 00 თეთრი)"
-        inner = words.group(0)[1:-1].strip()
-        out += f"{gap}({words_like(value, inner)})" + rest.lstrip()[words.end() :]
+        inner = words.group(2)[1:-1].strip()
+        out += f"{words.group(1)}({words_like(value, inner)})" + rest[words.end() :]
     else:
         out += rest
     return out.strip()
+
+
+def _nearest_price(value: float, prices: Sequence[float]) -> float | None:
+    """The one of ``prices`` a fee of ``value`` is a slip of, for its correction: the fewest
+    digit edits (a swap of two neighbours is one), a slip or two at most, then the smallest
+    difference. None when two are equally near or none is near: the message lists them."""
+
+    def key(p: float) -> tuple[int, float]:
+        written, meant = _plain(value).replace(".", ""), _plain(p).replace(".", "")
+        edits = damerau(written, meant, cap=max(len(written), len(meant)))
+        return edits, abs(value - p) / max(abs(p), 0.01)
+
+    ranked = sorted((key(p), p) for p in dict.fromkeys(prices))
+    if not ranked or ranked[0][0][0] > 2:
+        return None
+    if len(ranked) > 1 and ranked[1][0] == ranked[0][0]:
+        return None
+    return ranked[0][1]
 
 
 def _bank_key(code: str) -> str:
