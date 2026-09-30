@@ -568,6 +568,32 @@ every clause after it, made one block too big to pair, and the two versions scor
 "text changed" warning; whether a clause number that moved with its clause is a change at all
 is an open policy question (red team COMPARE-27).
 
+### Extraction, red team round 2 (2026-09-30)
+
+Defects a red team found and a verifier reproduced, each with a unit test on invented text
+(`tests/unit/test_extraction_redteam_r2.py`); the readers are in `docs/GOLD_SPEC.md` section 2.
+The decisions that are policy rather than reading:
+
+* **`payment_terms` carries the advance.** Canonical form: the deadline, then `advance N%`
+  (`P10D working advance 30%`), or the share alone (`advance 30%`); the chunk rule, the
+  whole-document reader and the comparison share one builder (`rules.payment_terms_value`),
+  and the merger demotes a value not in that form (a bare `30.0`) to a generic type, as it
+  does a `vat_status` that is not one of its four words. A staged payment states the balance's
+  deadline: it is the one that settles the price, and the advance's day is often counted from
+  signing. Which deadline to report was left open by the red team; this is the choice.
+* **A cap is no penalty.** Only the rate per period is a `penalty`; the cap stays a
+  `percentage`, so adding or changing it in a comparison is one `CMP.PERCENT` finding.
+* **An amount that restates a share** (a guarantee's `5%, 100 ლარი`, the VAT inside the price)
+  is only read as such when the share or the tax word stands right before it (80 characters,
+  no other figure between); `ღირებულება (18% დღგ-ს ჩათვლით) შეადგენს 1 000 ლარს` is the price.
+* **VAT rate in comparisons.** A rate is the VAT's only when written right beside the tax word
+  (`18% დღგ`, `დღგ-ს (18%)`, `VAT at 18%`); a discount in the same sentence is not. Its
+  appearance or removal alone is not reported.
+
+Measured after the fixes: the three strict gold sets unchanged at 100%/100%, and
+`scripts/mutate_aoa.py --seed 79 --per-class 6` detected every error class with 0% false
+positives on the harmless ones.
+
 ### Red team, round 1: what the comparison now reads (2026-09-30)
 
 Defects a red team found and a verifier reproduced, each with a unit test on invented
