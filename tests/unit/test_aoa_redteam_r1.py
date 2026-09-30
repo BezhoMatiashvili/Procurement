@@ -488,6 +488,16 @@ class TestActNotInGeorgian:
         skipped = {s.rule_id for s in report.skipped}
         assert {"AOA.ID_CODES", "AOA.PROJECT_PRESENT", "AOA.PERIOD"} <= skipped
 
+    def test_a_bilingual_act_is_read_as_georgian(self) -> None:
+        """Each line followed by its English rendering, longer than the Georgian: the rules read
+        the Georgian half, and a project missing from it is still a warning."""
+        english = "The same clause in English: the parties, the services, the fee and bank details"
+        act = ACT.replace("პროექტ „მზე“ (ს/კ: 01.02.03.456)", "მომსახურების")
+        bilingual = "\n".join(f"{line}\n{english}" for line in act.splitlines())
+        report = _check(bilingual)
+        assert [f.severity for f in _of(report, "AOA.PROJECT_PRESENT")] == ["warning"]
+        assert all(s.rule_id != "AOA.PROJECT_PRESENT" for s in report.skipped)
+
     def test_a_georgian_act_without_a_period_still_warns(self) -> None:
         act = ACT.replace(
             "მომსახურება შესრულდა 2026 წლის 1 აპრილიდან 2026 წლის 30 აპრილის ჩათვლით.\n", ""

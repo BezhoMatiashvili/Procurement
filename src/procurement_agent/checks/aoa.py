@@ -450,14 +450,17 @@ _ID_LABELLED = re.compile(
 )
 
 
-#: The share of an act's letters that must be Georgian for the rules to read it: a Georgian act
-#: writes its bank codes, IBANs and an English word or two in Latin letters, far below half.
-_GEORGIAN_SHARE = 0.5
+#: The share of an act's letters that must be Georgian for the rules to read it. A Georgian act
+#: is nearly all Georgian (the client's are over 80%: bank codes and IBANs are the Latin); an act
+#: in two languages, each clause in both, is about half, and the rules read its Georgian half;
+#: an act in English, with a Georgian name or address in it, is far below this.
+_GEORGIAN_SHARE = 0.2
 
 
 def _reads_georgian(text: str) -> bool:
-    """Whether ``text`` is written in Georgian: most of its letters are Georgian. The rules read
-    Georgian labels; an act in English has none of them to read."""
+    """Whether ``text`` is written in Georgian, alone or beside another language: a fair share
+    of its letters are Georgian (``_GEORGIAN_SHARE``). The rules read Georgian labels; an act in
+    English has none of them to read."""
     letters = [c for c in text if c.isalpha()]
     if not letters:
         return True  # nothing to judge by: the rules report what they find, as they always did

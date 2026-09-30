@@ -230,9 +230,11 @@ the text did (a merged cell read twice), every place is marked rather than a gue
 The rules read Georgian labels and wording (`ს/კ`, `შესრულდა`, `პროექტ`). On an act written in
 English (red team R1, AOA-15) they found no identification codes and reported an **error** on a
 correct act, and warnings that the project and the period were missing. Reading English parties,
-periods and dates is out of scope for now; instead, when fewer than half of the act's letters
+periods and dates is out of scope for now; instead, when fewer than a fifth of the act's letters
 are Georgian, `AOA.ID_CODES`, `AOA.PROJECT_PRESENT` and `AOA.PERIOD` leave a skip note saying the
-act is not in Georgian. Not measured: no client act is in English, so a late or out-of-term
+act is not in Georgian. The client's acts are over 80% Georgian letters (the Latin is bank codes
+and IBANs), and an act in two languages, each clause in both, about half: its Georgian half is
+read as before, and a project missing from it is still a warning. Not measured: no client act is in English, so a late or out-of-term
 English act is still missed (the act date and the period are not read), and says so only
 through those notes.
 

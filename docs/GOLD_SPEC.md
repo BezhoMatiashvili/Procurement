@@ -105,8 +105,9 @@ strict_findings: true             # anything else reported (any severity) is a f
     own date is the odd one out;
   * a missing project name / cadastral code → `AOA.PROJECT_PRESENT` / `AOA.CADASTRAL_PRESENT`;
   * a bank code or plot code not the contract's → one `AOA.BANK` / `AOA.CADASTRAL` per value,
-    correction = the one contract value it is nearest to (the contractor's own on a tie), none
-    when no single value is nearest; a BIC and its `XXX` branch form are the same code;
+    correction = the contract value it is a slip or two from, the contractor's own on a tie;
+    a value near none is corrected to the contractor's own, or to the only contract value; no
+    correction when that still leaves a choice. A BIC and its `XXX` branch form are one code;
   * an act not written in Georgian: what the rules read off Georgian wording (the parties'
     codes, the project, the period) is a skip note saying so, never a finding.
 * The legacy `expected_findings:` / `forbidden_findings:` (rule ids only, `"*"` = must be
