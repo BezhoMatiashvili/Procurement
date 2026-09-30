@@ -5,6 +5,7 @@ are made up."""
 
 from __future__ import annotations
 
+from procurement_agent.checks.document_facts import document_facts
 from procurement_agent.config import Settings
 from procurement_agent.extraction.georgian import lemma
 from procurement_agent.extraction.pipeline import run_extraction
@@ -167,3 +168,176 @@ def test_a_bracketed_price_with_no_price_before_it_is_the_price() -> None:
     assert _amount_types("4.1. ღირებულება შეადგენს 2 360 ლარს (ორი ათას სამას სამოცი ლარი).") == {
         2360.0: FactType.total_amount
     }
+
+
+def _doc(text: str, ft: FactType) -> list[str]:
+    return [f.normalized for f in document_facts(text) if f.type is ft]
+
+
+# --- EXTRACTION-R3-01: the payment verbs contracts use most ------------------------------------
+
+
+def test_every_payment_verb_makes_a_payment_clause() -> None:
+    for verb_clause in (
+        "4.2. დამკვეთი მიმწოდებელს ღირებულებას გადაუხდის აქტიდან 9 სამუშაო დღის განმავლობაში.",
+        "4.2. დამკვეთი ვალდებულია გადაუხადოს მიმწოდებელს ღირებულება 9 სამუშაო დღის ვადაში.",
+        "4.2. დამკვეთი ღირებულებას მიმწოდებლის ანგარიშზე გადაურიცხავს 9 სამუშაო დღის ვადაში.",
+        "4.2. დამკვეთი ღირებულებას აუნაზღაურებს მიმწოდებელს 9 სამუშაო დღის ვადაში.",
+        "4.2. დამკვეთი აანაზღაურებს ღირებულებას 9 სამუშაო დღის ვადაში.",
+        "4.2. თანხა ჩაირიცხება მიმწოდებლის ანგარიშზე 9 სამუშაო დღის განმავლობაში.",
+        "4.2. დამკვეთი იხდის ღირებულებას აქტიდან 9 სამუშაო დღის განმავლობაში.",
+    ):
+        assert _doc(KA_HEAD + verb_clause, FactType.payment_terms) == ["P9D working"], verb_clause
+    english = EN_HEAD + "4.2. The Buyer pays the price within 9 working days after acceptance."
+    assert _doc(english, FactType.payment_terms) == ["P9D working"]
+
+
+def test_a_staged_payment_with_the_indirect_verb_states_the_balance_s_deadline() -> None:
+    text = KA_HEAD + (
+        "4.2. დამკვეთი მიმწოდებელს გადაუხდის ავანსს 9 000 ლარის ოდენობით, ხოლო დარჩენილ თანხას "
+        "- აქტის გაფორმებიდან 9 სამუშაო დღის განმავლობაში."
+    )
+    assert _doc(text, FactType.payment_terms) == ["P9D working"]
+
+
+def test_a_payer_a_damages_clause_or_a_transfer_of_goods_pays_no_fee() -> None:
+    for clause in (
+        KA_HEAD + "4.2. მიმწოდებელი არის დღგ-ს გადამხდელი და მიაწოდებს 9 სამუშაო დღის ვადაში.",
+        KA_HEAD + "4.2. მიმწოდებელი ზიანს აუნაზღაურებს დამკვეთს 9 სამუშაო დღის ვადაში.",
+        EN_HEAD + "4.2. The Supplier shall transfer the goods within 9 working days.",
+    ):
+        assert _doc(clause, FactType.payment_terms) == [], clause
+
+
+# --- EXTRACTION-R3-09: the balance's deadline after a semicolon --------------------------------
+
+
+def test_the_balance_after_a_semicolon_states_the_payment_term() -> None:
+    text = EN_HEAD + (
+        "4.2. An advance of 25% is paid within 3 banking days; the balance within 12 working "
+        "days after acceptance."
+    )
+    assert _doc(text, FactType.payment_terms) == ["P12D working advance 25%"]
+    georgian = KA_HEAD + (
+        "4.2. ავანსი 25% გადაიხდება 3 სამუშაო დღეში; დარჩენილი თანხა - აქტიდან 12 სამუშაო დღის "
+        "ვადაში."
+    )
+    assert _doc(georgian, FactType.payment_terms) == ["P12D working advance 25%"]
+
+
+def test_a_sentence_after_a_full_stop_or_about_something_else_does_not_pay() -> None:
+    # after a full stop the balance names a new sentence; the remaining obligations are no payment
+    text = (
+        EN_HEAD + "4.2. The price is paid within 3 banking days; the remaining duties last 12 days."
+    )
+    assert _doc(text, FactType.payment_terms) == ["P3D working"]
+
+
+# --- EXTRACTION-R3-06: the price with VAT and its net figure in a bracket ------------------------
+
+
+def test_the_net_figure_s_bracket_does_not_decide_the_vat_status() -> None:
+    text = KA_HEAD + "4.1. ღირებულება შეადგენს 2 360 ლარს დღგ-ს ჩათვლით (დღგ-ს გარეშე 2 000 ლარი)."
+    assert _doc(text, FactType.vat_status) == ["incl"]
+    found = _extract(text)
+    assert found[FactType.total_amount] == ["2360.0"]
+    assert found[FactType.vat_status] == ["incl"]
+    assert _conflicts(text) == []
+    english = EN_HEAD + "4.1. The price is GEL 2,360 inclusive of VAT (excl. VAT GEL 2,000)."
+    assert _doc(english, FactType.vat_status) == ["incl"]
+
+
+def test_a_price_before_vat_with_no_bracket_is_still_excluded() -> None:
+    text = KA_HEAD + "4.1. ღირებულება შეადგენს 2 000 ლარს დღგ-ს გარეშე."
+    assert _doc(text, FactType.vat_status) == ["excl"]
+
+
+# --- EXTRACTION-R3-07: "net" that is no net amount -----------------------------------------------
+
+
+def test_net_of_vat_is_an_exclusion() -> None:
+    assert _doc(EN_HEAD + "4.1. The price is GEL 2,000 net of VAT.", FactType.vat_status) == [
+        "excl"
+    ]
+
+
+def test_net_days_or_net_weight_leave_the_stated_status() -> None:
+    for tail in (
+        "4.2. Payment terms: net 45 days from the invoice date.",
+        "4.2. The price is set per kilogram of net weight.",
+    ):
+        text = EN_HEAD + "4.1. The price is GEL 2,000 inclusive of VAT.\n" + tail
+        assert _doc(text, FactType.vat_status) == ["incl"], tail
+    georgian = KA_HEAD + (
+        "4.1. ღირებულება შეადგენს 2 000 ლარს დღგ-ს ჩათვლით.\n4.2. ფასი განისაზღვრება ნეტო "
+        "მასის მიხედვით."
+    )
+    assert _doc(georgian, FactType.vat_status) == ["incl"]
+
+
+def test_a_net_fee_is_still_net() -> None:
+    assert _doc(KA_HEAD + "4.1. ანაზღაურება შეადგენს 900 ლარს NET.", FactType.vat_status) == ["net"]
+    text = KA_HEAD + "4.1. ანაზღაურება შეადგენს 900 ლარს NET (საშემოსავლო გადასახადის გარეშე)."
+    assert _doc(text, FactType.vat_status) == ["net"]
+
+
+# --- EXTRACTION-R3-08: a non-payer clause under a condition --------------------------------------
+
+
+def test_a_conditional_non_payer_clause_does_not_override_the_stated_status() -> None:
+    text = KA_HEAD + (
+        "4.1. ღირებულება შეადგენს 2 000 ლარს დღგ-ს ჩათვლით. იმ შემთხვევაში, თუ მიმწოდებელი არ "
+        "არის დღგ-ს გადამხდელი, ღირებულება არ იცვლება."
+    )
+    assert _doc(text, FactType.vat_status) == ["incl"]
+    english = EN_HEAD + (
+        "4.1. The price is GEL 2,000 inclusive of VAT. If the Supplier is not registered as a "
+        "VAT payer, the price does not change."
+    )
+    assert _doc(english, FactType.vat_status) == ["incl"]
+
+
+def test_a_non_payer_stated_outright_is_none() -> None:
+    text = KA_HEAD + "4.1. მიმწოდებელი არ არის დღგ-ს გადამხდელი. ღირებულება შეადგენს 2 000 ლარს."
+    assert _doc(text, FactType.vat_status) == ["none"]
+    # with nothing else stated, the condition is all the document says
+    conditional = KA_HEAD + (
+        "4.1. ღირებულება შეადგენს 2 000 ლარს. თუ მიმწოდებელი არ არის დღგ-ს გადამხდელი, ფასი არ "
+        "იცვლება."
+    )
+    assert _doc(conditional, FactType.vat_status) == ["none"]
+
+
+# --- EXTRACTION-R3-12: a penalty's rate is read in its own sentence ------------------------------
+
+
+def test_a_rate_of_the_next_clause_is_no_penalty() -> None:
+    penalty = "5.1. დაგვიანებისთვის მიმწოდებელს ეკისრება პირგასამტეხლო 0.3% ყოველ დღეზე."
+    for neighbour in (
+        "5.2. მიმწოდებელი წარადგენს საბანკო გარანტიას ღირებულების 4%-ის ოდენობით.",
+        "5.2. საგარანტიო თანხის სახით დაკავდება ღირებულების 4%.",
+        "5.2. ფასი მოიცავს 18% დღგ-ს.",
+    ):
+        text = KA_HEAD + penalty + " " + neighbour
+        assert _doc(text, FactType.penalty) == ["0.3% per day"], neighbour
+        assert _extract(text)[FactType.penalty] == ["0.3% per day"], neighbour
+
+
+def test_fine_inside_another_word_is_no_penalty_word() -> None:
+    text = EN_HEAD + (
+        "1.1. Consulting services as defined in Annex 2.\n"
+        "4.2. The Buyer shall pay 40% of the price on delivery."
+    )
+    assert _doc(text, FactType.penalty) == []
+    assert FactType.penalty not in _extract(text)
+
+
+def test_a_penalty_named_by_its_heading_or_as_a_fine_is_kept() -> None:
+    heading = KA_HEAD + "5. პირგასამტეხლო 5.1. ვადის გადაცილებისას ეკისრება 0.3% ყოველ დღეზე."
+    assert _doc(heading, FactType.penalty) == ["0.3% per day"]
+    english = EN_HEAD + "5.1. A fine of 0.3% per day of delay is charged."
+    assert _doc(english, FactType.penalty) == ["0.3% per day"]
+    late_advance = (
+        KA_HEAD + "5.1. ავანსის დაბრუნების დაგვიანებისთვის პირგასამტეხლო 0.3% ყოველ დღეზე."
+    )
+    assert _doc(late_advance, FactType.penalty) == ["0.3% per day"]

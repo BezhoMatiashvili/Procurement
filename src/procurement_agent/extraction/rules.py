@@ -947,6 +947,36 @@ def is_advance_share(text: str, start: int, end: int) -> bool:
     return _RATE_ENDS.search(before, 0, word.start()) is None
 
 
+#: A word about paying the fee, built from the verb roots rather than from finished word forms,
+#: so every preverb, version vowel and person reads: pay - "გადაიხდის", "გადაიხდება",
+#: "გადაუხდის", "გადაუხადოს", "გადახდა", "იხდის", "უხდის"; transfer the money - "გადარიცხავს",
+#: "გადაურიცხავს", "ჩაირიცხება", "ჩარიცხვა"; reimburse - "ანაზღაურება", "აანაზღაურებს",
+#: "აუნაზღაურებს"; settle - "ანგარიშსწორება"; and English "pay", "pays", "paid", "paying",
+#: "payable", "payment(s)". Not "გადამხდელი" (a payer, as in "დღგ-ს გადამხდელი") and not English
+#: "transfer", which moves goods and rights as often as money.
+PAYMENT_WORDS = re.compile(
+    r"გადა[იუ]?ხა?დ|(?<![ა-ჰ])[იუ]ხდ"
+    r"|(?:გადა|ჩა)[იუ]?რიცხ"
+    r"|(?<![ა-ჰ])(?:ა|აა|აუ)ნაზღაურ"
+    r"|ანგარიშსწორებ"
+    r"|(?<![a-z])(?:pay|pays|paid|paying|payable|payments?)(?![a-z])",
+    re.IGNORECASE,
+)
+#: A clause that goes on with the balance after a paying clause: "...; the balance within 10
+#: working days", "...; დარჩენილი თანხა - 10 სამუშაო დღეში". It pays with the verb before it.
+_BALANCE_OPENS = re.compile(
+    r"(?:ხოლო\s+|and\s+)?(?:the\s+)?(?:დარჩენ|ნაშთ|მეორე\s+ნაწილ"
+    r"|(?:remaining|remainder|balance)(?![a-z]))",
+    re.IGNORECASE,
+)
+
+
+def continues_payment(text: str, previous_end: int, start: int) -> bool:
+    """Whether the sentence at ``start`` goes on with the balance of the paying sentence that
+    ends at ``previous_end``: only after a semicolon, and only when it opens with the balance."""
+    return text[previous_end - 1 : previous_end] == ";" and bool(_BALANCE_OPENS.match(text, start))
+
+
 #: Which payment a deadline is for: the advance's, or the balance's after it.
 _PAYMENT_PARTS: dict[str, tuple[str, ...]] = {
     "advance": ("ავანს", "advance", "prepayment", "prepaid"),
@@ -1006,6 +1036,47 @@ def is_vat_rate(text: str, start: int, end: int) -> bool:
         _VAT_BEFORE_RATE.search(text, max(0, start - 40), start) is not None
         or _VAT_AFTER_RATE.match(text, end) is not None
     )
+
+
+#: "net" that measures something other than money: a payment convention ("net 30 days"), a
+#: weight, a mass, an area, a profit ("net weight", "ნეტო წონის"). It says nothing about tax.
+_NET_MEASURE = re.compile(
+    r"\s*(?:-?[ა-ჰ]{1,3}\s+)?(?:\d|(?:weight|mass|area|volume|tonnage|profit|income|margin|"
+    r"loss)(?![a-z])|წონ|მას[აი]|ფართ|მოცულობ|მოგებ|ზარალ)",
+    re.IGNORECASE,
+)
+
+
+def is_net_measure(text: str, end: int) -> bool:
+    """Whether the word "net" ending at ``end`` measures a count, a weight or a profit rather
+    than stating a net amount: "net 30 days", "net weight", "ნეტო წონის მიხედვით"."""
+    return _NET_MEASURE.match(text, end) is not None
+
+
+#: A condition the tax wording after it stands under: "თუ „შემსრულებელი“ არ არის დღგ-ს
+#: გადამხდელი, ...", "იმ შემთხვევაში, თუკი ...", "If the Contractor is not registered as a VAT
+#: payer, ...". English only where it opens its clause: "the price, where applicable, ..." has a
+#: comma before the wording.
+_CONDITION = re.compile(
+    r"(?<![ა-ჰ])(?:თუ|თუკი)(?![ა-ჰ])"
+    r"|(?:^\s*|[,;:(]\s*|\d\.\s+)(?:if|in\s+case|in\s+the\s+event|where|unless|provided\s+that)"
+    r"(?![a-z])",
+    re.IGNORECASE,
+)
+_CONDITION_REACH = 120
+
+
+def is_hypothetical(text: str, start: int) -> bool:
+    """Whether the words at ``start`` stand in a conditional clause: a condition opens their
+    clause with no comma, semicolon or sentence end between. Such wording states what applies
+    in a case that may not arise - "თუ შემსრულებელი არ არის დღგ-ს გადამხდელი, ღირებულება არ
+    იცვლება" says nothing about whether this price includes VAT."""
+    lo = max(0, start - _CONDITION_REACH)
+    before = text[lo:start]
+    stops = [m.end() for m in _SENTENCE_END.finditer(before)]
+    clause = before[max(stops, default=0) :]
+    last = next(reversed(list(_CONDITION.finditer(clause))), None)
+    return last is not None and not re.search(r"[,;]", clause[last.end() :])
 
 
 def find_percentages(text: str) -> list[RuleHit]:
@@ -1101,6 +1172,48 @@ def penalty_period(text: str, start: int, end: int) -> str | None:
         return None
     unit = next(g for g in found.groups() if g)
     return _PERIOD_UNITS[unit.lower()]
+
+
+#: The words for a penalty; the English ones whole, so "fine" is no part of "defined".
+_PENALTY_WORD = re.compile(
+    r"პირგასამტეხლო|ჯარიმ|საურავ"
+    r"|(?<![a-z])(?:penalt[a-z]*|liquidated\s+damages|fines?)(?![a-z])",
+    re.IGNORECASE,
+)
+#: A rate another role owns, named nearer to it than the penalty: a guarantee's, a retention's
+#: or an advance's share ("საგარანტიო თანხის სახით დაკავდება ღირებულების 5%"). Named before the
+#: penalty word it owns nothing: "ავანსის დაბრუნების დაგვიანებისთვის პირგასამტეხლო 0.1%".
+_RATE_OWNER = re.compile(
+    r"საგარანტიო|გარანტი|უზრუნველყოფ(?:ა|ის|ად)(?![ა-ჰ])|დაკავ|ავანს"
+    r"|(?<![a-z])(?:guarantee|retention|retained|security|deposit|advance|prepayment)(?![a-z])",
+    re.IGNORECASE,
+)
+#: A sentence's end, but not the stop of a clause or heading number ("5. პირგასამტეხლო 5.1.
+#: ..."): a heading names the penalty its clauses set.
+_SENTENCE_END_IN_TEXT = re.compile(r"(?<!\d)[.;!?](?=\s)")
+_PENALTY_BEFORE = 120
+_PENALTY_AFTER = 40
+
+
+def is_penalty_rate(text: str, start: int, end: int) -> bool:
+    """Whether the percentage at ``text[start:end]`` is a penalty's rate: a penalty word stands
+    in its own sentence, before it (or after it, when none does), with no other role's word
+    nearer to it (``_RATE_OWNER``). Never the VAT's rate ("ფასი მოიცავს 18% დღგ-ს"), a cap on
+    the penalty, or a rate in the next clause: "პირგასამტეხლო 0.2% ყოველ დღეზე. 5.2. ...
+    გარანტიას ღირებულების 5%-ის ოდენობით" sets one penalty."""
+    if is_rate_cap(text, start, end) or is_vat_rate(text, start, end):
+        return False
+    before = text[max(0, start - _PENALTY_BEFORE) : start]
+    stops = [m.end() for m in _SENTENCE_END_IN_TEXT.finditer(before)]
+    before = before[max(stops, default=0) :]
+    after = text[end : end + _PENALTY_AFTER]
+    stop = _SENTENCE_END_IN_TEXT.search(after)
+    after = after[: stop.start()] if stop else after
+    word = next(reversed(list(_PENALTY_WORD.finditer(before))), None)
+    owner = next(reversed(list(_RATE_OWNER.finditer(before))), None)
+    if word is None:
+        return owner is None and _PENALTY_WORD.search(after) is not None
+    return owner is None or owner.start() < word.start()
 
 
 # --- durations ---------------------------------------------------------------------------------
