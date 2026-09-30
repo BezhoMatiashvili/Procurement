@@ -3161,7 +3161,9 @@ def _moved_row_hunks(
     left = tuple(a for a, _b, g in pairs if g == group and a is not None)
     right = tuple(b for _a, b, g in pairs if g == group and b is not None)
     columns = group.rsplit(":", 1)[-1]
-    ordinals = {(left[0].table, int(c)) for c in columns.split(",") if c}
+    ordinals: set[tuple[int | None, int | None]] = {
+        (left[0].table, int(c)) for c in columns.split(",") if c
+    }
     whole = [replace(unit[0], text=" | ".join(c.text for c in unit)) for unit in (left, right)]
     made += 1
     hunks.append(
