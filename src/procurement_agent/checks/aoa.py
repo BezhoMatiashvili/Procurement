@@ -2645,7 +2645,7 @@ class AoaChecker:
         meant = (
             same_currency[0] if len(same_currency) == 1 else _nearest_price(m.value, same_currency)
         )
-        expected = None if meant is None else _fee_like(meant, self.aoa.text[span[0] : span[1]])
+        fix = None if meant is None else _fee_like(meant, self.aoa.text[span[0] : span[1]])
         hint_ka = hint_en = ""
         for c in contract:
             if c.role is not None and c.role in _ROLE_NAME and _states([c.money], m):
@@ -2659,7 +2659,7 @@ class AoaChecker:
             f"{name_ka} {actual} არ ემთხვევა ხელშეკრულებით განსაზღვრულ ღირებულებას "
             f"({shown}){hint_ka}",
             f"{name_en} {actual} matches no price in the contract ({shown}){hint_en}",
-            expected=expected,
+            expected=fix,
             actual=actual,
             span=span,
         )
