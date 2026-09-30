@@ -73,8 +73,9 @@ _ALL_LAYERS: set[ContentLayer] = {ContentLayer.BODY, ContentLayer.FURNITURE}
 
 
 class PartyColumnsTableSerializer(TripletTableSerializer):
-    """Docling's triplet serialisation ("<row label>, <column header> = <cell>"), except for a
-    table laid out one party per column, which is written column by column.
+    """Docling's triplet serialisation ("<row label>, <column header> = <cell>"), except for two
+    layouts it misreads: a table laid out one party per column, written column by column, and a
+    two-column table whose first row is data, written row by row as "label: value".
 
     A requisites or signature grid - the customer's column beside the contractor's, their
     names, codes, accounts and directors row by row - written row by row puts each party's
@@ -90,6 +91,14 @@ class PartyColumnsTableSerializer(TripletTableSerializer):
     one row are one party, a table with a party per row, and stay in triplets. Columns before
     the first party's are row labels ("ს/კ", "მისამართი"): each party's cell is written after
     its row's label.
+
+    A key-terms table or a heading laid out in two columns has no header row, yet Docling
+    promotes its first row to the column header (``_first_row_is_data``). The triplets then drop
+    that row's label and write its value into every other row as a column name: the price table
+    lost its label (EXTRACTION-12), every row carried the first row's figures and deadline - a
+    false penalty "30%" beside the penalty's own rate (EXTRACTION-R3-02) - and a title with no
+    figure in its second cell was gone (EXTRACTION-R3-03). Such a table is written one row to
+    a line, each cell once, as the document has it.
     """
 
     def serialize(
@@ -101,7 +110,10 @@ class PartyColumnsTableSerializer(TripletTableSerializer):
         **kwargs: Any,
     ) -> SerializationResult:
         first = _party_columns(item)
-        if first is None or item.self_ref in doc_serializer.get_excluded_refs(**kwargs):
+        by_rows = first is None and _first_row_is_data(item)
+        if (first is None and not by_rows) or item.self_ref in doc_serializer.get_excluded_refs(
+            **kwargs
+        ):
             return super().serialize(item=item, doc_serializer=doc_serializer, doc=doc, **kwargs)
         parts: list[SerializationResult] = []
         captions = doc_serializer.serialize_captions(item=item, **kwargs)
@@ -118,7 +130,7 @@ class PartyColumnsTableSerializer(TripletTableSerializer):
             ]
             for r, row in enumerate(item.data.grid)
         ]
-        text = _by_column(texts, first)
+        text = _by_row(texts) if first is None else _by_column(texts, first)
         if text:
             if shared is not None:
                 shared.update(local["visited"])
@@ -165,6 +177,46 @@ def _by_column(texts: list[list[str]], first: int) -> str:
         if lines:
             blocks.append("\n".join(lines))
     return "\n".join(blocks)
+
+
+_DIGIT = re.compile(r"\d")
+
+
+def _first_row_is_data(table: TableItem) -> bool:
+    """Whether a two-column table's first row, which Docling promoted to the column header, is
+    data: a real header names both its columns and carries no figure ("პირობა | მნიშვნელობა").
+    A first row with a digit in either cell ("ხელშეკრულება N 27/2026", "ღირებულება | 9 100
+    ლარი"), or a label with no second cell (a title, alone or merged across the row), is not
+    one. A first row with an empty label cell is left to Docling: a header may leave the
+    corner blank."""
+    grid = table.data.grid
+    if table.data.num_cols != 2 or len(grid) < 2:
+        return False
+    first = grid[0]
+    if not any(cell.column_header and cell.start_row_offset_idx == 0 for cell in first):
+        return False
+    label = normalize_spaces(first[0].text)
+    # a cell merged across both columns is one cell, written in the first
+    value = "" if first[1].start_col_offset_idx == 0 else normalize_spaces(first[1].text)
+    if not label:
+        return False
+    return not value or bool(_DIGIT.search(label) or _DIGIT.search(value))
+
+
+def _by_row(texts: list[list[str]]) -> str:
+    """The grid one row to a line: "label: value", or a row's one cell alone, each ended with
+    ";" as ``_by_column`` ends a cell. A row is a clause of its own: with a line break alone
+    between them, the balance's deadline was read into the advance's sentence and lost."""
+    lines: list[str] = []
+    for row in texts:
+        cells = [cell for cell in row if cell]
+        if not cells:
+            continue
+        *labels, last = cells
+        head = " ".join(label.rstrip(" :") for label in labels)
+        line = f"{head}: {last}" if head else last
+        lines.append(line if line.endswith((".", ";", ":", "!", "?")) else f"{line};")
+    return "\n".join(lines)
 
 
 class AllLabelsSerializerProvider(ChunkingSerializerProvider):
@@ -223,19 +275,11 @@ def chunk_docling_document(
     chunks: list[Chunk] = []
     #: every item a chunk lists, with the text of each chunk that lists it
     cover: dict[str, list[str]] = {}
-    restored: set[str] = set()
     for dc in chunker.chunk(doc):
         meta = dc.meta
         if not isinstance(meta, DocMeta):  # pragma: no cover - HybridChunker always yields DocMeta
             raise TypeError("unexpected chunk metadata")
         body, contextual = dc.text, chunker.contextualize(dc)
-        for listed in meta.doc_items:
-            # a chunk lists its items by reference only: the table's cells are in the document
-            item = listed.get_ref().resolve(doc)
-            if isinstance(item, TableItem) and item.self_ref not in restored:
-                # once per table: a long table split over chunks lists it in each
-                restored.add(item.self_ref)
-                body, contextual = _restore_first_row(item, body, contextual)
         for listed in meta.doc_items:
             cover.setdefault(listed.self_ref, []).append(body)
         _append(chunks, doc, doc_id, contextual, body, meta.doc_items, list(meta.headings or []))
@@ -257,44 +301,6 @@ def chunk_docling_document(
             batch.append(item)
         _flush_orphans(chunks, doc, doc_id, batch)
     return chunks
-
-
-_DIGIT = re.compile(r"\d")
-
-
-def _restore_first_row(table: TableItem, body: str, contextual: str) -> tuple[str, str]:
-    """``body`` and ``contextual`` with a two-column table's first row written out as
-    "label: value" when the serializer lost it.
-
-    A key-terms table with no header row ("ხელშეკრულების ღირებულება | 9 100 ლარი") has its
-    first row promoted to the column header. The serializer then drops that row's label - the
-    corner cell - and writes its value into every other row as a column name, so the value is
-    read with no label: the contract's price was no total. A real header names its columns
-    and carries no figure ("პირობა | მნიშვნელობა"), so only a first row whose value has a
-    digit is data, and only when its label is nowhere in the chunk. The line goes before the
-    row that follows it, where the document has it.
-    """
-    grid = table.data.grid
-    if table.data.num_cols != 2 or len(grid) < 2:
-        return body, contextual
-    label, value = (normalize_spaces(c.text) for c in grid[0][:2])
-    if not label or not _DIGIT.search(value) or label in normalize_spaces(body):
-        return body, contextual
-    line = f"{label}: {value}"
-    # the next row as the serializer writes it: its label, then the promoted value as its
-    # column's name
-    row = f"{normalize_spaces(grid[1][0].text)}, {value}"
-    return _insert_before(body, line, row), _insert_before(contextual, line, row)
-
-
-def _insert_before(text: str, line: str, row: str) -> str:
-    """``text`` with ``line`` on a line of its own before the line holding ``row``, or at the
-    end when ``row`` is not found as written."""
-    at = text.find(row)
-    if at < 0:
-        return f"{text}\n{line}"
-    start = text.rfind("\n", 0, at) + 1
-    return f"{text[:start]}{line}\n{text[start:]}"
 
 
 def _not_yet_carried(
