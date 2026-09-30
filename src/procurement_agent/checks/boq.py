@@ -89,9 +89,8 @@ _HEADER_SYNONYMS: dict[str, tuple[str, ...]] = {
     # _norm_label strips surrounding whitespace, so "delivery " needs no entry of its own
     "rate_delivery": ("delivery", "transportation", "ტრანსპორტი", "ტრანსპორტირება", "მიწოდება"),
     "sum_delivery": ("delivery sum", "transportation sum"),
+    # a currency the label names ("Rate in USD", "ღირებულება ლარში") is taken off first
     "rate_total": (
-        "rate in us $",
-        "rate in usd",
         "rate",
         "unit rate",
         "unit price",
@@ -99,7 +98,15 @@ _HEADER_SYNONYMS: dict[str, tuple[str, ...]] = {
         "ერთ. ფასი",
         "ერთეულის ღირებულება",
     ),
-    "amount": ("amount in us $", "amount in usd", "amount", "total", "ღირებულება", "სულ", "ჯამი"),
+    "amount": (
+        "amount",
+        "total",
+        "total amount",
+        "total price",
+        "ღირებულება",
+        "სულ",
+        "ჯამი",
+    ),
 }
 _LABEL_TO_KEY = {label: key for key, labels in _HEADER_SYNONYMS.items() for label in labels}
 #: The columns a number is read from; text in one of them is reported, never read as 0.
@@ -204,16 +211,22 @@ _UNIT_ALIASES: dict[str, str] = {
 }
 
 
-#: A currency a header names after its label: "ერთეულის ფასი, აშშ დოლარი", "Amount (USD)".
+#: A currency, as a header names it: "GEL", "US $", "₾", "აშშ დოლარი", and the Georgian locative
+#: "ლარში" / "დოლარში" ("in lari", "in dollars").
+_CURRENCY = r"(?:აშშ\s+)?(?:დოლარ[ა-ჰ]*|ლარ[ა-ჰ]*|ევრო[ა-ჰ]*|usd|gel|eur|us\s*\$|\$|₾|€)"
+#: A currency a header names after its label, however it is attached: "ერთეულის ფასი, აშშ
+#: დოლარი", "Amount (USD)", "Rate in GEL", "Amount EUR", "ღირებულება ლარში". Only at the end: a
+#: label that goes on after the currency ("Unit rates in USD (excl. VAT)", the group label over
+#: the component rates) is not the rate itself.
 _LABEL_CURRENCY = re.compile(
-    r"\s*[,(]\s*(?:აშშ\s+)?(?:დოლარ[ა-ჰ]*|ლარ[ა-ჰ]*|ევრო|usd|gel|eur|us\s*\$|\$|₾|€)\s*\)?\s*$",
-    re.IGNORECASE,
+    rf"\s*(?:[,(]\s*|\s+in\s+|\s+){_CURRENCY}\s*\)?\s*$|^\s*(?:\$|₾|€)\s*", re.IGNORECASE
 )
 
 
 def _norm_label(v: object) -> str:
     """A header label as compared: "Qty." and "Unit:" are "qty" and "unit", and "ღირებულება, აშშ
-    დოლარი" is "ღირებულება"."""
+    დოლარი", "Amount in GEL" and "ღირებულება ლარში" are the amount whatever currency they name.
+    """
     label = normalize_spaces(str(v or "")).strip().lower().rstrip(":.").strip()
     return _LABEL_CURRENCY.sub("", label).strip()
 
@@ -1467,6 +1480,9 @@ def template_findings(template: BoqWorkbook) -> list[Finding]:
                     actual=name,
                 )
             )
+    for name, sheet in template.sheets.items():
+        if not _reads_prices(sheet):
+            out.append(_prices_not_read(name, template=True))
     for sheet in template.sheets.values():
         for line in sheet.leaf_lines:
             for key, text in line.non_numeric:
@@ -1482,6 +1498,30 @@ def template_findings(template: BoqWorkbook) -> list[Finding]:
                         )
                     )
     return out
+
+
+#: The columns a price is read from: a rate, an amount, or their components.
+_PRICE_KEYS = (*_RATE_KEYS, *_TOTAL_KEYS)
+
+
+def _reads_prices(sheet: BoqSheet) -> bool:
+    """Whether any rate or amount column of the sheet was recognised."""
+    return any(key in sheet.columns for key in _PRICE_KEYS)
+
+
+def _prices_not_read(name: str, *, template: bool) -> Finding:
+    """A sheet with quantities but no rate or amount column this reader recognised: the
+    reader's gap, never "section left unpriced" on bidders who priced every line."""
+    who_ka, who_en = ("შაბლონის ", "template ") if template else ("", "")
+    return _finding(
+        "BOQ.PRICES_NOT_READ",
+        "warning",
+        f"{who_ka}გვერდზე {name} ერთეულის ფასის და ღირებულების სვეტები ვერ ამოვიცანით — "
+        "ფასები არ წაკითხულა და გვერდი შეფასებაში არ მონაწილეობს",
+        f"{who_en}sheet {name}: no rate or amount column could be recognised - its prices were "
+        "not read and the sheet takes no part in the evaluation",
+        actual=name,
+    )
 
 
 def compare_bid(template: BoqWorkbook, bid: BoqWorkbook) -> BidComparison:
@@ -1850,7 +1890,11 @@ def _compare_sheet(out: BidComparison, t_sheet: BoqSheet, b_sheet: BoqSheet) -> 
     ]
 
     priced = [line for line in b_sheet.lines if line.is_priced]
-    if not priced and any(line.quantity for line in t_sheet.lines):
+    if not _reads_prices(b_sheet):
+        # the reader's gap, not the bidder's: said once, on the template, when it is the same
+        if _reads_prices(t_sheet):
+            out.findings.append(_prices_not_read(b_sheet.name, template=False))
+    elif not priced and any(line.quantity for line in t_sheet.lines):
         out.unpriced_sheets.append(t_sheet.name)
 
 
