@@ -130,7 +130,6 @@ class TestNearestPriceCorrection:
         assert finding.expected is None
         assert "100.00 GEL" in finding.message_en and "1,200.00 GEL" in finding.message_en
 
-
     def test_two_prices_equally_near_give_no_correction(self) -> None:
         """120 is one digit and a fifth from both 100 and 150: neither is the one meant."""
         assert _nearest_price(120, [100, 150]) is None
