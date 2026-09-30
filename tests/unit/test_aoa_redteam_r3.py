@@ -82,3 +82,43 @@ class TestTetriAfterAHyphen:
     def test_a_range_keeps_its_words_pair(self) -> None:
         [pair] = digits_and_words("ღირებულება 10-15 (თხუთმეტი) ლარი.")
         assert (pair.digits, pair.digits_raw, pair.spelled) == (15.0, "15", 15.0)
+
+
+# --- AOA-R3-07: a signatory with an initial and a slip in the surname's last letter -------------
+
+_CONT_SIGN = "დირექტორი: დავით მელაძე"
+_CUST_SIGN = "დირექტორი ნინო კაპანაძე"
+
+
+class TestInitialledSignatory:
+    def test_an_initialled_name_written_right_is_clean(self) -> None:
+        """The act's only form of the contractor's director, and the customer's beside its full
+        genitive in the preamble, each with the first name as its initial."""
+        for act in (
+            ACT.replace(_CONT_SIGN, "დირექტორი: დ. მელაძე"),
+            ACT.replace(_CUST_SIGN, "დირექტორი ნ. კაპანაძე"),
+            ACT.replace("დირექტორის ნინო კაპანაძის", "დირექტორის ნ. კაპანაძის"),
+        ):
+            assert _of(_check(act), "AOA.DIRECTOR") == []
+
+    def test_a_final_vowel_slip_after_an_initial_is_an_error(self) -> None:
+        for act, quote, fix in (
+            (ACT.replace(_CONT_SIGN, "დირექტორი: დ. მელაძი"), "დ. მელაძი", "დ. მელაძე"),
+            (ACT.replace(_CONT_SIGN, "დირექტორი: დ.მელაძი"), "დ.მელაძი", "დ. მელაძე"),
+            (ACT.replace(_CUST_SIGN, "დირექტორი ნ. კაპანაძი"), "ნ. კაპანაძი", "ნ. კაპანაძე"),
+        ):
+            [finding] = _of(_check(act), "AOA.DIRECTOR")
+            assert (finding.severity, finding.quote, finding.expected) == ("error", quote, fix)
+
+    def test_another_initial_is_not_the_director(self) -> None:
+        act = ACT.replace(_CONT_SIGN, "დირექტორი: ა. მელაძე")
+        [finding] = _of(_check(act), "AOA.DIRECTOR")
+        assert (finding.quote, finding.expected) == ("ა. მელაძე", "დ. მელაძე")
+
+    def test_an_initial_before_another_word_is_no_form_of_the_director(self) -> None:
+        """Near miss: "ნ." before a word that is not the surname (an abbreviation in prose)."""
+        act = ACT.replace(
+            "4. გაფორმების თარიღი",
+            "შენიშვნა: ნ. კატეგორია და დ. მეორე ეტაპი.\n4. გაფორმების თარიღი",
+        )
+        assert _of(_check(act), "AOA.DIRECTOR") == []

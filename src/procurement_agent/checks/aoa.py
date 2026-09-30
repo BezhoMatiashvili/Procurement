@@ -1843,7 +1843,10 @@ class AoaChecker:
 
         The party reader keeps one form of a signatory and takes another that differs only in
         its ending for the same person, a slip in the ending included ("მელაძის" and "მელაძი");
-        the rule compares each form found here on its own (``_same_person``)."""
+        the rule compares each form found here on its own (``_same_person``). So does it a form
+        with the first name as its initial ("ნ. ბერიძი" beside "ნოდარ ბერიძის", red team R3,
+        AOA-R3-07): the party reader takes the two for one person, and the initialled form's
+        surname is compared on its own."""
         parts = normalize_name(name).split()
         if len(parts) < 2 or not all(is_georgian_word(w) for w in parts):
             return [(form, [span]) for form, span in self._written_forms(name)]
@@ -1857,7 +1860,12 @@ class AoaChecker:
             if all(_near_word(w, p) for (w, _, _), p in zip(window, parts, strict=True)):
                 span = (window[0][1], window[-1][2])
                 forms.setdefault(self.aoa.as_written(*span), []).append(span)
-        return list(forms.items())
+        initials = r"\s*".join(rf"{re.escape(p[0])}\." for p in parts[:-1])
+        pattern = rf"(?<![{GEORGIAN}]){initials}\s*([{GEORGIAN}]+)(?![{GEORGIAN}])"
+        for m in re.finditer(pattern, self.aoa.text):
+            if _near_word(m.group(1), parts[-1]):
+                forms.setdefault(self.aoa.as_written(*m.span()), []).append(m.span())
+        return sorted(forms.items(), key=lambda form: form[1][0])
 
     def _owner_at(self, pos: int) -> Party | None:
         """The act party whose block ``pos`` stands in: the one named last before it - by its
@@ -3412,15 +3420,26 @@ def _same_person(written: str, named: str) -> bool:
 
     ``names_match`` strips a final "ე" or "ი" as an ending, so it takes "მელაძი" for "მელაძე";
     neither is a form of the other: "-ძე" gives "-ძის", "-ძეს", "-ძემ", and "-შვილი" gives
-    "-შვილის", "-შვილმა". A name in another script is compared as ``names_match`` does."""
+    "-შვილის", "-შვილმა". A name in another script is compared as ``names_match`` does.
+
+    A first name written as its initial ("ნ. ბერიძე") is the named person's when it is the
+    first letter of theirs; the surname is then held to the same rule (red team R3, AOA-R3-07):
+    "ნ. ბერიძი" is no form of "ნოდარ ბერიძე"."""
     a, b = normalize_name(written).split(), normalize_name(named).split()
     if not a or len(a) != len(b):
         return False
     if not all(is_georgian_word(w) for w in (*a, *b)):
         return names_match(written, named)
-    if not all(same_word(x, y) for x, y in zip(a[:-1], b[:-1], strict=True)):
+    if not all(_same_first(x, y) for x, y in zip(a[:-1], b[:-1], strict=True)):
         return False
     return lemma_word(b[-1]) in word_lemmas(a[-1])
+
+
+def _same_first(written: str, named: str) -> bool:
+    """A first name (or a patronymic) the same word in some form, or its initial."""
+    if len(written) == 1 or len(named) == 1:
+        return written[0] == named[0]
+    return same_word(written, named)
 
 
 def _near_word(word: str, target: str) -> bool:
