@@ -122,3 +122,35 @@ class TestInitialledSignatory:
             "შენიშვნა: ნ. კატეგორია და დ. მეორე ეტაპი.\n4. გაფორმების თარიღი",
         )
         assert _of(_check(act), "AOA.DIRECTOR") == []
+
+
+# --- mutation harness: a one-letter slip in the act's signing verb ------------------------------
+
+_SIGNED = "აქტი გაფორმდა 2026 წლის 30 აპრილი"
+#: the act with no "გაფორმების თარიღი" heading: its signing verb alone dates it
+_UNLABELLED = ACT.replace("4. გაფორმების თარიღი\n", "4. დასკვნითი დებულება\n")
+
+
+class TestSigningVerbSlip:
+    def test_the_date_after_a_slipped_verb_is_the_acts(self) -> None:
+        for slip in ("გაორმდა", "გაფორდა", "გაფორმდაა", "გაფრომდა"):
+            act = _UNLABELLED.replace(_SIGNED, f"„აქტი“ {slip} 2026 წლის 30 აპრილი")
+            report = _check(act)
+            assert _of(report, "AOA.ACT_DATE") == [], slip
+            assert report.summary["act_date"] == "2026-04-30"
+
+    def test_a_slipped_verb_still_dates_a_wrong_day(self) -> None:
+        act = _UNLABELLED.replace(_SIGNED, "აქტი გაორმდა 2026 წლის 20 აპრილი")
+        [finding] = _of(_check(act), "AOA.ACT_DATE")
+        assert (finding.quote, finding.expected) == ("2026 წლის 20 აპრილი", "2026 წლის 30 აპრილი")
+
+    def test_other_words_are_no_signing(self) -> None:
+        """Near misses: another form of the verb (will be signed), another verb, and a slip
+        after the contract's name - the contract's date, never the act's."""
+        for words in (
+            "აქტი გაფორმდება 2026 წლის 30 აპრილი",
+            "აქტი გააფორმეს 2026 წლის 30 აპრილი",
+            "ხელშეკრულება გაორმდა 2026 წლის 30 აპრილი",
+        ):
+            report = _check(_UNLABELLED.replace(_SIGNED, words))
+            assert report.summary.get("act_date") != "2026-04-30", words

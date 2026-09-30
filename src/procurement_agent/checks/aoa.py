@@ -23,6 +23,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
+from functools import lru_cache
 from itertools import pairwise
 from typing import Literal
 
@@ -303,6 +304,11 @@ _ACT_DATED_BEFORE = re.compile(
 #: The act's own signing, "აქტი გაფორმდა <date>" / "გაფორმების თარიღი: <date>", and the other
 #: ways an act says when it was drawn up or signed.
 _ACT_SIGNED = re.compile(rf"გაფორმდა|{_ACT_DATE_LABEL}|{_ACT_DRAWN_UP}")
+#: The signing verb, and a word the length of a slip of it (``_slipped_signing``).
+_SIGNING_VERB = "გაფორმდა"
+_SIGNING_VERB_LIKE = re.compile(r"(?<![ა-ჰ])[ა-ჰ]{7,9}(?![ა-ჰ])")
+#: The act named right before its signing verb: "აქტი ", "„აქტი“ ".
+_ACT_NAMED_BEFORE = re.compile(r"აქტი[\s„“”\"']*$")
 #: An advance or prepayment clause: a date there is a payment's, never the act's.
 _ADVANCE_WORDS = re.compile(r"ავანს|წინასწარ|advance|prepay", re.IGNORECASE)
 #: What opens the service period: "შესრულდა …", a "შესრულების თარიღი" heading, and the other
@@ -506,7 +512,7 @@ _CONTRACT_REFERENCE = re.compile(r"\s*[„“\"]?\s*(?:N\s*\S+\s*)?ხელშ�
 
 def _date_hits_near(
     text: str,
-    keys: tuple[str, ...] | re.Pattern[str],
+    keys: tuple[str, ...] | re.Pattern[str] | Callable[[str], list[int]],
     window: int = 160,
     *,
     skip: Callable[[RuleHit], bool] | None = None,
@@ -535,11 +541,48 @@ def _date_hits_near(
     return out
 
 
-def _key_starts(text: str, keys: tuple[str, ...] | re.Pattern[str]) -> list[int]:
-    """Where each keyword (or each match of a pattern) starts in ``text``."""
+def _key_starts(
+    text: str, keys: tuple[str, ...] | re.Pattern[str] | Callable[[str], list[int]]
+) -> list[int]:
+    """Where each keyword (or each match of a pattern, or each start a reader finds) starts in
+    ``text``."""
     if isinstance(keys, re.Pattern):
         return [m.start() for m in keys.finditer(text)]
+    if callable(keys):
+        return keys(text)
     return [m.start() for k in keys for m in re.finditer(re.escape(k), text)]
+
+
+@lru_cache(maxsize=8)
+def _slipped_signing(text: str) -> tuple[tuple[int, int], ...]:
+    """The signing verb written with a one-letter slip, after the act's name: "„აქტი“ გაორმდა
+    2026 წლის 30 სექტემბერი" (red team R3). The prose spelling rule reports the slip; the date
+    after it is still the act's. Only after "აქტი": "ხელშეკრულება გაორმდა" is the contract's."""
+    return tuple(
+        m.span()
+        for m in _SIGNING_VERB_LIKE.finditer(text)
+        if m.group() != _SIGNING_VERB
+        and damerau(m.group(), _SIGNING_VERB, cap=1) == 1
+        and _ACT_NAMED_BEFORE.search(text, max(0, m.start() - 12), m.start())
+    )
+
+
+def _act_date_key_starts(text: str) -> list[int]:
+    """Where a date may follow the words that date the act (``_ACT_DATE_KEYS``), the signing
+    verb with a slip in it too (``_slipped_signing``)."""
+    starts = [m.start() for m in _ACT_DATE_KEYS.finditer(text)]
+    return sorted(starts + [a for a, _ in _slipped_signing(text)])
+
+
+def _act_dated_right_before(text: str, pos: int) -> bool:
+    """Whether the words that date the act stand right before ``pos`` (``_ACT_DATED_BEFORE``),
+    the signing verb with a slip in it too."""
+    if _ACT_DATED_BEFORE.search(text, max(0, pos - 30), pos) is not None:
+        return True
+    return any(
+        b <= pos and pos - b <= 30 and not re.sub(r"[\s:,]", "", text[b:pos])
+        for _, b in _slipped_signing(text)
+    )
 
 
 #: A month and its year with no day before the month: "2026 წლის ივნისის (თვეში)", "2026 წ.
@@ -810,18 +853,18 @@ class AoaChecker:
         """
         text = self.aoa.text
         hits = find_dates(text)
-        for m in _ACT_SIGNED.finditer(text):
-            if _contract_is_subject(text, m.start()):
+        # the words that date the act, a slip in the signing verb allowed (red team R3)
+        signed = sorted([m.span() for m in _ACT_SIGNED.finditer(text)] + [*_slipped_signing(text)])
+        for key_start, key_end in signed:
+            if _contract_is_subject(text, key_start):
                 continue  # "ხელშეკრულება გაფორმდა ..." dates the contract, not the act
-            end = self._sentence_of(m.start())[1]
-            hit = next((h for h in hits if m.end() <= h.start < end), None)
-            if hit is not None and not _ADVANCE_WORDS.search(text, m.end(), hit.start):
+            end = self._sentence_of(key_start)[1]
+            hit = next((h for h in hits if key_end <= h.start < end), None)
+            if hit is not None and not _ADVANCE_WORDS.search(text, key_end, hit.start):
                 return date.fromisoformat(str(hit.normalized)), hit
-        for d, hit in _date_hits_near(text, _ACT_DATE_KEYS):
-            key_at = max(
-                (s for s in _key_starts(text, _ACT_DATE_KEYS) if s <= hit.start),
-                default=hit.start,
-            )
+        key_starts = _act_date_key_starts(text)
+        for d, hit in _date_hits_near(text, _act_date_key_starts):
+            key_at = max((s for s in key_starts if s <= hit.start), default=hit.start)
             if not self._in_advance_clause(hit.start) and not _contract_is_subject(text, key_at):
                 return d, hit
         # An act dated only in its heading ("ქ. თბილისი, 31.08.2026"): the first date, when it
@@ -857,7 +900,7 @@ class AoaChecker:
             among them."""
             if act is not None and h.start == act[1].start:
                 return True
-            return _ACT_DATED_BEFORE.search(text, max(0, h.start - 30), h.start) is not None
+            return _act_dated_right_before(text, h.start)
 
         def in_period(h: RuleHit) -> bool:
             if _CONTRACT_REFERENCE.match(text, h.end):
