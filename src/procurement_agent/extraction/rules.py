@@ -42,16 +42,26 @@ _EN_MONTH_RE = (
     r"sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
 )
 
+#: The endings a currency's name takes in the case the sentence needs: nominative, genitive (and
+#: its long form), dative, instrumental, adverbial. One set for every consonant-stem currency:
+#: the dollar had "-ით" and "-ად" while the lari did not, so "3 180 ლარით" was no amount.
+_CUR_CASES = r"(?:ი|ის|ისა|ს|ით|ად)?"
 #: A currency as the documents write it after an amount: the code or sign, or the name in the
 #: case the sentence needs - "აშშ დოლარს" (dative) is how a Georgian act states a dollar fee.
-#: Sterling only as "pound sterling": "100 pounds" is a weight as often as it is money.
+#: Sterling only as "pound sterling": "100 pounds" is a weight as often as it is money. The lari
+#: may be "ქართული ლარი", "Lari", or abbreviated "ლ." - which is also a litre, so an amount in
+#: "ლ." is kept only where a word about money types it (``find_amounts``).
 _CUR_RE = (
-    r"₾|\$|€|£|GEL|USD|EUR|GBP|ლარ(?:ი|ის|ს)?"
-    r"|(?:აშშ\s*|ა\.შ\.შ\.\s*)?დოლარ(?:ი|ის|ს|ით|ად)?"
+    r"₾|\$|€|£|GEL|USD|EUR|GBP"
+    rf"|(?:ქართულ(?:ი|მა)?\s+)?ლარ{_CUR_CASES}"
+    rf"|(?:აშშ\s*|ა\.შ\.შ\.\s*)?დოლარ{_CUR_CASES}"
     r"|ევრო(?:ს|თი|დ)?"
-    r"|(?:გირვანქა|ფუნტი?)\s*სტერლინგ(?:ი|ის|ს|ით|ად)?"
-    r"|(?:US\s*|U\.S\.\s*)?dollars?|euros?|pounds?\s+sterling"
+    rf"|(?:გირვანქა|ფუნტი?)\s*სტერლინგ{_CUR_CASES}"
+    r"|(?:US\s*|U\.S\.\s*)?dollars?|euros?|pounds?\s+sterling|lari"
+    r"|ლ\.(?![ა-ჰA-Za-z])"
 )
+#: The lari abbreviated, which is also a litre: an amount in it needs a money word to be one.
+_LARI_ABBREVIATION = "ლ."
 #: A currency written *before* an amount: a code or a sign only. A name there is the end of a
 #: sentence about something else - "... აშშ დოლარს 2026 წლის" read as 2,026 lari, because the
 #: name pattern found "ლარს" inside "დოლარს" - never "ლარი 100".
@@ -62,7 +72,7 @@ _CURRENCY_NAMES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("USD", re.compile(r"\$|usd|დოლარ|dollar", re.IGNORECASE)),
     ("EUR", re.compile(r"€|eur|ევრო", re.IGNORECASE)),
     ("GBP", re.compile(r"£|gbp|სტერლინგ|sterling", re.IGNORECASE)),
-    ("GEL", re.compile(r"₾|gel|ლარ", re.IGNORECASE)),
+    ("GEL", re.compile(r"₾|gel|ლარ|lari|ლ\.", re.IGNORECASE)),
 )
 _NUM_RE = r"\d{1,3}(?:[ \u00a0,.]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?"
 
@@ -263,6 +273,63 @@ def _overlaps(a: tuple[int, int], b: tuple[int, int]) -> bool:
     return a[0] < b[1] and b[0] < a[1]
 
 
+#: Tetri in figures after a lari amount: "4 150 ლარი და 35 თეთრი", "4,150 lari and 35 tetri".
+_TETRI_AFTER = re.compile(
+    r"\s*,?\s*(?:და\s+|and\s+)?(\d{1,2})\s*(?:თეთრ[ა-ჰ]*|tetri)(?![A-Za-zა-ჰ])",
+    re.IGNORECASE,
+)
+_HAS_FRACTION = re.compile(r"[.,]\d{1,2}$")
+
+
+def _with_tetri(text: str, number: str, end: int, value: float) -> tuple[float, int]:
+    """A lari amount with the tetri written after it in figures, as one amount: the value and the
+    end of its span. A figure with a fraction of its own takes no more tetri."""
+    m = _TETRI_AFTER.match(text, end)
+    if m is None or _HAS_FRACTION.search(number):
+        return value, end
+    return round(value + int(m.group(1)) / 100, 2), m.end()
+
+
+#: A cell of a serialised table row: "1, ერთეულის ფასი = 30.00 ლარი. 1, ჯამი = 3 000.00 ლარი" -
+#: the row's key, then the column's name, then the value; each cell ends in ". ".
+_TABLE_CELL = re.compile(r"(?:^|(?<=\.\s))([^,=.\n]{0,60}),\s([^=\n]{1,80}?)\s=\s", re.MULTILINE)
+#: A column that makes a row a priced line: its unit price, quantity or unit.
+_LINE_COLUMN = re.compile(
+    r"ფას|რაოდენობ|ერთეულ|price|rate|quantity|qty|unit",
+    re.IGNORECASE,
+)
+#: A row a total word names, as its key or as a cell's whole value: "სულ", "ჯამი", "Total".
+_TOTAL_ROW = re.compile(
+    r"\s*(?:სულ|ჯამ[ა-ჰ]*|საერთო|(?:grand\s+|sub-?)?total)(?![A-Za-zა-ჰ]).*",
+    re.IGNORECASE,
+)
+
+
+def _is_line_total(text: str, start: int) -> bool:
+    """Whether the amount at ``start`` is a line total of a price table: a cell of a column a
+    total word names ("ჯამი"), in a row that has a unit price or a quantity and that no total
+    word names. The document's total is the row "სულ" or a figure in the prose."""
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", start)
+    line = text[line_start : len(text) if line_end < 0 else line_end]
+    at = start - line_start
+    cells = list(_TABLE_CELL.finditer(line))
+    own = next((c for c in reversed(cells) if c.end() <= at), None)
+    column = own.group(2).lower() if own is not None else ""
+    if own is None or not any(keyword_in(column, kw) for kw in KEYWORDS[FactType.total_amount]):
+        return False
+    row = own.group(1).strip()
+    siblings = [c for c in cells if c.group(1).strip() == row]
+    values = [
+        line[c.end() : nxt.start() if nxt else len(line)].strip(" .")
+        for c, nxt in zip(cells, [*cells[1:], None], strict=True)
+        if c.group(1).strip() == row
+    ]
+    if _TOTAL_ROW.fullmatch(row) or any(_TOTAL_ROW.fullmatch(v) for v in values):
+        return False
+    return any(_LINE_COLUMN.search(c.group(2)) for c in siblings if c is not own)
+
+
 def find_amounts(text: str) -> list[RuleHit]:
     hits: list[RuleHit] = []
     seen: set[tuple[int, int]] = set()
@@ -285,7 +352,14 @@ def find_amounts(text: str) -> list[RuleHit]:
             if value is None:
                 continue
             cur = _norm_currency(m.group(cur_group))
+            if pat is _AMOUNT_AFTER and cur == "GEL":
+                value, tetri_end = _with_tetri(text, number, span[1], value)
+                span = (span[0], tetri_end)
             ft = _classify(text, *span, (FactType.total_amount, FactType.penalty, FactType.price))
+            if ft is None and m.group(cur_group) == _LARI_ABBREVIATION:
+                continue  # "20 ლ." with no word about money: litres as likely as lari
+            if ft == FactType.total_amount and _is_line_total(text, span[0]):
+                ft = None
             seen.add(span)
             hits.append(
                 RuleHit(
