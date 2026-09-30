@@ -47,6 +47,7 @@ __all__ = [
     "TermRange",
     "amount_roles",
     "fee_scope",
+    "performance_clause",
     "read_advance",
     "read_payment_terms",
     "read_term",
@@ -514,14 +515,43 @@ _PERFORMANCE = re.compile(
     r"|(?<![a-z])perform",
     re.IGNORECASE,
 )
+#: The work stated in the future passive: "მომსახურება შესრულდება ...", "სამუშაოები
+#: განხორციელდება / ჩატარდება ...", "... დაიწყება ... და დასრულდება ...". These verbs say as
+#: much of a delivery, a transfer or a meeting, and "... მოქმედებს მანამ, სანამ მომსახურება
+#: შესრულდება" is the contract's validity: they set the performance window only in a sentence
+#: that names the work and not the contract's validity (``performance_clause``).
+_PERFORMANCE_PASSIVE = re.compile(
+    r"(?<![ა-ჰ])(?:შესრულდება|განხორციელდება|ჩატარდება|დაიწყება|დასრულდება)(?![ა-ჰ])"
+)
+_THE_WORK = re.compile(r"მომსახურებ|სამუშაო", re.IGNORECASE)
+
+
+def performance_clause(text: str, a: int, b: int) -> bool:
+    """Whether the sentence ``text[a:b]`` sets when the work is done: a performance verb
+    (``_PERFORMANCE``), or the work in the future passive where the sentence is no validity
+    clause (``_PERFORMANCE_PASSIVE``)."""
+    if _PERFORMANCE.search(text, a, b):
+        return True
+    return (
+        _PERFORMANCE_PASSIVE.search(text, a, b) is not None
+        and _THE_WORK.search(text, a, b) is not None
+        and _VALIDITY.search(text, a, b) is None
+    )
+
+
 #: A guarantee's clause dates the guarantee, not the contract: "the bank guarantee is valid until
 #: ...". A payment clause is left out the same way (``_PAYMENT``, below).
 _NOT_A_TERM = re.compile(r"გარანტი|(?<![a-z])(?:guarantee|warrant)", re.IGNORECASE)
 #: What makes a date a range's first day or its last. Georgian writes it in the date's own ending
 #: - "1 მარტიდან" (from), "31 დეკემბრამდე" (until) - or after it: "01.03.2026-დან", "1
-#: სექტემბრის ჩათვლით" (up to and including). English writes it before: "from", "until".
-_FIRST_AFTER = re.compile(r"\s*-?\s*ი?დან(?![ა-ჰ])")
-_LAST_AFTER = re.compile(r"\s*-?\s*ა?მდე(?![ა-ჰ])|\s*\(?\s*(?:ჩათვლით|inclusive)", re.IGNORECASE)
+#: სექტემბრის ჩათვლით" (up to and including). English writes it before: "from", "until". A
+#: numeric date takes its case on a hyphen or on the word for year first: "31.12.2026-ის
+#: ჩათვლით", "31.12.2026 წლის ჩათვლით", "01.03.2026 წლიდან".
+_FIRST_AFTER = re.compile(r"\s*(?:წლ)?-?\s*ი?დან(?![ა-ჰ])")
+_LAST_AFTER = re.compile(
+    r"\s*(?:წლ)?-?\s*ა?მდე(?![ა-ჰ])|(?:\s*-\s*ის|\s*წ(?:ლის|\.))?\s*\(?\s*(?:ჩათვლით|inclusive)",
+    re.IGNORECASE,
+)
 _FIRST_BEFORE = re.compile(
     r"(?<![a-z])(?:from|since|starting|commencing|beginning|effective)(?:\s+(?:on|from))?\s*$",
     re.IGNORECASE,
@@ -631,7 +661,7 @@ def read_term(text: str, *, sentences: list[tuple[int, int]] | None = None) -> C
     validity: list[TermRange] = []
     performance: list[TermRange] = []
     for a, b in spans:
-        performs = _PERFORMANCE.search(text, a, b)
+        performs = performance_clause(text, a, b)
         valid = _VALIDITY.search(text, a, b)
         if not (performs or valid):
             continue

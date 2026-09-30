@@ -31,11 +31,11 @@ from procurement_agent.checks.contract_terms import (
     _FROM_SIGNING,
     _NOT_A_TERM,
     _PAYMENT,
-    _PERFORMANCE,
     _VALIDITY,
     TaxPhrase,
     _range_in,
     fee_scope,
+    performance_clause,
     tax_phrases,
 )
 from procurement_agent.extraction.normalize import normalize_spaces
@@ -317,7 +317,7 @@ def _start_unread(view: DocumentView) -> bool:
     text = view.text
     dates = [(h.start, h.end) for h in find_dates(text)]
     for a, b in view.sentences():
-        if not _PERFORMANCE.search(text, a, b) or _FROM_SIGNING.search(text, a, b):
+        if not performance_clause(text, a, b) or _FROM_SIGNING.search(text, a, b):
             continue
         if _NOT_A_TERM.search(text, a, b) or _PAYMENT.search(text, a, b):
             continue
