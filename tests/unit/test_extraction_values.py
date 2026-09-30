@@ -339,6 +339,8 @@ def test_a_project_name_in_apposition_is_kept_as_quoted(name: str) -> None:
         ("„მზის ქალაქის“ პროექტის ფარგლებში.", "მზის ქალაქი"),
         ("პროექტის „მზის ქალაქის“ ფარგლებში.", "მზის ქალაქი"),
         ("„ზღვის ექსპრეს“ პროექტის ფარგლებში.", "ზღვის ექსპრეს"),
+        # a postposition on the quoted attribute is always an oblique case
+        ("„მზის ქალაქისთვის“ პროექტის ფარგლებში.", "მზის ქალაქი"),
     ],
 )
 def test_a_project_name_in_an_oblique_case_is_given_in_the_nominative(text: str, name: str) -> None:

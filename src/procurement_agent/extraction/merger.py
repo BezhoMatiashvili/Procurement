@@ -203,8 +203,10 @@ _PROJECT_HEAD = re.compile(r"\s*პრო[ეა]{1,3}ქტ([ა-ჰ]*)")
 _APPOSITION_CASES: tuple[Case, ...] = (
     "gen", "gen_tvis", "gen_gan", "gen_ken", "dat_shi", "dat_ze", "dat_tan", "ins_dan", "adv_mde",
 )  # fmt: skip
-#: A quoted name before the project word is its attribute, a genitive: "„ზღვის ხედის“ პროექტი".
-_ATTRIBUTE_CASES: tuple[Case, ...] = ("gen",)
+#: A quoted name before the project word is its attribute, a genitive: "„ზღვის ხედის“ პროექტი" -
+#: or it carries the phrase's postposition itself ("„ზღვის ხედისთვის“ პროექტის ..."), which is
+#: never a nominative's ending either. Never a dative: "„ზღვის ექსპრეს“" is a name.
+_ATTRIBUTE_CASES: tuple[Case, ...] = _APPOSITION_CASES
 
 
 def _project_cases(raw_text: str) -> tuple[Case, ...] | None:
