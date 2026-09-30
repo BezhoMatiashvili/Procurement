@@ -800,8 +800,13 @@ def _range_end(text: str, rules: list[RuleHit], i: int) -> tuple[int, FactType] 
     else:
         return None
     gap = text[first.end : second.start]
-    marked = _RANGE_GAP.fullmatch(gap) is not None or (
-        text[first.start : first.end].rstrip().endswith("დან") and _RANGE_AFTER_FROM.fullmatch(gap)
+    written = text[first.start : first.end].rstrip()
+    marked = (
+        _RANGE_GAP.fullmatch(gap) is not None
+        or (written.endswith("დან") and _RANGE_AFTER_FROM.fullmatch(gap) is not None)
+        # a day range before one month and year, "01-31.05.2026", "1-31 მაისი, 2026 წ.": the
+        # rules read its first day with the dash, the last day with the month
+        or (written.endswith("-") and not gap.strip())
     )
     if marked and ft not in _PERIOD_TYPES:
         # two dates written as a range are a period whatever word names it ("გაწეულია
@@ -1480,14 +1485,16 @@ _DATE_TAIL = re.compile(
 def _postposition(written: str, tail: re.Match[str] | None) -> str:
     """What a date's postposition says of it: "from" (-დან), "until" (-მდე, ჩათვლით) or nothing
     (a case ending). "2026 წლის 31 დეკემბრამდე" is fused into the month's name, "31.12.2026-მდე"
-    written after the figures; the two are one date until one day."""
+    written after the figures; the two are one date until one day. A date read with its year
+    after the postposition, "30 ნოემბრის ჩათვლით, 2026 წ.", carries "ჩათვლით" inside it."""
     post = (tail.group("post") or "") if tail else ""
-    for word in re.findall(r"[ა-ჰ]+", written):
+    words = re.findall(r"[ა-ჰ]+", written)
+    for word in words:
         if any(word.startswith(stem) for stem in _KA_MONTH_STEMS):
             post = word
     if post.endswith("დან"):
         return "from"
-    if post.endswith("მდე") or (tail is not None and tail.group("incl")):
+    if post.endswith("მდე") or (tail is not None and tail.group("incl")) or "ჩათვლით" in words:
         return "until"
     return ""
 
