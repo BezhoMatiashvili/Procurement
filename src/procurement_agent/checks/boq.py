@@ -498,6 +498,8 @@ def cents(x: float) -> float:
     Float noise below 1e-9 is taken off first. Two bidders both at exactly 32,574.785 came out of
     their sums as 32574.785 and 32574.785000000003, which ``round(x, 2)`` (binary, half even)
     made .78 and .79: tied to the cent, one was green and the other uncoloured."""
+    if not math.isfinite(x):
+        return x
     return float(Decimal(repr(round(x, 9))).quantize(Decimal("0.01"), ROUND_HALF_UP))
 
 

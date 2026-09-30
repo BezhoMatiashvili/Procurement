@@ -227,6 +227,7 @@ def test_money_rounds_to_the_cent_half_up_whatever_float_noise_it_carries() -> N
     assert [cents(x) for x in _TIED] == [32574.79, 32574.79]
     assert cents(0.125) == 0.13 and cents(-2.675) == -2.68
     assert cents(1999.994999) == 1999.99  # not a half cent: rounds down
+    assert cents(float("inf")) == float("inf")  # never raises on a value it cannot round
 
 
 def test_bidders_tied_to_the_cent_share_their_colour() -> None:
