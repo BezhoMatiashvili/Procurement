@@ -6,9 +6,9 @@ import re
 
 from procurement_agent.extraction import weights
 from procurement_agent.extraction.anchors import AnchorHit, preamble_end
-from procurement_agent.extraction.georgian import lemma
+from procurement_agent.extraction.georgian import Case, lemma
 from procurement_agent.extraction.labels import LABELS
-from procurement_agent.extraction.normalize import names_match, normalize_name
+from procurement_agent.extraction.normalize import QUOTE_CHARS, names_match, normalize_name
 from procurement_agent.extraction.rules import RuleHit
 from procurement_agent.extraction.schemas import DEFAULT_TARGETS, ExtractedFact, FactType
 from procurement_agent.ingestion.chunker import Chunk
@@ -27,6 +27,10 @@ SINGLE_VALUED: frozenset[FactType] = frozenset(
         FactType.cadastral_code,
     }
 )
+
+#: What a vat_status states (docs/GOLD_SPEC.md): the price includes VAT, excludes it, none
+#: applies, or it is a net amount. Never a number.
+VAT_STATUSES = frozenset({"incl", "excl", "none", "net"})
 
 _WS = re.compile(r"\s+")
 _ORDER = {t: i for i, t in enumerate(DEFAULT_TARGETS)}
@@ -139,6 +143,10 @@ def rule_hits_to_facts(hits: dict[str, list[RuleHit]], chunks: list[Chunk]) -> l
         chunk = by_id[cid]
         for h in hs:
             ftype, conf, note = h.type, h.confidence, h.note
+            if ftype == FactType.vat_status and h.normalized not in VAT_STATUSES:
+                # the rate next to "დღგ" ("+ 18% დღგ") says nothing about whether the price
+                # includes the tax: as a fact it is a percentage
+                ftype = FactType.percentage
             if ftype == FactType.date and cid == header_id and h.end <= header_end:
                 # An unlabeled date in the document header is almost always the document date
                 # ("ქ. თბილისი, 2026 წლის 15 მარტი"); keep it, but say so.
@@ -181,7 +189,8 @@ def anchor_hits_to_facts(
         for h in hs:
             value, normalized = h.value, h.normalized
             if h.type in _NOMINATIVE_TYPES:
-                value = normalized = lemma(h.value)
+                cases = _project_cases(h.raw_text) if h.type == FactType.project_name else None
+                value = normalized = lemma(h.value, cases=cases)
             facts.append(
                 ExtractedFact(
                     type=h.type,
@@ -197,6 +206,34 @@ def anchor_hits_to_facts(
                 )
             )
     return facts
+
+
+#: The project word with a case ending of its own ("პროექტის", "პროექტი"), or bare ("პროექტ").
+_PROJECT_HEAD = re.compile(r"\s*პრო[ეა]{1,3}ქტ([ა-ჰ]*)")
+#: A name in apposition after an inflected head is a nominative ("პროექტის „ზღვის ხედი“
+#: ფარგლებში"); some writers put it in the genitive or add a postposition, whose endings are
+#: never a nominative's. An ergative, a dative or an adverbial is not written there, and reading
+#: one cut "„მთის პანორამა“" to "მთის პანორაი" and "„ზღვის ექსპრეს“" to "ზღვის ექსპრე".
+_APPOSITION_CASES: tuple[Case, ...] = (
+    "gen", "gen_tvis", "gen_gan", "gen_ken", "dat_shi", "dat_ze", "dat_tan", "ins_dan", "adv_mde",
+)  # fmt: skip
+#: A quoted name before the project word is its attribute, a genitive: "„ზღვის ხედის“ პროექტი" -
+#: or it carries the phrase's postposition itself ("„ზღვის ხედისთვის“ პროექტის ..."), which is
+#: never a nominative's ending either. Never a dative: "„ზღვის ექსპრეს“" is a name.
+_ATTRIBUTE_CASES: tuple[Case, ...] = _APPOSITION_CASES
+
+
+def _project_cases(raw_text: str) -> tuple[Case, ...] | None:
+    """The cases a project name can be in where the document writes it (``raw_text``, the words
+    the anchor read). After the bare "პროექტ" the name carries the phrase's case itself
+    ("პროექტ „ზღვის ხედისთვის“"), so any case; None when the place is not recognised."""
+    stripped = raw_text.lstrip()
+    if stripped[:1] and stripped[:1] in QUOTE_CHARS:
+        return _ATTRIBUTE_CASES
+    m = _PROJECT_HEAD.match(stripped)
+    if m is None or not m.group(1):
+        return None
+    return _APPOSITION_CASES
 
 
 #: Types whose values are codes a label names: one value is one type.

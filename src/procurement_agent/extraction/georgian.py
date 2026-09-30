@@ -22,6 +22,7 @@ Pure and dependency-free, like ``normalize``.
 from __future__ import annotations
 
 import re
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import date
 from typing import Literal, get_args
@@ -182,7 +183,7 @@ def case_of(word: str) -> Case:
     for ending, case in _ENDINGS:
         if word.endswith(ending) and len(word) - len(ending) >= 3:
             return case
-    if len(word) >= 4 and word[-2] in "აეოუი" and word[-1] in _VOWEL_STEM_ENDINGS:
+    if len(word) >= 4 and word[-2] in _ONE_LETTER_STEMS and word[-1] in _VOWEL_STEM_ENDINGS:
         # a vowel stem's one-letter endings; its genitive and dative are the same word
         return _VOWEL_STEM_ENDINGS[word[-1]]
     return "nom"
@@ -190,19 +191,32 @@ def case_of(word: str) -> Case:
 
 #: The cases a vowel stem marks with one letter: "ლომაიას", "ლომაიამ", "ფოტოდ".
 _VOWEL_STEM_ENDINGS: dict[str, Case] = {"ს": "gen", "მ": "erg", "დ": "adv"}
+#: The vowels a stem ends in before those one-letter endings. Not "უ": Georgian has next to no
+#: nouns in "-უ" (its surnames end in "-უა"), while loanwords end in "-უს", "-უმ" and "-უდ" in
+#: the nominative - "პლუს", "კამპუს", "პრემიუმ", "ფორუმ", "გრინვუდ" - and were cut to "პლუ".
+_ONE_LETTER_STEMS = "აეოი"
 
 
-def lemma_word(word: str) -> str:
+def lemma_word(word: str, *, cases: Collection[Case] | None = None) -> str:
     """The nominative of one inflected word: ``ტოგონიძის`` -> ``ტოგონიძე``,
     ``თაუერსისთვის`` -> ``თაუერსი``, ``ლომიას`` -> ``ლომია``, ``ბერიშვილით`` -> ``ბერიშვილი``.
+
+    ``cases``, when the caller knows them, are the cases the word's place allows: a name in
+    apposition after "პროექტის" is a nominative or at most a genitive, never an ergative, so
+    "სიგმა" there is no ergative of "სიგი". The word stays as written when its ending reads
+    only as a case its place does not allow.
     """
     if not is_georgian_word(word):
         return word
     case = case_of(word)
     # "-ას" is a vowel stem's genitive and a common noun's dative alike: "ლომიას", "ხეობას"
-    cases: tuple[Case, ...] = (case, "dat") if case == "gen" and word.endswith("ს") else (case,)
+    readings: tuple[Case, ...] = (case, "dat") if case == "gen" and word.endswith("ს") else (case,)
+    if cases is not None:
+        readings = tuple(c for c in readings if c in cases)
+        if not readings:
+            return word
     for lemma_candidate in _lemma_candidates(word):
-        if any(inflect_word(lemma_candidate, c) == word for c in cases):
+        if any(inflect_word(lemma_candidate, c) == word for c in readings):
             return lemma_candidate
     return word
 
@@ -224,9 +238,13 @@ def _lemma_candidates(word: str) -> list[str]:
             out.extend([stem + "ე", stem + "ი", stem])
         elif stem.endswith(("ობ", "ებ")):
             out.extend([stem + "ა", stem + "ი", stem])
+        elif stem[-1] in _VOWELS:
+            # the consonant stem's "-ი" never follows a vowel: "პანორამა" is no ergative of
+            # "პანორაი"
+            out.extend([stem, stem + "ა", stem + "ე"])
         else:
             out.extend([stem + "ი", stem, stem + "ა", stem + "ე"])
-    if word[-2] in _VOWELS and _VOWEL_STEM_ENDINGS.get(word[-1]) == case:
+    if word[-2] in _ONE_LETTER_STEMS and _VOWEL_STEM_ENDINGS.get(word[-1]) == case:
         out.append(word[:-1])  # vowel stem + "-ს" / "-მ" / "-დ"
     return list(dict.fromkeys(out))
 
@@ -240,13 +258,14 @@ def _split_quotes(phrase: str) -> tuple[str, str, str]:
     return m.group(1), m.group(2), m.group(3)
 
 
-def lemma(phrase: str) -> str:
-    """A name or a project name in the nominative: only its last word inflects."""
+def lemma(phrase: str, *, cases: Collection[Case] | None = None) -> str:
+    """A name or a project name in the nominative: only its last word inflects. ``cases``, when
+    given, are the cases the phrase's place allows (``lemma_word``)."""
     lead, core, trail = _split_quotes(normalize_spaces(phrase))
     parts = core.split()
     if not parts:
         return phrase
-    parts[-1] = lemma_word(parts[-1])
+    parts[-1] = lemma_word(parts[-1], cases=cases)
     return lead + " ".join(parts) + trail
 
 
@@ -274,7 +293,28 @@ def in_case_of(wrong: str, right: str) -> str:
     >>> in_case_of("გიორგი ჭიჭინია", "გიორგი ჭიჭინაძის")
     'გიორგი ჭიჭინაძე'
     """
-    return inflect(lemma(right), phrase_case(wrong))
+    right_lemma = lemma(right)
+    return inflect(right_lemma, _case_meant(wrong, right_lemma))
+
+
+def _case_meant(wrong: str, right_lemma: str) -> Case:
+    """The case ``wrong`` was meant in, ``right_lemma`` being the name it misspells.
+
+    Its ending says so, unless the ending is itself the slip: "ბარამიზე" ends like the
+    postposition "-ზე", but it is "ბარამიძე" with Shift missed on "ძ" - one letter from that
+    nominative, two from "ბარამიძეზე". When the form the ending reads is more than one edit
+    away and a form of the name in one other case is one edit away, that case was meant.
+    """
+    read = phrase_case(wrong)
+    _, wrong_core, _ = _split_quotes(normalize_spaces(wrong))
+    _, right_core, _ = _split_quotes(normalize_spaces(right_lemma))
+    if not wrong_core.split() or not right_core.split():
+        return read
+    last, name = wrong_core.split()[-1], right_core.split()[-1]
+    if not is_georgian_word(last) or damerau(last, inflect_word(name, read), cap=2) <= 1:
+        return read
+    near = {inflect_word(name, c): c for c in CASES if damerau(last, inflect_word(name, c)) <= 1}
+    return next(iter(near.values())) if len(near) == 1 else read
 
 
 #: Postpositions older or more formal texts write in full, beside the modern ``_ENDINGS``.
@@ -352,6 +392,19 @@ def same_word(a: str, b: str) -> bool:
     if not (is_georgian_word(a) and is_georgian_word(b)):
         return False
     return bool(word_lemmas(a) & word_lemmas(b))
+
+
+def same_phrase(a: str, b: str) -> bool:
+    """Whether two phrases name one thing in two grammatical forms: every word but the last the
+    same, the last words forms of a common nominative (``same_word``). Comparing the ``lemma``
+    of each forces a form two nominatives share onto one of them: "ტერასისთვის" is a form of
+    "ტერასა" and of "ტერასი" alike, and its lemma, "ტერასი", is not "ტერასა"."""
+    _, core_a, _ = _split_quotes(normalize_spaces(a))
+    _, core_b, _ = _split_quotes(normalize_spaces(b))
+    words_a, words_b = core_a.lower().split(), core_b.lower().split()
+    if not words_a or len(words_a) != len(words_b) or words_a[:-1] != words_b[:-1]:
+        return False
+    return same_word(words_a[-1], words_b[-1])
 
 
 def prefer_nominative(forms: list[str]) -> str | None:

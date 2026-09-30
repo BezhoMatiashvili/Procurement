@@ -62,6 +62,30 @@ whose first day is written but cannot be read starts open (`../2026-09-30`), nev
 signing. An act is an act when its title stands near the top or on a line of its own below a
 letterhead, before the first clause.
 
+How the rules read what the canonical forms need (red-team round 1):
+
+* **Money.** The lari is read in every case (`ლარი`, `ლარის`, `ლარს`, `ლარით`, `ლარად`), as
+  `ქართული ლარი`, as English `Lari`, and abbreviated `ლ.`. `ლ.` is also a litre, so an amount in
+  it is money only where a word about money types it (`ღირებულება`, `თანხა`, …); "20 ლ." alone
+  is no amount. Tetri written in figures after a lari amount are its fraction:
+  `4 800 ლარი და 50 თეთრი` is `4800.5`. In a price table, a cell under a total column (`ჯამი`)
+  in a row that has a unit price or quantity is a line total, not `total_amount`; the document's
+  total is the row a total word names, or the figure in the prose.
+* **Percentages and penalties.** A rate written with the word (`0.3 პროცენტის`, `0.2 percent`)
+  is read as `0.3%`. A penalty's period is read after or before its rate, within its sentence,
+  in days, weeks, months or years (`ყოველ ვადაგადაცილებულ კვირაზე` -> `0.3% per week`); the
+  period is part of the value, so a period changed alone is a penalty change. A rate beside
+  `დღგ` (`+ 18% დღგ`) is never a `vat_status`: that type holds only the four values above.
+* **Durations.** A count written in words before its figure (`ათი (10) სამუშაო დღე`,
+  `ten (10) banking days`, `24 (twenty-four) months`) is the same duration as `10 (ათი)`.
+* **Names.** A quoted project name in apposition after an inflected `პროექტის`/`პროექტი` is a
+  nominative unless its ending can only be an oblique case (`-ისთვის`, `-ის` after a consonant);
+  a loanword in `-უს`/`-უმ`/`-უდ` (`პრემიუმ`, `ფორუმ`) is a nominative. Two forms of one
+  project whose nominative is ambiguous between `-ა` and `-ი` (`ტერასისთვის` / `ტერასა`) are one
+  name; when neither document writes the nominative, the reported form is a guess (`-ი`).
+* **Contract numbers.** A slash with a space either side is part of the reference
+  (`N 15 / 2026` -> `15/2026`); a bare space ends it.
+
 `vat_status` meanings: `incl` = the price includes VAT/taxes; `excl` = VAT is added on top;
 `none` = no VAT applies / exempt; `net` = a net amount, taxes withheld or not mentioned by rule
 (natural person, foreign organisation).

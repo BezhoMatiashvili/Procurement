@@ -647,5 +647,10 @@ real number needs labelled paraphrases and substitutions, which this corpus does
   lead-in; a spreadsheet, or a table holding the list, has none, and the rule says it did not run.
 * The registry rules run only against a snapshot the client exports (`cli load-registry`); with
   no snapshot they are reported as skipped, never as passed.
+* Docling promotes the first row of a table with no header row to the column header, and its
+  serializer drops that row's label. For a two-column table whose first row's value holds a
+  figure (a key-terms table: `ხელშეკრულების ღირებულება | 48 000 ლარი`), the chunker writes the
+  row back as `label: value` before the table. A table of three or more columns with no header
+  row still loses its first row's first cell; the segmenter (document comparison) is unchanged.
 * A prose typo inside a service line or the subject clause also leaves a scope review note
   (see "Prose spelling"); the scope rules should compare the corrected word.

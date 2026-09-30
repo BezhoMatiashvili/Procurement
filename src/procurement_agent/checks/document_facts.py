@@ -26,7 +26,7 @@ from procurement_agent.checks.aoa import (
     AoaChecker,
     DocumentView,
 )
-from procurement_agent.checks.aoa_scope import subject_clause
+from procurement_agent.checks.aoa_scope import _SUBJECT_MAX, _SUBJECT_START, subject_clause
 from procurement_agent.checks.contract_terms import (
     _FROM_SIGNING,
     _NOT_A_TERM,
@@ -38,7 +38,15 @@ from procurement_agent.checks.contract_terms import (
     fee_scope,
     tax_phrases,
 )
-from procurement_agent.extraction.rules import RuleHit, _month_ka, find_dates, find_percentages
+from procurement_agent.extraction.normalize import normalize_spaces
+from procurement_agent.extraction.rules import (
+    RuleHit,
+    _month_ka,
+    find_dates,
+    find_percentages,
+    penalty_period,
+    percent_of,
+)
 from procurement_agent.extraction.schemas import FactType
 
 #: A document is an act when its title says so near the top.
@@ -72,8 +80,6 @@ _MONTH_PERIOD = re.compile(r"(?<!\d)(?P<y>\d{4})\s*წ(?:ლის|\.)?\s*(?P<m>
 _UNREAD_START = re.compile(
     r"(?<![\d.])\d{1,2}(?:[./-]\d{1,2}[./-]\d{2,4})?\S*\s*[ა-ჰ]*დან(?![ა-ჰ])"
 )
-#: "... ყოველ ვადაგადაცილებულ დღეზე", "per day of delay": a penalty counted per day.
-_PER_DAY = re.compile(r"ყოველ\s+(?:[ა-ჰ]+\s+){0,2}დღ|per\s+(?:calendar\s+|working\s+)?day", re.I)
 _PENALTY_WORDS = re.compile(r"პირგასამტეხლო|ჯარიმ|საურავ|penalt|liquidated damages|fine", re.I)
 _UNIT_CODES = {"day": "D", "week": "W", "month": "M", "year": "Y"}
 #: How a range reads: an en dash with a space either side, built from its code point.
@@ -182,9 +188,9 @@ def document_facts(text: str) -> list[DocumentFact]:
     if vat is not None:
         out.append(vat)
 
-    subject = subject_clause(folded)
-    if subject is not None and subject.text:
-        what = _trim_subject(subject.text)
+    subject = _subject(folded, view.sentences())
+    if subject:
+        what = _trim_subject(subject)
         out.append(
             DocumentFact(
                 type=FactType.subject,
@@ -325,6 +331,27 @@ _BEFORE_THE_SERVICE = re.compile(
 _CLAUSE_NUMBER = re.compile(r"^\s*\d+(?:\.\d+)*\.?\s*")
 
 
+def _subject(text: str, sentences: list[tuple[int, int]]) -> str | None:
+    """The subject clause as written: up to the term it defines ("(შემდგომში „მომსახურება“)",
+    ``subject_clause``), else up to the end of its sentence - "ხელშეკრულების საგანია ...
+    სამუშაოების შესრულება." is a subject clause as much as one that defines a term. After a
+    heading ("1. ხელშეკრულების საგანი") the clause is the sentence under it."""
+    found = subject_clause(text)
+    if found is not None and found.text:
+        return found.text
+    for m in _SUBJECT_START.finditer(text):
+        at = next((i for i, (a, b) in enumerate(sentences) if a <= m.start() < b), None)
+        if at is None:
+            continue
+        rest = text[m.end() : sentences[at][1]].strip(" :")
+        if len(rest.split()) < 2 and at + 1 < len(sentences):
+            rest = text[sentences[at + 1][0] : sentences[at + 1][1]]
+        rest = normalize_spaces(rest[:_SUBJECT_MAX])
+        if len(rest.split()) >= 2:
+            return rest
+    return None
+
+
 def _trim_subject(text: str) -> str:
     """The service a subject clause names, without the clause number and the project reference
     in front of it; the clause as it is when that would leave too little."""
@@ -382,12 +409,13 @@ def _penalties(text: str) -> list[DocumentFact]:
         before = text[start : hit.start]
         if not _PENALTY_WORDS.search(before + text[hit.end : hit.end + 40]):
             continue
-        value = float(hit.normalized) if isinstance(hit.normalized, float) else None
+        value = percent_of(hit)
         if value is None:
             continue
         shown = f"{value:g}%"
-        if _PER_DAY.search(text, hit.end, hit.end + 60):
-            shown += " per day"
+        period = penalty_period(text, hit.start, hit.end)
+        if period is not None:
+            shown += f" per {period}"
         out.append(
             DocumentFact(
                 type=FactType.penalty,

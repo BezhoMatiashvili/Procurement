@@ -42,16 +42,26 @@ _EN_MONTH_RE = (
     r"sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
 )
 
+#: The endings a currency's name takes in the case the sentence needs: nominative, genitive (and
+#: its long form), dative, instrumental, adverbial. One set for every consonant-stem currency:
+#: the dollar had "-ით" and "-ად" while the lari did not, so "3 180 ლარით" was no amount.
+_CUR_CASES = r"(?:ი|ის|ისა|ს|ით|ად)?"
 #: A currency as the documents write it after an amount: the code or sign, or the name in the
 #: case the sentence needs - "აშშ დოლარს" (dative) is how a Georgian act states a dollar fee.
-#: Sterling only as "pound sterling": "100 pounds" is a weight as often as it is money.
+#: Sterling only as "pound sterling": "100 pounds" is a weight as often as it is money. The lari
+#: may be "ქართული ლარი", "Lari", or abbreviated "ლ." - which is also a litre, so an amount in
+#: "ლ." is kept only where a word about money types it (``find_amounts``).
 _CUR_RE = (
-    r"₾|\$|€|£|GEL|USD|EUR|GBP|ლარ(?:ი|ის|ს)?"
-    r"|(?:აშშ\s*|ა\.შ\.შ\.\s*)?დოლარ(?:ი|ის|ს|ით|ად)?"
+    r"₾|\$|€|£|GEL|USD|EUR|GBP"
+    rf"|(?:ქართულ(?:ი|მა)?\s+)?ლარ{_CUR_CASES}"
+    rf"|(?:აშშ\s*|ა\.შ\.შ\.\s*)?დოლარ{_CUR_CASES}"
     r"|ევრო(?:ს|თი|დ)?"
-    r"|(?:გირვანქა|ფუნტი?)\s*სტერლინგ(?:ი|ის|ს|ით|ად)?"
-    r"|(?:US\s*|U\.S\.\s*)?dollars?|euros?|pounds?\s+sterling"
+    rf"|(?:გირვანქა|ფუნტი?)\s*სტერლინგ{_CUR_CASES}"
+    r"|(?:US\s*|U\.S\.\s*)?dollars?|euros?|pounds?\s+sterling|lari"
+    r"|ლ\.(?![ა-ჰA-Za-z])"
 )
+#: The lari abbreviated, which is also a litre: an amount in it needs a money word to be one.
+_LARI_ABBREVIATION = "ლ."
 #: A currency written *before* an amount: a code or a sign only. A name there is the end of a
 #: sentence about something else - "... აშშ დოლარს 2026 წლის" read as 2,026 lari, because the
 #: name pattern found "ლარს" inside "დოლარს" - never "ლარი 100".
@@ -62,7 +72,7 @@ _CURRENCY_NAMES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("USD", re.compile(r"\$|usd|დოლარ|dollar", re.IGNORECASE)),
     ("EUR", re.compile(r"€|eur|ევრო", re.IGNORECASE)),
     ("GBP", re.compile(r"£|gbp|სტერლინგ|sterling", re.IGNORECASE)),
-    ("GEL", re.compile(r"₾|gel|ლარ", re.IGNORECASE)),
+    ("GEL", re.compile(r"₾|gel|ლარ|lari|ლ\.", re.IGNORECASE)),
 )
 _NUM_RE = r"\d{1,3}(?:[ \u00a0,.]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?"
 
@@ -71,10 +81,13 @@ _CTX = 80
 
 KEYWORDS: dict[FactType, tuple[str, ...]] = {
     FactType.warranty_period: ("გარანტი", "საგარანტიო", "warrant", "guarantee period"),
-    FactType.delivery_deadline: ("მიწოდებ", "მოწოდებ", "deliver", "delivery"),
+    # the verb as well as the noun: "ვალდებულია მიაწოდოს „საქონელი“ ... -მდე", "შეასრულოს
+    # „მომსახურება“ ... დღის ვადაში" state the deadline as plainly as "მიწოდების ვადა"
+    FactType.delivery_deadline: ("მიწოდებ", "მოწოდებ", "მიაწოდ", "მოაწოდ", "deliver", "delivery"),
     FactType.execution_period: (
         "შესრულებ",
         "შესრულდა",
+        "შეასრულ",
         "დასრულებ",
         "execution",
         "completion",
@@ -263,6 +276,63 @@ def _overlaps(a: tuple[int, int], b: tuple[int, int]) -> bool:
     return a[0] < b[1] and b[0] < a[1]
 
 
+#: Tetri in figures after a lari amount: "4 150 ლარი და 35 თეთრი", "4,150 lari and 35 tetri".
+_TETRI_AFTER = re.compile(
+    r"\s*,?\s*(?:და\s+|and\s+)?(\d{1,2})\s*(?:თეთრ[ა-ჰ]*|tetri)(?![A-Za-zა-ჰ])",
+    re.IGNORECASE,
+)
+_HAS_FRACTION = re.compile(r"[.,]\d{1,2}$")
+
+
+def _with_tetri(text: str, number: str, end: int, value: float) -> tuple[float, int]:
+    """A lari amount with the tetri written after it in figures, as one amount: the value and the
+    end of its span. A figure with a fraction of its own takes no more tetri."""
+    m = _TETRI_AFTER.match(text, end)
+    if m is None or _HAS_FRACTION.search(number):
+        return value, end
+    return round(value + int(m.group(1)) / 100, 2), m.end()
+
+
+#: A cell of a serialised table row: "1, ერთეულის ფასი = 30.00 ლარი. 1, ჯამი = 3 000.00 ლარი" -
+#: the row's key, then the column's name, then the value; each cell ends in ". ".
+_TABLE_CELL = re.compile(r"(?:^|(?<=\.\s))([^,=.\n]{0,60}),\s([^=\n]{1,80}?)\s=\s", re.MULTILINE)
+#: A column that makes a row a priced line: its unit price, quantity or unit.
+_LINE_COLUMN = re.compile(
+    r"ფას|რაოდენობ|ერთეულ|price|rate|quantity|qty|unit",
+    re.IGNORECASE,
+)
+#: A row a total word names, as its key or as a cell's whole value: "სულ", "ჯამი", "Total".
+_TOTAL_ROW = re.compile(
+    r"\s*(?:სულ|ჯამ[ა-ჰ]*|საერთო|(?:grand\s+|sub-?)?total)(?![A-Za-zა-ჰ]).*",
+    re.IGNORECASE,
+)
+
+
+def _is_line_total(text: str, start: int) -> bool:
+    """Whether the amount at ``start`` is a line total of a price table: a cell of a column a
+    total word names ("ჯამი"), in a row that has a unit price or a quantity and that no total
+    word names. The document's total is the row "სულ" or a figure in the prose."""
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", start)
+    line = text[line_start : len(text) if line_end < 0 else line_end]
+    at = start - line_start
+    cells = list(_TABLE_CELL.finditer(line))
+    own = next((c for c in reversed(cells) if c.end() <= at), None)
+    column = own.group(2).lower() if own is not None else ""
+    if own is None or not any(keyword_in(column, kw) for kw in KEYWORDS[FactType.total_amount]):
+        return False
+    row = own.group(1).strip()
+    siblings = [c for c in cells if c.group(1).strip() == row]
+    values = [
+        line[c.end() : nxt.start() if nxt else len(line)].strip(" .")
+        for c, nxt in zip(cells, [*cells[1:], None], strict=True)
+        if c.group(1).strip() == row
+    ]
+    if _TOTAL_ROW.fullmatch(row) or any(_TOTAL_ROW.fullmatch(v) for v in values):
+        return False
+    return any(_LINE_COLUMN.search(c.group(2)) for c in siblings if c is not own)
+
+
 def find_amounts(text: str) -> list[RuleHit]:
     hits: list[RuleHit] = []
     seen: set[tuple[int, int]] = set()
@@ -285,7 +355,14 @@ def find_amounts(text: str) -> list[RuleHit]:
             if value is None:
                 continue
             cur = _norm_currency(m.group(cur_group))
+            if pat is _AMOUNT_AFTER and cur == "GEL":
+                value, tetri_end = _with_tetri(text, number, span[1], value)
+                span = (span[0], tetri_end)
             ft = _classify(text, *span, (FactType.total_amount, FactType.penalty, FactType.price))
+            if ft is None and m.group(cur_group) == _LARI_ABBREVIATION:
+                continue  # "20 ლ." with no word about money: litres as likely as lari
+            if ft == FactType.total_amount and _is_line_total(text, span[0]):
+                ft = None
             seen.add(span)
             hits.append(
                 RuleHit(
@@ -485,7 +562,23 @@ def find_id_codes(text: str) -> list[RuleHit]:
 
 # --- percentages -------------------------------------------------------------------------------
 
-_PCT = re.compile(r"(?<![\d.,])(\d{1,3}(?:[.,]\d{1,2})?)\s*%")
+#: A percentage: the sign, or the word - "0.3 პროცენტის", "0.3 (ნული მთელი სამი) პროცენტი",
+#: "0.2 percent", "0.2 per cent". Not the adjective "პროცენტული" ("10 პროცენტული პუნქტი").
+_PCT = re.compile(
+    r"(?<![\d.,])(\d{1,3}(?:[.,]\d{1,2})?)\s*"
+    r"(?:%|(?:\([^()\d]{1,60}\)\s*)?(?:პროცენტ(?!ულ)[ა-ჰ]*|per\s?cent(?![a-z])))",
+    re.IGNORECASE,
+)
+_PCT_NUMBER = re.compile(r"\d{1,3}(?:[.,]\d{1,2})?")
+
+
+def percent_of(hit: RuleHit) -> float | None:
+    """The rate a percentage hit states. A penalty's ``normalized`` is its canonical text once
+    the period is known ("0.5% per day"), so a reader that needs the number takes it here."""
+    if isinstance(hit.normalized, float):
+        return hit.normalized
+    m = _PCT_NUMBER.match(hit.raw_text)
+    return parse_number(m.group(0)) if m else None
 
 
 def find_percentages(text: str) -> list[RuleHit]:
@@ -500,14 +593,21 @@ def find_percentages(text: str) -> list[RuleHit]:
             m.end(),
             (FactType.penalty, FactType.vat_status, FactType.payment_terms),
         )
+        # a penalty counted per period is stated with it, canonically (docs/GOLD_SPEC.md):
+        # "0.5% per day" and "0.5% per week" are two penalties, not one
+        shown = f"{v:g}%"
+        normalized: str | float = v
+        period = penalty_period(text, m.start(), m.end()) if ft == FactType.penalty else None
+        if period is not None:
+            shown = normalized = f"{v:g}% per {period}"
         hits.append(
             RuleHit(
                 type=ft or FactType.percentage,
-                value=f"{v:g}%",
+                value=shown,
                 raw_text=m.group(0),
                 start=m.start(),
                 end=m.end(),
-                normalized=v,
+                normalized=normalized,
                 unit="%",
                 confidence=0.65 if ft else 0.45,
             )
@@ -515,16 +615,60 @@ def find_percentages(text: str) -> list[RuleHit]:
     return hits
 
 
+#: The period a penalty counts per, written after its rate or before it: "ყოველ ვადაგადაცილებულ
+#: დღეზე", "ყოველი თვის დაგვიანებისთვის", "დღიური", "per calendar day", "for each week of
+#: delay", "For every month of delay ... 1%". Never "a month": "within a month, a penalty of 5%"
+#: is no monthly penalty.
+_PERIOD_KA = r"(დღ(?!გ)|კვირ|თვ|წელ|წლ)"
+_PER_PERIOD = re.compile(
+    rf"ყოველ(?:ი|ს)?\s+(?:[ა-ჰ]+\s+){{0,2}}{_PERIOD_KA}"
+    r"|(?:ყოველ)?(დღ|თვ|კვირ|წლ)(?:იურ|ეულ)[ა-ჰ]*"
+    r"|(?<![a-z])(?:per|each|every|for\s+each|for\s+every)\s+"
+    r"(?:calendar\s+|working\s+|business\s+|banking\s+)?(day|week|month|year)(?![a-z])",
+    re.IGNORECASE,
+)
+_PERIOD_UNITS = {
+    "დღ": "day", "კვირ": "week", "თვ": "month", "წელ": "year", "წლ": "year",
+    "day": "day", "week": "week", "month": "month", "year": "year",
+}  # fmt: skip
+#: A sentence's end: a stop followed by a space. "0.5%" and "5.1." are not ends inside a clause.
+_SENTENCE_END = re.compile(r"[.;!?](?=\s)")
+_PERIOD_AFTER = 60
+_PERIOD_BEFORE = 120
+
+
+def penalty_period(text: str, start: int, end: int) -> str | None:
+    """The period ("day", "week", "month", "year") a rate at ``text[start:end]`` counts per,
+    or None. Read after the rate first, then before it, never across the sentence's end."""
+    after = text[end : end + _PERIOD_AFTER]
+    stop = _SENTENCE_END.search(after)
+    after = after[: stop.start()] if stop else after
+    before = text[max(0, start - _PERIOD_BEFORE) : start]
+    cut = list(_SENTENCE_END.finditer(before))
+    before = before[cut[-1].end() :] if cut else before
+    found = _PER_PERIOD.search(after)
+    if found is None:
+        found = next(reversed(list(_PER_PERIOD.finditer(before))), None)
+    if found is None:
+        return None
+    unit = next(g for g in found.groups() if g)
+    return _PERIOD_UNITS[unit.lower()]
+
+
 # --- durations ---------------------------------------------------------------------------------
 
+# The count: its figure, or its figure in brackets after the words - "10 (ათი) დღე" and "ათი
+# (10) დღე" are both how contracts write it, as are "24 (twenty-four) months" and "ten (10)
+# days". Only a closed bracket: "1) დღის ..." is a list item, not one day.
+_COUNT = r"(?<![\d(])(?:\(\s*(\d{1,4})\s*\)|(\d{1,4}))"
 _DUR_KA = re.compile(
-    r"(?<!\d)(\d{1,4})\s*(?:\(\s*[ა-ჰ ]+\s*\)\s*)?(კალენდარული|სამუშაო|საბანკო)?\s*"
+    rf"{_COUNT}\s*(?:\(\s*[ა-ჰ ]+\s*\)\s*)?(კალენდარული|სამუშაო|საბანკო)?\s*"
     # "დღ(?!გ)": დღგ is VAT, and "18 დღგ-ს ჩათვლით" is not eighteen days
     r"(დღ(?!გ)|კვირ|თვ|წელ|წლ)[ა-ჰ]*",
     re.IGNORECASE,
 )
 _DUR_EN = re.compile(
-    r"(?<!\d)(\d{1,4})\s*(?:\([a-z ]+\)\s*)?(calendar|working|business|banking)?\s*"
+    rf"{_COUNT}\s*(?:\([a-z\- ]+\)\s*)?(calendar|working|business|banking)?\s*"
     r"(day|week|month|year)s?\b",
     re.IGNORECASE,
 )
@@ -536,9 +680,9 @@ def find_durations(text: str) -> list[RuleHit]:
     hits: list[RuleHit] = []
     for pat, is_ka in ((_DUR_KA, True), (_DUR_EN, False)):
         for m in pat.finditer(text):
-            n = int(m.group(1))
-            qual = m.group(2).lower() if m.group(2) else None
-            unit = m.group(3).lower()
+            n = int(m.group(1) or m.group(2))
+            qual = m.group(3).lower() if m.group(3) else None
+            unit = m.group(4).lower()
             if is_ka and unit.startswith("წ") and n >= 1900:
                 continue  # "2026 წლის ..." is a date ("of the year 2026"), not a duration
             if is_ka:
@@ -589,29 +733,38 @@ _REFERENCED_DOC = (
 # letter must not be the start of a word - the old "N[oº]?\.?" read the n of "number" as a
 # marker and returned "umber" - and the reference itself must contain a digit.
 _NUMBER_MARKER = r"(?:№|#|(?<![A-Za-z])N(?:[oº°]\.?|\.|:)?(?![A-Za-z]))"
+# A reference: groups of letters and digits joined by "-", "/", "_" or ".", and by a slash with a
+# space either side ("15 / 2026"), which the canonical form drops. Only around a slash: a space
+# before "." or "-" is a sentence's end or a dash, and a bare space is where the reference ends.
+_REFERENCE_GROUP = r"[A-Za-z0-9](?:[A-Za-z0-9\-/_.]{0,30}[A-Za-z0-9])?"
+_REFERENCE = rf"(?=[A-Za-z0-9\-/_.]*\d){_REFERENCE_GROUP}(?:\s*/\s*{_REFERENCE_GROUP})*"
+_SPACED_SLASH = re.compile(r"\s*/\s*")
 # The document word must start a word: "act" inside "Contact" and "აქტ" inside "კონტაქტი" named
 # a phone number a contract number.
 _CONTRACT_NO = re.compile(
-    rf"(?<![A-Za-zა-ჰ])(?:{_REFERENCED_DOC})\s*{_NUMBER_MARKER}\s*"
-    r"((?=[A-Za-z0-9\-/_.]*\d)[A-Za-z0-9][A-Za-z0-9\-/_.]{0,30}[A-Za-z0-9])",
+    rf"(?<![A-Za-zა-ჰ])(?:{_REFERENCED_DOC})\s*{_NUMBER_MARKER}\s*({_REFERENCE})",
     re.IGNORECASE,
 )
 
 
 def find_contract_numbers(text: str) -> list[RuleHit]:
-    return [
-        RuleHit(
-            type=FactType.contract_number,
-            value=m.group(1),
-            raw_text=m.group(0),
-            start=m.start(),
-            end=m.end(),
-            normalized=m.group(1),
-            confidence=0.8,
+    hits: list[RuleHit] = []
+    for m in _CONTRACT_NO.finditer(text):
+        number = _SPACED_SLASH.sub("/", m.group(1))
+        if len(number) < 2 or not any(ch.isdigit() for ch in number):
+            continue
+        hits.append(
+            RuleHit(
+                type=FactType.contract_number,
+                value=number,
+                raw_text=m.group(0),
+                start=m.start(),
+                end=m.end(),
+                normalized=number,
+                confidence=0.8,
+            )
         )
-        for m in _CONTRACT_NO.finditer(text)
-        if any(ch.isdigit() for ch in m.group(1))
-    ]
+    return hits
 
 
 # --- bank accounts & cadastral codes -----------------------------------------------------------
@@ -766,7 +919,7 @@ def normalize_fact_value(ft: FactType, value: str) -> str | float | None:
         m = CADASTRAL_RE.search(v)
         return m.group(0) if m else None
     if ft == FactType.contract_number:
-        m = _REFERENCE_TOKEN.fullmatch(_LEADING_MARKER.sub("", v))
+        m = _REFERENCE_TOKEN.fullmatch(_SPACED_SLASH.sub("/", _LEADING_MARKER.sub("", v)))
         return m.group(0) if m and any(ch.isdigit() for ch in m.group(0)) else None
     if ft in _MONEY_TYPES:
         hit = _only(find_amounts(v), v)

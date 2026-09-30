@@ -61,6 +61,7 @@ from procurement_agent.extraction.georgian import (
     month_typo,
     number_words_typo,
     parse_number_words,
+    same_phrase,
 )
 from procurement_agent.extraction.georgian import words as georgian_words
 from procurement_agent.extraction.labels import LABELS
@@ -568,8 +569,9 @@ def _same_value(a: _Hit, b: _Hit) -> bool:
 
 
 def _same_lemma(a: str, b: str) -> bool:
-    """Two forms of one name: "ლაზური რეზიდენსის" and "ლაზური რეზიდენსისთვის"."""
-    return normalize_name(lemma(a)) == normalize_name(lemma(b))
+    """Two forms of one name: "ლაზური რეზიდენსის" and "ლაზური რეზიდენსისთვის", and "მთის
+    ვერანდისთვის" and "მთის ვერანდა" - a form two nominatives share (``same_phrase``)."""
+    return normalize_name(lemma(a)) == normalize_name(lemma(b)) or same_phrase(a, b)
 
 
 #: Past this many left-by-right comparisons, equal values are found by key rather than by

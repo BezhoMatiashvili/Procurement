@@ -28,6 +28,7 @@ from procurement_agent.extraction.rules import (
     find_durations,
     find_percentages,
     nearest_keyword_group,
+    percent_of,
 )
 from procurement_agent.extraction.schemas import FactType
 
@@ -348,10 +349,14 @@ _INCLUSION = re.compile(
     "|".join(
         (
             rf"{_KA_TAX_RUN}\s+{_KA_INCLUDING}",
-            rf"(?<!არ )(?:მოიცავს|ითვალისწინებს|მათ\s+შორის)(?:\s+{_KA_WORD}){{0,4}}?\s+{_KA_TAX}"
-            rf"(?!\s+{_KA_EXCLUDING})",
-            rf"(?<!not )(?<![a-z])(?:including|inclusive\s+of|incl\.?)\s+{_EN_TAX_RUN}",
-            rf"(?<![a-z]){_EN_TAX_RUN}\s+(?:is\s+|are\s+)?included(?![a-z])",
+            # not "ძალაში შედის" (enters into force)
+            rf"(?<!არ )(?:მოიცავს|შეიცავს|ითვალისწინებს|(?<!ძალაში )შედის|მათ\s+შორის)"
+            rf"(?:\s+{_KA_WORD}){{0,4}}?\s+{_KA_TAX}(?!\s+{_KA_EXCLUDING})",
+            # "დღგ შედის ღირებულებაში", and the adjective: "დღგ-იანი ღირებულება"
+            rf"{_KA_TAX}\s+შედის",
+            r"(?<![ა-ჰ])(?:დღგ|გადასახად[ა-ჰ]*?)-?იან(?:ი|მა|ს|ის|ით|ად)?(?![ა-ჰ])",
+            rf"(?<!not )(?<![a-z])(?:including|includes?|inclusive\s+of|incl\.?)\s+{_EN_TAX_RUN}",
+            rf"(?<![a-z]){_EN_TAX_RUN}\s+(?:is\s+|are\s+)?(?:included|inclusive)(?![a-z])",
             r"(?<![a-z])gross\s+(?:amount|fee|remuneration|price|sum|value)(?![a-z])",
         )
     ),
@@ -363,11 +368,14 @@ _EXCLUSION = re.compile(
     "|".join(
         (
             rf"{_KA_TAX_RUN}\s+{_KA_EXCLUDING}",
-            rf"არ\s+(?:მოიცავს|ითვალისწინებს)(?:\s+{_KA_WORD}){{0,4}}?\s+{_KA_TAX}",
-            r"\+\s*(?:დღგ|vat)(?![a-z])",
-            rf"(?<![a-z])(?:excluding|exclusive\s+of|excl\.?|without|net\s+of|not\s+including)"
-            rf"\s+{_EN_TAX_RUN}",
-            rf"(?<![a-z]){_EN_TAX_RUN}\s+(?:is\s+|are\s+)?(?:not\s+included|excluded)(?![a-z])",
+            rf"არ\s+(?:მოიცავს|შეიცავს|ითვალისწინებს|შედის)(?:\s+{_KA_WORD}){{0,4}}?\s+{_KA_TAX}",
+            rf"{_KA_TAX}\s+არ\s+შედის",
+            # "+ დღგ", and with its rate: "+ 18% დღგ"
+            r"\+\s*(?:\d{1,2}(?:[.,]\d{1,2})?\s*%\s*)?(?:დღგ|vat)(?![a-z])",
+            rf"(?<![a-z])(?:excluding|excludes?|exclusive\s+of|excl\.?|without|net\s+of"
+            rf"|not\s+including)\s+{_EN_TAX_RUN}",
+            rf"(?<![a-z]){_EN_TAX_RUN}\s+(?:is\s+|are\s+)?(?:not\s+included|excluded|exclusive)"
+            r"(?![a-z])",
             rf"(?<![a-z])(?:does|do)\s+not\s+include\s+{_EN_TAX_RUN}",
         )
     ),
@@ -952,7 +960,7 @@ def read_advance(
             if nearest_keyword_group(sentence, p.start, p.end, _SHARE_GROUPS) == "advance":
                 shares.append(
                     AdvanceShare(
-                        percent=float(p.normalized or 0),
+                        percent=percent_of(p) or 0.0,
                         span=(a + p.start, a + p.end),
                         raw=p.raw_text,
                     )

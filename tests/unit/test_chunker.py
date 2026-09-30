@@ -127,3 +127,74 @@ def test_a_note_under_a_table_that_its_text_lacks_is_kept() -> None:
 def test_an_orphan_with_no_covered_ancestor_is_kept() -> None:
     """A heading lives in the chunk's headings, not in its body: nothing else carries it."""
     assert "კომერციული წინადადება" in _text(_plain_table_document("შენიშვნა"))
+
+
+#: A key-terms table with no header row: Docling promotes its first row to the column header,
+#: and the serializer drops that row's label - the corner cell - and writes its value into
+#: every other row as a column name. (EXTRACTION-12)
+KEY_TERMS = [
+    ["ხელშეკრულების ღირებულება", "9 100 (ცხრა ათას ასი) ლარი, გადასახადების ჩათვლით"],
+    ["საგარანტიო ვადა", "12 (თორმეტი) თვე"],
+    ["ანგარიშსწორების ვადა", "5 (ხუთი) სამუშაო დღე"],
+]
+
+
+def _key_terms_document(rows: list[list[str]], *, rich: bool = False) -> DoclingDocument:
+    doc = DoclingDocument(name="synthetic")
+    doc.add_text(label=DocItemLabel.TEXT, text="4. ძირითადი პირობები:")
+    table = doc.add_table(data=TableData(num_rows=len(rows), num_cols=2))
+    for r, row in enumerate(rows):
+        for c, text in enumerate(row):
+            where = {
+                "start_row_offset_idx": r,
+                "end_row_offset_idx": r + 1,
+                "start_col_offset_idx": c,
+                "end_col_offset_idx": c + 1,
+                "column_header": r == 0,
+            }
+            if rich:
+                group = doc.add_group(
+                    label=GroupLabel.UNSPECIFIED, name=f"rich_cell_group_1_{c}_{r}", parent=table
+                )
+                doc.add_text(label=DocItemLabel.TEXT, text=text, parent=group)
+                cell: TableCell = RichTableCell(text=text, ref=group.get_ref(), **where)
+            else:
+                cell = TableCell(text=text, **where)
+            doc.add_table_cell(table_item=table, cell=cell)
+    doc.add_text(label=DocItemLabel.TEXT, text=AFTER)
+    return doc
+
+
+def test_a_first_row_taken_for_a_header_keeps_its_label_beside_its_value() -> None:
+    text = _text(_key_terms_document(KEY_TERMS))
+    line = "ხელშეკრულების ღირებულება: 9 100 (ცხრა ათას ასი) ლარი, გადასახადების ჩათვლით"
+    assert text.count(line) == 1
+    # in order: after the heading above the table, before the table's other rows
+    assert text.index("4. ძირითადი პირობები:") < text.index(line) < text.index("საგარანტიო ვადა")
+
+
+def test_a_first_row_taken_for_a_header_in_rich_cells_appears_once() -> None:
+    text = _text(_key_terms_document(KEY_TERMS, rich=True))
+    assert text.count("ხელშეკრულების ღირებულება") == 1
+
+
+def test_a_real_header_row_adds_nothing() -> None:
+    text = _text(_key_terms_document([["პირობა", "მნიშვნელობა"], *KEY_TERMS]))
+    assert "პირობა:" not in text
+    assert text.count("ხელშეკრულების ღირებულება") == 1
+
+
+def test_the_contract_value_in_a_headerless_key_terms_table_is_the_total() -> None:
+    from procurement_agent.config import Settings
+    from procurement_agent.extraction.pipeline import run_extraction
+    from procurement_agent.extraction.schemas import FactType
+
+    chunks = chunk_docling_document(_key_terms_document(KEY_TERMS), doc_id="t")
+    result = run_extraction(
+        document_id="t",
+        chunks=chunks,
+        settings=Settings(ollama_base_url="http://localhost:11434"),
+        llm=None,
+    )
+    totals = [f.normalized for f in result.facts if f.type == FactType.total_amount]
+    assert totals == [9100.0]
