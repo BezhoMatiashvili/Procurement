@@ -31,6 +31,11 @@ class Finding(BaseModel):
     #: reading: normalised (an ISO date, "48750"), and in the comparison shortened for display.
     #: Neither can be found again in the Word file, so annotation looks for this first.
     quote: str | None = None
+    #: Which of the places the document writes ``quote`` are the finding's, when not every one
+    #: is: their ordinals among the quote's whole-word places in reading order (from 0), and how
+    #: many places there are. A name copied from the other party is wrong in this party's block
+    #: and right in that party's own. None: every place is (``report/docx_annotate``).
+    places: tuple[tuple[int, ...], int] | None = None
     provenance: Provenance | None = None
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     #: A note the rules could not decide either way - the same clause in other words, a service

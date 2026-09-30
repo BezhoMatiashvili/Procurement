@@ -273,6 +273,32 @@ the button. Those inputs get the findings list and nothing more: `AoaChecker._ad
 `provenance`, only `span`, so there is no bbox for the page-image highlighter to draw — the
 highlighting path exists for extraction facts, not for act findings.
 
+A comment goes where the finding's words stand **as whole words** (red team R1, AOA-10): the
+slip `ივნის` was marked inside the correct `ივნისიდან` and `ივნისის` too, and a director's
+nominative inside the preamble's genitive, with the nominative's correction. Words found only
+inside longer ones (a stem the act writes with an ending) are still marked there. A name copied
+from the other party (AOA-09) is the one case where not every place of the words is wrong: the
+customer's director written for the contractor is right in the customer's own block. The act
+check attributes each place to the party named last before it (its name, code or role label)
+and, when some places are plainly the other party's correct director, the finding carries which
+of the places are its own (`Finding.places`: ordinals among the whole-word places, and their
+count). The API annotates the Word file without the checked text, so the ordinals are counted in
+reading order in the file, tables in place; when the file shows another number of places than
+the text did (a merged cell read twice), every place is marked rather than a guessed one.
+
+### An act not in Georgian: the rules say they cannot read it
+
+The rules read Georgian labels and wording (`ს/კ`, `შესრულდა`, `პროექტ`). On an act written in
+English (red team R1, AOA-15) they found no identification codes and reported an **error** on a
+correct act, and warnings that the project and the period were missing. Reading English parties,
+periods and dates is out of scope for now; instead, when fewer than a fifth of the act's letters
+are Georgian, `AOA.ID_CODES`, `AOA.PROJECT_PRESENT` and `AOA.PERIOD` leave a skip note saying the
+act is not in Georgian. The client's acts are over 80% Georgian letters (the Latin is bank codes
+and IBANs), and an act in two languages, each clause in both, about half: its Georgian half is
+read as before, and a project missing from it is still a warning. Not measured: no client act is in English, so a late or out-of-term
+English act is still missed (the act date and the period are not read), and says so only
+through those notes.
+
 ## LLM configuration, and why
 
 Three settings were established by reading what the model actually receives:
