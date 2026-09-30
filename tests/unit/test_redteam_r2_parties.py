@@ -244,6 +244,19 @@ class TestSignatoryTitles:
         [party] = find_parties(text)
         assert party.directors == []
 
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "დირექტორი: თომას ბრაუნი",
+            "წარმოდგენილი დირექტორის, თომას ბრაუნის სახით",
+            "თავმჯდომარე: კარლოს მიულერი",
+        ],
+    )
+    def test_a_foreign_first_name_in_s_is_still_read(self, line: str) -> None:
+        """The genitive guard for the adjectival titles leaves every other title as it was."""
+        [party] = find_parties(f"შპს „ალფა ჯგუფი“, ს/კ: 123456789. {line}")
+        assert len(party.directors) == 1
+
     def test_a_chairman_s_slip_is_an_error(self) -> None:
         act = _PUBLIC_ACT.replace("ნინო კაპანაძ", "ნინო კაპინაძ")
         found = {(f.actual, f.expected) for f in _of(_check(act, _PUBLIC_CONTRACT), "AOA.DIRECTOR")}

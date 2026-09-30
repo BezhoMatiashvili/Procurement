@@ -507,14 +507,15 @@ def _name_shaped(first: str, last: str) -> bool:
         return True  # an initial
     if len(first) > _FIRST_NAME_MAX:
         return False
-    # a consonant stem's genitive "-ის" and a vowel stem's "-ს" alike: "მმართველი ორგანოს
-    # გადაწყვეტილებით" ("by the governing body's decision") names nobody
-    return not (first.endswith("ს") and len(first) > 4 and not _surname_shaped(last))
+    return not (first.endswith("ის") and len(first) > 4 and not _surname_shaped(last))
 
 
 #: Titles that are also adjectives: "ხელმძღვანელი პირი" (a person in charge), "მმართველი ორგანო"
 #: (a governing body). A name after them needs its place to say so - a colon, "სახით", the end
-#: of its line - or the document naming the person again; a surname's ending is not enough.
+#: of its line - or the document naming the person again; a surname's ending is not enough. Nor
+#: is a vowel stem's genitive "-ს" a first name there: "მმართველი ორგანოს გადაწყვეტილებით" ("by
+#: the governing body's decision") names nobody. After any other title a first name in "-ს" is
+#: read, as a foreign one is ("დირექტორი: თომას ბრაუნი").
 _ADJECTIVAL_TITLE = re.compile(r"ხელმძღვანელ|მმართველ")
 
 
@@ -535,6 +536,8 @@ def _read_signatory(window: str, m: re.Match[str]) -> tuple[str, int, bool] | No
         return None
     end = m.start("name") + words[1].end()
     adjectival = _ADJECTIVAL_TITLE.search(window[m.start() : m.start("sep")]) is not None
+    if adjectival and first.endswith("ს") and len(first) > 4 and not _surname_shaped(last):
+        return None
     confirmed = bool(
         m.group("sep") == ":"
         or _IN_THE_PERSON_OF.match(window, end)
