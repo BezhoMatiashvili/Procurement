@@ -28,7 +28,7 @@ from procurement_agent.checks.boq import (
     summary_roles,
     template_findings,
 )
-from tests.boq_factory import Bid, build_real_boq
+from tests.boq_factory import CIVIL, Bid, build_real_boq
 from tests.unit.test_boq_reader_variants import (
     Cells,
     Fx,
@@ -124,7 +124,10 @@ def test_a_header_that_only_names_a_currency_is_not_a_price_column(label: str) -
 def _lari_sheet(rate_head: str, amount_head: str, factor: float | None) -> Cells:
     heads = ["No", "Description", "Unit", "Quantity", rate_head, amount_head]
     cells: Cells = {(1, c): h for c, h in enumerate(heads, 1)}
-    rows = [("1.1", "Trench excavation", "m3", 50.0, 12.0), ("1.2", "Sand bedding", "m3", 8.0, 30.0)]
+    rows = [
+        ("1.1", "Trench excavation", "m3", 50.0, 12.0),
+        ("1.2", "Sand bedding", "m3", 8.0, 30.0),
+    ]
     for r, (item, text, unit, qty, rate) in enumerate(rows, start=2):
         cells.update({(r, 1): item, (r, 2): text, (r, 3): unit, (r, 4): qty})
         if factor is not None:
@@ -308,7 +311,9 @@ def test_a_summary_row_does_not_play_a_part_its_words_only_resemble(role: str, l
 def _chain(*rows: tuple[str, float, float | None]) -> BoqWorkbook:
     """A Summary: one section of 1,000.00 and then ``rows`` as (label, value, rate)."""
     out = [_row(9, "1", "WORKS", 1000.0)]
-    out += [_row(10 + i, "", label, value, rate=rate) for i, (label, value, rate) in enumerate(rows)]
+    out += [
+        _row(10 + i, "", label, value, rate=rate) for i, (label, value, rate) in enumerate(rows)
+    ]
     return _summary_book(out)
 
 
@@ -404,3 +409,115 @@ def test_a_bid_whose_summary_states_no_total_incl_vat_says_why_it_is_not_ranked(
     assert note.severity == "warning" and "incl. VAT" in note.message_en
     # a Summary with its whole chain says nothing of the kind
     assert "BOQ.NOT_RANKED" not in _rules(compare_bid(t, read_boq(b_path, name="B")))
+
+
+# --- component column groups ------------------------------------------------------------------
+
+_COMPONENT_LABELS = {
+    "en": (
+        "No",
+        "Description",
+        "Unit",
+        "Quantity",
+        "Materials",
+        "Labour",
+        "Total",
+        "Rate",
+        "Amount",
+    ),
+    "ka": (
+        "№",
+        "დასახელება",
+        "განზ.",
+        "რაოდენობა",
+        "მასალა",
+        "ხელფასი",
+        "ჯამი",
+        "ერთ. ფასი",
+        "სულ",
+    ),
+}
+
+
+def _component_sheet(labels: tuple[str, ...], split: tuple[float, float] | None) -> Cells:
+    """Each component a group over its own rate and amount, and a last column totalling the line:
+
+    No | Description | Unit | Qty | Materials (E:F)  | Labour (G:H)     | Total
+                                  | Rate  | Amount   | Rate  | Amount   |
+    """
+    no, desc, unit, qty, mat, lab, tot, rate, amount = labels
+    cells: Cells = {(1, 1): no, (1, 2): desc, (1, 3): unit, (1, 4): qty}
+    cells.update({(1, 5): mat, (1, 7): lab, (1, 9): tot})
+    cells.update({(2, 5): rate, (2, 6): amount, (2, 7): rate, (2, 8): amount})
+    total = 0.0
+    for r, (item, text, u, q, price) in enumerate(
+        [("1.1", "Wall plaster", "m2", 100.0, 10.0), ("1.2", "Floor screed", "m2", 40.0, 25.0)],
+        start=3,
+    ):
+        cells.update({(r, 1): item, (r, 2): text, (r, 3): u, (r, 4): q})
+        m, lb = (price * split[0], price * split[1]) if split else (0.0, 0.0)
+        if split:
+            cells.update({(r, 5): m, (r, 7): lb})
+        cells[(r, 6)] = Fx(f"=D{r}*E{r}", q * m)
+        cells[(r, 8)] = Fx(f"=D{r}*G{r}", q * lb)
+        cells[(r, 9)] = Fx(f"=F{r}+H{r}", q * (m + lb))
+        total += q * (m + lb)
+    cells[(5, 2)] = tot
+    cells[(5, 9)] = Fx("=SUM(I3:I4)", total)
+    return cells
+
+
+@pytest.mark.parametrize("lang", ["en", "ka"])
+def test_a_component_group_binds_its_own_rate_and_amount(tmp_path: Path, lang: str) -> None:
+    """ "Materials" over Rate | Amount is the materials rate and sum, not the unit rate: read as
+    the unit rate, the materials alone priced the line and ten ARITHMETIC errors followed."""
+    labels = _COMPONENT_LABELS[lang]
+    t_cells = _component_sheet(labels, None)
+    b_cells = _component_sheet(labels, (0.7, 0.3))
+    t = read_boq(_save(tmp_path / "t.xlsx", {"1. WORKS": t_cells}), name="T")
+    b = read_boq(_save(tmp_path / "b.xlsx", {"1. WORKS": b_cells}), name="B")
+    assert t.sheets["1. WORKS"].columns == {
+        "no": 1,
+        "desc": 2,
+        "unit": 3,
+        "qty": 4,
+        "rate_materials": 5,
+        "sum_materials": 6,
+        "rate_labor": 7,
+        "sum_labor": 8,
+        "amount": 9,
+    }
+    comp = compare_bid(t, b)
+    assert comp.evaluated_cost == pytest.approx(100 * 10.0 + 40 * 25.0)
+    assert comp.findings == []
+
+
+def test_a_cheaper_materials_rate_does_not_make_a_dearer_bid_cheapest(tmp_path: Path) -> None:
+    labels = _COMPONENT_LABELS["en"]
+    t = read_boq(_save(tmp_path / "t.xlsx", {"1. WORKS": _component_sheet(labels, None)}))
+    a = _save(tmp_path / "a.xlsx", {"1. WORKS": _component_sheet(labels, (0.7, 0.3))})
+    c = _save(tmp_path / "c.xlsx", {"1. WORKS": _component_sheet(labels, (0.5, 0.6))})
+    cost = {n: compare_bid(t, read_boq(p, name=n)).evaluated_cost for n, p in (("A", a), ("C", c))}
+    assert cost["C"] == pytest.approx(cost["A"] * 1.1)
+
+
+def test_the_client_style_header_block_keeps_its_columns(tmp_path: Path) -> None:
+    """A group label over Materials | Materials Sum | ... | Rate | Amount, then a column-number
+    row: the layout the reader was written for keeps its column map."""
+    path = tmp_path / "t.xlsx"
+    path.write_bytes(build_real_boq())
+    sheet = read_boq(path, name="T").sheets[CIVIL]
+    assert sheet.columns == {
+        "no": 1,
+        "desc": 3,
+        "qty": 7,
+        "unit": 8,
+        "rate_materials": 9,
+        "sum_materials": 10,
+        "rate_labor": 11,
+        "sum_labor": 12,
+        "rate_delivery": 13,
+        "sum_delivery": 14,
+        "rate_total": 15,
+        "amount": 16,
+    }

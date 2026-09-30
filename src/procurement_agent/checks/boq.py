@@ -537,7 +537,9 @@ def _group(ws: object, row: int, col: int, key: str, below: int) -> dict[int, st
     over Materials | Labour | Delivery | Total as the materials rate. With no Total beneath it
     the key stays unbound (a rate is then built from its components). None: not a group.
     """
-    if key not in _GROUP_KEYS or ws.cell(below, col).value in (None, ""):  # type: ignore[attr-defined]
+    if key not in _GROUP_KEYS and key not in _COMPONENT_GROUPS:
+        return None
+    if ws.cell(below, col).value in (None, ""):  # type: ignore[attr-defined]
         return None
     subs = [
         (c, ws.cell(below, c).value)  # type: ignore[attr-defined]
@@ -546,16 +548,29 @@ def _group(ws: object, row: int, col: int, key: str, below: int) -> dict[int, st
     ]
     if len(subs) < 2:
         return None
-    under = _GROUP_KEYS[key]
-    bound = {
-        c: under[family]
-        for c, v in subs
-        if (sub := _label_key(v)) and (family := _FAMILY.get(sub, "")) in under
-    }
+    bound = {c: bind for c, v in subs if (sub := _label_key(v)) and (bind := _sub_key(key, sub))}
     if key != "qty" and not bound:
         return None  # "Amount" over "USD | GEL": not a breakdown this reader knows
     # every sub-column belongs to the group, bound or not ("Block A | Block B" under Quantity)
     return {c: bound.get(c, "") for c, _ in subs}
+
+
+#: A component that heads its own sub-columns ("Materials" over Rate | Amount, "მასალა" over
+#: "ერთ. ფასი | სულ" in a Georgian estimate): the component is the group, and its rate and amount
+#: are the component's rate and sum - never the unit rate and the line amount.
+_COMPONENT_GROUPS = {
+    "rate_materials": "materials",
+    "rate_labor": "labor",
+    "rate_delivery": "delivery",
+}
+
+
+def _sub_key(group: str, sub: str) -> str | None:
+    """The key a sub-label read as ``sub`` takes under a group label read as ``group``."""
+    if group in _COMPONENT_GROUPS:
+        part = _COMPONENT_GROUPS[group]
+        return {"rate_total": f"rate_{part}", "amount": f"sum_{part}"}.get(sub)
+    return _GROUP_KEYS[group].get(_FAMILY.get(sub, ""))
 
 
 def _continues_header(ws: object, row: int, above: int, first: dict[str, int]) -> bool:
@@ -632,8 +647,16 @@ def _map_headers(ws: object) -> tuple[dict[str, int], int]:
                 consumed.add((below, sub_col))  # type: ignore[arg-type]
                 if sub_key:
                     grouped.setdefault(sub_key, sub_col)
-    cols.update(grouped)
-    return cols, max(block[-1], _column_number_row(ws, block[-1]))
+    # A column holds one number: what a group binds wins, and a label that would bind a column
+    # already bound is dropped. Binding "Rate" under "Materials" as the unit rate once gave one
+    # column two keys, and the materials rate priced the whole line.
+    out = dict(grouped)
+    taken = set(grouped.values())
+    for key, c in cols.items():
+        if key not in out and c not in taken:
+            out[key] = c
+            taken.add(c)
+    return out, max(block[-1], _column_number_row(ws, block[-1]))
 
 
 def _column_number_row(ws: object, after: int) -> int:
