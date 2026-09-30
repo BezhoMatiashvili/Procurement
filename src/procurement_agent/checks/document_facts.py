@@ -44,6 +44,9 @@ from procurement_agent.extraction.rules import (
     _month_ka,
     find_dates,
     find_percentages,
+    is_advance_deadline,
+    is_rate_cap,
+    payment_terms_value,
     penalty_period,
     percent_of,
 )
@@ -167,22 +170,9 @@ def document_facts(text: str) -> list[DocumentFact]:
             start = term.validity.start or term.signed
             out.append(_range_fact(FactType.validity_period, start, term.validity.end, None))
 
-    for deadline in view.payment_terms().deadlines[:1]:
-        code = _UNIT_CODES.get(deadline.unit)
-        if code is None:
-            continue
-        canonical = f"P{deadline.count}{code}"
-        if deadline.qualifier:
-            canonical += f" {deadline.qualifier}"
-        out.append(
-            DocumentFact(
-                type=FactType.payment_terms,
-                value=deadline.raw,
-                normalized=canonical,
-                raw_text=deadline.raw,
-                unit=deadline.unit,
-            )
-        )
+    payment = _payment_terms(view)
+    if payment is not None:
+        out.append(payment)
 
     vat = _vat_status(view)
     if vat is not None:
@@ -411,6 +401,35 @@ def _vat_status(view: DocumentView) -> DocumentFact | None:
     return None
 
 
+def _payment_terms(view: DocumentView) -> DocumentFact | None:
+    """How the fee is paid, canonically (``rules.payment_terms_value``): the deadline, then the
+    advance's share - "P10D working advance 30%". A staged payment states the balance's deadline,
+    not the advance's; the share is the one the chunk rule reads (``find_percentages``)."""
+    text = view.text
+    deadlines = [d for d in view.payment_terms().deadlines if d.unit in _UNIT_CODES]
+    deadline = next(
+        (d for d in deadlines if not is_advance_deadline(text, *d.span)),
+        deadlines[0] if deadlines else None,
+    )
+    share = next((h for h in find_percentages(text) if h.type is FactType.payment_terms), None)
+    canonical = None
+    if deadline is not None:
+        canonical = f"P{deadline.count}{_UNIT_CODES[deadline.unit]}"
+        if deadline.qualifier:
+            canonical += f" {deadline.qualifier}"
+    value = payment_terms_value(canonical, percent_of(share) if share is not None else None)
+    if value is None:
+        return None
+    raw = deadline.raw if deadline is not None else share.raw_text if share is not None else value
+    return DocumentFact(
+        type=FactType.payment_terms,
+        value=raw,
+        normalized=value,
+        raw_text=raw,
+        unit=deadline.unit if deadline is not None else "%",
+    )
+
+
 def _penalties(text: str) -> list[DocumentFact]:
     """Percentages a penalty clause sets, with the period it counts per: "0.5% per day"."""
     out: list[DocumentFact] = []
@@ -419,6 +438,8 @@ def _penalties(text: str) -> list[DocumentFact]:
         before = text[start : hit.start]
         if not _PENALTY_WORDS.search(before + text[hit.end : hit.end + 40]):
             continue
+        if is_rate_cap(text, hit.start, hit.end):
+            continue  # "not exceeding 10%" caps the penalty; it is no rate of its own
         value = percent_of(hit)
         if value is None:
             continue

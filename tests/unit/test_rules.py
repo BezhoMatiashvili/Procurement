@@ -177,9 +177,11 @@ def test_id_code_needs_marker() -> None:
 
 def test_percentages() -> None:
     hits = find_percentages("ავანსი 30% წინასწარ; დღგ 18%; ჯარიმა 0.1% დღეში; humidity 250%")
+    # canonical forms (docs/GOLD_SPEC.md): an advance's share is "advance N%", and a rate beside
+    # "დღგ" is a percentage - a vat_status is one of four words, never a number
     assert [(h.normalized, h.type) for h in hits] == [
-        (30.0, FactType.payment_terms),
-        (18.0, FactType.vat_status),
+        ("advance 30%", FactType.payment_terms),
+        (18.0, FactType.percentage),
         (0.1, FactType.penalty),
     ]
 
@@ -376,7 +378,7 @@ def test_run_rules_sorted_and_spans_valid() -> None:
         FactType.contract_number,
         FactType.contract_date,
         FactType.total_amount,
-        FactType.vat_status,
+        FactType.percentage,  # "VAT 18%": the rate, never a vat_status (docs/GOLD_SPEC.md)
         FactType.delivery_deadline,
         FactType.party_id_code,
     }

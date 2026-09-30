@@ -77,7 +77,7 @@ from procurement_agent.extraction.normalize import (
     parse_number,
     strip_quotes,
 )
-from procurement_agent.extraction.rules import RuleHit, find_dates, run_rules
+from procurement_agent.extraction.rules import VAT_RATE_NOTE, RuleHit, find_dates, run_rules
 from procurement_agent.extraction.schemas import FactType
 from procurement_agent.extraction.spellcheck import classify_difference
 from procurement_agent.ingestion.segmenter import Segment, document_text, key_of
@@ -581,7 +581,8 @@ def _rule_hits(text: str) -> list[_Hit]:
         end = _range_end(text, rules, i)
         if end is None:
             ft = _payment_if_said(text, r, _total_if_said(text, r))
-            out.append(_Hit(ft, r.value, r.normalized, r.unit, r.currency, "rules"))
+            unit = _VAT_RATE if r.note == VAT_RATE_NOTE else r.unit
+            out.append(_Hit(ft, r.value, r.normalized, unit, r.currency, "rules"))
             i += 1
             continue
         j, ft = end
@@ -848,10 +849,18 @@ def _bank_note(left: str, right: str) -> tuple[str, str] | None:
     return None
 
 
+#: The unit of a percentage that is the VAT's rate (``rules.VAT_RATE_NOTE``).
+_VAT_RATE = "% VAT"
+
+
 def _delta(a: _Hit | None, b: _Hit | None) -> ValueDelta | None:
     """One difference between two typed values, or None when they say the same thing."""
     hit = a or b
     if hit is None:  # pragma: no cover - never called with two Nones
+        return None
+    if (a is None or b is None) and hit.unit == _VAT_RATE:
+        # "დღგ-ს ჩათვლით" restated "დღგ-ს (18%) ჩათვლით" says no more: the rate is part of the
+        # tax wording, whose change CMP.VAT reports. A rate changed (18% -> 20%) is reported.
         return None
     ft = hit.type
     en, ka = LABELS.get(ft, (ft.value, ft.value))
