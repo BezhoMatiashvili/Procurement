@@ -1256,6 +1256,7 @@ def _layout_key(text: str) -> str:
 
 #: The word for "year" a date may be followed by: "2026 წ.", "2026 წელი".
 _YEAR_AFTER = re.compile(r"\s*(?:წლის|წელი|წ\.?)(?![ა-ჰ])")
+_YEAR_OF_DATES = re.compile(r",?\s*(?<!\d)(\d{4})\s*(?:წელს|წელი|წ\.)(?![ა-ჰ])")
 
 
 def _same_dates_rewritten(left: str, right: str) -> bool:
@@ -1287,7 +1288,11 @@ def _without_dates(text: str) -> tuple[str, list[str]]:
         year = _YEAR_AFTER.match(folded, hit.end)
         pos = year.end() if year else hit.end
     kept.append(folded[pos:])
-    return " ".join(kept), dates
+    years = {d[:4] for d in dates}
+    # the year a period's dates take from after it, "1 მაისიდან 31 მაისის ჩათვლით, 2026 წელს",
+    # is theirs
+    rest = _YEAR_OF_DATES.sub(lambda m: "" if m.group(1) in years else m.group(0), " ".join(kept))
+    return rest, dates
 
 
 _WORD_NUMBER_LABELS: dict[str, tuple[str, str]] = {
@@ -2000,6 +2005,14 @@ def _pair_replace(left: Sequence[Segment], right: Sequence[Segment]) -> list[_Pa
 def _align_linear(left: list[Segment], right: list[Segment]) -> tuple[list[_Pair], float]:
     if any(s.table_row is not None for s in (*left, *right)):
         return _align_with_rows(left, right)
+    pairs, ops = _align_segments(left, right)
+    return pairs, _similarity_of(ops, pairs, len(left) + len(right))
+
+
+def _align_segments(
+    left: Sequence[Segment], right: Sequence[Segment]
+) -> tuple[list[_Pair], list[_Opcode]]:
+    """Segments aligned line by line: the pairs, and the opcodes they came from."""
     lk = [key_of(s.text) for s in left]
     rk = [key_of(s.text) for s in right]
     ops = _opcodes(lk, rk)
@@ -2030,7 +2043,7 @@ def _align_linear(left: list[Segment], right: list[Segment]) -> tuple[list[_Pair
             pairs.extend(
                 _pair_replace_with_moves(left[i1:i2], right[j1:j2], unmatched_left, unmatched_right)
             )
-    return pairs, _similarity_of(ops, pairs, len(lk) + len(rk))
+    return pairs, ops
 
 
 #: The group of a table row added or removed whole: one change, not one per cell.
@@ -2094,18 +2107,22 @@ def _pair_rows(a: _Unit, b: _Unit, ordinals: set[tuple[int | None, int | None]])
     added or removed is not a figure that changed: it is laid out anew."""
     if len(a) == 1 and len(b) == 1 and a[0].table_row is None and b[0].table_row is None:
         return [(a[0], b[0], None)]
-    by_a = {c.table_col: c for c in a}
-    by_b = {c.table_col: c for c in b}
+    by_a: dict[int | None, list[Segment]] = {}
+    by_b: dict[int | None, list[Segment]] = {}
+    for c in a:
+        by_a.setdefault(c.table_col, []).append(c)
+    for c in b:
+        by_b.setdefault(c.table_col, []).append(c)
     out: list[_Pair] = []
     for col in sorted(set(by_a) | set(by_b), key=lambda c: (c is None, c or 0)):
-        x, y = by_a.get(col), by_b.get(col)
-        renumbered = (
-            x is not None
-            and y is not None
-            and (x.table, col) in ordinals
-            and x.text.strip() != y.text.strip()
-        )
-        out.append((x, y, f"{_LAYOUT}ord{x.index}" if renumbered and x is not None else None))
+        xs, ys = by_a.get(col, []), by_b.get(col, [])
+        if len(xs) != 1 or len(ys) != 1:
+            # a cell of several paragraphs, or one the parser gave whole and as its paragraphs
+            out.extend(_align_segments(xs, ys)[0])
+            continue
+        x, y = xs[0], ys[0]
+        renumbered = (x.table, col) in ordinals and x.text.strip() != y.text.strip()
+        out.append((x, y, f"{_LAYOUT}ord{x.index}" if renumbered else None))
     return out
 
 
@@ -2605,7 +2622,15 @@ def _build(
                 end += 1
             run = pairs[i:end]
             cells = [c for ra, rb, _g in run for c in (ra, rb) if c is not None]
-            whole = replace(cells[0], text=" | ".join(c.text for c in cells))
+            # a cell the parser gave whole and as its paragraphs is written once
+            lines = {key_of(c.text) for c in cells if c.kind != "table_cell"}
+            written = [
+                c
+                for c in cells
+                if c.kind != "table_cell"
+                or not all(key_of(line) in lines for line in c.text.splitlines())
+            ]
+            whole = replace(cells[0], text=" | ".join(c.text for c in written or cells))
             added = run[0][0] is None
             kind, materiality, deltas, rules, inline = _classify(
                 None if added else whole, whole if added else None, ocr=ocr, contexts=contexts

@@ -185,3 +185,31 @@ def test_a_changed_row_number_that_is_no_renumbering_is_still_reported() -> None
     right = [["7", *ROWS[0][1:]], ["13", *ROWS[1][1:]]]
     rules = [r[0] for r in found(run(document(rows), document(right)))]
     assert rules == ["CMP.AMOUNT"]
+
+
+def signature_table(director: str) -> list[Segment]:
+    """A signature table as Docling gives a Word one: each cell whole, and again as the
+    paragraphs inside it, all in the one row."""
+    cells = [
+        ["„შემკვეთი“", "შპს „ზღვის ქარი“", f"დირექტორი {director}"],
+        ["„შემსრულებელი“", "შპს „მთის წყარო“", "დირექტორი: ლევან ქავთარაძე"],
+    ]
+    records: list[tuple] = [("ხელმოწერები", "text", "¶1", None, None)]  # type: ignore[type-arg]
+    for col, lines in enumerate(cells, start=1):
+        where = TableCell(1, 1, col, None)
+        records.append(("\n".join(lines), "table_cell", f"T1/r1/c{col}", None, None, where))
+    for col, lines in enumerate(cells, start=1):
+        where = TableCell(1, 1, col, None)
+        records.extend(
+            (line, "text", f"¶{col}{k}", None, None, where) for k, line in enumerate(lines)
+        )
+    return build(records)
+
+
+def test_a_director_renamed_in_a_signature_table_is_one_change() -> None:
+    left, right = signature_table("ნანა გელაშვილი"), signature_table("ნანა გელაძე")
+    report = run(left, right)
+    assert found(report) == [("CMP.PARTY", "ნანა გელაშვილი", "ნანა გელაძე", "error")]
+    # every line of both documents is in the diff, the cell whole and its paragraphs alike
+    assert sorted(r.left.index for r in report.rows if r.left) == [s.index for s in left]
+    assert sorted(r.right.index for r in report.rows if r.right) == [s.index for s in right]

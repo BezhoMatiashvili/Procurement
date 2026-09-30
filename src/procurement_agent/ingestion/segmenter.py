@@ -186,10 +186,21 @@ def _grid(table: Any) -> list[tuple[int, int, str]]:
     return sorted(out)
 
 
+#: A first row's cell longer than this, or of several lines, is content, not a column's name.
+_HEADER_MAX = 60
+
+
 def _header_of(grid: list[tuple[int, int, str]], row: int, col: int) -> str | None:
     if row == 0:
         return None
-    return next((text for r, c, text in grid if r == 0 and c == col and text), None)
+    return next(
+        (
+            text
+            for r, c, text in grid
+            if r == 0 and c == col and text and len(text) <= _HEADER_MAX and "\n" not in text
+        ),
+        None,
+    )
 
 
 def _cells_of_text_items(doc: DoclingDocument, numbers: dict[str, int]) -> dict[str, TableCell]:
