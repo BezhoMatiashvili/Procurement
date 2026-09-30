@@ -321,3 +321,71 @@ def test_a_value_clause_deleted_whole_is_one_finding() -> None:
 def test_a_rate_changed_on_a_line_whose_other_words_stay_is_one_finding() -> None:
     right = edit(CONTRACT, "0.3% ოდენობით", "0.5% ოდენობით")
     assert [r for r, _b, _a, _s in found(run(CONTRACT, right))] == ["CMP.PERCENT"]
+
+
+# --- COMPARE-R2-02: a contract against its act loses no value to a change it never reports ------
+
+#: The act closing CONTRACT: the same two parties, what was delivered and for how much.
+ITS_ACT = [
+    "მიღება-ჩაბარების აქტი",
+    CONTRACT[2],
+    CONTRACT[3],
+    "„მხარეებმა“ 2026 წლის 14 მაისს გააფორმეს ხელშეკრულება № TR-2026/081.",
+    "მიმწოდებელმა მიაწოდა, ხოლო შემსყიდველმა ჩაიბარა სასკოლო მერხები.",
+    "მიწოდებული საქონელი დათვალიერდა ადგილზე, მისი ოდენობა და ხარისხი შეესაბამება "
+    "ხელშეკრულებით გათვალისწინებულ მოთხოვნებს, ხილული დაზიანება არ აღმოჩენილა.",
+    "შემსყიდველს მიმწოდებლის მიმართ პრეტენზია არ გააჩნია, საქონელი მიღებულია სრულად და "
+    "დროულად, თანდართული სასაქონლო ზედნადების შესაბამისად.",
+    "წინამდებარე დოკუმენტი წარმოადგენს ანგარიშსწორების საფუძველს და ინახება ორივე მხარესთან.",
+    "საქონლის ღირებულება შეადგენს 8 400 (რვა ათას ოთხასი) ლარს დღგ-ს ჩათვლით.",
+    "აქტი შედგენილია 2026 წლის 20 ივნისს.",
+]
+
+
+def _parties(report) -> list[tuple[str, str | None, str | None]]:  # type: ignore[no-untyped-def]
+    return sorted(
+        (
+            (f.rule_id, f.expected, f.actual)
+            for f in report.findings
+            if f.rule_id in ("CMP.PARTY", "CMP.ID_CODE") and "address" not in f.message_en
+        ),
+        key=str,
+    )
+
+
+def test_an_act_naming_other_directors_for_both_parties_lists_them() -> None:
+    act = edit(edit(ITS_ACT, "თამარ ქობალიას", "ნინო ბერაძის"), "ლაშა გოგიძის", "დავით ხუციშვილის")
+    report = run(CONTRACT, act)
+    assert report.alignment == "unrelated"
+    assert _parties(report) == sorted(
+        [
+            ("CMP.PARTY", "თამარ ქობალია", None),
+            ("CMP.PARTY", "ლაშა გოგიძე", None),
+            ("CMP.PARTY", None, "ნინო ბერაძე"),
+            ("CMP.PARTY", None, "დავით ხუციშვილი"),
+        ],
+        key=str,
+    )
+
+
+def test_an_act_giving_other_id_codes_for_both_parties_lists_them() -> None:
+    act = edit(edit(ITS_ACT, "406777888", "401122334"), "407999000", "402233445")
+    report = run(CONTRACT, act)
+    assert report.alignment == "unrelated"
+    ids = [(e, a) for r, e, a in _parties(report) if r == "CMP.ID_CODE"]
+    assert sorted(ids, key=str) == sorted(
+        [("406777888", None), ("407999000", None), (None, "401122334"), (None, "402233445")],
+        key=str,
+    )
+
+
+def test_an_act_naming_the_contract_s_parties_reports_none_of_them() -> None:
+    assert _parties(run(CONTRACT, ITS_ACT)) == []
+
+
+def test_an_act_naming_one_other_director_is_that_director_s_change() -> None:
+    act = edit(ITS_ACT, "ლაშა გოგიძის", "დავით ხუციშვილის")
+    # a single leftover on each side is still one director's change, the error it is
+    assert [(r, e, a, s) for r, e, a, s in found(run(CONTRACT, act)) if r == "CMP.PARTY"] == [
+        ("CMP.PARTY", "ლაშა გოგიძე", "დავით ხუციშვილი", "error")
+    ]

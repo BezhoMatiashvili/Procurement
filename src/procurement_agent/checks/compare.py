@@ -3145,7 +3145,11 @@ def _findings_of(
         return d.severity
 
     written = _Written(left_text), _Written(right_text)
-    all_deltas = [d for h in hunks for d in h.deltas] + list(field_deltas)
+    # Only a change that is reported can make another report of it superfluous. Two documents
+    # that are not versions of one another report no line's change: their positional diff pairs
+    # the contract's party lines with the act's, and its "director X -> Y" was dropping the
+    # document-wide "X removed" and "Y added" - for both parties, nothing was listed.
+    all_deltas = [d for h in hunks if not unrelated for d in h.deltas] + list(field_deltas)
     changed_sides = {
         (_kind_of_change(d), side)
         for d in all_deltas
