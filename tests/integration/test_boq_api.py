@@ -308,3 +308,36 @@ def test_the_xlsx_format_returns_the_merged_workbook(client: TestClient) -> None
     assert r.headers["X-Bidder-Count"] == "2"
     wb = load_workbook(io.BytesIO(r.content))
     assert "SUMMARY" in wb.sheetnames
+
+
+def test_an_unreadable_bid_is_reported_on_that_bidder_and_the_rest_are_compared(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One bidder's workbook that the reader cannot open is that bidder's finding, in the JSON
+    report and in the merged workbook alike - never a failed request for every bidder."""
+    from procurement_agent.checks import boq as boq_module
+
+    real_read = boq_module.read_boq
+
+    def read(path: Path, *, name: str | None = None) -> object:
+        if name == "Broken Co":
+            raise KeyError("a part of the workbook the reader expects is missing")
+        return real_read(path, name=name)
+
+    monkeypatch.setattr(boq_module, "read_boq", read)
+    template = _template(client)
+    bids = [_bid(client, "Company-1"), _bid(client, "Company-2"), _bid(client, "Broken Co")]
+    report = _check(client, template, bids)
+    by_name = {b["bidder"]: b for b in report["bidders"]}
+    assert [f["rule_id"] for f in by_name["Broken Co"]["findings"]] == ["BOQ.UNREADABLE"]
+    assert by_name["Broken Co"]["comparable"] is False
+    assert by_name["Company-1"]["comparable"] and by_name["Company-2"]["comparable"]
+
+    r = client.post(
+        "/api/v1/checks/boq",
+        headers=H,
+        params={"format": "xlsx"},
+        json={"template_document_id": template, "bid_document_ids": bids},
+    )
+    assert r.status_code == 200, r.text
+    assert "SUMMARY" in load_workbook(io.BytesIO(r.content)).sheetnames

@@ -1088,6 +1088,25 @@ def test_money_has_thousands_separators_and_a_dash_for_nothing() -> None:
     assert _money(None) == "—"
 
 
+def test_the_boq_page_reports_an_unreadable_bid_and_ranks_the_rest(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from procurement_agent.checks import boq as boq_module
+
+    real_read = boq_module.read_boq
+
+    def read(path: Path, *, name: str | None = None) -> object:
+        if name == "Company-3":
+            raise KeyError("a part of the workbook the reader expects is missing")
+        return real_read(path, name=name)
+
+    monkeypatch.setattr(boq_module, "read_boq", read)
+    template, bids = _boq_run(client, n=3)
+    r = client.get(f"/ui/checks/boq?template={template}&bids={','.join(bids)}")
+    assert r.status_code == 200
+    assert "BOQ.UNREADABLE" in r.text and "rank-low" in r.text
+
+
 def test_the_boq_totals_are_grouped_by_thousands(client: TestClient) -> None:
     template, bids = _boq_run(client)
     body = client.get(f"/ui/checks/boq?template={template}&bids={','.join(bids)}").text
