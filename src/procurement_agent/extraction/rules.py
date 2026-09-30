@@ -467,7 +467,12 @@ def find_amounts(text: str) -> list[RuleHit]:
 _YEAR_WORD = r"წ(?:\.|(?:ელი|ელს|ლის|ლისა)(?:ვე)?(?![ა-ჰ])|(?![ა-ჰ]))"
 #: ... and the same without the bare letter, which alone is too little to make "26" a year.
 _YEAR_WORD_SPELLED = r"წ(?:\.|(?:ელი|ელს|ლის|ლისა)(?:ვე)?(?![ა-ჰ]))"
-_DATE_NUMERIC = re.compile(r"(?<!\d)(\d{1,2})[./-](\d{1,2})[./-](\d{4})(?!\d)")
+#: A numeric date, with the word for year when one follows it ("05.07.2026 წ.", "05.07.2026
+#: წელს"): the word is part of the date, so the act's date is quoted whole and its correction
+#: keeps the word, as for a two-digit year.
+_DATE_NUMERIC = re.compile(
+    rf"(?<!\d)(\d{{1,2}})[./-](\d{{1,2}})[./-](\d{{4}})(?!\d)(?:\s*{_YEAR_WORD})?"
+)
 #: A two-digit year, only where the word for "year" says it is one: "12.05.26 წ.". The word is
 #: part of the date, so a correction written like it keeps it ("30.06.26 წ.").
 _DATE_NUMERIC_SHORT_YEAR = re.compile(
