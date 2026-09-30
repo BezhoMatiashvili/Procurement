@@ -44,17 +44,20 @@ _QUOTED = rf"[{_Q}]([^{_Q}]{{2,90}}?)[{_Q}]"
 
 # Georgian legal forms. "ი/მ" and "ინდ. მეწარმე" matter because the client's tax-wording rules
 # branch on whether the contractor is a company, an individual entrepreneur or a person.
-# A company's form is also written out in full, in any case: "შეზღუდული პასუხისმგებლობის
-# საზოგადოება „…“" is "შპს „…“", and a party name carries the abbreviation (``_legal_form``).
+# A form is also written out in full, in any case: "შეზღუდული პასუხისმგებლობის საზოგადოება
+# „…“" is "შპს „…“", "ინდივიდუალური მეწარმე" and "ინდ. მეწარმე" are "ი/მ", and a party name
+# carries the abbreviation (``_legal_form``). This table is the one list of the long forms: a
+# form the readers accept is always written short (red team R3, AOA-R3-04).
+_ENTREPRENEUR = r"ინდ(?:\.|ივიდუალური)?\s*მეწარმ"
 _SPELLED_OUT_FORMS: tuple[tuple[str, str], ...] = (
     (r"შეზღუდული\s+პასუხისმგებლობის\s+საზოგადოებ[აისმ]{0,2}", "შპს"),
     (r"სააქციო\s+საზოგადოებ[აისმ]{0,2}", "სს"),
     (r"არასამეწარმეო\s*\(?\s*არაკომერციული\s*\)?\s*იურიდიული\s+პირ[ისმა]{0,2}", "ააიპ"),
     (r"საჯარო\s+სამართლის\s+იურიდიული\s+პირ[ისმა]{0,2}", "სსიპ"),
+    (rf"{_ENTREPRENEUR}[ეის]*", "ი/მ"),
 )
 _LEGAL_FORM = (
-    "|".join(pattern for pattern, _ in _SPELLED_OUT_FORMS)
-    + r"|შპს|სს|ააიპ|სსიპ|ი\s*/\s*მ|ინდ(?:\.|ივიდუალური)?\s*მეწარმ[ეის]*"
+    "|".join(pattern for pattern, _ in _SPELLED_OUT_FORMS) + r"|შპს|სს|ააიპ|სსიპ|ი\s*/\s*მ"
 )
 
 _PARTY_NAME = re.compile(rf"(?<![ა-ჰ])({_LEGAL_FORM})\s*{_QUOTED}")
@@ -71,7 +74,7 @@ def _legal_form(written: str) -> str:
 #: An individual entrepreneur or a natural person is named, not quoted: "ი/მ ირაკლი სულაძე",
 #: "ფ/პ ანა ბერიძე" - a first name and a surname after the abbreviation.
 _PERSON_PARTY = re.compile(
-    r"(?<![ა-ჰ])(ი\s*/\s*მ|ფ\s*/\s*პ|ინდ(?:\.|ივიდუალური)?\s*მეწარმე)\s+"
+    rf"(?<![ა-ჰ])(ი\s*/\s*მ|ფ\s*/\s*პ|{_ENTREPRENEUR}ე)\s+"
     r"([ა-ჰ]{2,20}\s+[ა-ჰ]{2,25})(?![ა-ჰ])"
 )
 # The code behind any of its labels (``normalize.ID_LABEL``: "ს/კ", "ს.კ.", "საიდ. კოდი", "ID",
