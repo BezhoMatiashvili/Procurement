@@ -1104,15 +1104,16 @@ class AoaChecker:
         doubles as an OCR guard: a misread digit no longer matches its own spelled-out form.
 
         The finding marks the half that is wrong and says how it should read. Which half that is
-        comes from the contract when there is one: words that state the contract's price and
-        digits that do not mean the digits are wrong; otherwise - and with no contract - the
-        figure is taken as written and the words are corrected to it. Words that are the right
-        number misspelled ("ასოი" for "ასი") are a spelling slip with its correction, not an
-        unreadable amount; a bracket that holds no numeral at all ("დანართი 1 (ტექნიკური
-        დავალება)") is no amount and is left alone.
+        comes from the contract when there is one: words that state a figure the contract
+        states - its price, or a count it writes in digits and words alike ("12 (თორმეტი)
+        პოსტი") - and digits that do not mean the digits are wrong; otherwise - and with no
+        contract - the figure is taken as written and the words are corrected to it. Words
+        that are the right number misspelled ("ასოი" for "ასი") are a spelling slip with its
+        correction, not an unreadable amount; a bracket that holds no numeral at all
+        ("დანართი 1 (ტექნიკური დავალება)") is no amount and is left alone.
         """
         checked = 0
-        prices = self._contract_price_values()
+        prices = self._contract_figures()
         for pair in digits_and_words(self.aoa.text):
             if not pair.numeral:
                 continue
@@ -1172,6 +1173,18 @@ class AoaChecker:
                 "აქტში ვერ მოიძებნა თანხა ფორმით „ციფრები (სიტყვიერად)“",
                 "no 'digits (words)' amount found",
             )
+
+    def _contract_figures(self) -> list[float]:
+        """The figures the contract states for certain: its prices, and every figure it writes
+        in digits and words that agree. Empty without a contract."""
+        if self.contract is None:
+            return []
+        agreed = [
+            p.digits
+            for p in digits_and_words(self.contract.text)
+            if p.spelled is not None and amounts_equal(p.spelled, p.digits)
+        ]
+        return [*self._contract_price_values(), *agreed]
 
     def _contract_price_values(self) -> list[float]:
         """The contract's prices as figures, as the fee rule reads them; empty without one."""
