@@ -641,10 +641,8 @@ def _range_end(text: str, rules: list[RuleHit], i: int) -> tuple[int, FactType] 
     if j == len(rules):
         return None
     second = rules[j]
-    if not _ISO_DATE.match(str(second.normalized)) or str(first.normalized) > str(
-        second.normalized
-    ):
-        return None
+    if not _ISO_DATE.match(str(second.normalized)):
+        return None  # a range written with its end first is still that range: its syntax says so
     if first.type == second.type or second.type is FactType.date:
         ft = first.type
     elif first.type is FactType.date:

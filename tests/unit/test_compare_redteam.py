@@ -347,3 +347,22 @@ def test_a_contract_and_its_act_that_disagree_on_the_payment_term_is_one_change(
     labels = ("Duration (unclassified)", "Period in words")
     assert not [f for f in report.findings if f.message_en.startswith(labels)]
     assert not [f for f in run(CONTRACT, ACT).findings if f.rule_id == "CMP.PAYMENT"]
+
+
+# --- COMPARE-07: a period with one year typed wrong is that period, ends as written -------------
+
+
+def test_a_period_with_its_end_year_typed_wrong_is_one_change_ends_as_written() -> None:
+    act = edit(ACT, "2026 წლის 30 ივნისის ჩათვლით", "2025 წლის 30 ივნისის ჩათვლით")
+    found = [r for r in rules(run(ACT, act)) if r[0] in ("CMP.DURATION", "CMP.DATE")]
+    assert found == [("CMP.DURATION", "2026-06-01/2026-06-30", "2026-06-01/2025-06-30", "error")]
+    started = edit(ACT, "2026 წლის 1 ივნისიდან", "2027 წლის 1 ივნისიდან")
+    found = [r for r in rules(run(ACT, started)) if r[0] in ("CMP.DURATION", "CMP.DATE")]
+    assert found == [("CMP.DURATION", "2026-06-01/2026-06-30", "2027-06-01/2026-06-30", "error")]
+
+
+def test_a_contract_period_with_its_end_year_typed_wrong_adds_no_date() -> None:
+    right = edit(CONTRACT, "2026 წლის 30 სექტემბრის", "2025 წლის 30 სექტემბრის")
+    assert rules(run(CONTRACT, right)) == [
+        ("CMP.DURATION", "2026-05-01/2026-09-30", "2026-05-01/2025-09-30", "error")
+    ]
