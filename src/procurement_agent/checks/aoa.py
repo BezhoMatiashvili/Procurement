@@ -28,7 +28,7 @@ from typing import Literal
 
 from procurement_agent.checks.amounts import (
     CURRENCY,
-    FIGURE,
+    FIGURE_TETRI,
     DigitsAndWords,
     Money,
     digits_and_words,
@@ -3534,7 +3534,7 @@ def _fee_like(value: float, written: str) -> str:
     the lari ("700 ლარი და 50 თეთრი") are the value's own, and dropped when it has none. Text
     the pattern does not recognise yields the bare figure.
     """
-    figure = re.search(FIGURE, written)
+    figure = re.search(FIGURE_TETRI, written)
     if figure is None:
         return _plain(value)
     rest = written[figure.end() :]

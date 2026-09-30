@@ -19,10 +19,12 @@ from procurement_agent.extraction.schemas import FactType
 __all__ = [
     "CURRENCY",
     "FIGURE",
+    "FIGURE_TETRI",
     "NUM_IN_TEXT",
     "DigitsAndWords",
     "Money",
     "digits_and_words",
+    "figure_value",
     "looks_like_numeral",
     "money_amounts",
     "money_hits",
@@ -44,10 +46,19 @@ _MONEY_TYPES = frozenset({FactType.price, FactType.total_amount, FactType.amount
 #: one separator, so an item number in front ("საფასური: 1. 100 (ასი)") is not read into it,
 #: which a looser pattern did: it read 1100 there and reported the words as wrong.
 FIGURE = r"\d{1,3}(?:[ \u00a0.,]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?"
+#: A figure with its tetri written after a hyphen, the bookkeeping style (red team R3, AOA-R3-03):
+#: "3 450-00" is 3450.00. Exactly two digits, straight after the hyphen; whether they are tetri
+#: or the end of a range ("10-15 ლარი") is ``figure_value``'s to say.
+FIGURE_TETRI = rf"(?:{FIGURE})(?:-\d{{2}}(?!\d))?"
+#: Where a figure may start: not inside another number, and not as the two tetri digits after a
+#: figure's hyphen ("00" of "3 450-00").
+_FIGURE_START = r"(?<![\d.,])(?!(?<=\d-)\d{2}(?!\d))"
+_HYPHEN_TETRI = re.compile(rf"({FIGURE})-(\d{{2}})")
+_HAS_FRACTION = re.compile(r"[.,]\d{1,2}$")
 #: "100 (ასი) ლარს" - a figure, then the same number written out. Digits may appear inside the
 #: brackets only for tetri ("ლარი და 50 თეთრი").
 _DIGITS_THEN_WORDS = re.compile(
-    rf"(?<![\d.,])({FIGURE})(?!\d)\s*\(\s*([ა-ჰ][ა-ჰ0-9 ,.]{{1,80}}?)\s*"
+    rf"{_FIGURE_START}({FIGURE_TETRI})(?!\d)\s*\(\s*([ა-ჰ][ა-ჰ0-9 ,.]{{1,80}}?)\s*"
     # a scan reads the closing bracket as ":" or "|" now and then; before a currency word
     # nothing else can be meant
     r"(?:\)|[:;|\]}](?=\s*(?:აშშ\s+)?(?:ლარ|დოლარ|ევრო)))"
@@ -59,7 +70,7 @@ CURRENCY = r"(?:(?:აშშ\s+)?(?:ლარ|დოლარ|ევრო)[ა-
 #: that reads as a numeral makes such a pair (``digits_and_words``): "100 ლარი (ერთი თვის)" is
 #: no amount in words.
 _DIGITS_CURRENCY_WORDS = re.compile(
-    rf"(?<![\d.,])({FIGURE})(?!\d)\s*{CURRENCY}\s*\(\s*([ა-ჰ][ა-ჰ0-9 ,.]{{1,80}}?)\s*\)"
+    rf"{_FIGURE_START}({FIGURE_TETRI})(?!\d)\s*{CURRENCY}\s*\(\s*([ა-ჰ][ა-ჰ0-9 ,.]{{1,80}}?)\s*\)"
 )
 #: Currency words inside the brackets: "(ასი ლარი)", "(ათასი აშშ დოლარი)".
 _CURRENCY_WORD = re.compile(r"(?:აშშ\s+)?(?:ლარ|დოლარ|ევრო|ფუნტ|რუბლ)[ა-ჰ]*")
@@ -86,6 +97,57 @@ def number_of(value: str, normalized: str | float | None = None) -> float | None
     return parse_number(found.group()) if found else None
 
 
+def _tetri_value(whole: str, tetri: str) -> float | None:
+    """A figure and the two digits after its hyphen as lari and tetri: "3 450" and "00" are
+    3450.0. None when the two digits read as the end of a range instead - more than the figure
+    before them ("10-15", "90-95") - or when the figure has a fraction of its own."""
+    if _HAS_FRACTION.search(whole):
+        return None
+    value = parse_number(whole)
+    cents = int(tetri)
+    if value is None or cents > value:
+        return None
+    return round(value + cents / 100, 2)
+
+
+def figure_value(figure: str) -> float | None:
+    """The number a figure (``FIGURE_TETRI``) states: "2 400" is 2400.0, and "3 450-00", its
+    tetri after a hyphen, 3450.0. None for a hyphen that joins a range ("10-15")."""
+    m = _HYPHEN_TETRI.fullmatch(figure.strip())
+    if m is not None:
+        return _tetri_value(m.group(1), m.group(2))
+    return parse_number(figure)
+
+
+#: The figure a hyphen joins to the tetri an amount starts with: "3 450-" of "3 450-00 ლარს".
+_WHOLE_BEFORE = re.compile(rf"(?<![\d.,/-])({FIGURE})-$")
+#: Tetri after the hyphen that ends an amount written currency first: "-00" of "GEL 3 450-00".
+_TETRI_AFTER_HYPHEN = re.compile(r"-(\d{2})(?![\d.,]?\d)")
+
+
+def _hyphen_tetri(text: str, h: Money) -> Money:
+    """``h`` with the rest of a "3 450-00" figure the rule hit left out: the lari before the
+    hyphen when the hit starts at the tetri ("00 ლარს"), or the tetri after it when the hit ends
+    at the lari ("GEL 3 450"). ``h`` as it is when there is none, or it reads as a range."""
+    start, end = h.span
+    tetri = re.match(r"(\d{2})(?![\d.,]?\d)", h.raw)
+    if tetri is not None and h.value == int(tetri.group(1)):
+        whole = _WHOLE_BEFORE.search(text, max(0, start - 30), start)
+        if whole is not None:
+            value = _tetri_value(whole.group(1), tetri.group(1))
+            if value is not None:
+                a = whole.start(1)
+                return Money(value=value, currency=h.currency, span=(a, end), raw=text[a:end])
+    after = _TETRI_AFTER_HYPHEN.match(text, end)
+    lari = re.search(rf"({FIGURE})$", h.raw)
+    if after is not None and lari is not None and float(h.value).is_integer():
+        value = _tetri_value(lari.group(1), after.group(1))
+        if value is not None:
+            b = after.end()
+            return Money(value=value, currency=h.currency, span=(start, b), raw=text[start:b])
+    return h
+
+
 @dataclass(frozen=True, slots=True)
 class Money:
     """One monetary amount as the document writes it: "100 (ასი) ლარს" is 100.0 GEL."""
@@ -104,7 +166,8 @@ def money_hits(text: str, *, penalties: bool = False) -> list[Money]:
     amounts and a fee comparison reports them as candidate contract values. An amount the rules
     classify as a penalty is left out for the same reason - unless ``penalties`` asks for it: a
     check that gives every amount its own role (``contract_terms.amount_roles``) names a
-    penalty instead of losing it.
+    penalty instead of losing it. A figure with its tetri after a hyphen ("3 450-00 ლარს") is one
+    amount, 3450.00, never its tetri "00" (red team R3, AOA-R3-03).
     """
     out: list[Money] = []
     for h in sorted(find_amounts(text), key=lambda h: (h.start, h.end)):
@@ -112,7 +175,8 @@ def money_hits(text: str, *, penalties: bool = False) -> list[Money]:
             continue
         n = number_of(h.value, h.normalized if isinstance(h.normalized, float) else None)
         if n is not None:
-            out.append(Money(value=n, currency=h.currency, span=(h.start, h.end), raw=h.raw_text))
+            money = Money(value=n, currency=h.currency, span=(h.start, h.end), raw=h.raw_text)
+            out.append(_hyphen_tetri(text, money))
     return out
 
 
@@ -254,7 +318,12 @@ def digits_and_words(text: str) -> list[DigitsAndWords]:
         if looks_like_numeral(read_words(m.group(2).strip())[0])
     ]
     for m in sorted([*direct, *across], key=lambda m: m.start()):
-        digits = parse_number(m.group(1))
+        digits_span = m.span(1)
+        digits = figure_value(m.group(1))
+        if digits is None and (joined := _HYPHEN_TETRI.fullmatch(m.group(1))) is not None:
+            # a range, "10-15 (თხუთმეტი)": the figure before the words is the one they restate
+            digits_span = (m.start(1) + joined.start(2), m.end(1))
+            digits = parse_number(joined.group(2))
         if digits is None:
             continue
         inner = m.group(2).strip()
@@ -266,9 +335,9 @@ def digits_and_words(text: str) -> list[DigitsAndWords]:
                 digits=digits,
                 words=words,
                 spelled=spelled,
-                raw=m.group(0).strip(),
-                span=m.span(),
-                digits_span=m.span(1),
+                raw=text[digits_span[0] : m.end()].strip(),
+                span=(digits_span[0], m.end()),
+                digits_span=digits_span,
                 words_span=words_span,
                 numeral=looks_like_numeral(words),
             )
@@ -310,8 +379,12 @@ def words_like(value: float, example: str) -> str:
 
 
 def render_figure_like(value: float, example: str) -> str:
-    """``value`` written the way ``example`` writes a figure: "2 400", "2,400.00", "2400"."""
+    """``value`` written the way ``example`` writes a figure: "2 400", "2,400.00", "2400", and
+    with its tetri after a hyphen, "3 450-00"."""
     ex = example.strip()
+    if (hyphen := _HYPHEN_TETRI.fullmatch(ex)) is not None:
+        lari, cents = divmod(round(value * 100), 100)
+        return f"{render_figure_like(lari, hyphen.group(1))}-{cents:02d}"
     decimals = re.search(r"[.,](\d{1,2})$", ex)
     grouped = re.search(r"\d[ \u00a0.,]\d{3}", ex)
     sep = grouped.group(0)[1] if grouped else ""
