@@ -51,6 +51,7 @@ from procurement_agent.extraction.anchors import (
     bic_is_well_formed,
     find_anchors,
     find_parties,
+    party_column,
     plain_party_wording,
 )
 from procurement_agent.extraction.georgian import (
@@ -1617,12 +1618,16 @@ class _Context:
     its table column ("ღირებულება (ლარი)"), or at the start of the paragraph after it ("ლარს").
 
     A cell of a quantity column ("რაოდენობა") or a unit column ("ერთეული") also knows its row's
-    other half: ``quantity`` and ``unit`` are the texts of the row's quantity and unit cells."""
+    other half: ``quantity`` and ``unit`` are the texts of the row's quantity and unit cells.
+    ``total`` says a total word names the cell's row ("სულ"); ``party`` is the party-name cell
+    of its column in a table laid out one party per column."""
 
     header: str = ""
     following: str = ""
     quantity: str = ""
     unit: str = ""
+    total: bool = False
+    party: str = ""
 
 
 _NO_CONTEXT = _Context()
@@ -1637,28 +1642,87 @@ _UNIT_HEADER = re.compile(
 )
 
 
+#: A cell that names its row a total: "სულ", "ჯამი", "სულ ჯამი:", "Total", "Grand total" - not a
+#: sub-total, which totals a part.
+_TOTAL_CELL = re.compile(
+    r"\s*(?:სულ(?:\s+ჯამ[ა-ჰ]*)?|ჯამ[ა-ჰ]*|საერთო\s+ჯამ[ა-ჰ]*|(?:grand\s+)?total)\s*:?\s*",
+    re.IGNORECASE,
+)
+#: A column header of money: its currency, or a word for a price, a sum or a value.
+_MONEY_HEADER = re.compile(
+    r"ლარ|თეთრ|დოლარ|ევრო|₾|\$|€|(?<![a-z])(?:gel|usd|eur)(?![a-z])|ღირებულ|ფას|ჯამ|თანხ"
+    r"|(?<![a-z])(?:amount|price|cost|total|sum|value)(?![a-z])",
+    re.IGNORECASE,
+)
+
+
+#: A requisites line: short, one field. A clause is no line of a signature block.
+_REQUISITE_LINE = 80
+#: How many lines of a signature block a party's name heads.
+_BLOCK_LINES = 3
+
+
+def _signed_under(segments: Sequence[Segment], k: int) -> str | None:
+    """The party-name line a short line of a signature block stands under ("შპს „ა“", then
+    "ს/კ ...", then "დირექტორი: ..."), when the line names no party of its own."""
+    if len(segments[k].text) > _REQUISITE_LINE or party_column(segments[k].text) is not None:
+        return None
+    for back in range(k - 1, max(-1, k - 1 - _BLOCK_LINES), -1):
+        line = segments[back]
+        if line.table is not None or len(line.text) > _REQUISITE_LINE:
+            return None
+        column = party_column(line.text)
+        if column is not None:
+            return line.text if column[0] == "name" else None
+    return None
+
+
 def _contexts(segments: Sequence[Segment]) -> dict[int, _Context]:
-    """Each segment's context (``_Context``), keyed by ``id``: a table cell's column header and
-    its row's quantity and unit, another segment's next paragraph."""
+    """Each segment's context (``_Context``), keyed by ``id``: a table cell's column header, its
+    row's quantity and unit, whether a total word names its row, and whose column it is in a
+    table of one party per column; another segment's next paragraph."""
     rows: dict[tuple[int | None, int | None], dict[str, str]] = {}
+    totals: set[tuple[int | None, int | None]] = set()
+    parties: dict[tuple[int | None, int | None], str] = {}
     for segment in segments:
+        if segment.table_row is None:
+            continue
         header = segment.column or ""
         for role, pattern in (("quantity", _QUANTITY_HEADER), ("unit", _UNIT_HEADER)):
-            if segment.table_row is not None and pattern.search(header):
+            if pattern.search(header):
                 rows.setdefault((segment.table, segment.table_row), {}).setdefault(
                     role, segment.text
                 )
+        if _TOTAL_CELL.fullmatch(segment.text):
+            totals.add((segment.table, segment.table_row))
+        column = party_column(segment.text)
+        if column is not None and column[0] == "name":
+            parties.setdefault((segment.table, segment.table_col), segment.text)
+    # one party per column: two parties named side by side in the one table
+    by_table = Counter(table for table, _col in parties)
     out: dict[int, _Context] = {}
     for k, segment in enumerate(segments):
+        context = _NO_CONTEXT
         if segment.column is not None:
             row = rows.get((segment.table, segment.table_row), {})
-            out[id(segment)] = _Context(
+            context = _Context(
                 header=segment.column,
                 quantity=row.get("quantity", ""),
                 unit=row.get("unit", ""),
             )
         elif k + 1 < len(segments) and segments[k + 1].table is None:
-            out[id(segment)] = _Context(following=segments[k + 1].text[:_AFTER])
+            context = _Context(following=segments[k + 1].text[:_AFTER])
+        if segment.table_row is not None:
+            party = parties.get((segment.table, segment.table_col), "")
+            context = replace(
+                context,
+                total=(segment.table, segment.table_row) in totals,
+                party=party if by_table[segment.table] >= 2 and party != segment.text else "",
+            )
+        elif (party := _signed_under(segments, k)) is not None:
+            context = replace(context, party=party)
+        if context != _NO_CONTEXT:
+            out[id(segment)] = context
     return out
 
 
@@ -3016,20 +3080,23 @@ def _classify(
         return "changed", "cosmetic", [], ["CMP.FORMATTING"], inline
 
     hidden = hidden_character_rules(a.text, b.text)
-    values = deltas_between(a.text, b.text)
+    values = deltas_between(_in_its_column(a.text, ca), _in_its_column(b.text, cb))
     counted = _cell_quantity(a.text, ca), _cell_quantity(b.text, cb)
     quantity = _delta(*counted) if None not in counted else None
     # a quantity column's figure, or its row's unit, is the row's quantity - not a bare number
     bare = (
         [quantity]
         if quantity is not None
-        else bare_number_delta(
-            a.text,
-            b.text,
-            critical=a.kind != "sheet_cell",
-            left_number=a.number,
-            right_number=b.number,
-        )
+        else [
+            _as_total(d, ca, cb)
+            for d in bare_number_delta(
+                a.text,
+                b.text,
+                critical=a.kind != "sheet_cell",
+                left_number=a.number,
+                right_number=b.number,
+            )
+        ]
     )
     words = [
         d
@@ -3054,6 +3121,27 @@ def _classify(
     ):
         return "changed", "cosmetic", [], ["CMP.FORMATTING"], inline
     return "changed", "substantive", [], sorted({*hidden, "CMP.TEXT_CHANGED"}), inline
+
+
+def _in_its_column(text: str, context: _Context) -> str:
+    """A cell of a table laid out one party per column, read under its party's name.
+
+    "დირექტორი: ნიკა ლომთაძე" alone names no party, so no director was read from it: the
+    contractor's director replaced in the requisites table was only "text changed", while the
+    same edit to the name cell above it was a party change (docs/GOLD_SPEC.md section 2, round
+    2: such a table is read column by column, each cell its party's)."""
+    return f"{context.party}\n{text}" if context.party else text
+
+
+def _as_total(d: ValueDelta, left: _Context, right: _Context) -> ValueDelta:
+    """A bare figure of a price table's total row - the row a total word names, under a column
+    of money - is the document's total amount, labelled so (docs/GOLD_SPEC.md section 2)."""
+    if not (left.total and right.total) or not _MONEY_HEADER.search(right.header):
+        return d
+    if _UNIT_WORDS.search(right.header):
+        return d  # the unit price column: no total
+    en, ka = LABELS[FactType.total_amount]
+    return d.model_copy(update={"type": FactType.total_amount, "label_en": en, "label_ka": ka})
 
 
 def _build(
