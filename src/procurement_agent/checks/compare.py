@@ -1846,10 +1846,62 @@ def _ratio(ops: list[_Opcode], total: int) -> float:
     return 2.0 * same / total if total else 1.0
 
 
+#: A clause's own number in front of it: "5.3.", "12)", "ა)".
+_CLAUSE_NUMBER = re.compile(r"^\s*(?:\d+(?:\.\d+)*\.?|\d+\)|[ა-ჰa-z]\))\s+", re.IGNORECASE)
+
+
+def _unnumbered(text: str) -> str:
+    """A line's key without its own clause number: "5.3. ..." and "6.3. ..." are one clause."""
+    return key_of(_CLAUSE_NUMBER.sub("", text, count=1))
+
+
+def _renumbered(left: Sequence[Segment], right: Sequence[Segment]) -> list[tuple[int, int]]:
+    """The lines of a replace block that differ only in their clause number, as (i, j) in
+    order: each the one line of its side with that text after the number, and long enough to
+    say something."""
+    lk = [_unnumbered(a.text) for a in left]
+    rk = [_unnumbered(b.text) for b in right]
+    count_l, count_r = Counter(lk), Counter(rk)
+    where_r = {k: j for j, k in enumerate(rk) if count_r[k] == 1}
+    pairs = [
+        (i, where_r[k])
+        for i, k in enumerate(lk)
+        if count_l[k] == 1
+        and k in where_r
+        and len(k) >= _MOVE_MIN_CHARS
+        and key_of(left[i].text) != key_of(right[where_r[k]].text)
+    ]
+    return _longest_increasing(pairs)
+
+
+def _pair_gap(left: Sequence[Segment], right: Sequence[Segment]) -> list[_Pair]:
+    if not left:
+        return [(None, b, None) for b in right]
+    if not right:
+        return [(a, None, None) for a in left]
+    return _pair_replace(left, right)
+
+
 def _pair_replace(left: Sequence[Segment], right: Sequence[Segment]) -> list[_Pair]:
-    """Re-pair a replace block so a 3-for-2 swap is not rendered as one undifferentiated blob."""
+    """Re-pair a replace block so a 3-for-2 swap is not rendered as one undifferentiated blob.
+
+    Lines that differ only in their clause number are paired first, in order, and the rest
+    between them: an article inserted near the top renumbers every clause after it, and a
+    contract of seventy clauses made one block too big to pair - reported whole as removed
+    and added, the two versions looked unrelated and nothing between them was reported.
+    """
     if len(left) == 1 and len(right) == 1:
         return [(left[0], right[0], None)]
+    anchors = _renumbered(left, right)
+    if anchors:
+        out: list[_Pair] = []
+        i0 = j0 = 0
+        for i, j in anchors:
+            out.extend(_pair_gap(left[i0:i], right[j0:j]))
+            out.append((left[i], right[j], None))
+            i0, j0 = i + 1, j + 1
+        out.extend(_pair_gap(left[i0:], right[j0:]))
+        return out
     if len(left) * len(right) > _PAIR_BUDGET:
         # Too big to score pairwise, and a block this large is a wholesale replacement rather
         # than a set of line edits. Say that, instead of inventing line-to-line correspondences.

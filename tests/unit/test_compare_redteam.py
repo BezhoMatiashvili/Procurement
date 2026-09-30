@@ -366,3 +366,33 @@ def test_a_contract_period_with_its_end_year_typed_wrong_adds_no_date() -> None:
     assert rules(run(CONTRACT, right)) == [
         ("CMP.DURATION", "2026-05-01/2026-09-30", "2026-05-01/2025-09-30", "error")
     ]
+
+
+# --- COMPARE-09: an article inserted near the top renumbers the rest; still two versions -------
+
+_TOPICS = ["საგანი", "ვადები", "ღირებულება", "მიღება", "გარანტია", "ფორსმაჟორი", "დავები"]
+_ACTS = ["ასრულებს", "ამოწმებს", "აფორმებს", "ატყობინებს", "ინახავს", "წარუდგენს", "უზრუნველყოფს"]
+
+
+def _long_contract(articles: list[str]) -> list[str]:
+    out: list[str] = []
+    for n, title in enumerate(articles, start=1):
+        out.append(f"{n}. {title}")
+        out.extend(
+            f"{n}.{k}. მხარე {verb} მუხლით „{title}“ გათვალისწინებულ ვალდებულებას ნაწილში {k}."
+            for k, verb in enumerate(_ACTS, start=1)
+        )
+    return out
+
+
+def test_an_article_inserted_near_the_top_keeps_the_documents_versions() -> None:
+    articles = [f"{t} {i}" for i, t in enumerate([*_TOPICS, "ანგარიში", "ცვლილება", "ენა"])]
+    left = _long_contract(articles)
+    right = _long_contract([articles[0], "ქვეკონტრაქტორები", *articles[1:]])
+    right = [t for t in right if not t.startswith("2.") or t == "2. ქვეკონტრაქტორები"]
+    right.insert(right.index("2. ქვეკონტრაქტორები") + 1, "2.1. ქვეკონტრაქტორის ჩართვა დაუშვებელია.")
+    report = run(left, right)
+    assert report.alignment == "versions"
+    added = [f.actual for f in report.findings if f.rule_id == "CMP.TEXT_ADDED"]
+    assert added == ["2. ქვეკონტრაქტორები", "2.1. ქვეკონტრაქტორის ჩართვა დაუშვებელია."]
+    assert not [f for f in report.findings if f.rule_id == "CMP.TEXT_REMOVED"]
