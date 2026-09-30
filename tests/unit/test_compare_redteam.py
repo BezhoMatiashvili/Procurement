@@ -307,3 +307,25 @@ def test_a_reordered_list_is_reported_as_moves() -> None:
     reordered = [items[2], items[0], items[1], items[4], items[3]]
     report = run(head + items + tail, head + reordered + tail)
     assert {f.rule_id for f in report.findings} == {"CMP.MOVED"}
+
+
+def test_a_line_quoted_inside_another_changed_line_is_still_its_own_change() -> None:
+    """Only a table cell and one of its own paragraphs are one change; a heading the clause
+    below it quotes, both renumbered, are two."""
+    left = [
+        "დანართი №7",
+        "1.2. მომსახურების აღწერა მოცემულია დანართი №7-ში, რომელიც თან ერთვის.",
+        "სხვა პირობები უცვლელია.",
+    ]
+    right = [t.replace("№7", "№8") for t in left]
+    assert [r[0] for r in rules(run(left, right))] == ["CMP.TEXT_CHANGED", "CMP.TEXT_CHANGED"]
+
+
+def test_words_that_only_begin_like_a_unit_are_no_quantity() -> None:
+    for line in (
+        "მიწოდებულ იქნა 5 ტონერი პრინტერისთვის.",
+        "შეთანხმება გაფორმდა 5 ცალმხრივი აქტით.",
+        "შეძენილია 5 ლიტრიანი ბოთლები.",
+    ):
+        found = rules(run([line], [line.replace("5", "6")]))
+        assert "CMP.QUANTITY" not in [r[0] for r in found], line

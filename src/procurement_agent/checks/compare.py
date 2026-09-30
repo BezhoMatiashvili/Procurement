@@ -415,17 +415,21 @@ def hits_of(text: str, *, reference: str = "") -> list[_Hit]:
     return out
 
 
+#: The case endings of a unit noun, and nothing longer: "ცალი", "ცალს", "ტონამდე" are units,
+#: "ცალკე" (separately), "ცალმხრივი" (unilateral), "ტონერი" (toner) and "ლიტრიანი" (a bottle's
+#: size) are other words.
+_CASE = r"(?:ი|ა|ს|ის|ას|ით|ად|ამდე|ზე|ში|ებ(?:ი|ის|ს|ით|ად|ამდე)?)?(?![ა-ჰ])"
 #: The units a procured quantity is counted in, and the name ``docs/GOLD_SPEC.md`` gives each.
 #: A closed list: copies of the document ("2 ეგზემპლარად"), pages, trips and months are counts
 #: or periods, not quantities, and stay what the other rules make of them.
 _UNITS: tuple[tuple[str, str], ...] = (
-    (r"ცალ[ა-ჰ]*|(?<![a-z])(?:pcs|pieces?|items?)(?![a-z])", "item"),
-    (r"კომპლექტ[ა-ჰ]*|(?<![a-z])sets?(?![a-z])", "set"),
-    (r"კვ\.?\s*მ(?:ეტრ[ა-ჰ]*)?(?![ა-ჰ])|მ²|(?<![a-z])(?:m²|m2|sq\.?\s*m)(?![a-z0-9])", "m2"),
-    (r"კუბ\.?\s*მ(?:ეტრ[ა-ჰ]*)?(?![ა-ჰ])|მ³|(?<![a-z])(?:m³|m3|cu\.?\s*m)(?![a-z0-9])", "m3"),
-    (r"კგ(?![ა-ჰ])|კილოგრამ[ა-ჰ]*|(?<![a-z])kg(?![a-z])", "kg"),
-    (r"ტონ[ა-ჰ]*|(?<![a-z])(?:tons?|tonnes?)(?![a-z])", "t"),
-    (r"ლიტრ[ა-ჰ]*|(?<![a-z])(?:litres?|liters?)(?![a-z])", "l"),
+    (rf"ცალ{_CASE}|(?<![a-z])(?:pcs|pieces?|items?)(?![a-z])", "item"),
+    (rf"კომპლექტ{_CASE}|(?<![a-z])sets?(?![a-z])", "set"),
+    (rf"კვ\.?\s*მ(?:ეტრ{_CASE})?(?![ა-ჰ])|მ²|(?<![a-z])(?:m²|m2|sq\.?\s*m)(?![a-z0-9])", "m2"),
+    (rf"კუბ\.?\s*მ(?:ეტრ{_CASE})?(?![ა-ჰ])|მ³|(?<![a-z])(?:m³|m3|cu\.?\s*m)(?![a-z0-9])", "m3"),
+    (rf"კგ(?![ა-ჰ])|კილოგრამ{_CASE}|(?<![a-z])kg(?![a-z])", "kg"),
+    (rf"ტონ{_CASE}|(?<![a-z])(?:tons?|tonnes?)(?![a-z])", "t"),
+    (rf"ლიტრ{_CASE}|(?<![a-z])(?:litres?|liters?)(?![a-z])", "l"),
 )
 _QUANTITY = re.compile(
     r"(?<![\d.,])(\d+(?:[.,]\d+)?)\s*(?:\(\s*[ა-ჰa-z\s-]+\s*\)\s*)?(?:"
@@ -2407,9 +2411,21 @@ def _changed_words(left: str, right: str) -> _Change:
 
 
 def _nested(a: tuple[str, str], b: tuple[str, str]) -> bool:
-    """Whether one changed line holds the other on both sides: a table cell and one of its
-    paragraphs."""
-    return (a[0] in b[0] and a[1] in b[1]) or (b[0] in a[0] and b[1] in a[1])
+    """Whether one changed line is, on both sides, one of the other's own lines: a table cell
+    and one of its paragraphs.
+
+    A line quoted inside another is not enough. An annex's heading "დანართი №2" and the clause
+    that cites "დანართი №2-ში", both renumbered, are two changes a reader must see; matched as
+    substrings, the clause's was dropped.
+    """
+
+    def within(part: tuple[str, str], whole: tuple[str, str]) -> bool:
+        return all(
+            normalize_spaces(p) in {normalize_spaces(line) for line in w.splitlines()}
+            for p, w in zip(part, whole, strict=True)
+        )
+
+    return within(a, b) or within(b, a)
 
 
 #: Unchanged words quoted either side of a change in a "text changed" finding.
