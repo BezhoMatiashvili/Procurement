@@ -259,6 +259,20 @@ def test_added_and_removed_positions_are_separate_from_quantity_changes(
     assert bidder["added"][0]["item_no"] == "1.9"
 
 
+def test_a_unit_written_where_the_template_left_none_is_listed_apart(client: TestClient) -> None:
+    item, desc, _unit, qty, mat, lab = LINES[0]
+    template = _upload(
+        client,
+        "Template.xlsx",
+        build_boq([(item, desc, "", qty, mat, lab), *LINES[1:]], stated_total=None),
+    )
+    bid = _upload(client, "Company-1.xlsx", build_boq(LINES))
+    bidder = _check(client, template, [bid])["bidders"][0]
+    assert [(p["item_no"], p["unit"]) for p in bidder["unit_filled"]] == [(item, LINES[0][2])]
+    rules = [f["rule_id"] for f in bidder["findings"]]
+    assert "BOQ.UNIT_FILLED" in rules and "BOQ.UNIT_CHANGED" not in rules
+
+
 def test_fewer_than_three_bidders_reports_the_outlier_rule_as_skipped(
     client: TestClient,
 ) -> None:

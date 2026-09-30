@@ -9,6 +9,8 @@ memory; every expected number is worked out here from the test's own data.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from openpyxl import Workbook
 
@@ -21,11 +23,16 @@ from procurement_agent.checks.boq import (
     _num,
     _plays,
     cents,
+    compare_bid,
     grand_total,
     norm_unit,
+    read_boq,
     reconcile_summary,
     summary_roles,
 )
+from tests.unit.test_boq_reader_variants import Cells, Fx, _rules, _save
+
+_HEAD = ("No", "Description", "Unit", "Quantity", "Rate", "Amount")
 
 # --- numbers typed as text --------------------------------------------------------------------
 
@@ -227,3 +234,41 @@ def test_tied_cells_of_the_merged_workbook_share_their_colour() -> None:
     _colour_extremes(ws, [1, 2, 3], 1)
     fills = [ws.cell(r, 1).fill.fgColor.rgb for r in (1, 2, 3)]
     assert fills[0] == fills[1] != fills[2]
+
+
+# --- a unit written where the template left none --------------------------------------------------
+
+
+def _unit_sheet(units: tuple[str | None, str | None, str | None]) -> Cells:
+    """Three positions at 10 x 5.00, with the given units."""
+    cells: Cells = {(1, c): h for c, h in enumerate(_HEAD, 1)}
+    for i, (item, unit) in enumerate(zip(("2.1", "2.2", "2.3"), units, strict=True)):
+        r = i + 2
+        cells.update({(r, 1): item, (r, 2): f"Partition wall type {i + 1}", (r, 4): 10.0})
+        if unit is not None:
+            cells[(r, 3)] = unit
+        cells[(r, 5)] = 5.0
+        cells[(r, 6)] = Fx(f"=D{r}*E{r}", 50.0)
+    return cells
+
+
+def test_a_unit_written_where_the_template_left_none_is_listed_apart(tmp_path: Path) -> None:
+    t = read_boq(_save(tmp_path / "t.xlsx", {"1. WORKS": _unit_sheet(("m2", None, None))}))
+    b = read_boq(_save(tmp_path / "b.xlsx", {"1. WORKS": _unit_sheet(("m2", "m3", None))}))
+    comp = compare_bid(t, b)
+    assert [(ln.sheet, ln.item_no, ln.unit) for ln in comp.unit_filled] == [
+        ("1. WORKS", "2.2", "m3")
+    ]
+    [note] = [f for f in comp.findings if f.rule_id == "BOQ.UNIT_FILLED"]
+    assert note.severity == "info" and "2.2 (m3)" in note.message_en
+    # never a unit change, and the position is still evaluated as the template's
+    assert "BOQ.UNIT_CHANGED" not in _rules(comp)
+    assert comp.evaluated_cost == pytest.approx(3 * 10 * 5.0)
+
+
+def test_a_unit_the_template_states_is_never_listed_as_filled(tmp_path: Path) -> None:
+    t = read_boq(_save(tmp_path / "t.xlsx", {"1. WORKS": _unit_sheet(("m2", "m2", None))}))
+    b = read_boq(_save(tmp_path / "b.xlsx", {"1. WORKS": _unit_sheet(("m2", "m3", None))}))
+    comp = compare_bid(t, b)
+    assert comp.unit_filled == []
+    assert _rules(comp).count("BOQ.UNIT_CHANGED") == 1

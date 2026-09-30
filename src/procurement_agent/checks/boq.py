@@ -1554,6 +1554,9 @@ class BidComparison:
     unpriced_positions: list[BoqLine] = field(default_factory=list)
     #: template positions with a blank quantity ("bidder fills in") that the bid left blank
     unfilled_positions: list[BoqLine] = field(default_factory=list)
+    #: bid lines stating a unit on a template position whose unit is blank - listed apart, never
+    #: a unit change (GOLD_SPEC 5)
+    unit_filled: list[BoqLine] = field(default_factory=list)
     #: bid lines priced on the template's placeholder for "any other items": the bidder's own
     #: additions, listed and left out of the evaluation like an added line
     priced_optional: list[BoqLine] = field(default_factory=list)
@@ -2117,6 +2120,10 @@ def _compare_sheet(out: BidComparison, t_sheet: BoqSheet, b_sheet: BoqSheet) -> 
                     actual="",
                 )
             )
+        elif b_unit and not t_unit and t_line.kind == "position":
+            # a unit written where the template left none: "m3" on a wall is worth a look, but
+            # the bid has changed nothing the template states
+            out.unit_filled.append(b_line)
         for key, text in b_line.non_numeric:
             out.non_numeric.append((b_line, key, text))
         typed_over = tuple(k for k in b_line.hardcoded if k in t_line.formulas)
@@ -2415,6 +2422,21 @@ def _list_findings(out: BidComparison) -> None:
                 f"({_money(b.amount or 0.0)}) - its own addition, left out of the evaluation "
                 "like an added position",
                 actual=_money(b.amount or 0.0),
+            )
+        )
+    filled_units: dict[str, list[BoqLine]] = {}
+    for b in out.unit_filled:
+        filled_units.setdefault(b.sheet, []).append(b)
+    for sheet, lines in filled_units.items():
+        shown = ", ".join(f"{b.item_no or f'row {b.row}'} ({b.unit})" for b in lines[:15])
+        shown += f" (+{len(lines) - 15})" if len(lines) > 15 else ""
+        out.findings.append(
+            _finding(
+                "BOQ.UNIT_FILLED",
+                "info",
+                f"{sheet}: ერთეული მითითებულია იქ, სადაც შაბლონში ცარიელია — {shown}",
+                f"{sheet}: unit written where the template leaves none - {shown}",
+                actual=shown,
             )
         )
     unpriced_sheets = set(out.unpriced_sheets)

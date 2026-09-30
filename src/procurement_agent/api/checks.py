@@ -618,6 +618,9 @@ class BoqBidder(BaseModel):
     unpriced_positions: list[BoqLineRef] = Field(default_factory=list)
     #: template positions with a blank quantity ("bidder fills in") the bid left blank
     unfilled_positions: list[BoqLineRef] = Field(default_factory=list)
+    #: template positions whose unit is blank where the bid wrote one (``unit`` is the bid's);
+    #: listed apart, never a unit change
+    unit_filled: list[BoqLineRef] = Field(default_factory=list)
     #: rows priced in the bid where the template has no position; not evaluated
     priced_headings: list[BoqLineRef] = Field(default_factory=list)
     description_changed: list[BoqLineRef] = Field(default_factory=list)
@@ -809,6 +812,7 @@ def run_boq(
                 unfilled_positions=[
                     _ref_from_line(t, status.get((t.sheet, t.row))) for t in comp.unfilled_positions
                 ],
+                unit_filled=[_ref_from_line(b, "unit_filled") for b in comp.unit_filled],
                 priced_headings=[_ref_from_line(b, "priced_heading") for b in comp.priced_headings],
                 description_changed=[
                     _ref_from_line(b).model_copy(update={"template_description": t.description})
