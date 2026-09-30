@@ -16,9 +16,12 @@ import pytest
 from openpyxl import Workbook
 
 from procurement_agent.checks.boq import (
+    BoqLine,
     BoqWorkbook,
     _label_key,
+    _num,
     _plays,
+    _two_readings,
     compare_bid,
     grand_total,
     norm_unit,
@@ -521,3 +524,117 @@ def test_the_client_style_header_block_keeps_its_columns(tmp_path: Path) -> None
         "rate_total": 15,
         "amount": 16,
     }
+
+
+# --- numbers typed as text with three decimals ------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "readings"),
+    [("1.250", (1.25, 1250.0)), ("5,000", (5.0, 5000.0)), ("-2.500", (-2.5, -2500.0))],
+)
+def test_text_with_three_digits_after_one_separator_reads_two_ways(
+    text: str, readings: tuple[float, float]
+) -> None:
+    assert _two_readings(text) == readings
+    # and is never guessed on its own: read as thousands, 1.25 t became 1,250 t
+    assert _num(text) is None
+
+
+@pytest.mark.parametrize(
+    ("text", "value"),
+    [
+        ("1,250.50", 1250.5),
+        ("1.250,50", 1250.5),
+        ("12.5", 12.5),
+        ("0.125", 0.125),
+        ("1.250.000", 1250000.0),
+        ("12.3450", 12.345),
+        ("1 250", 1250.0),
+    ],
+)
+def test_text_that_reads_one_way_keeps_its_reading(text: str, value: float) -> None:
+    assert _two_readings(text) is None
+    assert _num(text) == pytest.approx(value)
+
+
+_HEAD = ("No", "Description", "Unit", "Quantity", "Rate", "Amount")
+
+
+def _text_qty_sheet(qty: object, rate: float | None, *, amount: float | None = None) -> Cells:
+    """Position 1.1 with the given quantity and rate, its amount a formula cached as ``amount``
+    (0 when not given), and position 1.2 at 10 x 100 (priced when ``rate`` is)."""
+    cells: Cells = {(1, c): h for c, h in enumerate(_HEAD, 1)}
+    cells.update({(2, 1): "1.1", (2, 2): "Reinforcement bars", (2, 3): "t", (2, 4): qty})
+    if rate is not None:
+        cells[(2, 5)] = rate
+    cells[(2, 6)] = Fx("=D2*E2", amount if amount is not None else 0.0)
+    cells.update({(3, 1): "1.2", (3, 2): "Concrete", (3, 3): "m3", (3, 4): 10.0})
+    if rate is not None:
+        cells[(3, 5)] = 100.0
+    cells[(3, 6)] = Fx("=D3*E3", 1000.0 if rate is not None else 0.0)
+    return cells
+
+
+def _one_line(tmp_path: Path, name: str, cells: Cells) -> BoqLine:
+    book = read_boq(_save(tmp_path / f"{name}.xlsx", {"1. WORKS": cells}), name=name)
+    return book.sheets["1. WORKS"].lines[0]
+
+
+def test_a_text_quantity_is_read_the_way_its_row_computes_it(tmp_path: Path) -> None:
+    line = _one_line(tmp_path, "a", _text_qty_sheet("1.250", 1000.0, amount=1250.0))
+    assert line.quantity == 1.25 and line.non_numeric == ()
+    # the same text beside an amount computed with 1,250 is a thousand and a quarter
+    line = _one_line(tmp_path, "b", _text_qty_sheet("1.250", 2.0, amount=2500.0))
+    assert line.quantity == 1250.0 and line.non_numeric == ()
+
+
+def test_a_text_rate_is_read_the_way_its_row_computes_it(tmp_path: Path) -> None:
+    cells = _text_qty_sheet(2.0, None, amount=2900.0)
+    cells[(2, 5)] = "1.450"
+    line = _one_line(tmp_path, "r", cells)
+    assert line.rate_total == 1450.0 and line.non_numeric == ()
+
+
+@pytest.mark.parametrize(
+    ("rate", "amount"),
+    [
+        (None, None),  # an unpriced row: 0 = 1.25 x nothing says nothing
+        (1000.0, 777.0),  # an amount neither reading computes
+    ],
+)
+def test_a_text_quantity_its_row_cannot_settle_stays_text(
+    tmp_path: Path, rate: float | None, amount: float | None
+) -> None:
+    line = _one_line(tmp_path, "t", _text_qty_sheet("1.250", rate, amount=amount))
+    assert line.quantity is None
+    assert line.non_numeric == (("qty", "1.250"),)
+
+
+def test_a_bid_quantity_typed_as_text_is_no_quantity_change(tmp_path: Path) -> None:
+    """The template says 5; the bid's cell says "5.000" and its amount is 5 x 140."""
+    t_cells = _text_qty_sheet(5.0, None)
+    b_cells = _text_qty_sheet("5.000", 140.0, amount=700.0)
+    t = read_boq(_save(tmp_path / "t.xlsx", {"1. WORKS": t_cells}), name="T")
+    b = read_boq(_save(tmp_path / "b.xlsx", {"1. WORKS": b_cells}), name="B")
+    comp = compare_bid(t, b)
+    assert comp.quantity_changed == [] and comp.findings == []
+    assert comp.evaluated_cost == pytest.approx(5 * 140.0 + 1000.0)
+
+
+def test_a_template_quantity_its_row_cannot_settle_is_evaluated_for_no_bidder(
+    tmp_path: Path,
+) -> None:
+    """An unpriced template's "1.250": never 1,250 t, and never the bidder's own amount as if
+    the template had left the quantity blank."""
+    t = read_boq(_save(tmp_path / "t.xlsx", {"1. WORKS": _text_qty_sheet("1.250", None)}))
+    b_cells = _text_qty_sheet("1.250", 1000.0, amount=1250.0)
+    b = read_boq(_save(tmp_path / "b.xlsx", {"1. WORKS": b_cells}), name="B")
+    notes = [f for f in template_findings(t) if f.rule_id == "BOQ.NON_NUMERIC"]
+    assert len(notes) == 1 and "1.25 or 1,250" in notes[0].message_en
+    comp = compare_bid(t, b)
+    pos = next(p for p in comp.positions if p.item_no == "1.1")
+    assert (pos.status, pos.cost) == ("non_numeric", 0.0)
+    assert comp.filled_blank == [] and comp.unpriced_positions == []
+    assert comp.evaluated_cost == pytest.approx(1000.0)
+    assert "BOQ.ARITHMETIC" not in _rules(comp)

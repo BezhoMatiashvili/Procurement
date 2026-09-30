@@ -247,12 +247,100 @@ def _norm_label(v: object) -> str:
     return _LABEL_CURRENCY.sub("", label).strip()
 
 
+#: Text a number reads from two ways: one separator and exactly three digits after it ("1.250",
+#: "5,000") is a thousands group, or three decimals as an estimating program exports a quantity.
+#: A spreadsheet computes with it by its own locale, so the text alone cannot tell which.
+_TWO_WAY_NUMBER = re.compile(r"[+-]?[1-9]\d{0,2}[.,]\d{3}")
+
+
+def _two_readings(v: object) -> tuple[float, float] | None:
+    """The two numbers text such as "1.250" reads as - (1.25, 1250.0) - else None."""
+    if not isinstance(v, str):
+        return None
+    text = normalize_spaces(v).strip()
+    if not _TWO_WAY_NUMBER.fullmatch(text):
+        return None
+    decimal = text.replace(",", ".")
+    return float(decimal), float(decimal.replace(".", ""))
+
+
 def _num(v: object) -> float | None:
     if v is None or v == "" or isinstance(v, bool):  # TRUE in a quantity cell is not 1
         return None
     if isinstance(v, int | float):
         return float(v)
+    if _two_readings(v) is not None:
+        # "1.250" is 1.25 or 1,250: never guessed. Only the row it stands in can tell
+        # (``_resolve_two_way``); read as thousands, 1.25 t of rebar priced as 1,250 t.
+        return None
     return parse_number(str(v))
+
+
+#: (product, factor, factor): the number cells of a line that compute one another
+_ROW_PRODUCTS = (
+    ("amount", "qty", "rate_total"),
+    ("sum_materials", "qty", "rate_materials"),
+    ("sum_labor", "qty", "rate_labor"),
+    ("sum_delivery", "qty", "rate_delivery"),
+)
+_COMPONENT_RATES = ("rate_materials", "rate_labor", "rate_delivery")
+_COMPONENT_SUMS = ("sum_materials", "sum_labor", "sum_delivery")
+
+
+def _row_checks(v: dict[str, float | None]) -> list[tuple[set[str], float, float]]:
+    """What a line's number cells compute from one another, as (the cells used, the number
+    stated, the number computed): amount = quantity x rate, a component's sum = quantity x its
+    rate, the rate = the component rates added, the amount = the component sums added."""
+    out: list[tuple[set[str], float, float]] = []
+    for prod, a, b in _ROW_PRODUCTS:
+        p, x, y = v.get(prod), v.get(a), v.get(b)
+        if p is not None and x is not None and y is not None:
+            out.append(({prod, a, b}, p, x * y))
+    parts = [k for k in _COMPONENT_RATES if v.get(k) is not None]
+    if parts:
+        rate = sum(v[k] or 0.0 for k in parts)
+        stated, qty, amount = v.get("rate_total"), v.get("qty"), v.get("amount")
+        if stated is not None:
+            out.append(({"rate_total", *parts}, stated, rate))
+        elif qty is not None and amount is not None:
+            out.append(({"amount", "qty", *parts}, amount, qty * rate))
+    sums = [k for k in _COMPONENT_SUMS if v.get(k) is not None]
+    if sums and v.get("amount") is not None:
+        out.append(({"amount", *sums}, v["amount"] or 0.0, sum(v[k] or 0.0 for k in sums)))
+    return out
+
+
+def _row_computes(v: dict[str, float | None], key: str) -> bool:
+    """Whether some computation of the row that uses ``key`` holds, on numbers that are not all
+    nought: an unpriced row (0 = 1.25 x nothing) tells nothing."""
+    for keys, stated, computed in _row_checks(v):
+        if key not in keys or (abs(stated) < 1e-9 and abs(computed) < 1e-9):
+            continue
+        if abs(stated - computed) <= max(_MONEY_TOL, 0.005 * max(abs(stated), abs(computed))):
+            return True
+    return False
+
+
+def _resolve_two_way(v: dict[str, float | None], raw: dict[str, object]) -> set[str]:
+    """Read each two-way text cell of a line ("1.250") the way the row itself computes it.
+
+    The reading the row's cached computations agree with is taken - the sheet's own quantity x
+    rate = amount says whether its quantity was 1.25 or 1,250. When neither or both agree (an
+    unpriced row, nothing beside it to check), the cell stays text: never read as a number the
+    workbook does not bear out. ``v`` is updated in place; returns the keys read."""
+    pending = {k: r for k, text in raw.items() if (r := _two_readings(text)) is not None}
+    done: set[str] = set()
+    progress = True
+    while pending and progress:
+        progress = False
+        for key, readings in list(pending.items()):
+            fits = [x for x in readings if _row_computes({**v, key: x}, key)]
+            if len(fits) == 1:
+                v[key] = fits[0]
+                done.add(key)
+                del pending[key]
+                progress = True
+    return done
 
 
 def _is_text_in_number_cell(v: object) -> bool:
@@ -427,11 +515,6 @@ class BoqWorkbook:
     def no_cached_values(self) -> bool:
         """Saved without calculated values: every formula reads as None, i.e. as nothing."""
         return self.formula_cells > 0 and self.uncached_cells > self.formula_cells * _UNCACHED_SHARE
-
-
-def _cell_value(ws: object, cols: dict[str, int], row: int, key: str) -> float | None:
-    column = cols.get(key)
-    return _num(ws.cell(row, column).value) if column else None  # type: ignore[attr-defined]
 
 
 #: A unit column headed the long or the short way: "Unit of measurement", "U.o.M.", "Measure",
@@ -1021,30 +1104,28 @@ def _read_sheet(
             continue
         if not _has_letter(description) and (
             # a bare number is a column number, never a description
-            _num(description) is not None or not _numbered_line(ws, wf, r, cols, item_cols)
+            parse_number(description) is not None or not _numbered_line(ws, wf, r, cols, item_cols)
         ):
             continue
 
-        def val(
-            key: str, _row: int = r, _ws: object = ws, _cols: dict[str, int] = cols
-        ) -> float | None:
-            return _cell_value(_ws, _cols, _row, key)
+        raws = {key: ws.cell(r, c).value for key in _NUMERIC_KEYS if (c := cols.get(key))}  # type: ignore[attr-defined]
+        values: dict[str, float | None] = {key: _num(raw) for key, raw in raws.items()}
+        read_two_way = _resolve_two_way(values, raws)
+
+        def val(key: str, _values: dict[str, float | None] = values) -> float | None:
+            return _values.get(key)
 
         hardcoded: list[str] = []
         formula_keys: list[str] = []
         non_numeric: list[tuple[str, str]] = []
-        for key in _NUMERIC_KEYS:
-            c = cols.get(key)
-            if not c:
-                continue
-            raw = ws.cell(r, c).value  # type: ignore[attr-defined]
-            is_formula = wf.cell(r, c).data_type == "f"  # type: ignore[attr-defined]
+        for key, raw in raws.items():
+            is_formula = wf.cell(r, cols[key]).data_type == "f"  # type: ignore[attr-defined]
             if is_formula:
                 book.formula_cells += 1
                 formula_keys.append(key)
                 if raw is None:
                     book.uncached_cells += 1
-            if _is_text_in_number_cell(raw):
+            if key not in read_two_way and _is_text_in_number_cell(raw):
                 non_numeric.append((key, normalize_spaces(str(raw)).strip()[:40]))
             # the cell's type, not its text: a *string* cell reading "=5" is typed-in text
             if key in _TOTAL_KEYS and val(key) not in (None, 0) and not is_formula:
@@ -1576,7 +1657,22 @@ def template_findings(template: BoqWorkbook) -> list[Finding]:
     for sheet in template.sheets.values():
         for line in sheet.leaf_lines:
             for key, text in line.non_numeric:
-                if key == "qty":
+                if key == "qty" and (two := _two_readings(text)):
+                    ka, en = _where(line)
+                    low, high = _qty(two[0]), _qty(two[1])
+                    out.append(
+                        _finding(
+                            "BOQ.NON_NUMERIC",
+                            "warning",
+                            f"შაბლონი, {ka}: მოცულობა ტექსტია „{text}“ — {low} თუ {high}, "
+                            "სტრიქონიდან ვერ დგინდება; პოზიცია არცერთ კომპანიასთან არ ფასდება",
+                            f"template, {en}: the quantity is the text '{text}' - {low} or "
+                            f"{high}, and its row does not tell which; the position is not "
+                            "evaluated for any bidder",
+                            actual=text,
+                        )
+                    )
+                elif key == "qty":
                     ka, en = _where(line)
                     out.append(
                         _finding(
@@ -1780,6 +1876,11 @@ def _rate_text_blocks(line: BoqLine) -> bool:
     return not line.rate_total and bool(keys & set(_RATE_KEYS))
 
 
+def _qty_reads_two_ways(line: BoqLine) -> bool:
+    """Whether the line's quantity is text such as "1.250" that its row could not settle."""
+    return any(key == "qty" and _two_readings(text) for key, text in line.non_numeric)
+
+
 def _unit_rate(line: BoqLine, columns: dict[str, int]) -> float | None:
     """The bidder's unit rate: the rate column, else the sum of the component rates.
 
@@ -1945,6 +2046,16 @@ def _compare_sheet(out: BidComparison, t_sheet: BoqSheet, b_sheet: BoqSheet) -> 
                     rate,
                     0.0,
                     "optional_priced" if (b.amount or rate) else "optional",
+                )
+            )
+            continue
+        if _qty_reads_two_ways(t):
+            # the template's own quantity reads 1.25 or 1,250 and its row cannot tell which: not
+            # evaluated for any bidder - never at a quantity a thousand times off, and never at
+            # the bidder's own amount as if the template had left it blank
+            out.positions.append(
+                PositionEval(
+                    t.sheet, t.row, t.item_no, t.description, None, b.row, rate, 0.0, "non_numeric"
                 )
             )
             continue
