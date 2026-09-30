@@ -135,6 +135,11 @@ AmountRole = Literal[
 
 #: An amount restated in another currency beside the real one: "100 ლარი (ეკვივალენტი 37 აშშ
 #: დოლარი)". It is the same fee, not a second one, and not a price to compare.
+#: VAT's abbreviation, however it is dotted: "დღგ", "დ.ღ.გ.", "დ.ღ.გ". Every pattern that reads
+#: VAT uses this one token, so a spelling one of them learns the others know too. A case ending
+#: follows it with or without a hyphen ("დღგ-ს", "დ.ღ.გ.-ს", "დღგ-ისა").
+_KA_VAT = r"დ\.?ღ\.?გ\.?"
+
 _EQUIVALENT = re.compile(r"ეკვივალენტ|ექვივალენტ|equivalent|equiv\.", re.IGNORECASE)
 
 #: What the words around an amount call it. At the same distance the longer keyword wins, so
@@ -173,7 +178,7 @@ _ROLE_KEYWORDS: dict[AmountRole, tuple[str, ...]] = {
 #: გადასახადებს მათ შორის დღგ-ს", and that 100 is the price. Matched against the end of the
 #: text before the figure.
 _TAX_BEFORE = re.compile(
-    r"(?<![^\W\d_])(?:დღგ|vat)(?:-?ის|-?ს)?"
+    rf"(?<![^\W\d_])(?:{_KA_VAT}|vat)(?:-?ის|-?ს)?"
     r"(?:\s+(?:თანხა|ოდენობა|amount))?"
     r"(?:\s*\(?\s*\d{1,2}(?:[.,]\d{1,2})?\s*%\s*\)?)?"
     r"(?P<verb>\s+(?:შეადგენს|არის|is|amounts\s+to))?"
@@ -206,7 +211,7 @@ _QUALIFIER_REACH = 20
 #: "+" between the figure and the tax adds the tax to a price, so neither is allowed there.
 #: Matched at the end of the figure.
 _TAX_AFTER = re.compile(
-    r"\s*\(?\s*(?:დღგ|vat)(?:-?ის|-?ს)?(?![\w-])"
+    rf"\s*\(?\s*(?:{_KA_VAT}|vat)(?:-?ის|-?ს)?(?![\w-])"
     r"(?:\s*\(\s*\d{1,2}(?:[.,]\d{1,2})?\s*%\s*\))?+"
     r"(?=\s*(?:[.,;)]|$|(?:სახით|ოდენობით)(?![ა-ჰ])))",
     re.IGNORECASE,
@@ -307,8 +312,8 @@ TaxKind = Literal["net", "inclusion", "exclusion", "mention"]
 #: income tax, pension (საპენსიო შენატანი). The tail is possessive: a shorter word must never
 #: let a lookahead after it pass ("გადასახადებ|ის გარეშე" is still "without taxes").
 _KA_TAX = (
-    r"(?<![ა-ჰ])(?:დამატებული\s+ღირებულების\s+გადასახად|გადასახად|საგადასახად|დღგ"
-    r"|საშემოსავლო|საპენსიო)[ა-ჰ-]*+"
+    r"(?<![ა-ჰ])(?:დამატებული\s+ღირებულების\s+გადასახად|გადასახად|საგადასახად|"
+    rf"{_KA_VAT}|საშემოსავლო|საპენსიო)[ა-ჰ-]*+"
 )
 _KA_WORD = r"[ა-ჰ][ა-ჰ-]*+"
 #: "including" and "taking into account" - the instrumental only: "კანონმდებლობით
@@ -344,6 +349,10 @@ _NET = re.compile(
 #: The words a price is called by when a tax is said to be in it: "თანხაში შედის დღგ", "ფასში",
 #: "ღირებულებაში". Only these: "ძალაში შედის" (enters into force) includes nothing.
 _KA_MONEY = r"(?:თანხ|ფას|ღირებულებ|საფასურ|ანაზღაურებ)[ა-ჰ]*"
+#: What "ჩათვლით" before the tax may follow: no word ("…, ჩათვლით დღგ"), or the amount's own
+#: currency word ("100 ლარს ჩათვლით დღგ-ს"). After any other word it closes a date ("30 აპრილის
+#: ჩათვლით დღგ-ს გადამხდელის …"). One lookbehind per width: Python's must each be fixed.
+_AFTER_NO_WORD_OR_MONEY = r"(?:(?<![ა-ჰ] )|(?<=ლარ[ა-ჰ] )|(?<=ლარ[ა-ჰ]{2} )|(?<=ევრო )|(?<=ევროს ))"
 #: The amount includes the tax: "გადასახადების ჩათვლით", "დღგ-ს გათვალისწინებით", "მოიცავს
 #: გადასახადებს", "თანხა შეიცავს დღგ-ს", "მათ შორის დღგ-ს", "ითვალისწინებს გადასახადებს",
 #: "თანხაში შედის დღგ", "დღგ შედის ღირებულებაში", ", ჩათვლით დღგ", "including all taxes", "VAT
@@ -360,13 +369,13 @@ _INCLUSION = re.compile(
             rf"(?:\s+{_KA_WORD}){{0,4}}?\s+{_KA_TAX}(?!\s+{_KA_EXCLUDING})",
             # "დღგ შედის ღირებულებაში", and the adjective: "დღგ-იანი ღირებულება"
             rf"{_KA_TAX}\s+შედის",
-            r"(?<![ა-ჰ])(?:დღგ|გადასახად[ა-ჰ]*?)-?იან(?:ი|მა|ს|ის|ით|ად)?(?![ა-ჰ])",
+            rf"(?<![ა-ჰ])(?:{_KA_VAT}|გადასახად[ა-ჰ]*?)-?იან(?:ი|მა|ს|ის|ით|ად)?(?![ა-ჰ])",
             rf"(?<!not )(?<![a-z])(?:including|includes?|inclusive\s+of|incl\.?)\s+{_EN_TAX_RUN}",
             rf"(?<![a-z]){_EN_TAX_RUN}\s+(?:is\s+|are\s+)?(?:included|inclusive)(?![a-z])",
             # the act check's wordings: the price includes the tax, in either order
             rf"(?<![ა-ჰ])(?<!არ ){_KA_MONEY}\s+შედის\s+{_KA_TAX}",
             rf"{_KA_TAX}\s+შედის\s+{_KA_MONEY}",
-            rf"(?<![ა-ჰ] )(?<![ა-ჰ]){_KA_INCLUDING}\s+{_KA_TAX}",
+            rf"{_AFTER_NO_WORD_OR_MONEY}(?<![ა-ჰ]){_KA_INCLUDING}\s+{_KA_TAX}",
             r"(?<![a-z])gross\s+(?:amount|fee|remuneration|price|sum|value)(?![a-z])",
         )
     ),
@@ -382,7 +391,7 @@ _EXCLUSION = re.compile(
             rf"არ\s+(?:მოიცავს|შეიცავს|ითვალისწინებს|შედის)(?:\s+{_KA_WORD}){{0,4}}?\s+{_KA_TAX}",
             rf"{_KA_TAX}\s+არ\s+შედის",
             # "+ დღგ", and with its rate: "+ 18% დღგ"
-            r"\+\s*(?:\d{1,2}(?:[.,]\d{1,2})?\s*%\s*)?(?:დღგ|vat)(?![a-z])",
+            rf"\+\s*(?:\d{{1,2}}(?:[.,]\d{{1,2}})?\s*%\s*)?(?:{_KA_VAT}|vat)(?![a-z])",
             rf"(?<![a-z])(?:excluding|excludes?|exclusive\s+of|excl\.?|without|net\s+of"
             rf"|not\s+including)\s+{_EN_TAX_RUN}",
             rf"(?<![a-z]){_EN_TAX_RUN}\s+(?:is\s+|are\s+)?(?:not\s+included|excluded|exclusive)"
@@ -406,7 +415,7 @@ _TAX_ID_LABEL = re.compile(
         (
             # not the Tax Code (საგადასახადო კოდექსი), which is a law, not a number
             r"საგადასახადო\s+(?:ნომ|კოდ(?!ექს)|იდენტიფიკ)[ა-ჰ]*",
-            r"(?:გადასახადის|დღგ-?ს|დღგ-?ის)\s+გადამხდელის(?:\s+[ა-ჰ]+)?\s+(?:ნომ|კოდ)[ა-ჰ]*",
+            rf"(?:გადასახადის|{_KA_VAT}-?ს|{_KA_VAT}-?ის)\s+გადამხდელის(?:\s+[ა-ჰ]+)?\s+(?:ნომ|კოდ)[ა-ჰ]*",
             r"(?<![a-z])(?:vat|tax)[\s-]*(?:reg(?:istration)?\.?[\s-]*)?"
             r"(?:no\b\.?|nr\b\.?|number|id\b|code\b|identification\s+(?:number|no\b\.?))",
             r"(?<![a-z])tin(?![a-z])",
@@ -418,7 +427,7 @@ _TAX_ID_LABEL = re.compile(
 _NAMES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("income", re.compile(r"საშემოსავლო|income", re.IGNORECASE)),
     ("pension", re.compile(r"საპენსიო|pension", re.IGNORECASE)),
-    ("vat", re.compile(r"დღგ|დამატებული\s+ღირებულების|vat|value\s+added", re.IGNORECASE)),
+    ("vat", re.compile(rf"{_KA_VAT}|დამატებული\s+ღირებულების|vat|value\s+added", re.IGNORECASE)),
 )
 
 
