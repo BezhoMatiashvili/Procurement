@@ -18,8 +18,11 @@ _SPACE_RE = re.compile(f"[{_SPACES}]")
 _WS = re.compile(r"\s+")
 
 # Georgian documents use „…“ and ”…”; OCR and Word autocorrect add several more.
-QUOTE_CHARS = "„“”“”„«»‹›\"'`‘’"
+QUOTE_CHARS = "„“”“”„«»‹›\"'`‘’" + "‚‛"  # and the low and reversed single quotes ‚ ‛
 _DASHES = re.compile("[‐‑‒–—―−]")
+#: Two commas typed for the low opening quote: ",,შემსრულებელი”". Only directly before a letter
+#: or a digit - two commas before a space are a typo, not a quote.
+_COMMA_QUOTE = re.compile(r",,(?=[^\W_])")
 
 # Cyrillic letters that are visually identical to Latin ones. Tesseract emits these inside
 # otherwise-Latin tokens such as IBANs and SWIFT codes, where they silently break validation.
@@ -74,9 +77,31 @@ def fold_look_alikes(s: str) -> str:
     return s.translate(_CYRILLIC_TO_LATIN)
 
 
+def fold_comma_quotes(s: str) -> str:
+    """Two commas typed for the opening quote (",,შემსრულებელი”") as the quote they stand
+    for, so every reader - the anchors, the name and project rules - sees one form of quote."""
+    return _COMMA_QUOTE.sub("„", s)
+
+
+def fold_comma_quotes_mapped(s: str) -> tuple[str, list[int]]:
+    """``fold_comma_quotes`` and, for each offset into its result and for its end, the offset
+    into ``s``: the fold is one character for two, and a finding computed over the folded text
+    must still quote the two commas the document has."""
+    parts: list[str] = []
+    back: list[int] = []
+    at = 0
+    for m in _COMMA_QUOTE.finditer(s):
+        parts += [s[at : m.start()], "„"]
+        back += [*range(at, m.start()), m.start()]
+        at = m.end()
+    parts.append(s[at:])
+    back += [*range(at, len(s)), len(s)]
+    return "".join(parts), back
+
+
 def normalize_confusables(s: str) -> str:
     """NFC + fold homoglyphs and typographic punctuation. Safe to apply to any document text."""
-    return fold_look_alikes(normalize_layout(s))
+    return fold_look_alikes(fold_comma_quotes(normalize_layout(s)))
 
 
 def confusable_chars(s: str) -> str:
@@ -130,8 +155,38 @@ def name_stem(name: str) -> str:
 
 
 def names_match(a: str, b: str) -> bool:
-    """True when two names differ only by inflection."""
-    return bool(a) and bool(b) and name_stem(a) == name_stem(b)
+    """True when two names differ only by inflection, or when one writes the first name as its
+    initial: "ნ. ბერიძე" is "ნიკა ბერიძის" - the initial must be the first letter of a full
+    first name, and the rest must agree."""
+    if not a or not b:
+        return False
+    sa, sb = name_stem(a), name_stem(b)
+    if sa == sb:
+        return True
+    wa, wb = sa.split(), sb.split()
+    return _initial_of(wa, wb) or _initial_of(wb, wa)
+
+
+_INITIAL_FIRST = re.compile(r"[^\W\d_]\.\s*[^\W\d_]")
+
+
+def keep_initial(written: str, name: str) -> str:
+    """``name`` in the style ``written`` has: its first name as an initial when ``written`` gives
+    one ("გ. ჩხეტიძე" corrected to "გ. ჩხეტია", not to the full "გურამ ჩხეტია")."""
+    parts = name.split(maxsplit=1)
+    if len(parts) < 2 or not _INITIAL_FIRST.match(written):
+        return name
+    return f"{parts[0][0]}. {parts[1]}"
+
+
+def _initial_of(initialled: list[str], full: list[str]) -> bool:
+    return (
+        len(initialled) == len(full) >= 2
+        and len(initialled[0]) == 1
+        and len(full[0]) > 1
+        and full[0].startswith(initialled[0])
+        and initialled[1:] == full[1:]
+    )
 
 
 # --- content words ------------------------------------------------------------------------------
@@ -210,6 +265,9 @@ _STOPWORDS = frozenset(
         "that",
     }
 )
+#: The same words, for readers that must tell a name from the words of a sentence: no person is
+#: called "ან მის" ("or his").
+FUNCTION_WORDS = _STOPWORDS
 #: What a Georgian word carries after its stem, cut from the end one at a time: postpositions
 #: ("-ში", "-ზე", "-თვის", "-დან"), the case endings - with the long forms a list takes before
 #: "და", "დიზაინისა და …" - the plural "-ებ-" and the nominative "-ი". Cut this far, two forms
@@ -444,6 +502,36 @@ def parse_georgian_number_words(text: str) -> int | None:
 # --- IBAN ---------------------------------------------------------------------------------------
 
 _IBAN_CLEAN = re.compile(r"[^A-Z0-9]")
+
+#: ISO 13616 registry: an IBAN's length is fixed by its country. Only the countries these
+#: documents meet, or their neighbours and banks' correspondents, and only lengths that are
+#: certain; for any other country the length is unknown and a reader falls back on the checksum.
+_IBAN_LENGTHS: dict[str, int] = {
+    "GE": 22,
+    "AT": 20,
+    "AZ": 28,
+    "BE": 16,
+    "CH": 21,
+    "DE": 22,
+    "ES": 24,
+    "FR": 27,
+    "GB": 22,
+    "IT": 27,
+    "NL": 18,
+    "PL": 28,
+    "TR": 26,
+    "UA": 29,
+}
+
+
+def iban_length(country: str) -> int | None:
+    """The fixed length of ``country``'s IBANs (GE: 22), or None when this table lacks it.
+
+    Where a grouped IBAN or one broken over a line ends is a question of length, not of the
+    checksum: the client's anonymised accounts fail the checksum, and so does a mistyped one -
+    which is exactly the account the acceptance check must still read and report.
+    """
+    return _IBAN_LENGTHS.get(country.upper())
 
 
 def iban_is_valid(iban: str) -> bool:

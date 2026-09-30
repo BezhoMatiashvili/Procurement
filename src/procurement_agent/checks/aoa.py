@@ -112,8 +112,10 @@ from procurement_agent.extraction.georgian import (
 from procurement_agent.extraction.georgian import words as georgian_words
 from procurement_agent.extraction.normalize import (
     amounts_equal,
+    fold_comma_quotes_mapped,
     fold_look_alikes,
     iban_is_valid,
+    keep_initial,
     name_stem,
     names_match,
     normalize_confusables,
@@ -332,6 +334,9 @@ class DocumentView:
     written: str = ""
     #: The text came from a scan (``build``): a letter in it may be a misreading.
     ocr: bool = False
+    #: For each offset into ``text``, and for its end, the offset into ``written``, where the
+    #: fold is not one character for one (two commas typed for a quote); None when it is.
+    _to_written: list[int] | None = field(default=None, init=False, repr=False, compare=False)
     _hits: list[AnchorHit] | None = field(default=None, init=False, repr=False, compare=False)
     _sentences: list[tuple[int, int]] | None = field(
         default=None, init=False, repr=False, compare=False
@@ -352,13 +357,20 @@ class DocumentView:
             line for line in (fix(normalize_confusables(x)) for x in text.split("\n")) if line
         )
         written = normalize_layout(text)
-        text = fold_look_alikes(fix(written))
+        folded, to_written = fold_comma_quotes_mapped(written)
+        text = fold_look_alikes(fix(folded))
         # one code under two names stays two parties here: that is AOA.ID_CODE_PARTY's evidence
         parties = find_parties(text, split_conflicts=True)
-        return cls(doc_id=doc_id, text=text, parties=parties, lines=lines, written=written, ocr=ocr)
+        view = cls(doc_id=doc_id, text=text, parties=parties, lines=lines, written=written, ocr=ocr)
+        if len(folded) != len(written):
+            view._to_written = to_written
+        return view
 
     def as_written(self, start: int, end: int) -> str:
         """The text at a span of ``text``, in the letters the document writes."""
+        back = self._to_written
+        if back is not None and len(back) == len(self.text) + 1 and 0 <= start <= end < len(back):
+            return self.written[back[start] : back[end]]
         source = self.written if len(self.written) == len(self.text) else self.text
         return source[start:end]
 
@@ -625,6 +637,12 @@ class AoaChecker:
     def _find_span(self, needle: str) -> tuple[int, int] | None:
         i = self.aoa.text.find(needle)
         return (i, i + len(needle)) if i >= 0 else None
+
+    def _account_span(self, iban: str) -> tuple[int, int] | None:
+        """Where the act writes an account: an IBAN printed in groups or broken over a line is
+        read compact, and only the reader's span finds the characters the document has."""
+        hit = next((h for h in self.aoa.bank_hits("IBAN") if h.value == iban), None)
+        return (hit.start, hit.end) if hit is not None else self._find_span(iban)
 
     def _act_date(self) -> tuple[date, RuleHit] | None:
         """The act's own date, and where it is written. Every rule that needs it reads it here,
@@ -1209,7 +1227,7 @@ class AoaChecker:
                     f"IBAN-ის საკონტროლო ციფრები არ იკრიბება: {iban}",
                     f"IBAN checksum does not validate: {iban}",
                     actual=iban,
-                    span=self._find_span(iban),
+                    span=self._account_span(iban),
                     confidence=0.9,
                 )
 
@@ -1570,7 +1588,7 @@ class AoaChecker:
                 forms: list[tuple[str, tuple[int, int] | None]] = [*self._written_forms(d)]
                 for form, span in forms or [(d, self._find_span(d))]:
                     # the correction in the act's own grammar, form by form
-                    expected = in_case_of(form, guess[0]) if guess else None
+                    expected = keep_initial(form, in_case_of(form, guess[0])) if guess else None
                     self._add(
                         "AOA.DIRECTOR",
                         "error",
@@ -2025,7 +2043,11 @@ class AoaChecker:
                     f"{en} differs: {sorted(a)} vs contract {sorted(c)}{hint_en}",
                     expected=", ".join(sorted(c)),
                     actual=", ".join(extra),
-                    span=self._find_span(extra[0]),
+                    span=(
+                        self._account_span(extra[0])
+                        if unit == "IBAN"
+                        else self._find_span(extra[0])
+                    ),
                 )
             elif not a and unit == "IBAN":
                 self._add(
@@ -2077,7 +2099,7 @@ class AoaChecker:
                 f"the contractor's account is {payee_accounts}",
                 expected=", ".join(payee_accounts),
                 actual=", ".join(act_accounts),
-                span=self._find_span(act_accounts[0]),
+                span=self._account_span(act_accounts[0]),
             )
 
     def _bank_pairing(self) -> None:

@@ -191,6 +191,44 @@ genuinely different account once the act and the contract disagree.
 Bank codes are different: a BIC is 8 or 11 characters and the client's documents carry real
 ones, so a malformed code is an error. That rule is what surfaced `AAAGE22` in Mistake #3.
 
+### Where an IBAN ends is its country's length, not its checksum
+
+An IBAN printed in groups of four ("GE00 NB00 ...") used to be accepted only at a length whose
+checksum validated, so that the grouped form would not run on into the next capitalised word.
+That made a mistyped grouped account, and every one of the client's anonymised accounts written
+in groups, "no account" instead of "wrong account". The anchors now take groups, and the rest of
+an IBAN a line break cut off, up to the length ISO 13616 fixes for its country
+(`normalize.iban_length`, GE: 22) and stop there; a clause number after a short IBAN is never a
+piece of it. The checksum still decides only for a grouped IBAN of a country the table lacks.
+The act's findings quote the account as the act prints it, groups and all, so the Word comment
+lands on it.
+
+### Every quote style is a quote
+
+The readers knew `„“`, `“”`, `«»` and the straight quotes, but not the low single quote `‚`
+(which GOLD_SPEC section 1 already folds) nor two commas typed for `„` (",,შემსრულებელი“"), so an
+act in either style had no parties and a false project-name error. `normalize.QUOTE_CHARS` now
+holds `‚` and `‛`, and `normalize_confusables` turns two commas directly before a letter or digit
+into `„` - two commas before a space stay a typo - so every reader sees one form of quote. The
+act's text as written keeps the commas, and a finding's offsets are mapped back to it
+(`fold_comma_quotes_mapped`), so its quote is the document's own words and the Word comment finds
+them: the client's template writes `შემდგომში - ,,შემკვეთი”`, and a swapped role there is quoted
+with its commas.
+
+### Signatories: a name where its place says so
+
+The readers after "დირექტორი" and "მინდობილობით" took any two words, so body clauses ("... დირექტორი
+ან მის მიერ უფლებამოსილი პირი", "... დირექტორი პასუხს აგებს") invented signatories. A candidate is
+now kept when its place says it is a name - after a colon, before "სახით", alone on its line or
+cell - or when its last word ends as a Georgian surname does, or when the document names the
+person again; function words never make a name. A courtesy title before the name is skipped; an
+initial ("გ. ნიმუშაძე") is read and compared on the surname, and the correction keeps the
+initial. A signatory listed after a party's bank lines belongs to that party, and a bank that is
+itself a party (its side defined, written above it, or its name carrying an ID code elsewhere)
+keeps its signatory. A two-column signature table that Docling serialises row by row
+("<left cell>, <column header> = <right cell>") gives each column's director to that column's
+party.
+
 ### Scanned PDFs cannot carry Word comments
 
 The client asked for findings marked in the document itself. `report/docx_annotate.py` writes
