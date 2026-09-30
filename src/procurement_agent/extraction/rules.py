@@ -12,6 +12,7 @@ import re
 from collections.abc import Callable, Hashable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import date
+from typing import Literal
 
 from procurement_agent.extraction.georgian import month_typo
 from procurement_agent.extraction.normalize import (
@@ -490,11 +491,17 @@ _DATE_KA_YMD = re.compile(
     rf"(?<!\d)(?P<y>\d{{4}})[.,\s]*წ(?:ლის|\.)?\s*{_KA_DAY}\.?\s*(?P<m>{_KA_MONTH_FUZZY})",
     re.IGNORECASE,
 )
+#: A day and a month, then the year: "30 ივნისი, 2026 წ.", also with the end's "up to and
+#: including" between them ("30 ნოემბრის ჩათვლით, 2026 წ."), which is part of the date.
 _DATE_KA_DMY = re.compile(
-    rf"(?<!\d){_KA_DAY}\.?\s*(?P<m>{_KA_MONTH_FUZZY}),?\s*(?P<y>\d{{4}})(?!\d)"
-    rf"(?:\s*{_YEAR_WORD})?",
+    rf"(?<!\d){_KA_DAY}\.?\s*(?P<m>{_KA_MONTH_FUZZY})(?P<incl>\s+ჩათვლით)?,?\s*"
+    rf"(?P<y>\d{{4}})(?!\d)(?:\s*{_YEAR_WORD})?",
     re.IGNORECASE,
 )
+#: A year written after a date and a postposition, and the word that makes it a year:
+#: "30 ნოემბრამდე, 2026 წ." ends on 30 November 2026.
+_TRAILING_YEAR = re.compile(rf"[\s,]*\d{{4}}(?:\s*{_YEAR_WORD})?\s*$")
+_UNTIL_END = re.compile(r"(?:მდე|ჩათვლით)$")
 _DATE_EN_DMY = re.compile(
     rf"(?<!\d)(\d{{1,2}})(?:st|nd|rd|th)?\s+({_EN_MONTH_RE})\.?,?\s+(\d{{4}})", re.IGNORECASE
 )
@@ -687,6 +694,29 @@ def _month_en(s: str) -> int | None:
     return _EN_MONTHS.get(s.lower()[:3])
 
 
+def _opens_a_date(text: str, at: int) -> bool:
+    """Whether a Georgian date written year first starts at ``at``: "2027 წლის 1 იანვარი"."""
+    m = _DATE_KA_YMD.match(text, at)
+    return m is not None and _month_ka(m.group("m")) is not None
+
+
+DateRole = Literal["from", "until"]
+
+
+def date_role(raw: str) -> DateRole | None:
+    """Whether a date as written is a range's first day ("from") or its last ("until"), by the
+    postposition on its own words: "1 მარტიდან", "30 ნოემბრამდე", "30 ნოემბრის ჩათვლით". A year
+    written after it belongs to the date and says nothing of its role: "30 ნოემბრამდე, 2026 წ."
+    is an end, as "2026 წლის 30 ნოემბრამდე" is. None when the date's words carry no mark (it
+    may stand after them: "01.03.2026-დან")."""
+    head = _TRAILING_YEAR.sub("", raw.strip())
+    if _UNTIL_END.search(head):
+        return "until"
+    if head.endswith("დან"):
+        return "from"
+    return None
+
+
 def find_dates(text: str) -> list[RuleHit]:
     found: dict[tuple[int, int], tuple[date, str, str | None]] = {}
 
@@ -700,6 +730,8 @@ def find_dates(text: str) -> list[RuleHit]:
 
     for pattern in (_DATE_KA_YMD, _DATE_KA_DMY):
         for m in pattern.finditer(text):
+            if pattern is _DATE_KA_DMY and m.group("incl") and _opens_a_date(text, m.start("y")):
+                continue  # "30 ნოემბრის ჩათვლით, 2027 წლის 1 იანვრიდან": the year is the next's
             mo = _month_ka(m.group("m"))
             dt = _safe_date(int(m.group("y")), mo, int(m.group("d"))) if mo else None
             add(m, dt, m.group("m"))

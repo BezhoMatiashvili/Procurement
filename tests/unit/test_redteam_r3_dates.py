@@ -220,3 +220,115 @@ def test_a_table_cells_period_restyled_as_a_day_range_is_no_change() -> None:
         right_kind="docx",
     )
     assert found(report) == []
+
+
+# --- COMPARE-R3-02: a date's role is on its month, before a year written after it ---------------
+
+from procurement_agent.checks.contract_terms import read_term  # noqa: E402
+from procurement_agent.checks.document_facts import document_facts  # noqa: E402
+from procurement_agent.extraction.rules import date_role  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    ("raw", "role"),
+    [
+        ("30 ნოემბრამდე, 2026 წ.", "until"),
+        ("„30“ ნოემბრამდე, 2026 წელს", "until"),
+        ("30 ნოემბრის ჩათვლით, 2026 წ.", "until"),
+        ("2026 წლის 30 ნოემბრამდე", "until"),
+        ("1 მარტიდან, 2026 წელს", "from"),
+        ("2026 წლის 1 მარტიდან", "from"),
+        ("30 ნოემბერი, 2026 წ.", None),
+        ("30 ნოემბერს, 2026 წელს", None),
+        ("30.11.2026 წ.", None),
+    ],
+)
+def test_a_dates_role_is_read_off_its_month(raw: str, role: str | None) -> None:
+    assert date_role(raw) == role
+
+
+def test_a_dates_inclusive_end_with_its_year_after_it_is_read() -> None:
+    [hit] = find_dates("და მოქმედებს 30 ნოემბრის ჩათვლით, 2026 წ. ორივე მხარისთვის")
+    assert (hit.normalized, hit.raw_text) == ("2026-11-30", "30 ნოემბრის ჩათვლით, 2026 წ.")
+
+
+def test_a_year_that_opens_the_next_date_is_not_taken_by_an_inclusive_end() -> None:
+    hits = find_dates("30 ნოემბრის ჩათვლით, 2027 წლის 1 იანვრიდან")
+    assert [h.normalized for h in hits] == ["2027-01-01"]
+
+
+_TERM_CONTRACT = (
+    "ხელშეკრულება № TK-7\n"
+    "ქ. ქუთაისი, 2026 წლის 14 მაისი\n"
+    "შპს „მთის წყარო“, საიდენტიფიკაციო კოდი: 204455667 (შემდგომში „შემსყიდველი“) და "
+    "შპს „ველის ქარი“, საიდენტიფიკაციო კოდი: 205566778 (შემდგომში „მიმწოდებელი“)\n"
+    "1.1. მიმწოდებელი აწვდის ოფისის ავეჯს.\n"
+    "5.1. ხელშეკრულება ძალაში შედის ხელმოწერის მომენტიდან და მოქმედებს {end}.\n"
+)
+
+
+@pytest.mark.parametrize(
+    "end",
+    [
+        "2026 წლის 30 ნოემბრამდე",
+        "30 ნოემბრამდე, 2026 წ.",
+        "30 ნოემბრამდე, 2026 წელს",
+        "„30“ ნოემბრამდე, 2026 წ.",
+        "30 ნოემბრის ჩათვლით, 2026 წ.",
+    ],
+)
+def test_a_validity_end_with_its_year_after_it_is_the_end(end: str) -> None:
+    text = _TERM_CONTRACT.format(end=end)
+    term = read_term(text)
+    assert term.validity is not None
+    assert (term.validity.start, term.validity.end) == (date(2026, 5, 14), date(2026, 11, 30))
+    validity = [f.normalized for f in document_facts(text) if f.type.value == "validity_period"]
+    assert validity == ["2026-05-14/2026-11-30"]
+
+
+def test_a_validity_start_with_its_year_after_it_is_the_start() -> None:
+    text = _TERM_CONTRACT.format(end="1 ივნისიდან, 2026 წ. ორი წლის განმავლობაში")
+    text = text.replace("ხელმოწერის მომენტიდან და ", "")
+    term = read_term(text)
+    assert term.validity is not None
+    assert term.validity.start == date(2026, 6, 1)
+    assert term.validity.end is None
+
+
+_VALID_UNTIL = "2026 წლის 30 ნოემბრამდე"
+
+
+@pytest.mark.parametrize(
+    "restyled",
+    ["30 ნოემბრამდე, 2026 წ.", "30 ნოემბრამდე, 2026 წელს", "„30“ ნოემბრამდე, 2026 წ."],
+)
+def test_a_validity_end_restyled_with_its_year_after_it_is_no_change(restyled: str) -> None:
+    assert found(run(SUPPLY, edit(SUPPLY, _VALID_UNTIL, restyled))) == []
+
+
+def test_an_inclusive_validity_end_restyled_with_its_year_after_it_is_no_change() -> None:
+    left = edit(SUPPLY, _VALID_UNTIL, "2026 წლის 30 ნოემბრის ჩათვლით")
+    right = edit(SUPPLY, _VALID_UNTIL, "30 ნოემბრის ჩათვლით, 2026 წ.")
+    assert found(run(left, right)) == []
+
+
+def test_a_validity_end_moved_and_written_with_its_year_after_it_keeps_the_start() -> None:
+    right = edit(SUPPLY, _VALID_UNTIL, "31 დეკემბრამდე, 2026 წ.")
+    assert found(run(SUPPLY, right)) == [
+        ("CMP.DURATION", "2026-05-14/2026-11-30", "2026-05-14/2026-12-31", "error")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("example", "day", "expected"),
+    [
+        ("30 ნოემბრის ჩათვლით, 2026 წ.", date(2026, 12, 31), "31 დეკემბრის ჩათვლით, 2026 წ."),
+        ("30 ნოემბრის ჩათვლით, 2026 წ.", date(2026, 8, 31), "31 აგვისტოს ჩათვლით, 2026 წ."),
+    ],
+)
+def test_an_inclusive_end_with_its_year_after_it_is_written_in_its_style(
+    example: str, day: date, expected: str
+) -> None:
+    [hit] = find_dates(example)
+    assert render_date_like(date.fromisoformat(str(hit.normalized)), hit.raw_text) == example
+    assert render_date_like(day, example) == expected

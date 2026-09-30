@@ -24,6 +24,7 @@ from procurement_agent.extraction.anchors import preamble_end
 from procurement_agent.extraction.rules import (
     KEYWORDS,
     RuleHit,
+    date_role,
     find_dates,
     find_durations,
     find_percentages,
@@ -654,9 +655,12 @@ def _range_in(
     for h in hits:
         before = text[max(a, h.start - _MARK_REACH) : h.start]
         after = text[h.end : min(b, h.end + _MARK_REACH)]
-        if h.raw_text.endswith("დან") or _FIRST_AFTER.match(after) or _FIRST_BEFORE.search(before):
+        # the mark on the date's own words, a year written after it or not ("30 ნოემბრამდე, 2026
+        # წ." is an end), else one written after or before it
+        role = date_role(h.raw_text)
+        if role == "from" or _FIRST_AFTER.match(after) or _FIRST_BEFORE.search(before):
             firsts.append(_date_of(h))
-        elif h.raw_text.endswith("მდე") or _LAST_AFTER.match(after) or _LAST_BEFORE.search(before):
+        elif role == "until" or _LAST_AFTER.match(after) or _LAST_BEFORE.search(before):
             lasts.append(_date_of(h))
         else:
             plain.append(h)

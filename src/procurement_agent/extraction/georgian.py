@@ -629,8 +629,8 @@ _STYLE_YMD = re.compile(
     rf"(?P<month>[{GEORGIAN}]+)"
 )
 _STYLE_DMY = re.compile(
-    rf"^\s*{_STYLE_DAY}(?P<gap>\s*)(?P<month>[{GEORGIAN}]+)(?P<sep>,?\s*)(?P<year>\d{{4}})"
-    rf"{_STYLE_YEAR_WORD}"
+    rf"^\s*{_STYLE_DAY}(?P<gap>\s*)(?P<month>[{GEORGIAN}]+)(?P<incl>\s+ჩათვლით)?(?P<sep>,?\s*)"
+    rf"(?P<year>\d{{4}}){_STYLE_YEAR_WORD}"
 )
 #: An English date: "5 July 2026", "5th Jul. 2026", "July 5, 2026".
 _EN_ORDINAL = r"(?P<ordinal>st|nd|rd|th)?"
@@ -721,9 +721,12 @@ def render_date_like(d: date, example: str, *, following: str = "") -> str:
         written = month_form(d.month, month_case(m.group("month"), following=following))
         return f"{d.year}{m.group('sep')}{_styled_day(d, m)}{m.group('gap')}{written}"
     if m := _STYLE_DMY.match(ex):
-        written = month_form(d.month, month_case(m.group("month"), following=following))
+        # "30 ნოემბრის ჩათვლით, 2026 წ.": the month's case is the one "ჩათვლით" asks for
+        incl = m.group("incl") or ""
+        case = month_case(m.group("month"), following=incl or following)
+        written = month_form(d.month, case)
         tail = m.group("tail") or ""
-        return f"{_styled_day(d, m)}{m.group('gap')}{written}{m.group('sep')}{d.year}{tail}"
+        return f"{_styled_day(d, m)}{m.group('gap')}{written}{incl}{m.group('sep')}{d.year}{tail}"
     for pattern in (_STYLE_EN_DMY, _STYLE_EN_MDY):
         if (m := pattern.match(ex)) and (english := _render_english(d, m)) is not None:
             return english
