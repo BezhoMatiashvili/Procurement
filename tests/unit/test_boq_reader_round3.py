@@ -600,17 +600,28 @@ def test_a_summary_row_labelled_total_is_never_the_total_column() -> None:
     assert _summary_columns(ws) == (1, 2, 3, 1)
 
 
+@pytest.mark.parametrize(
+    ("role", "value", "text", "said"),
+    [
+        ("incl", None, None, "states no number"),
+        ("cost", None, "#DIV/0!", "states the text '#DIV/0!'"),
+        ("cost", 0.0, None, "states 0"),
+    ],
+)
 def test_a_summary_row_with_no_value_in_the_total_column_is_named_not_called_missing(
-    tmp_path: Path,
+    tmp_path: Path, role: str, value: float | None, text: str | None, said: str
 ) -> None:
     t_path, b_path = tmp_path / "t.xlsx", tmp_path / "b.xlsx"
     t_path.write_bytes(build_real_boq())
     b_path.write_bytes(build_real_boq(Bid()))
     t, b = read_boq(t_path, name="T"), read_boq(b_path, name="B")
-    incl = summary_roles(b)["incl"]
-    b.summary_rows = [replace(r, value=None) if r.row == incl.row else r for r in b.summary_rows]
+    row = summary_roles(b)[role]
+    b.summary_rows = [
+        replace(r, value=value, non_numeric=text) if r.row == row.row else r for r in b.summary_rows
+    ]
     [note] = [f for f in compare_bid(t, b).findings if f.rule_id == "BOQ.NOT_RANKED"]
-    assert f"row {incl.row}" in note.message_en and "states no number" in note.message_en
+    assert f"row {row.row}" in note.message_en and said in note.message_en
+    assert "no Summary row states" not in note.message_en
 
 
 def test_positions_on_a_sheet_whose_prices_are_not_read_are_never_called_unpriced(

@@ -2127,15 +2127,21 @@ def _not_ranked(out: BidComparison, bid: BoqWorkbook) -> Finding:
     else:
         role, ka, en = "cost", "TOTAL COST", "TOTAL COST"
     row = summary_roles(bid).get(role)
-    if row is not None and row.value is None:
+    if row is not None and not row.value:
+        # the row is there: it states nothing, text ("#DIV/0!") or 0 in the column read
         column = get_column_letter(bid.summary_total_col) if bid.summary_total_col else "?"
+        if row.non_numeric:
+            said_ka, said_en = f"ტექსტი „{row.non_numeric}“", f"the text '{row.non_numeric}'"
+        elif row.value is None:
+            said_ka, said_en = "რიცხვი არ უწერია", "no number"
+        else:
+            said_ka, said_en = "0", "0"
         return _finding(
             "BOQ.NOT_RANKED",
             "warning",
-            f"{out.bidder}: Summary-ის სტრიქონს {row.row} („{row.label[:40]}“) ჯამის სვეტში "
-            f"({column}) რიცხვი არ უწერია — ფასნამატი ვერ გამოითვალა და კომპანია რანჟირებაში "
-            "არ მონაწილეობს",
-            f"{out.bidder}: Summary row {row.row} ('{row.label[:40]}') states no number in "
+            f"{out.bidder}: Summary-ის სტრიქონი {row.row} („{row.label[:40]}“), სვეტი {column}: "
+            f"{said_ka} — ფასნამატი ვერ გამოითვალა და კომპანია რანჟირებაში არ მონაწილეობს",
+            f"{out.bidder}: Summary row {row.row} ('{row.label[:40]}') states {said_en} in "
             f"column {column}, the column read as the Summary's total - the bidder's markup "
             "could not be worked out, so the bid is not ranked",
             expected=en,
