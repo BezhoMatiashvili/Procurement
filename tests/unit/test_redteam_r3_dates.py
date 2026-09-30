@@ -332,3 +332,82 @@ def test_an_inclusive_end_with_its_year_after_it_is_written_in_its_style(
     [hit] = find_dates(example)
     assert render_date_like(date.fromisoformat(str(hit.normalized)), hit.raw_text) == example
     assert render_date_like(day, example) == expected
+
+
+# --- EXTRACTION-R3-05: an act's own heading date is never its contract's date -------------------
+
+from procurement_agent.extraction.pipeline import run_extraction  # noqa: E402
+from procurement_agent.extraction.schemas import FactType  # noqa: E402
+from tests.unit.test_dates_and_periods import _SETTINGS, _chunk  # noqa: E402
+
+_ACT_HEAD = (
+    "მიღება-ჩაბარების აქტი N 4\n"
+    "ქ. ზუგდიდი                              2026 წლის 30 ივნისი\n"
+    "ერთი მხრივ შპს „ტყის ბილიკი“ (ს/კ: 206677889) (შემდგომში „შემკვეთი“) და მეორე მხრივ შპს "
+    "„ქვის ხიდი“ (ს/კ: 207788990) (შემდგომში „შემსრულებელი“), ვადგენთ წინამდებარე აქტს:\n"
+)
+_ACT_TAIL = (
+    "2. მომსახურება შესრულდა 2026 წლის 1 ივნისიდან 2026 წლის 30 ივნისის ჩათვლით.\n"
+    "3. ღირებულება შეადგენს 2 500 (ორი ათას ხუთასი) ლარს გადასახადების ჩათვლით.\n"
+)
+
+
+def _act_dates(clause: str) -> dict[str, list[str]]:
+    text = _ACT_HEAD + clause + "\n" + _ACT_TAIL
+    res = run_extraction(document_id="d", chunks=[_chunk("c0", text)], settings=_SETTINGS, llm=None)
+    return {
+        ft.value: sorted(str(f.normalized) for f in res.facts if f.type is ft)
+        for ft in (FactType.contract_date, FactType.act_date)
+    }
+
+
+@pytest.mark.parametrize(
+    "clause",
+    [
+        "1. მხარეებს შორის 2026 წლის 3 მარტს გაფორმებული ხელშეკრულების საფუძველზე შესრულდა "
+        "მომსახურება.",
+        "1. მხარეებს შორის გაფორმებული N 11/2026 ხელშეკრულების (თარიღი: 03.03.2026) საფუძველზე "
+        "შესრულდა მომსახურება.",
+        "1. N 11/2026 ხელშეკრულება, დადებული 2026 წლის 3 მარტს, ითვალისწინებს მომსახურებას.",
+        "1. მხარეებს შორის 03.03.2026 №11/2026 ხელშეკრულების საფუძველზე შესრულდა მომსახურება.",
+        "1. ხელშეკრულება № ZK-11, გაფორმებული 2026 წლის 3 მარტს, ითვალისწინებს მომსახურებას.",
+    ],
+)
+def test_an_act_dating_its_contract_after_naming_it_has_one_contract_date(clause: str) -> None:
+    assert _act_dates(clause) == {"contract_date": ["2026-03-03"], "act_date": ["2026-06-30"]}
+
+
+def test_an_act_that_names_no_contract_date_takes_its_heading_date_as_its_own() -> None:
+    clause = "1. N 11/2026 ხელშეკრულების საფუძველზე შესრულდა მომსახურება."
+    assert _act_dates(clause) == {"contract_date": [], "act_date": ["2026-06-30"]}
+
+
+@pytest.mark.parametrize(
+    "clause",
+    [
+        "1. N 11/2026 ხელშეკრულების შესაბამისად, 2026 წლის 10 ივნისს „შემკვეთმა“ გადაიხადა ავანსი.",
+        "1. N 11/2026 ხელშეკრულებით დადგენილი 2026 წლის 10 ივნისის ვადა დაცულია.",
+        "1. ხელშეკრულების თარიღიდან, 2026 წლის 10 ივნისს, გადაიხადა ავანსი.",
+    ],
+)
+def test_a_date_after_the_contract_named_for_another_purpose_is_not_its_signing(
+    clause: str,
+) -> None:
+    text = _ACT_HEAD + clause + "\n" + _ACT_TAIL
+    signed = [f.normalized for f in document_facts(text) if f.type is FactType.contract_date]
+    assert signed == []
+
+
+def test_a_contracts_heading_date_is_still_its_contract_date() -> None:
+    text = (
+        "ხელშეკრულება N 11/2026\n"
+        "ქ. ზუგდიდი, 2026 წლის 3 მარტი\n"
+        "შპს „ტყის ბილიკი“ (ს/კ: 206677889) (შემდგომში „შემკვეთი“) და შპს „ქვის ხიდი“ "
+        "(ს/კ: 207788990) (შემდგომში „შემსრულებელი“)\n"
+        "1.1. შემსრულებელი ასრულებს მომსახურებას.\n"
+    )
+    res = run_extraction(document_id="d", chunks=[_chunk("c0", text)], settings=_SETTINGS, llm=None)
+    assert [str(f.normalized) for f in res.facts if f.type is FactType.contract_date] == [
+        "2026-03-03"
+    ]
+    assert [f for f in res.facts if f.type is FactType.act_date] == []

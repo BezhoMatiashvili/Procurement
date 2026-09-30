@@ -151,9 +151,14 @@ def _in_canonical_type(ftype: FactType, normalized: object, value: str) -> FactT
 
 
 def rule_hits_to_facts(hits: dict[str, list[RuleHit]], chunks: list[Chunk]) -> list[ExtractedFact]:
+    # imported here: checks import the extraction
+    from procurement_agent.checks.document_facts import is_act
+
     by_id = {c.id: c for c in chunks}
     header_id = chunks[0].id if chunks else None
     header_end = _header_end(chunks)
+    # the document's own date: an act's is the act's, never its contract's (docs/GOLD_SPEC.md 2)
+    own_date = FactType.act_date if chunks and is_act(chunks[0].text) else FactType.contract_date
     facts: list[ExtractedFact] = []
     for cid, hs in hits.items():
         chunk = by_id[cid]
@@ -164,7 +169,7 @@ def rule_hits_to_facts(hits: dict[str, list[RuleHit]], chunks: list[Chunk]) -> l
                 # An unlabeled date in the document header is almost always the document date
                 # ("ქ. თბილისი, 2026 წლის 15 მარტი"); keep it, but say so.
                 ftype, conf, note = (
-                    FactType.contract_date,
+                    own_date,
                     weights.HEADER_DATE,
                     "date found in document header",
                 )
