@@ -259,6 +259,33 @@ rule (`tests/unit/test_dates_and_periods.py`):
 how often a document states its own date after the parties in a way the signing-words reader
 does not know: both return no value rather than a guessed one.
 
+Red team round 2 (2026-09-30) found six more, each fixed by rule with a unit test and a near
+miss that must not match (`tests/unit/test_redteam_r2_dates.py`):
+
+* **A day range before its month and year** (`1-15 ივნისი, 2026 წ.`, `01-15.06.2026`) was read
+  as its last day alone: a correct month-end act got `AOA.ACT_DATE`, and a year slip was quoted
+  without its first day. `rules.find_dates` reads the leading day as the range's first day, in
+  the same month and year, only where nothing makes the number something else (a digit, stop,
+  slash, dash or letter before it, `N`, a first day not before the last).
+* **The year word is a whole word.** The `წ` of `წელს` was taken for the abbreviation `წ.`, so
+  the act's date ended mid-word and its correction lost the rest. A two-digit year's date now
+  includes its year word, and `georgian.render_date_like` has a style for every form the date
+  reader reads (dd.mm.yy, English day-month-year and month-day-year, with ordinals); a unit test
+  round-trips each form through its own style.
+* **A numeric date's end is written with its case**: `31.12.2026-ის ჩათვლით`, `31.12.2026 წლის
+  ჩათვლით`. Unread, the validity's last day became its first.
+* **The future passive sets the performance window** (`შესრულდება`, `განხორციელდება`,
+  `ჩატარდება`, `დაიწყება … დასრულდება`) - a decision to read these only in a sentence that names
+  the work (`მომსახურება`, `სამუშაო`) and is not the validity clause, since "მოქმედებს მანამ,
+  სანამ მომსახურება შესრულდება" and "მიწოდება განხორციელდება …" use the same verbs.
+* **Parties named in the title** (`… შპს „…“-სა და შპს „…“-ს შორის`) ended the preamble above
+  the place-and-date line, so the contract lost its date and its validity "from signing". A
+  party joined to the contract word by a `-სა და … -ს შორის` phrase on the title line is part of
+  the title; a party block that defines roles in brackets still ends the preamble.
+* **A sentence does not end inside a short bracket or at a chained abbreviation** (`(იხ.
+  დანართი N1)`, `მ.შ.`, `ე.წ.`), which cut a subject clause at `(იხ`. `ა.შ.` (and so on) still
+  ends one, and a bracket left open or broken over a line holds nothing together.
+
 ### Scanned PDFs cannot carry Word comments
 
 The client asked for findings marked in the document itself. `report/docx_annotate.py` writes
