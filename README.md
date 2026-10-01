@@ -254,8 +254,8 @@ Word comment marks), rules and anchors only:
 |---|---|
 | client set, Test Set 2, Test Set 3 (strict `scripts/evaluate.py`) | every field and every finding matched; nothing missing, nothing unexpected |
 | BOQ against an independent reference reader (`scripts/evaluate_boq.py`) | 106/106, 106/106, 132/132 checks: totals to the cent, common scope, colours, merged workbook |
-| act check, mutation harness (20 error classes; 15,000 planted mistakes over three large runs) | 2 missed and 5 corrected in a wrong form, each traced to a general rule and fixed; the last fresh run: 100% detected, 1 correction in 3,000 wrong (since fixed) |
-| harmless edits (14 classes: styles, layouts, formats; 10,500 cases) | 0 false findings |
+| act check, mutation harness (20 error classes; 21,000 planted mistakes over four large runs) | the first three found 2 missed and 5 corrected in a wrong form, each fixed as a general rule; the final run on the final code: 6,000 of 6,000 detected, corrected in the act's own form and marked |
+| harmless edits (14 classes: styles, layouts, formats; 14,700 cases) | 0 false findings |
 | comparison of the same mutated pairs | 100% per class, but a director slip that breaks the surname's declension (99%) |
 | BOQ mutation harness (17 classes, 7 seeds, the last 25 a class) | 100% of valid mutants |
 | scanned acts (OCR) against the Word contract | every planted mistake reported, no false error |

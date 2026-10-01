@@ -74,14 +74,15 @@ paragraphs, unquoted names, tetri, an equivalent in USD, a relabelled price, ...
 typo classes. A case passes only with the finding, the correction in the act's own form, a Word
 comment on every place, and nothing else reported.
 
-Six small seeds (71-199, 12 cases a class) and then three large runs, 300, 300 and 150 cases a
-class (25,650 cases in all; about one in two is distinct, a repeat being scored once):
+Six small seeds (71-199, 12 cases a class) and then four large runs, 300, 300, 150 and 300 cases
+a class (36,450 cases in all; about one in two is distinct, a repeat being scored once):
 
 | run | error classes (15,000 planted mistakes over the three runs) | harmless classes | what it found, each fixed as a general rule |
 |---|---|---|---|
 | seed 211, 300 a class | 1 address slip missed, 1 party name corrected into the wrong case | 0 false findings in 4,200 | a genitive written with and without the vowel some nouns drop is two words; a slip tied between two cases takes the case the documents write |
 | seed 223, 300 a class | 1 address missed, 1 month corrected into a form no date takes, 1 month read as another month, 2 stray letters in the signing verb hid the act's date | 0 in 4,200 | a phrase declines on its last word only; a month tie is decided by the whole word, or no month is read; a date's form wins a tie; the act's date is read past a stray letter |
 | seed 229, 150 a class, after those fixes | detection 100%, 1 stray letter corrected by a guessed letter (1 in 3,000) | 0 in 2,100 | a stray letter dropped beats a letter guessed in its place |
+| **seed 241, 300 a class, the final code** | **all 6,000: detected, corrected in the act's own form, every place marked, nothing else reported (100%)** | **0 in 4,200** | nothing new; the comparison missed 1 director slip in 300 (the known declension limit) |
 
 Every failing case of the three runs passes on the final code. A targeted rerun of the classes
 touched, 300 cases each: party name, address and month typos 100% on every measure with no
