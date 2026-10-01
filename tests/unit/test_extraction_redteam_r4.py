@@ -175,9 +175,7 @@ class TestStagedPaymentList:
         )
         assert _extract(text)[FactType.payment_terms] == ["P12D working"]
         facts = document_facts(text)
-        assert [f.normalized for f in facts if f.type is FactType.payment_terms] == [
-            "P12D working"
-        ]
+        assert [f.normalized for f in facts if f.type is FactType.payment_terms] == ["P12D working"]
 
     def test_near_miss_a_clause_under_a_payment_heading_is_no_stage(self) -> None:
         text = HEAD + (
@@ -412,6 +410,4 @@ class TestLabelLines:
     def test_a_figure_whose_words_run_onto_the_next_line_is_still_one_amount(self) -> None:
         """The line rule bounds where a keyword is looked for; what the patterns match is
         unchanged."""
-        assert _rule_money("ღირებულება: 100\n(ასი) ლარი") == [
-            (100.0, FactType.total_amount, "GEL")
-        ]
+        assert _rule_money("ღირებულება: 100\n(ასი) ლარი") == [(100.0, FactType.total_amount, "GEL")]

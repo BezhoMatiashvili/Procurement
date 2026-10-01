@@ -183,10 +183,9 @@ def _chunk_holding(chunks: Sequence[Chunk], words: str) -> Chunk | None:
     needle = normalize_confusables(words)[:60]
     if not needle:
         return None
-    for candidate in dict.fromkeys((needle, needle.rstrip("."))):
+    for candidate in filter(None, dict.fromkeys((needle, needle.rstrip(".")))):
         found = next(
-            (c for c in chunks if candidate and candidate in normalize_confusables(c.body or c.text)),
-            None,
+            (c for c in chunks if candidate in normalize_confusables(c.body or c.text)), None
         )
         if found is not None:
             return found

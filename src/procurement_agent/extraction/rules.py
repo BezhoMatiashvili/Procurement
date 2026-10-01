@@ -178,13 +178,13 @@ _KW_CACHE: dict[str, re.Pattern[str]] = {}
 #: value on the same line, opened by a bullet or not - "მომსახურების შესრულების ვადა:
 #: 10.03.2026 - 31.07.2026", "- საგარანტიო ვადა: 12 თვე".
 _LABEL_LINE = re.compile(
-    r"^[ \t]*(?:[-–—•][ \t]*)?[ა-ჰA-Za-z][ა-ჰA-Za-z /()\-]{0,58}?[ \t]*:[ \t]*"
+    r"^[ \t]*(?:[-\u2013\u2014•][ \t]*)?[ა-ჰA-Za-z][ა-ჰA-Za-z /()\-]{0,58}?[ \t]*:[ \t]*"
     r"(?P<value>\S[^\n]*?)[ \t]*$",
     re.MULTILINE,
 )
 #: A value that goes on in the next line: it ends with a comma, a dash, an open bracket or
 #: "და" / "and".
-_VALUE_GOES_ON = re.compile(r"(?:[,(\-–—]|(?<![ა-ჰA-Za-z])(?:და|and))$", re.IGNORECASE)
+_VALUE_GOES_ON = re.compile(r"(?:[,(\-\u2013\u2014]|(?<![ა-ჰA-Za-z])(?:და|and))$", re.IGNORECASE)
 
 
 def label_line_spans(text: str) -> list[tuple[int, int]]:
@@ -602,7 +602,7 @@ _TAX_AMOUNT_LABEL = re.compile(
     r"(?<![ა-ჰa-z])(?:დ\.?ღ\.?გ\.?|vat|value\s+added\s+tax)"
     r"(?:(?:-?ის|-?ს)\s+(?:თანხა|ოდენობა)|\s+(?:თანხა|ოდენობა|amount))?"
     r"(?:\s*\(\s*\d{1,2}(?:[.,]\d{1,2})?\s*%\s*\))?"
-    r"\s*[:=–—-]?\s*(?:(?:GEL|USD|EUR|GBP|₾|\$|€|£)\s*)?$",
+    r"\s*[:=\u2013\u2014-]?\s*(?:(?:GEL|USD|EUR|GBP|₾|\$|€|£)\s*)?$",
     re.IGNORECASE,
 )
 _TAX_QUALIFIED = re.compile(
@@ -858,14 +858,15 @@ def is_contract_price(text: str, start: int, end: int) -> bool:
     after = after[: stop.start()] if stop else after
     if _PER_UNIT.search(label) or _PER_UNIT.search(after):
         return False
-    return _WHOLE_PRICE.search(" ".join(lead)) is not None or _WHOLE_PRICE.search(between) is not None
+    named = " ".join(lead)
+    return _WHOLE_PRICE.search(named) is not None or _WHOLE_PRICE.search(between) is not None
 
 
 def _table_cell_at(text: str, start: int) -> bool:
     """Whether the figure at ``start`` is a cell of a serialised table row ("<row>, <column> =
     <cell>")."""
     line_start = text.rfind("\n", 0, start) + 1
-    return any(c.end() <= start for c in _TABLE_CELL.finditer(text[line_start:start + 1]))
+    return any(c.end() <= start for c in _TABLE_CELL.finditer(text[line_start : start + 1]))
 
 
 def find_amounts(text: str) -> list[RuleHit]:
@@ -1442,7 +1443,7 @@ _BALANCE_OPENS = re.compile(
 
 
 #: The marker of a list item: "ბ)", "2)", "4.2.2.", "- ".
-_LIST_MARKER = re.compile(r"(?:[ა-ჰa-z]\)|\d{1,2}\)|\d{1,2}(?:\.\d{1,2}){0,3}\.|[-–•])\s*")
+_LIST_MARKER = re.compile(r"(?:[ა-ჰa-z]\)|\d{1,2}\)|\d{1,2}(?:\.\d{1,2}){0,3}\.|[-\u2013•])\s*")
 #: An advance opening a stage of a staged payment: "ავანსი - ...", "Advance: ...".
 _ADVANCE_OPENS = re.compile(
     r"ავანს|წინასწარი?\s+(?:გადახდ|ანგარიშსწორებ)|(?:an?\s+)?(?:advance|prepayment)(?![a-z])",
@@ -1729,8 +1730,8 @@ _UNIT_STEM_KA = r"(დღ(?!გ)|კვირ|თვ|წელ|წლ)[ა-ჰ]*
 _DUR_KA = re.compile(
     # the count, then its unit as a word or as the adjective hyphenated to it: "20 დღე",
     # "20-დღიან ვადაში", "12-თვიანი"; never an ordinal ("20-ე დღეს", "მე-20 დღეს")
-    rf"(?<!მე-){_COUNT}(?:-(?=დღ(?!გ)|კვირ|თვ|წლ)|\s*(?:\(\s*[ა-ჰ ]+\s*\)\s*)?(?:({_QUALIFIER_KA})\s*)?)"
-    + _UNIT_STEM_KA,
+    rf"(?<!მე-){_COUNT}(?:-(?=დღ(?!გ)|კვირ|თვ|წლ)"
+    rf"|\s*(?:\(\s*[ა-ჰ ]+\s*\)\s*)?(?:({_QUALIFIER_KA})\s*)?){_UNIT_STEM_KA}",
     re.IGNORECASE,
 )
 #: A unit of time right after a word, with the days it counts: where a count written only in
@@ -1850,10 +1851,10 @@ def find_durations(text: str) -> list[RuleHit]:
         for pat, is_ka in ((_DUR_KA, True), (_DUR_EN, False))
         for m in pat.finditer(text)
     ]
-    for start, count, at in _counts_in_words(text, [m.span() for m, *_ in found]):
+    for words_start, words_count, at in _counts_in_words(text, [m.span() for m, *_ in found]):
         unit_match = _UNIT_AFTER_WORDS.match(text, at)
         if unit_match is not None:
-            found.append((unit_match, True, count, start))
+            found.append((unit_match, True, words_count, words_start))
     for m, is_ka, count, start in found:
         if count is None:
             n = int(m.group(1) or m.group(2))
