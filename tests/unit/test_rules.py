@@ -178,11 +178,13 @@ def test_id_code_needs_marker() -> None:
 def test_percentages() -> None:
     hits = find_percentages("ავანსი 30% წინასწარ; დღგ 18%; ჯარიმა 0.1% დღეში; humidity 250%")
     # canonical forms (docs/GOLD_SPEC.md): an advance's share is "advance N%", and a rate beside
-    # "დღგ" is a percentage - a vat_status is one of four words, never a number
+    # "დღგ" is a percentage - a vat_status is one of four words, never a number. "0.1% დღეში"
+    # counts per day: the period in the inessive right after the rate is the rate's (red team
+    # R5, COMPARE-R5-05; docs/GOLD_SPEC.md section 2, R1)
     assert [(h.normalized, h.type) for h in hits] == [
         ("advance 30%", FactType.payment_terms),
         (18.0, FactType.percentage),
-        (0.1, FactType.penalty),
+        ("0.1% per day", FactType.penalty),
     ]
 
 

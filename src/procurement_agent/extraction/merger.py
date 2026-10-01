@@ -6,10 +6,14 @@ import re
 
 from procurement_agent.extraction import weights
 from procurement_agent.extraction.anchors import AnchorHit, preamble_end
-from procurement_agent.extraction.georgian import Case, lemma
+from procurement_agent.extraction.georgian import Case, attested_nominatives, lemma
 from procurement_agent.extraction.labels import LABELS
 from procurement_agent.extraction.normalize import QUOTE_CHARS, names_match, normalize_name
-from procurement_agent.extraction.rules import RuleHit, is_payment_terms_value
+from procurement_agent.extraction.rules import (
+    RuleHit,
+    is_payment_terms_value,
+    payment_deadline_of,
+)
 from procurement_agent.extraction.schemas import DEFAULT_TARGETS, ExtractedFact, FactType
 from procurement_agent.ingestion.chunker import Chunk
 
@@ -104,6 +108,11 @@ def _same_fact(a: ExtractedFact, b: ExtractedFact) -> bool:
         # "ნინო კაპანაძის" in the preamble and "ნინო კაპანაძე" in the signature
         # block are one signatory; two facts would be a false extra name on every document
         return True
+    if (
+        a.type == FactType.party_director
+        and len(set(attested_nominatives([a.value, b.value]))) == 1
+    ):
+        return True  # "სოსო წერეთლი", read off a genitive that drops a vowel, is "სოსო წერეთელი"
     if a.normalized is not None and b.normalized is not None:
         return False  # both canonical and different: two values, perhaps a conflict
     qa, qb = _norm(a.raw_text), _norm(b.raw_text)
@@ -164,7 +173,11 @@ def rule_hits_to_facts(hits: dict[str, list[RuleHit]], chunks: list[Chunk]) -> l
         chunk = by_id[cid]
         for h in hs:
             ftype, conf, note = h.type, h.confidence, h.note
-            ftype = _in_canonical_type(ftype, h.normalized, h.value)
+            normalized = h.normalized
+            if ftype == FactType.payment_terms:
+                # the days a payment deadline counts are part of its value: "P10D working"
+                normalized = payment_deadline_of(h) or normalized
+            ftype = _in_canonical_type(ftype, normalized, h.value)
             if ftype == FactType.date and cid == header_id and h.end <= header_end:
                 # An unlabeled date in the document header is almost always the document date
                 # ("ქ. თბილისი, 2026 წლის 15 მარტი"); keep it, but say so.
@@ -178,7 +191,7 @@ def rule_hits_to_facts(hits: dict[str, list[RuleHit]], chunks: list[Chunk]) -> l
                     type=ftype,
                     label=LABELS[ftype][0],
                     value=h.value,
-                    normalized=h.normalized,
+                    normalized=normalized,
                     unit=h.unit,
                     currency=h.currency,
                     raw_text=h.raw_text,
@@ -305,6 +318,12 @@ def merge(
             )
         if f.normalized is not None and existing.normalized is None:
             existing.normalized = f.normalized
+        if existing.type == FactType.party_director:
+            # "სოსო წერეთლის" in the preamble read "სოსო წერეთლი"; the signature's "სოსო
+            # წერეთელი" is the nominative it lost (``attested_nominatives``, red team R5)
+            named = attested_nominatives([existing.value, f.value])[0]
+            if named != existing.value:
+                existing.value = existing.normalized = named
         if f.note:
             # A note is a caveat about the value, not a property of the source that won. Losing
             # it here would silently discard warnings — "date found in document header", or a

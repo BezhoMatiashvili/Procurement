@@ -1155,6 +1155,57 @@ Measured after the fixes: the three strict gold sets unchanged at 100%/100%, and
 `4138994` row for row: every error class detected at 100%, `party_name` and `prose_typo`
 corrections at 83% and `script_letter` 17% false positives, all three already there before.
 
+### Extraction, red team round 5: the readers the three modules share (2026-10-01)
+
+EXTRACTION-R5-04, -05, -07, -08, -09, -10, -11, -14, -15, -17, COMPARE-R5-05, -06, -08, -09 and
+AOA-R5-03, -05, -10, each with a failing unit test on invented text first and a near miss beside
+every widened reading (`tests/unit/test_r5_extraction_fields.py`,
+`tests/unit/test_r5_shared_readers.py`); the readings are in `docs/GOLD_SPEC.md` section 2. What
+was decided, and where one reader now serves several:
+
+* **One money typing.** `rules._money_type` now also types the contract's sum by its wordings
+  (`_sum_named_whole`), a price of one item as a price (`_priced_per_unit`, on the `ღირებულება`
+  path too, which never reached `is_contract_price`), and a figure its clause names an advance
+  without a turn (`_named_a_part`). The comparison, the act check and the extraction read the
+  same types, so `ავანსს 5 520 ლარის ოდენობით, ხელშეკრულების ღირებულების 30%` is an `amount` and
+  `advance 30%` in all three.
+* **One words-first reader.** `rules._words_before` reads the number words before a bracketed
+  figure for the amount reader, the act check's digits-and-words pairs
+  (`amounts._words_then_digits`) and the act check's fee correction (`aoa._fee_like`), so a
+  words-first fee is read, compared and corrected in its own order.
+* **Rows by their columns.** `rules._table_rows` splits a serialised price table into rows by
+  key and by a column coming again; closing rows with no key were one row, and the tax's row
+  took the total's name.
+* **The penalty kind decides what supersedes.** `pipeline._superseded` lets the document-level
+  penalty rates replace the chunk-level rates only; a fine stated as money is the chunk rule's.
+  To keep that from reading a money cap as a second penalty, `_money_type` gives a penalty
+  figure the rate's own cap and share tests.
+* **The payment deadline's days.** `rules.payment_deadline_of` builds `P10D working` from the
+  duration hit for the chunk path (`merger.rule_hits_to_facts`); the comparison's own payment
+  values are unchanged.
+* **The attested nominative.** `georgian.attested_nominatives` gives each written form of a person
+  the nominative another form attests; the act check's signatory correction
+  (`aoa._person_findings`) and the extraction's merge of a director's forms use it, and
+  `in_case_of(..., written=...)` returns the contract's own form in a case the contract writes.
+  Plain `lemma` is unchanged: project names go through it, and a place name such as `ქართლი` is
+  a nominative in `-ლი`.
+* **The price's own sentence first.** `document_facts._status_of` ranks tax wording by
+  attachment before kind (`own sentence`, then the fee's scope, then anywhere); the kinds'
+  precedence holds among wording of one attachment.
+
+A test of round 1 (`test_rules.test_percentages`) read `ჯარიმა 0.1% დღეში` as a bare `0.1%`; that
+is the behaviour COMPARE-R5-05 confirms as a defect, and the test now expects `0.1% per day`.
+
+Changed outside the extraction's files, each the smallest change inside one function:
+`contract_terms._EXEMPT` (two alternatives), `document_facts._CLAUSE_NUMBER`, `_status_of` and
+`_vat_status`, `amounts.digits_and_words` and `DigitsAndWords.digits_raw` (a figure may follow its
+words), `aoa._fee_like` and `aoa._person_findings` (one call each), and
+`compare._with_own_words` (a figure's words after its currency).
+
+Measured after the fixes: the three strict gold sets (`client_v2`, `ts2`, `ts3`) pass unchanged,
+and `scripts/mutate_aoa.py --seed 173 --per-class 6` gives the base's table row for row: every
+error class detected and corrected at 100%, every harmless class at 0% false positives.
+
 ### Red team, round 1: what the comparison now reads (2026-09-30)
 
 Defects a red team found and a verifier reproduced, each with a unit test on invented

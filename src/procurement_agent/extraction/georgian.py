@@ -305,17 +305,57 @@ def phrase_case(phrase: str) -> Case:
     return case_of(parts[-1]) if parts else "nom"
 
 
-def in_case_of(wrong: str, right: str) -> str:
+def in_case_of(wrong: str, right: str, *, written: Collection[str] = ()) -> str:
     """``right`` (in any case) rewritten in the case ``wrong`` is written in.
 
     What a correction must say: the act's own grammar, the contract's name. ``wrong`` may be
-    misspelled, which does not matter - only its ending is read.
+    misspelled, which does not matter - only its ending is read. ``written`` are the forms the
+    documents write of the name: a form among them in the case meant is the correction as
+    written, so a name that drops a vowel before its ending ("წერეთლის" of "წერეთელი") keeps the
+    form the contract writes rather than one built from the nominative ("წერეთელის").
 
     >>> in_case_of("გიორგი ჭიჭინია", "გიორგი ჭიჭინაძის")
     'გიორგი ჭიჭინაძე'
     """
+    forms = list(written)
     right_lemma = lemma(right)
+    if forms:
+        nominatives = attested_nominatives([right, *forms])
+        right_lemma = nominatives[0]
+        case = _case_meant(wrong, right_lemma)
+        same = [
+            normalize_spaces(f)
+            for f, n in zip(forms, nominatives[1:], strict=True)
+            if n == right_lemma and phrase_case(f) == case
+        ]
+        return same[0] if same else inflect(right_lemma, case)
     return inflect(right_lemma, _case_meant(wrong, right_lemma))
+
+
+#: A word's last syllable with the vowel some nouns drop before their ending put back: "წერეთლი"
+#: (read off "წერეთლის") against "წერეთელი", "ამილახვრი" against "ამილახვარი".
+_SYNCOPE = re.compile(rf"(?P<stem>[{GEORGIAN}]*[^\W\d_აეიოუ])(?P<vowel>[აეო])(?P<c>[ნლრმ])ი")
+
+
+def _restores(full: str, short: str) -> bool:
+    """Whether the phrase ``short`` is ``full`` with the vowel before its last word's final
+    consonant dropped - the nominative read off a syncopated genitive."""
+    a, b = full.split(), short.split()
+    if len(a) != len(b) or a[:-1] != b[:-1]:
+        return False
+    m = _SYNCOPE.fullmatch(a[-1])
+    return m is not None and b[-1] == f"{m.group('stem')}{m.group('c')}ი"
+
+
+def attested_nominatives(forms: Collection[str]) -> list[str]:
+    """The nominative of each of a person's written forms, as another written form attests it.
+
+    ``lemma`` reads "სოსო წერეთლის" as "სოსო წერეთლი": a noun that drops a vowel before its ending
+    cannot be told from its genitive alone. When the documents also write the nominative ("სოსო
+    წერეთელი"), that is the name, and every form of it is given it (red team R5, AOA-R5-05: a
+    correction must never be a non-word). A form no other form attests keeps its ``lemma``."""
+    lemmas = [lemma(f) for f in forms]
+    return [next((o for o in lemmas if _restores(o, n)), n) for n in lemmas]
 
 
 def _case_meant(wrong: str, right_lemma: str) -> Case:

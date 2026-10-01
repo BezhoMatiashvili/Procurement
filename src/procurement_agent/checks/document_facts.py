@@ -37,10 +37,12 @@ from procurement_agent.checks.contract_terms import (
     TaxPhrase,
     fee_scope,
     performance_clause,
+    sentence_at,
     tax_phrases,
 )
 from procurement_agent.extraction.normalize import normalize_spaces
 from procurement_agent.extraction.rules import (
+    _AMOUNT_TURN,
     find_dates,
     find_percentages,
     is_advance_deadline,
@@ -51,6 +53,7 @@ from procurement_agent.extraction.rules import (
     penalty_period,
     percent_of,
     restating_bracket,
+    tax_in_breakdown,
 )
 from procurement_agent.extraction.schemas import FactType
 
@@ -223,7 +226,10 @@ def _start_unread(view: DocumentView) -> bool:
 _BEFORE_THE_SERVICE = re.compile(
     r"^.*?\(\s*(?:ს\s*/\s*კ|საკადასტრო\s+კოდი)[^)]*\)\s*(?:ფარგლებში\s*)?", re.DOTALL
 )
-_CLAUSE_NUMBER = re.compile(r"^\s*\d+(?:\.\d+)*\.?\s*")
+#: A clause number has its form: several levels ("1.1", "1.1.") or one with a stop or a bracket
+#: ("1.", "1)"). A bare figure before a word is the subject's own: "20 ცალი სამუშაო მაგიდის ...",
+#: "2026 წლის ..." (red team R5, EXTRACTION-R5-15).
+_CLAUSE_NUMBER = re.compile(r"^\s*(?:\d+(?:\.\d+)+\.?|\d+[.)])\s*")
 
 
 def _subject(text: str, sentences: list[tuple[int, int]]) -> str | None:
@@ -295,7 +301,22 @@ def _vat_status(view: DocumentView) -> DocumentFact | None:
         and not (p.kind == "net" and (_within(p.span, worded) or is_net_measure(text, p.span[1])))
     ]
     stated = [p for p in phrases if not is_hypothetical(text, p.span[0])]
-    return _status_of(stated, fees, sentences) or _status_of(phrases, fees, sentences)
+    found = _status_of(text, stated, fees, sentences) or _status_of(text, phrases, fees, sentences)
+    if found is not None:
+        return found
+    # the tax listed among the price's parts: "..., მათ შორის: დღგ-ს გარეშე - ..., დღგ - ..."
+    for fee in fees:
+        held = tax_in_breakdown(text, fee.money.span[0])
+        if held is not None:
+            words = text[held[0] : held[1]].strip(" ,;")
+            return DocumentFact(
+                type=FactType.vat_status,
+                value=words,
+                normalized="incl",
+                raw_text=words,
+                confidence=0.8,
+            )
+    return None
 
 
 def _within(span: tuple[int, int], others: list[tuple[int, int]]) -> bool:
@@ -303,15 +324,34 @@ def _within(span: tuple[int, int], others: list[tuple[int, int]]) -> bool:
 
 
 def _status_of(
-    phrases: list[TaxPhrase], fees: list[RoledAmount], sentences: list[tuple[int, int]]
+    text: str,
+    phrases: list[TaxPhrase],
+    fees: list[RoledAmount],
+    sentences: list[tuple[int, int]],
 ) -> DocumentFact | None:
     """The VAT status the wording around the fees states, by kind: net, exempt, exclusion,
-    inclusion; the wording anywhere when none is near a fee."""
+    inclusion; the wording anywhere when none is near a fee.
+
+    Wording in a fee's own sentence decides; the next sentence's counts only when the fee's own
+    states no status. "4.1. ... 18 450 ლარს დღგ-ს ჩათვლით. 4.2. ავანსი დღგ-ს გარეშე შეადგენს
+    3 000 ლარს" is incl: the exclusion is the advance's (red team R5, EXTRACTION-R5-09), and the
+    precedence of kinds is among wording of one attachment."""
+    statuses = ("inclusion", "exclusion", "net", "exempt")
+    own: list[TaxPhrase] = []
     near: list[TaxPhrase] = []
     for fee in fees:
         a, b = fee_scope(sentences, fee.money.span)
         near.extend(p for p in phrases if a <= p.span[0] < b)
-    chosen = near or [p for p in phrases if p.kind in ("inclusion", "exclusion", "net", "exempt")]
+        sentence = sentence_at(sentences, fee.money.span[0])
+        if sentence is not None:
+            # the fee's own clause: its sentence cut at the turns around the fee (", ხოლო
+            # ავანსი დღგ-ს გარეშე ..." is the advance's wording)
+            lo, hi = max(a, sentence[0]), min(b, sentence[1])
+            turns = [m.start() for m in _AMOUNT_TURN.finditer(text, lo, hi)]
+            lo = max([t for t in turns if t < fee.money.span[0]], default=lo)
+            hi = min([t for t in turns if t >= fee.money.span[1]], default=hi)
+            own.extend(p for p in phrases if lo <= p.span[0] < hi and p.kind in statuses)
+    chosen = own or near or [p for p in phrases if p.kind in statuses]
     for kind, status in (
         ("net", "net"),
         ("exempt", "none"),

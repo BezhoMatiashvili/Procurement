@@ -198,10 +198,15 @@ _GENERIC_OF = {FactType.payment_terms: FactType.duration}
 
 
 def _superseded(fact: ExtractedFact, doc_facts: list[ExtractedFact]) -> bool:
-    """Whether a chunk-level rule fact is replaced by a document-level one."""
+    """Whether a chunk-level rule fact is replaced by a document-level one. A penalty is replaced
+    by its kind: the document reader states rates, so a fine stated as an amount ("ჯარიმა 500
+    ლარის ოდენობით") is still the chunk rule's, beside a daily rate (red team R5,
+    EXTRACTION-R5-11)."""
     if fact.source != "rules":
         return False
     for d in doc_facts:
+        if fact.type == d.type == FactType.penalty and not _is_rate(fact):
+            continue
         if fact.type == d.type:
             return True
         generic = _GENERIC_OF.get(d.type)
@@ -212,6 +217,11 @@ def _superseded(fact: ExtractedFact, doc_facts: list[ExtractedFact]) -> bool:
         ):
             return True
     return False
+
+
+def _is_rate(fact: ExtractedFact) -> bool:
+    """Whether a fact states a rate ("0.1% per day") rather than an amount of money."""
+    return fact.unit == "%" or fact.currency is None or "%" in fact.value
 
 
 def run_extraction(

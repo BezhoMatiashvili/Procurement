@@ -121,6 +121,7 @@ from procurement_agent.extraction.georgian import (
     CASES,
     GEORGIAN,
     MONTH_FORMS,
+    attested_nominatives,
     damerau,
     in_case_of,
     inflect,
@@ -156,6 +157,7 @@ from procurement_agent.extraction.rules import (
     _REFERENCE,
     RuleHit,
     _month_ka,
+    _words_before,
     find_dates,
     month_ka_correction,
 )
@@ -2599,13 +2601,17 @@ class AoaChecker:
                 continue  # every place of it is another party's own director, written right
             span, places = where
             # compared on the nominative, so a genitive in either document is no mistake
-            guess = best_match(lemma(form), [lemma(c) for c in theirs])
+            # the nominative the contract writes, never one read off a genitive that drops a
+            # vowel ("წერეთლის" is "წერეთელი", red team R5, AOA-R5-05)
+            guess = best_match(lemma(form), attested_nominatives(theirs))
             diff = guess[1] if guess else None
             typo = diff is not None and diff.looks_like_typo
             hint_ka = " (როგორც ჩანს, შეცდომაა)" if typo else ""
             hint_en = " (looks like a misspelling)" if typo else ""
             # the correction in the act's own grammar, form by form
-            expected = keep_initial(form, in_case_of(form, guess[0])) if guess else None
+            expected = (
+                keep_initial(form, in_case_of(form, guess[0], written=theirs)) if guess else None
+            )
             if expected is not None:
                 expected = with_patronymic(expected, patronymic)
             self._add(
@@ -4365,7 +4371,12 @@ def _fee_like(value: float, written: str) -> str:
         else:
             out += tetri.group(1).rstrip()
         return (out + rest[tetri.end() :]).strip()
-    out = written[: figure.start()] + render_figure_like(value, figure.group(0))
+    lead = written[: figure.start()]
+    words_at = _words_before(lead, len(lead.rstrip(" (")))
+    if words_at is not None and lead.rstrip().endswith("("):
+        # the words first, the figure in brackets: "სამი ათას (3 000) ლარს" (red team R5)
+        lead = lead[:words_at] + words_like(value, lead[words_at:].rstrip(" (")) + " ("
+    out = lead + render_figure_like(value, figure.group(0))
     words = _FEE_WORDS_AFTER.match(rest)
     if words is not None:
         # the bracket's own currency and tetri words kept: "(ასი ლარი და 00 თეთრი)"
