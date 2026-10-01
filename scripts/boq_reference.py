@@ -1365,6 +1365,18 @@ DECISIONS = [
     "sheets_added/sheets_removed compare every sheet name, hidden sheets included.",
     "Colours compare common_scope_total rounded to the cent; ties share a colour; no colour with "
     "fewer than two evaluable bidders or when all tie.",
+    "Round 5: a row that is no position ends a section group unless its item number is "
+    "numbered under the section; '1.' and '1' (one closing dot) are one item number; the "
+    "Georgian 'with VAT' (დღგ-ით, დღგ-თ, დღგ-ს გათვალისწინებით) is the total incl. VAT and "
+    "'დღგ-ს გამოკლებით' the total excl. VAT.",
+    "Round 5, the lead's decisions: with no SUB-TOTAL row, a sheet's own total is the first row "
+    "after the last quantity whose amount plainly sums rows above it, whatever its label, so a "
+    "contingency and a carried total under it are not the positions' total; a single-sheet "
+    "price list whose only valued closing row is its total incl. VAT, plainly summing the "
+    "prices, is ranked on it as both its total and its total incl. VAT (markup 1.0); a hidden "
+    "sheet the Summary does not link to is no priced section (a bidder pricing it is listed "
+    "under heading_priced); the man-hour (კაც/სთ, კაც.სთ, კაც-სთ), the piece (შტ, ც, ცალი), "
+    "kW (კვტ), the month (მთვ) and the metre (გრ.მ) are each one unit.",
 ]
 
 
