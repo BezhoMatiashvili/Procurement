@@ -523,3 +523,16 @@ def test_a_range_of_plain_dates_named_by_no_keyword_is_the_period() -> None:
     assert [(f.rule_id, f.expected, f.actual) for f in changed] == [
         ("CMP.DURATION", "2026-04-01/2026-04-30", "2025-04-01/2025-04-30")
     ]
+
+
+def test_a_malformed_bank_code_changed_beside_the_amount_words_is_two_findings() -> None:
+    """A bank code cut to seven characters is no code the line's values mask, so its letters
+    were read as a changed word and the line's text change was reported beside the bank code
+    and the amount in words, both already reported."""
+    line = (
+        "საფასური შეადგენს 100 (ორასი) ლარს გადასახადების ჩათვლით. ბანკი: სს „ნიმუშის ბანკი“; "
+        "ბანკის კოდი: BAGAGE22; ა/ა: GE18BG0000000677777777"
+    )
+    changed = line.replace("(ორასი)", "(ასი)").replace("BAGAGE22", "TBCGE22")
+    rules = [rule for rule, _, _ in found(["აქტი", line], ["აქტი", changed])]
+    assert sorted(rules) == ["CMP.AMOUNT_WORDS", "CMP.BANK"]

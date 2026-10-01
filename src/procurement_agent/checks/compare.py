@@ -4899,6 +4899,14 @@ def _says_more(hunk: Hunk, shown: list[ValueDelta], *, whole: bool) -> bool:
         for text in (d.left, d.right, d.note_en)
         for w in _WORD.findall(normalize_name(text or ""))
     }
+    # and a value's words as the line's layout splits them: a bank code too short to be masked
+    # ("TBCGE22") reads "tbcge 22" on the line
+    told |= {
+        name_stem(w)
+        for d in shown
+        for text in (d.left, d.right)
+        for w in _layout_key(normalize_name(text or "")).split()
+    }
     stems = tuple(s for s in told if len(s) >= _TOLD_STEM)
     for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, lt, rt, autojunk=False).get_opcodes():
         if tag == "equal":
