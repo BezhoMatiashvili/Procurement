@@ -229,9 +229,13 @@ How the rules read dates and periods (red-team round 4):
 * **A validity stated as a length is a closed range** (a decision): `ძალაში შედის ხელმოწერისთანავე
   და მოქმედებს 12 (თორმეტი) თვის განმავლობაში` is `2026-03-03/2027-03-03`, the length counted
   from the clause's first day, else from the signing, the day kept and held to the month's last
-  (31 August and six months is 28 February). Days and weeks are counted. A length beside an
+  (31 August and six months is 28 February). Days and weeks are counted. The length is the
+  validity's own: it follows its predicate (`მოქმედებს`, `ძალაშია`, `მოქმედების ვადა`, `valid`,
+  `in force`) in the same clause, no comma between; a notice period or a report's deadline in
+  the validity's sentence (`…, ხოლო შეტყობინების ვადაა 30 დღე`) is not. A length beside an
   until-phrase (`… ან შესრულებამდე`) or counted from another event (`მიწოდებიდან 12 თვის`) closes
-  nothing: the range stays open.
+  nothing: the range stays open. With no signing date and no first day known, the length is the
+  ISO duration (`P12M`).
 * **A signing date labelled anywhere is the signing date**: with no date in the preamble, a date
   after `(ხელშეკრულების) გაფორმების / ხელმოწერის / დადების თარიღი:` or `Date of signing:` is
   `contract_date`, and the validity "from signing" starts on it. Another document's label

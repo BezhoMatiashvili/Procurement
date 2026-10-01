@@ -12,6 +12,8 @@ from procurement_agent.checks.aoa import check_aoa
 from procurement_agent.checks.compare import compare
 from procurement_agent.checks.contract_terms import read_term
 from procurement_agent.checks.document_facts import document_facts
+from procurement_agent.extraction.rules import run_rules
+from procurement_agent.extraction.schemas import FactType
 from procurement_agent.ingestion.segmenter import Segment, build
 from tests.unit.test_aoa_check import ACT, CONTRACT
 
@@ -357,6 +359,15 @@ def test_a_validity_stated_as_a_length_is_the_closed_range(
         "ხელშეკრულება ძალაში შედის ხელმოწერისთანავე და მოქმედებს მიწოდებიდან 12 თვის განმავლობაში.",
         "ხელშეკრულება ძალაში შედის ხელმოწერისთანავე და მოქმედებს შესრულებამდე, ხოლო შეწყვეტის "
         "შესახებ მხარე აცნობებს 30 დღით ადრე.",
+        # a notice period, a report's deadline: no until-phrase, and still no length of the
+        # contract, since the validity's own predicate does not state them
+        "ხელშეკრულება ძალაში შედის ხელმოწერისთანავე, ხოლო შეწყვეტის შესახებ შეტყობინების "
+        "ვადაა 30 დღე.",
+        "The Contract is valid from signing until fulfilment, with a notice period of 30 days.",
+        "The Contract is valid from signing, with a notice period of 30 days.",
+        "ხელშეკრულება ძალაში შედის ხელმოწერისთანავე და შემსრულებელი 5 დღის ვადაში "
+        "წარმოადგენს ანგარიშს.",
+        "ხელშეკრულება მოქმედებს ხელმოწერიდან, ხოლო შეტყობინების ვადაა 30 დღე.",
     ],
 )
 def test_a_validity_with_no_length_of_its_own_stays_open(validity: str) -> None:
@@ -402,3 +413,14 @@ def test_the_preambles_date_comes_before_a_labelled_one() -> None:
     text = _contract(_OPEN, foot="ხელშეკრულების გაფორმების თარიღი: 05.03.2026\n")
     assert read_term(text).signed is not None
     assert str(read_term(text).signed) == "2026-03-03"
+
+
+def test_a_length_with_no_known_signing_date_is_left_to_the_duration() -> None:
+    """No date to count from: the whole-document reader states no range, so the chunk rule's
+    ISO duration is the value (GOLD_SPEC 2)."""
+    text = _contract(
+        "ხელშეკრულება ძალაში შედის ხელმოწერისთანავე და მოქმედებს 12 (თორმეტი) თვის განმავლობაში.",
+        dated="ქ. თბილისი",
+    )
+    assert "validity_period" not in _facts(text)
+    assert [h.normalized for h in run_rules(text) if h.type is FactType.validity_period] == ["P12M"]

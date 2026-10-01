@@ -751,12 +751,26 @@ _FROM_AN_EVENT_AFTER = re.compile(
     re.IGNORECASE,
 )
 _LENGTH_UNITS = frozenset({"day", "week", "month", "year"})
+#: What the length must follow, in its own clause: the validity's own predicate - "მოქმედებს",
+#: "ძალაშია", "მოქმედების ვადა", "valid", "remains in force". A notice period or a report's
+#: deadline in the validity's sentence ("..., ხოლო შეტყობინების ვადაა 30 დღე", "5 დღის ვადაში
+#: წარმოადგენს ანგარიშს", "with a notice period of 30 days") is no length of the contract.
+_LASTS = re.compile(
+    r"(?<![ა-ჰ])(?:მოქმედებ[ა-ჰ]*|ძალაშია)(?![ა-ჰ])|(?<![a-z])(?:valid|in\s+force)(?![a-z])",
+    re.IGNORECASE,
+)
+#: Where the predicate's clause ends before the length: a comma or a semicolon ("..., ხოლო",
+#: "valid from signing, with a notice period of 30 days").
+_TURN = re.compile(r"[,;]")
+#: How far after the predicate its length may stand.
+_LENGTH_REACH = 80
 
 
 def _stated_length(text: str, a: int, b: int) -> tuple[int, str] | None:
     """The length a validity clause ``text[a:b]`` states the contract runs for, as (count, unit),
-    counted from the signing or the clause's own first day: one length, and no until-phrase
-    beside it. None when it states none, or more than one."""
+    counted from the signing or the clause's own first day: one length, after the validity's own
+    predicate in its clause (``_LASTS``), and no until-phrase beside it. None when it states
+    none, or more than one."""
     if _UNTIL.search(text, a, b):
         return None
     signing_ends = {m.end() for m in _FROM_SIGNING.finditer(text, a, b)}
@@ -776,6 +790,9 @@ def _stated_length(text: str, a: int, b: int) -> tuple[int, str] | None:
                 continue
         if _FROM_AN_EVENT_AFTER.match(text, end, b):
             continue
+        lasts = [m.end() for m in _LASTS.finditer(text, max(a, start - _LENGTH_REACH), start)]
+        if not lasts or _TURN.search(text, lasts[-1], start):
+            continue  # not the validity's own length: a notice, a report's deadline
         count = int(str(h.normalized)[1:-1])
         found.add((count, str(h.unit)))
     return found.pop() if len(found) == 1 else None

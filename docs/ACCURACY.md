@@ -402,8 +402,10 @@ miss that must not match (`tests/unit/test_redteam_r4_dates.py`):
   whole words only.
 * **A validity stated as a length** (EXTRACTION-R4-08) was an open range from the signing. The
   lead decided it is the closed range: the length counted from the clause's first day or the
-  signing, the day kept, held to the month's last. The red team's probe asks for `P12M`; it
-  reports the range now, by that decision.
+  signing, the day kept, held to the month's last. Only the validity's own length closes it - one
+  that follows `მოქმედებს` / `ძალაშია` / `valid` in its clause - so a notice period or a
+  report's deadline in the same sentence leaves the range open. The red team's probe asks for
+  `P12M`; it reports the range now, by that decision.
 * **A signing date labelled at the foot** (EXTRACTION-R4-11) was read as `contract_date` by the
   chunk rule but not by the term reader, so the validity "from signing" was lost. The term
   reader now takes a labelled signing date anywhere when the preamble has none.
