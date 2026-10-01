@@ -1276,18 +1276,47 @@ def document_deltas(left_text: str, right_text: str) -> tuple[list[ValueDelta], 
         _in_place_of(hits, [f for f in facts if f.type in _WHOLE_DOCUMENT_TYPES])
         for hits, facts in ((left_hits, left_facts), (right_hits, right_facts))
     ]
-    return _deltas(*whole, types=FIELD_TYPES) + _dates_changed(left_facts, right_facts), []
+    dates = _dates_changed(
+        left_facts,
+        right_facts,
+        (left_hits, right_hits),
+        one_sided=_same_kind(left_text, right_text),
+    )
+    return _deltas(*whole, types=FIELD_TYPES) + dates, []
 
 
-def _dates_changed(left: list[_Hit], right: list[_Hit]) -> list[ValueDelta]:
-    """A document's own date changed between the versions: one each side, and different. The
-    line it stands on may name it by no word ("Date (unclassified)"); this names it."""
+def _same_kind(left_text: str, right_text: str) -> bool:
+    """Whether both documents are acts, or neither is: an act's own date is what it has and its
+    contract has not, no date added."""
+    from procurement_agent.checks.document_facts import is_act  # checks import compare
+
+    return is_act(normalize_confusables(left_text)) == is_act(normalize_confusables(right_text))
+
+
+def _dates_changed(
+    left: list[_Hit],
+    right: list[_Hit],
+    written: tuple[list[_Hit], list[_Hit]],
+    *,
+    one_sided: bool = True,
+) -> list[ValueDelta]:
+    """A document's own date changed between the versions: one each side, and different; or,
+    between two versions of one kind (``one_sided``), one side's alone - a draft's blank filled
+    in, the date deleted (red team R5, COMPARE-R5-10) - when the other side writes no date of
+    that value anywhere (``written``: each side's values). The line it stands on may name it by
+    no word ("Date (unclassified)"); this names it."""
     out: list[ValueDelta] = []
     for ft in sorted(_DOCUMENT_DATES, key=lambda t: t.value):
         ls = [h for h in left if h.type is ft]
         rs = [h for h in right if h.type is ft]
         if len(ls) == 1 and len(rs) == 1 and (d := _delta(ls[0], rs[0])) is not None:
             out.append(d)
+        elif one_sided and len(ls) + len(rs) == 1:
+            one, other = (ls[0], written[1]) if ls else (rs[0], written[0])
+            if all(str(h.normalized) != str(one.normalized) for h in other):
+                d = _delta(one, None) if ls else _delta(None, one)
+                if d is not None:
+                    out.append(d)
     return out
 
 
