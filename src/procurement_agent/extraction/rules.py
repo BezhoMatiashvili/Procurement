@@ -1411,7 +1411,7 @@ def is_rate_cap(text: str, start: int, end: int) -> bool:
     """Whether the percentage at ``text[start:end]`` caps a penalty's total rather than setting
     its rate. A cap is no penalty, and the period of the rate beside it is not its period: read
     as one, "0.1% per day, not exceeding 10%" stated a second penalty of "10% per day"."""
-    if _OWN_PERIOD.match(text, end):
+    if _OWN_PERIOD.match(text, end) or _PER_PERIOD_INESSIVE.match(text, end):
         return False  # "up to 0.5% per day", "არაუმეტეს 0.1%-ისა ყოველ დღეზე": a rate all the same
     before = text[max(0, start - _CAP_REACH) : start]
     cut = list(_SENTENCE_END.finditer(before))
@@ -1685,15 +1685,27 @@ def find_percentages(text: str) -> list[RuleHit]:
 #: delay", "For every month of delay ... 1%". Never "a month": "within a month, a penalty of 5%"
 #: is no monthly penalty.
 _PERIOD_KA = r"(დღ(?!გ)|კვირ|თვ|წელ|წლ)"
+#: A period's noun in the inessive: "დღეში", "კვირაში", "თვეში", "წელიწადში".
+_INESSIVE = r"(დღ|კვირ|თვ|წელიწად)(?:ე|ა)?ში(?![ა-ჰ])"
 _PER_PERIOD = re.compile(
     rf"ყოველ(?:ი|ს)?\s+(?:[ა-ჰ]+\s+){{0,2}}{_PERIOD_KA}"
     r"|(?:ყოველ)?(დღ|თვ|კვირ|წლ)(?:იურ|ეულ)[ა-ჰ]*"
+    # "every day" written as one word: "ყოველდღე", "ყოველკვირა", "ყოველთვე" - never "ყოველთვის"
+    # (always)
+    r"|ყოველ(დღ|კვირ|თვ)(?:ე|ა)(?![ა-ჰ])"
+    # the inessive straight after the rate's sign (``_PER_PERIOD_INESSIVE``), for a reader that
+    # searches the whole text: the comparison masks these words as the value's own
+    rf"|(?:(?<=%)|(?<=%\s)|(?<=%-ს\s)|(?<=%-ის\s)|(?<=%-ისა\s)){_INESSIVE}"
     r"|(?<![a-z])(?:per|each|every|for\s+each|for\s+every)\s+"
     r"(?:calendar\s+|working\s+|business\s+|banking\s+)?(day|week|month|year)(?![a-z])",
     re.IGNORECASE,
 )
+#: The period in the inessive right after the rate, or after its case ending: "0.2% დღეში", "0.2%
+#: კვირაში", "0.5%-ს თვეში", "1% წელიწადში" (red team R5, COMPARE-R5-05). Only there: a count
+#: between them is a length of time, not a period - "0.2% 10 დღეში" counts no rate per day.
+_PER_PERIOD_INESSIVE = re.compile(rf"(?:-?[ა-ჰ]{{1,4}})?(?:\s+ოდენობით)?\s*{_INESSIVE}")
 _PERIOD_UNITS = {
-    "დღ": "day", "კვირ": "week", "თვ": "month", "წელ": "year", "წლ": "year",
+    "დღ": "day", "კვირ": "week", "თვ": "month", "წელ": "year", "წლ": "year", "წელიწად": "year",
     "day": "day", "week": "week", "month": "month", "year": "year",
 }  # fmt: skip
 #: A rate's own period, right after it and within its clause: "0.5% per day", "0.1%-ისა ყოველ
@@ -1721,6 +1733,9 @@ def penalty_period(text: str, start: int, end: int) -> str | None:
     before = text[max(0, start - _PERIOD_BEFORE) : start]
     cut = [*_SENTENCE_END.finditer(before), *_PCT.finditer(before), *_CLAUSE_TURN.finditer(before)]
     before = before[max(c.end() for c in cut) :] if cut else before
+    inessive = _PER_PERIOD_INESSIVE.match(text, end)
+    if inessive is not None:
+        return _PERIOD_UNITS[inessive.group(1)]
     found = _PER_PERIOD.search(after)
     if found is None:
         found = next(reversed(list(_PER_PERIOD.finditer(before))), None)
