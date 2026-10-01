@@ -426,5 +426,5 @@ def test_a_monthly_fee_beside_the_total_in_one_sentence_is_the_monthly_fee() -> 
 
 def test_an_advance_paid_monthly_is_no_monthly_fee() -> None:
     left = ["1.1. ყოველთვიური ავანსის თანხა შეადგენს 500 ლარს."]
-    [(rule, label, *_)] = labelled(run(left, edit(left, "500", "600")))
+    [(_rule, label, *_)] = labelled(run(left, edit(left, "500", "600")))
     assert label != "Monthly fee"
