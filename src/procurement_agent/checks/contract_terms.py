@@ -269,6 +269,60 @@ _FEE_NAMED = re.compile(
 )
 
 
+#: The advance deducted, named with the advance itself: "ავანსის (30%) გამოქვითვით", "ავანსის
+#: თანხის გამოკლებით", "გამოქვითული ავანსი", "გამოიქვითება ავანსი", "less the advance". The
+#: deduction alone says nothing of the advance: "საშემოსავლო გადასახადის გამოქვითვით" is a
+#: natural person's net fee.
+_DEDUCTION = r"(?:გამო(?:ი)?ქვით|გამოკლ)[ა-ჰ]*"
+_ADVANCE_DEDUCTED = re.compile(
+    rf"(?<![ა-ჰ])ავანს[ა-ჰ]*(?:\s*\([^()\n]{{0,20}}\))?(?:\s+თანხ[ა-ჰ]*)?\s+{_DEDUCTION}"
+    rf"|(?<![ა-ჰ]){_DEDUCTION}\s+ავანს[ა-ჰ]*"
+    r"|(?<![a-z])(?:less|minus|after\s+deducting|net\s+of)\s+(?:the\s+)?advance(?![a-z])"
+    r"|(?<![a-z])advance\s+deducted(?![a-z])",
+    re.IGNORECASE,
+)
+#: What is left to pay, after the deduction and before the figure: "ანაზღაურებას ექვემდებარება",
+#: "გადასახდელი თანხა", "ასანაზღაურებელია", "გადაიხდება", "payable".
+_PAYABLE = re.compile(
+    r"(?<![ა-ჰ])(?:ანაზღაურებ|ასანაზღაურებ|გადასახდელ|გადაიხდ|დარჩენ)[ა-ჰ]*"
+    r"|(?<![a-z])(?:payable|to\s+be\s+paid|due)(?![a-z])",
+    re.IGNORECASE,
+)
+_ADVANCE_WORD = re.compile(r"(?<![ა-ჰ])ავანს|(?<![a-z])advance(?![a-z])", re.IGNORECASE)
+#: How far back from a figure the advance's deduction may stand. It is looked for across a ";"
+#: ("გამოქვითული ავანსი: 30 ლარი; გადასახდელი თანხა: 70 ლარი") but never across a full stop.
+_DEDUCTION_REACH = 160
+
+
+def _clause_reach(spans: list[tuple[int, int]], i: int | None, start: int, text: str) -> int:
+    """Where the words before the figure at ``start`` that may still speak of it begin: its
+    sentence's start, or an earlier one's when only a ";" ends the sentences between."""
+    if i is None:
+        return start
+    lo = spans[i][0]
+    while (
+        i > 0 and text[spans[i - 1][1] - 1] == ";" and start - spans[i - 1][0] <= _DEDUCTION_REACH
+    ):
+        i -= 1
+        lo = spans[i][0]
+    return max(lo, start - _DEDUCTION_REACH)
+
+
+def _remains_after_the_advance(text: str, lo: int, own: int, start: int) -> bool:
+    """Whether the words before the figure at ``start`` (from ``lo``) deduct the advance, and
+    its own clause (from ``own``, the end of the amount before it) then says what is left to
+    pay: the figure is the fee's remainder (red team R5, AOA-R5-02). The payable word must be
+    the figure's own, so a fee stated after the remainder ("..., ხოლო საფასური 100 ლარი") is not
+    taken for it."""
+    found = list(_ADVANCE_DEDUCTED.finditer(text, lo, start))
+    if not found:
+        return False
+    payable = list(_PAYABLE.finditer(text, max(found[-1].end(), own), start))
+    # the advance named after what is to be paid is the figure's own name: "გადასახდელი
+    # ავანსი 30 ლარი" is the advance
+    return bool(payable) and _ADVANCE_WORD.search(text, payable[-1].end(), start) is None
+
+
 def _names_a_running_figure(text: str, lo: int, start: int) -> bool:
     """Whether the words before the figure at ``start``, in its clause (``lo`` on: its sentence,
     or the end of the amount before it) and on this side of a ";", name it a running figure of
@@ -314,7 +368,9 @@ def amount_roles(text: str, *, sentences: list[tuple[int, int]] | None = None) -
     lend its word to the price in the next one. A tax amount is the exception: only a tax named
     right before or right after the figure makes it one (``_TAX_BEFORE``, ``_TAX_AFTER``).
     Penalties are kept and named. A figure its clause names as a running figure of the
-    contract - done to date, the balance left, paid before (``_RUNNING``) - is "running".
+    contract - done to date, the balance left, paid before (``_RUNNING``) - is "running". A
+    figure the words before it name as what is left to pay once the advance is deducted
+    ("ავანსის გამოქვითვით ანაზღაურებას ექვემდებარება 70 ლარი") is the fee's "remainder".
     """
     spans = sentence_spans(text) if sentences is None else sentences
     out: list[RoledAmount] = []
@@ -324,6 +380,7 @@ def amount_roles(text: str, *, sentences: list[tuple[int, int]] | None = None) -
         i = _sentence_index(spans, start)
         a, b = spans[i] if i is not None else (start, end)
         b = max(b, end)
+        own_from = previous_end
         clause_from, previous_end = max(a, previous_end), end
         role: AmountRole | None
         opened = text.rfind("(", max(0, start - 40), start)
@@ -337,6 +394,10 @@ def amount_roles(text: str, *, sentences: list[tuple[int, int]] | None = None) -
             role = "tax"
         else:
             role = nearest_keyword_group(text[a:b], start - a, end - a, _ROLE_KEYWORDS)
+        if role in (None, "price", "advance") and _remains_after_the_advance(
+            text, _clause_reach(spans, i, start, text), own_from, start
+        ):
+            role = "remainder"
         if role not in _RUNNING_YIELDS_TO and _names_a_running_figure(text, clause_from, start):
             role = "running"
         out.append(RoledAmount(money=money, role=role))

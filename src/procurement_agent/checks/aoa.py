@@ -3310,13 +3310,22 @@ class AoaChecker:
         parts = [r for r in act if r.role in ("advance", "remainder")]
         matched = [r.money for r in fees if _states(prices, r.money)]
         wrong = [r for r in fees if not _states(prices, r.money)]
-        if parts and not _fee_parts_add_up(parts, matched, prices):
+        # an advance stated only as a share ("ავანსის (30%) გამოქვითვით"): the remainder is the
+        # rest of the fee (red team R5, AOA-R5-02)
+        shares = [
+            share.percent
+            for doc in (self.aoa, self.contract)
+            for share in doc.advance(in_act=doc is self.aoa).shares
+            if 0 < share.percent < 100
+        ]
+        if parts and not _fee_parts_add_up(parts, matched, prices, shares):
             # a part the contract itself states (its advance) is not the one that is wrong
             wrong += [
                 r
                 for r in parts
                 if not _states(prices, r.money)
                 and not _states([c.money for c in contract if c.role == r.role], r.money)
+                and not (r.role == "advance" and _share_of(r.money, prices, shares))
             ]
         for r in sorted(wrong, key=lambda r: r.money.span):
             self._fee_finding(r, prices, contract)
@@ -4595,7 +4604,23 @@ def _plus_vat(net: float, gross: float, rate: float) -> bool:
     )
 
 
-def _fee_parts_add_up(parts: list[RoledAmount], fees: list[Money], prices: list[Money]) -> bool:
+def _share_of(money: Money, prices: list[Money], shares: Sequence[float]) -> bool:
+    """Whether ``money`` is a stated share (percent) of a price in its currency: the advance
+    the contract sets as "30% of the price", written out as a figure in the act."""
+    return any(
+        amounts_equal(round(p.value * n / 100, 2), money.value)
+        for p in prices
+        if p.currency == money.currency
+        for n in shares
+    )
+
+
+def _fee_parts_add_up(
+    parts: list[RoledAmount],
+    fees: list[Money],
+    prices: list[Money],
+    shares: Sequence[float] = (),
+) -> bool:
     """Whether the act's advance and remainder lines are its fee paid in parts.
 
     Per currency, the advances and the remainder must add up to a fee the act states and the
@@ -4604,7 +4629,9 @@ def _fee_parts_add_up(parts: list[RoledAmount], fees: list[Money], prices: list[
     already paid, and "the rest" goes without saying. An act that states its fee only in parts
     has no fee line for them to make up; then the advance and the remainder must add up to a
     price the contract states. A line the act restates counts once or as often as it is written,
-    whichever adds up.
+    whichever adds up. With no advance figure, an advance the act or the contract states as a
+    share (``shares``, in percent) leaves the remainder that share's rest of the fee: 70 of 100
+    after a 30% advance (red team R5, AOA-R5-02).
     """
     for currency in dict.fromkeys(r.money.currency for r in parts):
         advances = [
@@ -4616,7 +4643,15 @@ def _fee_parts_add_up(parts: list[RoledAmount], fees: list[Money], prices: list[
         advance = {sum(advances), sum(set(advances))}
         rest = {sum(rests), sum(set(rests))}
         totals = [f.value for f in fees if f.currency == currency]
-        if totals and rests:
+        if rests and not advances and shares:
+            targets = totals or [p.value for p in prices if p.currency == currency]
+            ok = any(
+                amounts_equal(round(t * (100 - n) / 100, 2), r)
+                for n in shares
+                for r in rest
+                for t in targets
+            )
+        elif totals and rests:
             ok = any(amounts_equal(a + r, t) for a in advance for r in rest for t in totals)
         elif totals:
             ok = any(min(advance) <= t + 0.01 for t in totals)
