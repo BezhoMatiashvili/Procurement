@@ -667,6 +667,8 @@ class BoqLine:
     non_numeric: tuple[tuple[str, str], ...] = ()
     #: the item number was stored as a number ("1.10" typed into a General cell reads 1.1)
     numeric_item: bool = False
+    #: the rows of this sheet the amount cell's formula refers to (none for a typed amount)
+    amount_rows: tuple[int, ...] = ()
 
     @property
     def key(self) -> str:
@@ -1651,6 +1653,7 @@ def _read_sheet(
         item_no, numeric_item = _item_cell(ws, r, item_cols)
         if label_col and not _ITEM_NO.match(item_no):
             item_no = ""  # the label merged over the item column is no item number
+        amount_formula = _formula_text(wf.cell(r, cols["amount"])) if cols.get("amount") else None  # type: ignore[attr-defined]
         sheet.lines.append(
             BoqLine(
                 sheet=sheet_name,
@@ -1668,6 +1671,7 @@ def _read_sheet(
                 kind=_line_kind(ws, wf, cols, r, description, has_measure),
                 non_numeric=tuple(non_numeric),
                 numeric_item=numeric_item,
+                amount_rows=tuple(_formula_rows(amount_formula)) if amount_formula else (),
             )
         )
     return sheet
@@ -1706,12 +1710,29 @@ def _closing_line(sheet: BoqSheet, linked_rows: set[int]) -> BoqLine | None:
         and not _INCL_VAT.search(ln.description)
     ]
     linked = [ln for ln in after if ln.row in linked_rows]
-    if linked:
-        return linked[-1]
     labelled = [ln for ln in after if _CLOSING.match(ln.description)]
-    if labelled:
-        return labelled[-1]
+    closing = linked[-1] if linked else labelled[-1] if labelled else None
+    if closing is not None:
+        return _total_before_rates(after, closing) or closing
     return subtotals[-1] if subtotals else None
+
+
+def _total_before_rates(after: list[BoqLine], closing: BoqLine) -> BoqLine | None:
+    """The bill's own total under a closing row that adds rates of it: "Total", "Contingency 5%"
+    (``=F7*E8``), "TOTAL CARRIED TO SUMMARY" (``=F7+F8``) - the positions are held against
+    "Total", whatever it is labelled, and the carried total closes the sheet only for the
+    Summary's link (the lead's round-5 policy). Chosen by how the rows are built, never by
+    whether the first one's range covers the positions: a range one row short is the slip the
+    reconciliation is there to report. None when the rows are not so built."""
+    first = after[0]
+    between = [ln for ln in after if first.row < ln.row < closing.row]
+    if closing is first or not between or not first.amount_rows:
+        return None
+    if any(set(ln.amount_rows) - {ln.row} != {first.row} for ln in between):
+        return None  # a row between that is not a rate of the total alone
+    built = set(closing.amount_rows) - {closing.row}
+    allowed = {first.row, *(ln.row for ln in between)}
+    return first if first.row in built and built <= allowed else None
 
 
 def _summary_columns(ws: object) -> tuple[int | None, int | None, int | None, int]:

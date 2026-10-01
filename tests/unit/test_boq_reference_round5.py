@@ -247,3 +247,30 @@ def test_a_hidden_draft_sheet_no_summary_links_is_no_section(tmp_path: Path, hid
         assert a["evaluated_cost"] == 1100.0
     else:  # near miss: a visible second bill is a section
         assert b["unpriced_sheets"] == ["1. WORKS (old)"]
+
+
+def _carried_bill(rate: float | None, label: str) -> Cells:
+    """Two positions, then "<label>" (=SUM), "Contingency 5%" (=F5*E6), "TOTAL CARRIED"."""
+    lines = (("1.1", "Trench excavation", "m3", 10.0), ("1.2", "Brick wall", "m2", 20.0))
+    cells = _ref_bill(
+        tuple((*x, rate, None if rate is None else x[3] * rate) for x in lines),
+        template=rate is None,
+    )
+    total = sum(x[3] * (rate or 0.0) for x in lines)
+    cells[(5, 2)] = label
+    cells[(5, 6)] = Fx("=SUM(F3:F4)", total)
+    cells[(6, 2)], cells[(6, 5)], cells[(6, 6)] = "Contingency 5%", 0.05, Fx("=F5*E6", total * 0.05)
+    cells[(7, 2)], cells[(7, 6)] = "TOTAL CARRIED TO SUMMARY", Fx("=F5+F6", total * 1.05)
+    return cells
+
+
+@pytest.mark.parametrize("label", ["Total", "ჯამი"])
+def test_the_positions_are_held_against_the_total_before_a_contingency(
+    tmp_path: Path, label: str
+) -> None:
+    _save(tmp_path / "template.xlsx", {"1. WORKS": _carried_bill(None, label)})
+    _save(tmp_path / "A.xlsx", {"1. WORKS": _carried_bill(100.0, label)})
+    gold = ref.build_gold(tmp_path, tmp_path / "template.xlsx")
+    a = gold["bids"]["A"]
+    assert a["sheet_subtotals"] == {"1. WORKS": 3000.0}
+    assert a["sheet_amounts"] == {"1. WORKS": 3000.0}

@@ -291,6 +291,20 @@ def read_sheet(ws_v, ws_f, name: str, hdr) -> Sheet:
         ]
         if any(t.startswith("SUB-TOTAL") or t.startswith("SUBTOTAL") for t in texts):
             subtotal_rows.append(r)
+    if not subtotal_rows:
+        # round 5 (the lead's decision): with no SUB-TOTAL row, the sheet's own total is the
+        # first row after the last quantity whose amount adds rows above it, whatever it is
+        # labelled ("Total", "ჯამი"); a contingency and a carried total below it are built from
+        # it and are not read as the positions' total
+        qty_rows = [
+            r for r in range(nr + 1, last + 1) if ws_v.cell(r, cols["qty"]).value is not None
+        ]
+        for r in range(max(qty_rows, default=nr) + 1, last + 1):
+            f = formula_of(ws_f.cell(r, cols["amount"]))
+            refs = refs_of(f) if f else []
+            if refs and not own_row_only(f or "", r) and all(r2_ < r for _, _, _, r2_ in refs):
+                subtotal_rows.append(r)
+                break
     end = subtotal_rows[-1] if subtotal_rows else last + 1
     for r in range(nr + 1, end):
         item, numeric_item = "", False

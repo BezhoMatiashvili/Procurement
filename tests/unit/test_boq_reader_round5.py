@@ -759,3 +759,69 @@ def test_a_linked_or_visible_second_bill_is_still_a_section(
     t, (a, _) = _hidden_draft_compare(tmp_path, linked=linked, hidden=hidden)
     assert _DRAFT in t.sheets and not t.hidden_sheets
     assert "BOQ.SECTION_UNPRICED" in _rules(a)
+
+
+# --- R5-16 (the lead's policy): a contingency between the bill's Total and the carried total --
+
+
+def _contingency_bill(
+    factor: float | None, label: str, *, total_range: str = "F2:F6", between: object = None
+) -> tuple[Cells, float]:
+    """The bill, then "<label>" summing the positions, "Contingency 5%" (``=F7*E8``) - or the
+    ``between`` row given - and "TOTAL CARRIED TO SUMMARY" (``=F7+F8``), which the Summary
+    links."""
+    cells, total = _bill(factor, close=label)
+    last = int(total_range.split(":")[1][1:])
+    stated = total - sum(
+        q * r * (factor or 0.0) for r_, (_, _, _, q, r) in enumerate(_LINES, 2) if r_ > last
+    )
+    cells[(7, 6)] = Fx(f"=SUM({total_range})", stated)
+    cells[(8, 2)] = "Contingency 5%"
+    cells[(8, 5)] = 0.05
+    cells[(8, 6)] = Fx("=F7*E8", stated * 0.05)
+    if between is not None:
+        cells[(8, 2)] = "Provisional sum"
+        cells[(8, 5)] = None
+        cells[(8, 6)] = between
+    carried = stated + (between if isinstance(between, float) else stated * 0.05)
+    cells[(9, 2)] = "TOTAL CARRIED TO SUMMARY"
+    cells[(9, 6)] = Fx("=F7+F8", carried)
+    return cells, carried
+
+
+def _contingency_compare(tmp_path: Path, label: str, **kw: object) -> list[BidComparison]:
+    books = []
+    for name, factor in (("T", None), ("A", 1.0), ("B", 0.9)):
+        bill, carried = _contingency_bill(factor, label, **kw)  # type: ignore[arg-type]
+        summary = _summary(carried, closing=9)
+        path = _save(tmp_path / f"{name}.xlsx", {"SUMMARY": summary, _SHEET: bill})
+        books.append(read_boq(path, name=name))
+    return compare_all(books[0], books[1:])
+
+
+@pytest.mark.parametrize("label", ["Total", "ჯამი", "Sub-total", "Works total"])
+def test_a_contingency_between_the_total_and_the_carried_total_is_part_of_the_chain(
+    tmp_path: Path, label: str
+) -> None:
+    a, b = _contingency_compare(tmp_path, label)
+    for comp in (a, b):
+        assert "BOQ.RECONCILE" not in _rules(comp)
+    assert (a.colour, b.colour) == ("red", "green")
+
+
+def test_a_bill_total_one_row_short_is_still_reported(tmp_path: Path) -> None:
+    # near miss: chosen by how the rows are built, the Total still answers for its own range
+    a, _ = _contingency_compare(tmp_path, "Total", total_range="F2:F5")
+    [gap] = [f for f in a.findings if f.rule_id == "BOQ.RECONCILE"]
+    assert "row 7" in gap.message_en
+    assert gap.actual == "24,005.00" and gap.expected == "16,755.00"
+
+
+def test_a_row_between_that_is_no_rate_of_the_total_leaves_the_carried_total_closing(
+    tmp_path: Path,
+) -> None:
+    # near miss: a typed provisional sum between them is no rate of the Total - the carried
+    # total closes the sheet as before, and the positions do not add up to it
+    a, _ = _contingency_compare(tmp_path, "Total", between=1000.0)
+    [gap] = [f for f in a.findings if f.rule_id == "BOQ.RECONCILE"]
+    assert "row 9" in gap.message_en
