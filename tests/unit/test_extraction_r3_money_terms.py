@@ -207,6 +207,19 @@ def test_a_payer_a_damages_clause_or_a_transfer_of_goods_pays_no_fee() -> None:
         EN_HEAD + "4.2. The Supplier shall transfer the goods within 9 working days.",
     ):
         assert _doc(clause, FactType.payment_terms) == [], clause
+    english = EN_HEAD + "4.2. The Supplier shall pay the Buyer's damages within 9 working days."
+    assert _doc(english, FactType.payment_terms) == []
+
+
+def test_damage_mentioned_in_a_payment_clause_leaves_it_a_payment_clause() -> None:
+    for clause in (
+        KA_HEAD + "4.2. შემკვეთი ღირებულებას გადაიხდის მიწოდებიდან 9 სამუშაო დღის განმავლობაში, "
+        "თუ საქონელი არ არის დაზიანებული.",
+        KA_HEAD + "4.2. ღირებულება გადაიხდება 9 სამუშაო დღეში, თუ შემკვეთს ზიანი არ მიადგა.",
+        EN_HEAD + "4.2. The Buyer shall pay the price within 9 working days after delivery of the "
+        "goods free of damage.",
+    ):
+        assert _doc(clause, FactType.payment_terms) == ["P9D working"], clause
 
 
 # --- EXTRACTION-R3-09: the balance's deadline after a semicolon --------------------------------
