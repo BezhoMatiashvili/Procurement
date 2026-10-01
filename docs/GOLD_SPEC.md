@@ -323,6 +323,64 @@ How the rules read money, terms and lines (red-team round 4):
 * **Contract numbers.** Latin letters are upper case whatever the document's case (`sp-2026/318`
   is `SP-2026/318`); Georgian letters stay as written.
 
+How the rules read money, terms and names (red-team round 5):
+
+* **Money.** An amount written words first with its figure in brackets (`სამი ათას (3 000)
+  ლარს`) is one amount, words to currency, its value the figure's, as a duration or a rate
+  written so already is; the words must read as a number, so `ღირებულება (3 000) ლარი` is none.
+  In the act check its two halves are a pair like `3 000 (სამი ათასი) ლარს`. A currency's name
+  may carry its adjective of origin in the noun's case (`ამერიკული დოლარი`, `ამერიკულ დოლარს`
+  are USD). A figure's words after its currency (`18 400 ლარს (თვრამეტი ათას ოთხასი ლარი)`, with
+  or without tetri) are its own, as before it.
+* **The contract's sum.** `ხელშეკრულების თანხა`, `ხელშეკრულების საერთო თანხა` and `საერთო
+  თანხა` name the contract's overall figure (`total_amount`) as `ხელშეკრულების ღირებულება`
+  does, when no other figure and no rate stand between; `ავანსის თანხა` does not, nor a share's
+  base (`ხელშეკრულების თანხის 10%`). `შეფასებულია` (is valued) holds no price word. A price
+  of one item - a count of one before the priced item (`ერთი სკამის ღირებულება`, `1 (ერთი)
+  ცალი ... ღირებულება`, `თითო`, `one`, `each`), or a per-unit word - is a `price` whichever
+  money word labels it; a figure's own words (`1 000 (ერთი ათასი)`) are no count, and
+  `სამუშაო` names the works only as a noun (`სამუშაოს`, `სამუშაოების`): `სამუშაო მაგიდის ფასი`
+  prices a desk.
+* **Parts of the price.** A figure its own clause names an advance, a guarantee, a retention or a
+  deposit before it (`გადაიხდის ავანსს 5 520 ლარის ოდენობით`) is an `amount` with or without a
+  turn before it; a clause is cut at a comma, and a part word that only qualifies (`ავანსის
+  ჩათვლით`) names none, so `ღირებულება, ავანსის ჩათვლით, შეადგენს 36 000 ლარს` stays the
+  price. Past a turn, what is left to pay (`ასანაზღაურებელი`, `გადასახდელი`, `დარჩენილი`,
+  `payable`, `balance`) is an `amount` too. The advance's share is read back to the start of its
+  sentence, however long the amount's words are, never across a turn (`, ხოლო`, `, მაგრამ`), a
+  negation (`ავანსი არ გაიცემა`) or a security of the advance (`საბანკო გარანტია ავანსის თანხის
+  100%-ის ოდენობით`).
+* **A price table's closing rows.** Rows are told apart by their columns as well as their key
+  (closing rows often have none). The tax's row (`დღგ`, `დღგ (18%)`) is an `amount`; a total
+  row the tax's row and another total row follow (`სულ` / `დღგ` / `სულ დღგ-ს ჩათვლით`) is the
+  net, an `amount`, and so is a row naming the tax's absence beside another total row (`ჯამი
+  დღგ-ს გარეშე` beside `სულ ჯამი`). A table whose only closing row is `ჯამი დღგ-ს გარეშე` keeps it
+  as the total.
+* **VAT.** `none` also in the other word orders (`დღგ-ს გადამხდელი არ არის`, `არ არის
+  რეგისტრირებული დღგ-ს გადამხდელად`, `დღგ-ის გადამხდელად რეგისტრირებული არ არის`). Wording in a
+  fee's own sentence decides its status; the next sentence counts only when the fee's own states
+  none, so an advance's or the unit prices' basis in the next clause is theirs. A price that lists
+  the tax among its parts (`36 000 ლარს, მათ შორის: დღგ-ს გარეშე - ..., დღგ - ...`) is `incl`.
+* **Penalties.** The period in the inessive right after the rate or its case ending (`0.2%
+  დღეში`, `კვირაში`, `თვეში`, `წელიწადში`) and written as one word (`ყოველდღე`, `ყოველკვირა`,
+  `ყოველთვე`) is the rate's; a count between them is a length (`0.2% 10 დღეში`), and `ყოველთვის`
+  (always) is no month. A fine stated as an amount (`ჯარიმა 500 ლარის ოდენობით`) is a `penalty`
+  beside a daily rate; a money cap (`მაგრამ არაუმეტეს 1 000 ლარისა`) and a rate restated as
+  money (`ღირებულების 5%-ის, 100 ლარის ოდენობით`) are not.
+* **Payment terms.** The days a deadline counts are read from the duration itself in every
+  path: `ანგარიშსწორების ვადა: ... 10 (ათი) სამუშაო დღე` is `P10D working`; business and banking
+  days are working days.
+* **Contract numbers.** Behind a label, a colon or a dash after the number sign or the word for
+  number (`ხელშეკრულების №: 45/2026`, `ხელშეკრულების ნომერი: 45/2026`, `Contract No.: 45/2026`,
+  a key-terms row): after the contract's own word only. `აქტის №: 12` and `ინვოისის ნომერი: 7`
+  stay unread, R3-16 being undecided.
+* **Subject.** A clause number has its form (`1.1`, `1.`, `1)`); a figure that opens the subject
+  (`20 ცალი ...`, `2026 წლის ...`) is its own.
+* **Names.** A surname that drops a vowel before its ending (`წერეთლის` of `წერეთელი`) cannot be
+  told from its genitive alone: the nominative is the one another written form attests (the
+  contract's signature), and a correction in a case the contract writes is its written form
+  (`… წერეთლის` in a genitive place). With no form attesting it, the lemma stays as read.
+
 `vat_status` meanings: `incl` = the price includes VAT/taxes; `excl` = VAT is added on top;
 `none` = no VAT applies / exempt; `net` = a net amount, taxes withheld or not mentioned by rule
 (natural person, foreign organisation).
