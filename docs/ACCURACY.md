@@ -1257,7 +1257,8 @@ are in GOLD_SPEC 5.
   was held against the range's first row; it is held against the range's positions, and a
   range scaled or mixed is not checked. "V.A.T." and "დ.ღ.გ." are the tax. A chain row's rate
   is the one its label states or the one typed beside it; a "% of total" share column is no
-  rate.
+  rate. A profit rate read from the label alone holds on TOTAL COST or on TOTAL COST +
+  overheads, so the labels never widen the open "profit on cost + overheads" question above.
 * Units: "100 m2" is "100 მ2" (a multiplier kept, the measure folded; R4-09). An "Other(s)"
   position "to be specified by the Engineer" is described work, not a placeholder (R4-10). A
   sheet priced by its component rates alone is priced, and the merged sheets show every
@@ -1278,7 +1279,8 @@ The lead's policies of round 4, each in GOLD_SPEC 5 and the gold writer:
   The round-2 tests of parents were reworded to rows without an amount, and assert the policy
   for rows with one.
 * **A single-sheet schedule with no Summary (R4-16)** is ranked on its Total, VAT and Total incl.
-  VAT rows, a contingency between the total and the VAT taxed with it. Without such rows the
+  VAT rows, a contingency between the total and the VAT taxed with it - only where the template
+  has no Summary either: a bid dropping the template's Summary is not ranked. Without such rows the
   skip note says the workbook has no Summary sheet; no per-bidder finding is added, as fifteen
   earlier tests of Summary-less bills hold that such bids carry no findings.
 * **LS, L.S., lump sum and lump-sum are one unit (R4-18)**, apart from item, set, pcs and the

@@ -37,7 +37,7 @@ import itertools
 import math
 import re
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
@@ -2445,6 +2445,10 @@ def compare_bid(template: BoqWorkbook, bid: BoqWorkbook) -> BidComparison:
             for b_line in b_sheet.lines:
                 out.findings.extend(_arithmetic_findings(b_line, ()))
 
+    if bid.summary_in_bill is not None and template.summary_sheet is not None:
+        # the template has a Summary and the bid dropped it: it states no totals and is not
+        # ranked (``_summary_missing``), whatever it writes under its bill
+        bid = replace(bid, summary_rows=[], summary={}, summary_in_bill=None)
     _evaluate(out, bid)
     if bid.summary_sheet is not None:
         out.totals_from = "summary"
@@ -3324,15 +3328,24 @@ def _reconcile_chain(
     cost, overheads, profit = roles.get("cost"), roles.get("overheads"), roles.get("profit")
     excl, vat, incl = roles.get("excl"), roles.get("vat"), roles.get("incl")
 
-    def rated(part: SummaryRow | None, base: list[SummaryRow]) -> None:
+    def rated(
+        part: SummaryRow | None, base: list[SummaryRow], also: list[SummaryRow] | None = None
+    ) -> None:
         """The row against its base x its rate: the rate its label states ("Overheads 10%")
-        and the one typed beside it, either of which holding is enough."""
+        and the one typed beside it, either of which holding is enough. ``also``: a second
+        base the label's rate may be on - profit on cost + overheads, as Georgian estimates
+        compute it; read from the label alone, that rate once made such a faithful row an
+        error."""
         if part is None or not base or part.value is None or base[0].value is None:
             return
         value = sum(r.value or 0.0 for r in base)
         rates = [x for x in (part.label_rate, part.rate) if x is not None]
         if not rates or any(_same_money(part.value, value * x) for x in rates):
             return
+        if also and part.label_rate is not None:
+            other = sum(r.value or 0.0 for r in also)
+            if _same_money(part.value, other * part.label_rate):
+                return
         rate = rates[0]
         what = " + ".join(str(r.row) for r in base)
         ka_rows = "სტრიქონები" if len(base) > 1 else "სტრიქონი"
@@ -3348,7 +3361,7 @@ def _reconcile_chain(
 
     costs = [cost] if cost is not None else []
     rated(overheads, costs)
-    rated(profit, costs)
+    rated(profit, costs, [*costs, overheads] if overheads is not None else None)
     if excl is not None and excl.value is not None and cost is not None and cost.value is not None:
         parts = _excl_parts(rows, cost, excl)
         want = sum(r.value or 0.0 for r in parts)

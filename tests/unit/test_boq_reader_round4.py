@@ -531,6 +531,26 @@ def test_an_overheads_sum_off_its_labelled_rate_is_still_reported(tmp_path: Path
     assert gaps and gaps[0].expected == "2,400.50"
 
 
+@pytest.mark.parametrize("label", ["Profit 8%", "გეგმიური დაგროვება 8%"])
+def test_profit_labelled_with_its_rate_on_cost_and_overheads_is_no_gap(label: str) -> None:
+    """Georgian estimates put profit on cost + overheads. A rate read from the label only (no
+    rate column) must not turn that faithful row into an error; on neither base it still is."""
+    from procurement_agent.checks.boq import SummaryRow
+
+    def chain(profit: float) -> BoqWorkbook:
+        rows = [
+            SummaryRow(row=3, item="", label="TOTAL COST", value=1000.0),
+            SummaryRow(row=4, item="", label="Overheads 10%", value=100.0, label_rate=0.10),
+            SummaryRow(row=5, item="", label=label, value=profit, label_rate=0.08),
+        ]
+        return BoqWorkbook(name="B", summary_rows=rows, summary_sheet="SUMMARY")
+
+    assert reconcile_summary(chain(88.0)) == []  # 8% of 1,100
+    assert reconcile_summary(chain(80.0)) == []  # 8% of 1,000
+    [gap] = reconcile_summary(chain(95.0))
+    assert "row 5" in gap.message_en
+
+
 def test_a_typed_rate_beside_the_total_still_checks_its_row() -> None:
     """A rate typed in the column (0.12) where the label states none is the row's rate."""
     from procurement_agent.checks.boq import SummaryRow
@@ -740,6 +760,21 @@ def test_a_single_sheet_schedule_states_its_totals_under_the_bill(tmp_path: Path
     _, (a, _b), _ = _schedules(tmp_path)
     assert a.totals_from == "bill"
     assert _no_basis_note(a) is None
+
+
+def test_a_bid_dropping_the_templates_summary_is_not_ranked_on_its_bill(tmp_path: Path) -> None:
+    """The template has a Summary; a bid deleting it is not ranked (GOLD_SPEC 5), whatever
+    totals it writes under its bill - never told so and coloured at once."""
+    bill, total = _bill(None)
+    t = read_boq(_save(tmp_path / "t.xlsx", {"SUMMARY": _summary(total), _SHEET: bill}), name="T")
+    a = read_boq(_save(tmp_path / "a.xlsx", {_SHEET: _schedule(1.0)}), name="A")
+    b_bill, b_total = _bill(0.9)
+    b_path = _save(tmp_path / "b.xlsx", {"SUMMARY": _summary(b_total), _SHEET: b_bill})
+    a_comp, b_comp = compare_all(t, [a, read_boq(b_path, name="B")])
+    assert "BOQ.SHEET_REMOVED" in _rules(a_comp)
+    assert a_comp.markup_factor is None and a_comp.colour is None
+    assert "BOQ.RECONCILE" not in _rules(a_comp)
+    assert b_comp.colour is None  # one ranked bidder: no colours
 
 
 def test_a_workbook_with_several_priced_sheets_and_no_summary_is_not_ranked_on_one(

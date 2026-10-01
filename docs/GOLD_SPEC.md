@@ -633,7 +633,8 @@ Policy (client BOQ rules 2, 3, 5, 6 and the user's decision of 2026-09-28):
   (`BOQ.RECONCILE`, naming the rows). A chain row's rate is the one its label states
   ("Overheads 10%", "VAT 18%") or the fraction typed beside its TOTAL, either holding being
   enough; a cell dividing the row's own total by another ("% of total", `=C4/$C$8`) is a share,
-  never a rate. The stated total incl. VAT is the row labelled so; there
+  never a rate. A profit rate read from the label holds on TOTAL COST or on TOTAL COST +
+  overheads (the Georgian estimate's base); a typed rate's base stays the open question in docs/ACCURACY.md (BOQ comparison). The stated total incl. VAT is the row labelled so; there
   is no fallback to another row. Each part of the chain (TOTAL COST, overheads, profit, excl.
   VAT, VAT, incl. VAT) is played by one row and each row plays one part at most: TOTAL COST is
   the last row labelled so before the chain goes on, and the rest are taken below it, top down,
@@ -677,7 +678,8 @@ Policy (client BOQ rules 2, 3, 5, 6 and the user's decision of 2026-09-28):
 * The Summary of a workbook is the sheet named "SUMMARY", else the one sheet named like a
   summary ("BOQ SUMMARY"), else, among several such ("Summary of unit rates" beside it), the one
   stating a TOTAL COST or incl.-VAT row and linking to the most sheets. A bid without it states no totals and is not ranked, and the
-  missing sheet is named as the Summary. A single-sheet price schedule with no Summary sheet
+  missing sheet is named as the Summary - whatever it writes under its bill. Where the
+  template has no Summary either, a single-sheet price schedule
   (the ordinary goods or simplified form) states its totals under the bill (round 4, the
   lead's decision): its closing total plays TOTAL COST, and the VAT and total incl. VAT rows
   below it ("VAT 18%", "Total incl. VAT") complete the chain, reconciled like a Summary's (the
