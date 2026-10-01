@@ -233,6 +233,48 @@ How the rules read money, terms and names (red-team round 3):
   (`N 27/2026 ხელშეკრულების საფუძველზე`, `№27/2026 ხელშეკრულებით`); the number sign stays
   required, and before any other word (`N 5 პუნქტის`, `N 14 აქტის`) it is no contract number.
 
+How the rules read dates and periods (red-team round 4):
+
+* **An act's service period, one reader.** The act check and the extraction read it in one
+  place (`AoaChecker._period_hits`), so they never state two periods. It opens after a key or
+  a label (`შესრულების პერიოდი`, `მომსახურების გაწევის პერიოდი:`, `მიწოდების პერიოდი:`, a bare
+  `პერიოდი:` opening its line), within reach; after a past form of a performance root
+  (`შესრულებულია`, `შესრულებულ იქნა`, `გაწეულ იქნა`, `განხორციელდა`, `ჩატარდა`, `მიეწოდა`,
+  `გასწია`, ...) in that verb's own sentence; failing those, it is a range in a sentence about the
+  work (a range written before its verb, `2026 წლის 1-30 ივნისის პერიოდში გასწია`, included).
+  Not a period: a label another word qualifies (`საგარანტიო პერიოდი:`, `ხელშეკრულების
+  მოქმედების პერიოდი:`), a sentence about a guarantee, an advance or the validity, and a recital
+  of the work still to be done (`ვალდებულია გასწიოს …`, `შესრულდება`) with no past verb beside it.
+* **A date that names the contract** is never the act's date or a day of its period: the
+  contract right after it, its number in any form the number reader reads (`2026 წლის 9 მარტის
+  № 318 ხელშეკრულების`, `N`, `#`, `No.`), or the contract and its signing words right before it.
+  A comma before the contract word counts only before a signing verb (`… გააფორმეს
+  ხელშეკრულება`); `… 30 ივნისის ჩათვლით, ხელშეკრულების პირობების შესაბამისად` ends the period.
+* **An act's heading date** is read below a title that dates its contract (`მიღება-ჩაბარების
+  აქტი (2026 წლის 15 მაისის N 12/2026 ხელშეკრულებაზე)` / `ქ. თბილისი 30.06.2026`): the contract
+  date is passed over, and its contract word no longer makes the next date the contract's. A
+  contract word no date names still leaves the heading date unread, and a date after one passed
+  over must stand before the preamble ends.
+* **The act's date in its other wordings**: `აქტი გაფორმებულია`, `აქტი შედგა`, `აქტს ხელი
+  მოეწერა`, `აქტის გაფორმების თარიღია` (the label with its copula), each with the date in the
+  same sentence; `აქტი შედგა ორ ეგზემპლარად`, `აქტი შედგება …` and `ხელმოწერის თარიღიდან` date
+  nothing.
+* **A validity stated as a length is a closed range** (a decision): `ძალაში შედის ხელმოწერისთანავე
+  და მოქმედებს 12 (თორმეტი) თვის განმავლობაში` is `2026-03-03/2027-03-03`, the length counted
+  from the clause's first day, else from the signing, the day kept and held to the month's last
+  (31 August and six months is 28 February). Days and weeks are counted. The length is the
+  validity's own: it follows its predicate (`მოქმედებს`, `ძალაშია`, `მოქმედების ვადა`, `valid`,
+  `in force`) in the same clause, no comma between; a notice period or a report's deadline in
+  the validity's sentence (`…, ხოლო შეტყობინების ვადაა 30 დღე`) is not. A length beside an
+  until-phrase (`… ან შესრულებამდე`) or counted from another event (`მიწოდებიდან 12 თვის`) closes
+  nothing: the range stays open. With no signing date and no first day known, the length is the
+  ISO duration (`P12M`).
+* **A signing date labelled anywhere is the signing date**: with no date in the preamble, a date
+  after `(ხელშეკრულების) გაფორმების / ხელმოწერის / დადების თარიღი:` or `Date of signing:` is
+  `contract_date`, and the validity "from signing" starts on it. Another document's label
+  (`მიღება-ჩაბარების აქტის გაფორმების თარიღი:`) is not, and an unlabelled date outside the
+  preamble still is no signing date.
+
 `vat_status` meanings: `incl` = the price includes VAT/taxes; `excl` = VAT is added on top;
 `none` = no VAT applies / exempt; `net` = a net amount, taxes withheld or not mentioned by rule
 (natural person, foreign organisation).

@@ -70,6 +70,8 @@ from procurement_agent.checks.aoa_spelling import (
 )
 from procurement_agent.checks.contract_terms import _ADVANCE as _ADVANCE_NAMED
 from procurement_agent.checks.contract_terms import (
+    _NOT_A_TERM,
+    _VALIDITY,
     AdvanceTerms,
     AmountRole,
     ContractTerm,
@@ -79,6 +81,7 @@ from procurement_agent.checks.contract_terms import (
     PaymentTerms,
     RoledAmount,
     TaxPhrase,
+    _range_in,
     amount_roles,
     fee_scope,
     read_advance,
@@ -109,6 +112,7 @@ from procurement_agent.extraction.anchors import (
     defined_sides,
     find_anchors,
     find_parties,
+    preamble_end,
     split_patronymic,
     with_patronymic,
 )
@@ -146,7 +150,14 @@ from procurement_agent.extraction.normalize import (
     normalize_name,
 )
 from procurement_agent.extraction.ocr import misread_explains, repair_codes
-from procurement_agent.extraction.rules import RuleHit, find_dates, month_ka_correction
+from procurement_agent.extraction.rules import (
+    _NUMBER_MARKER,
+    _REFERENCE,
+    RuleHit,
+    _month_ka,
+    find_dates,
+    month_ka_correction,
+)
 from procurement_agent.extraction.schemas import FactType
 from procurement_agent.extraction.spellcheck import Difference, best_match, classify_difference
 from procurement_agent.fx.provider import NullRateProvider, RateProvider
@@ -298,23 +309,29 @@ _NOT_APPLICABLE: tuple[tuple[str, frozenset[str]], ...] = (
 )
 
 #: A label that dates the act - its signing ("გაფორმების"), its drawing up ("შედგენის") or its
-#: signature ("ხელმოწერის") "თარიღი". The label must stand as a word: "ხელმოწერის თარიღიდან 5
-#: დღეში" counts a deadline from the date instead.
-_ACT_DATE_LABEL = r"(?:გაფორმების|შედგენის|ხელმოწერის)\s+თარიღი(?![ა-ჰ])"
-#: The verbs that say the act was drawn up or signed, with the act named before them: "აქტი
-#: შედგენილია 30.06.2026", "„აქტი“ ხელმოწერილია ...". Only with a date in the same sentence
-#: (``AoaChecker._act_date``): "აქტი შედგენილია ორ ეგზემპლარად" dates nothing.
-_ACT_DRAWN_UP = r"აქტი[\s„“”\"']*(?:შედგენილია|ხელმოწერილია)"
+#: signature ("ხელმოწერის") "თარიღი", also with its copula ("აქტის გაფორმების თარიღია ...", red
+#: team R4). The label must stand as a word: "ხელმოწერის თარიღიდან 5 დღეში" counts a deadline
+#: from the date instead.
+_ACT_DATE_LABEL = r"(?:გაფორმების|შედგენის|ხელმოწერის)\s+თარიღია?(?![ა-ჰ])"
+#: The verbs that say the act was signed or drawn up, with the act named before them: the
+#: signing in the aorist and the perfect ("გაფორმდა", "გაფორმებულია"), the drawing up
+#: ("შედგა", "შედგენილია"), the signature ("ხელმოწერილია"; "აქტს ხელი მოეწერა"). Each a whole
+#: word: "აქტი შედგება ორი გვერდისგან" is what it consists of. One alternation for every reader
+#: of the act's date (``_ACT_SIGNED``, ``_ACT_DATED_BEFORE``), red team R4 (AOA-R4-07). Only with
+#: a date in the same sentence (``AoaChecker._act_date``): "აქტი შედგენილია ორ ეგზემპლარად" dates
+#: nothing.
+_ACT_VERB = (
+    r"(?<![ა-ჰ])(?:აქტი[\s„“”\"']*(?:გაფორმდა|გაფორმებულია|შედგა|შედგენილია|ხელმოწერილია)"
+    r"|აქტს?[\s„“”\"']*ხელი\s+მოეწერა)(?![ა-ჰ])"
+)
 #: Where a date may follow the words that date the act, further off than their sentence: the
 #: signing and the labels, never the verbs of drawing up.
 _ACT_DATE_KEYS = re.compile(rf"გაფორმდა|{_ACT_DATE_LABEL}")
 #: The words that date the act, right before a date: "აქტი გაფორმდა 30.11.2026".
-_ACT_DATED_BEFORE = re.compile(
-    rf"(?:აქტი[\s„“”\"']*(?:გაფორმდა|შედგენილია|ხელმოწერილია)|{_ACT_DATE_LABEL})[\s:,]*$"
-)
+_ACT_DATED_BEFORE = re.compile(rf"(?:{_ACT_VERB}|{_ACT_DATE_LABEL})[\s:,]*$")
 #: The act's own signing, "აქტი გაფორმდა <date>" / "გაფორმების თარიღი: <date>", and the other
 #: ways an act says when it was drawn up or signed.
-_ACT_SIGNED = re.compile(rf"გაფორმდა|{_ACT_DATE_LABEL}|{_ACT_DRAWN_UP}")
+_ACT_SIGNED = re.compile(rf"გაფორმდა|{_ACT_DATE_LABEL}|{_ACT_VERB}")
 #: The signing verb, and a word the length of a slip of it (``_slipped_signing``).
 _SIGNING_VERB = "გაფორმდა"
 _SIGNING_VERB_LIKE = re.compile(r"(?<![ა-ჰ])[ა-ჰ]{7,9}(?![ა-ჰ])")
@@ -322,9 +339,11 @@ _SIGNING_VERB_LIKE = re.compile(r"(?<![ა-ჰ])[ა-ჰ]{7,9}(?![ა-ჰ])")
 _ACT_NAMED_BEFORE = re.compile(r"აქტი[\s„“”\"']*$")
 #: An advance or prepayment clause: a date there is a payment's, never the act's.
 _ADVANCE_WORDS = re.compile(r"ავანს|წინასწარ|advance|prepay", re.IGNORECASE)
-#: What opens the service period: "შესრულდა …", a "შესრულების თარიღი" heading, and the other
-#: ways acts say it - "გაწეულია 01.11.2026 - 30.11.2026 პერიოდში" (the services rendered), a
-#: "საანგარიშო პერიოდი" (reporting period) heading.
+#: What opens the service period, its dates within ``_date_hits_near``'s reach after it, past
+#: the end of its sentence: "შესრულდა …", a "შესრულების თარიღი" heading, and the other ways acts
+#: say it - "გაწეულია 01.11.2026 - 30.11.2026 პერიოდში" (the services rendered), a "საანგარიშო
+#: პერიოდი" (reporting period) heading, the period of rendering or of delivery ("მომსახურების
+#: გაწევის პერიოდი:", "მიწოდების პერიოდი:", red team R4).
 _PERIOD_KEYS = (
     "შესრულდა",
     "შესრულების თარიღი",
@@ -333,7 +352,74 @@ _PERIOD_KEYS = (
     "გაიწია",
     "საანგარიშო პერიოდ",
     "მომსახურების პერიოდ",
+    "გაწევის პერიოდ",
+    "მიწოდების პერიოდ",
 )
+#: ... and a bare "პერიოდი:" label, opening its line after a clause number: "2. პერიოდი:
+#: 01.06.2026 - 30.06.2026". A period another word qualifies ("საგარანტიო პერიოდი:",
+#: "ხელშეკრულების მოქმედების პერიოდი:") is not the work's.
+_BARE_PERIOD_LABEL = re.compile(r"(?<![ა-ჰ])პერიოდი\s*[:\u2013\u2014-]")
+_LINE_LEAD = re.compile(r"[\s\d.)]*")
+#: The work done, in the past - the aorist and the perfect, active and passive, of the roots
+#: that say it (perform, render, carry out, conduct, deliver): "შესრულებულია", "გაწეულ იქნა",
+#: "განხორციელდა", "ჩატარდა", "მიეწოდა", "„შემსრულებელმა“ … გასწია". The future and the
+#: subjunctive ("შესრულდება", "შეასრულოს") are the contract's window, never the act's period
+#: (``_CONTRACT_WINDOW``). A date after one of these is the period's only in its sentence:
+#: "მომსახურება შესრულებულია სრულად." dates nothing after it (red team R4, AOA-R4-03).
+_PERFORMED = re.compile(
+    r"(?<![ა-ჰ])(?:(?:შესრულებულ|გაწეულ|განხორციელებულ|ჩატარებულ|მიწოდებულ)(?:ია|\s+იქნა)"
+    r"|შესრულდა|გაიწია|განხორციელდა|ჩატარდა|მიეწოდა"
+    r"|შეასრულა|გასწია|განახორციელა|ჩაატარა|მიაწოდა)(?![ა-ჰ])"
+)
+#: The work as a duty still to be done: a recital restating the contract's window ("…
+#: ვალდებულია გასწიოს მომსახურება 2026 წლის 1 მარტიდან …") states no period of the act's.
+_CONTRACT_WINDOW = re.compile(
+    r"(?<![ა-ჰ])(?:შეასრულოს|გასწიოს|მიაწოდოს|განახორციელოს|ჩაატაროს|შეასრულებს|გასწევს"
+    r"|გაიწევა|გაეწევა|მიეწოდება|შესრულდება|განხორციელდება|ჩატარდება|დაიწყება|დასრულდება)"
+    r"(?![ა-ჰ])"
+)
+#: What an act says a service period of, where no verb or label opens it: the work done,
+#: rendered, carried out, or a period named as one (``AoaChecker._period_ranges``).
+_SERVICE_WORDS = re.compile(
+    r"შესრულ|გაწე|გაიწ|განხორციელ|ჩატარ|პერიოდ|მომსახურებ|სამუშაო|მიწოდ|"
+    r"(?<![a-z])(?:perform|render|provid|period)",
+    re.IGNORECASE,
+)
+#: A range's end written without its year after a dash, the start's year understood: "2026
+#: წლის 1 ივნისიდან - 30 ივნისის ჩათვლით", "... - 30 ივნისამდე".
+_YEARLESS_END = re.compile(
+    r"\s*[-\u2013\u2014]?\s*(?P<d>\d{1,2})\s*(?P<m>[ა-ჰ]{3,14})(?P<mark>\s*\(?\s*ჩათვლით)?"
+)
+#: A period stated as a month: "2026 წლის ივნისის თვეში", "2026 წ. ივნისის თვის განმავლობაში".
+_MONTH_PERIOD = re.compile(r"(?<!\d)(?P<y>\d{4})\s*წ(?:ლის|\.)?\s*(?P<m>[ა-ჰ]{3,14})\s+თვ[ეი]")
+#: How far after the words that open the period its dates may stand (``_date_hits_near``).
+_PERIOD_REACH = 160
+#: How surely a range no verb and no service word stands beside is the period
+#: (``AoaChecker._period_ranges``): only when it is the act's one range.
+_BARE_RANGE = 2
+
+
+@lru_cache(maxsize=8)
+def _period_opens(text: str) -> tuple[tuple[int, int, bool], ...]:
+    """Where each of the words that open the service period starts and ends, and whether a date
+    after it must stand in its sentence - a verb of work done (``_PERFORMED``) - or may stand
+    within the keys' reach - a key or a label (``_PERIOD_KEYS``, ``_BARE_PERIOD_LABEL``)."""
+    opens = [
+        (m.start(), m.end(), False) for k in _PERIOD_KEYS for m in re.finditer(re.escape(k), text)
+    ]
+    opens += [
+        (m.start(), m.end(), False)
+        for m in _BARE_PERIOD_LABEL.finditer(text)
+        if _LINE_LEAD.fullmatch(text, text.rfind("\n", 0, m.start()) + 1, m.start())
+    ]
+    opens += [(m.start(), m.end(), True) for m in _PERFORMED.finditer(text)]
+    return tuple(sorted(opens))
+
+
+def _period_key_starts(text: str) -> list[int]:
+    """Where the words that open the service period start (``_period_opens``)."""
+    return [a for a, _, _ in _period_opens(text)]
+
 
 #: The window a service period is held to (``_term_window``), as the messages name it: (Georgian,
 #: in the dative "სცდება" takes; English).
@@ -518,8 +604,114 @@ def _contract_is_subject(text: str, pos: int) -> bool:
     return _ACT_WORD.search(before, contract[-1]) is None
 
 
-#: A date that names the contract it belongs to: "2026 წლის 1 მარტის ხელშეკრულების ...".
-_CONTRACT_REFERENCE = re.compile(r"\s*[„“\"]?\s*(?:N\s*\S+\s*)?ხელშეკრულებ")
+_Q = "\u201e\u201c\u201d\"'"
+#: A contract's number as a reference writes it: "N 27/2026", "№27/2026", "# 15", "No. 15"
+#: (``rules._NUMBER_MARKER`` and ``rules._REFERENCE``, the contract-number reader's own).
+_CONTRACT_NUMBER = rf"(?:{_NUMBER_MARKER})\s*{_REFERENCE}"
+#: A date that names the contract it belongs to, the contract right after it: "2026 წლის 1
+#: მარტის ხელშეკრულების ...", "2026 წლის 9 მარტის № 318 ხელშეკრულების საფუძველზე" (its number
+#: in every form the number reader reads, red team R4: COMPARE-R4-01), "მხარეებმა 01.09.2026
+#: გააფორმეს ხელშეკრულება", "15.05.2026 წლის ხელშეკრულება". A comma only before a signing verb:
+#: "... 30 ივნისის ჩათვლით, ხელშეკრულების პირობების შესაბამისად" is the period's end.
+_CONTRACT_REFERENCE = re.compile(
+    rf"(?:[\s,]*(?:გააფორმეს|გაფორმებული|დადებული|დადეს))?[\s{_Q}]*"
+    rf"(?:{_CONTRACT_NUMBER}\s*|N\s*\S+\s*)?ხელშეკრულებ"
+)
+#: ... or the contract, then its signing: "ხელშეკრულება გაფორმდა 2026 წლის 1 მარტს",
+#: "ხელშეკრულების თარიღი: 01.03.2026", "N 27/2026 ხელშეკრულება, დადებული 2026 წლის 3 მარტს",
+#: "ხელშეკრულება № 27, გაფორმებული ...", "ხელშეკრულების (თარიღი: 03.03.2026)". The signing
+#: words stand right after the contract and its number: "ხელშეკრულების შესაბამისად, 2026 წლის
+#: 10 ივნისს ..." dates something else.
+_CONTRACT_DATED_BEFORE = re.compile(
+    rf"ხელშეკრულებ[ა-ჰ]*[{_Q}]*(?:\s*{_CONTRACT_NUMBER})?[\s,]*\(?\s*"
+    r"(?:გაფორმდა|დაიდო|დადებული|გაფორმებული|(?:გაფორმების\s+)?თარიღია?)[\s:,-]*$"
+)
+#: How far before a date the contract and its signing words may stand.
+_CONTRACT_DATED_REACH = 60
+
+
+def contract_named_by(text: str, hit: RuleHit) -> int | None:
+    """Where the contract word stands that the date ``hit`` names as the contract's own date -
+    the contract right after it (``_CONTRACT_REFERENCE``) or named with its signing right before
+    it (``_CONTRACT_DATED_BEFORE``) - or None when the date is not the contract's. One reader of
+    "this date is the contract's" for the act's date, its period and the contract date the
+    extraction states (red team R4)."""
+    after = _CONTRACT_REFERENCE.match(text, hit.end)
+    if after is not None:
+        return after.end() - len("ხელშეკრულებ")
+    reach = max(0, hit.start - _CONTRACT_DATED_REACH)
+    before = _CONTRACT_DATED_BEFORE.search(text, reach, hit.start)
+    return before.start() if before is not None else None
+
+
+def _date_hit(d: date, raw: str, start: int, end: int) -> RuleHit:
+    """A date the period reader read past ``find_dates`` - a month, a range's yearless end - as
+    a hit like the reader's own."""
+    return RuleHit(
+        type=FactType.date,
+        value=d.isoformat(),
+        raw_text=raw,
+        start=start,
+        end=end,
+        normalized=d.isoformat(),
+    )
+
+
+def _yearless_end(text: str, first: RuleHit, limit: int) -> RuleHit | None:
+    """The last day of a range whose end is written without a year after a dash, right after
+    its first day, the start's year understood ("2026 წლის 1 ივნისიდან - 30 ივნისის ჩათვლით"):
+    marked as an end ("ჩათვლით", "-მდე"), and not before the first day."""
+    m = _YEARLESS_END.match(text, first.end, limit)
+    if m is None:
+        return None
+    word = m.group("m")
+    month = _month_ka(word)
+    if month is None or not (m.group("mark") or word.endswith("მდე")):
+        return None
+    start = date.fromisoformat(str(first.normalized))
+    for year in (start.year, start.year + 1):
+        try:
+            end = date(year, month, int(m.group("d")))
+        except ValueError:
+            return None
+        if end >= start:
+            return _date_hit(end, text[m.start("d") : m.end("m")], m.start("d"), m.end("m"))
+    return None
+
+
+def _heading_date(text: str, hits: list[RuleHit]) -> tuple[date, RuleHit] | None:
+    """An act dated only in its heading ("ქ. თბილისი, 31.08.2026"): the first date that opens
+    the document and is not the contract's.
+
+    A date that names the contract (``contract_named_by``) - a title citing it, "მიღება-ჩაბარების
+    აქტი (2026 წლის 15 მაისის N 12/2026 ხელშეკრულებაზე)" - is passed over, and the contract word it
+    names is its own: it no longer makes the heading date under it the contract's (red team R4,
+    AOA-R4-05). Any other contract word near a date leaves whose date it is unsaid, and no date
+    is taken. A date after one passed over is the act's only before the preamble ends
+    (``anchors.preamble_end``): further on it is a clause's - the period's first day, say."""
+    claimed: set[int] = set()
+    passed_over = False
+    for h in hits:
+        if h.start >= _HEADER_CHARS:
+            return None
+        named = contract_named_by(text, h)
+        if named is not None:
+            claimed.add(named)
+            passed_over = True
+            continue
+        near = [
+            m.start()
+            for m in _CONTRACT_WORD.finditer(text, max(0, h.start - 60), h.end + 30)
+            if m.start() not in claimed
+        ]
+        if near:
+            return None
+        if passed_over:
+            end = preamble_end(text)
+            if end is None or h.end > end:
+                return None
+        return date.fromisoformat(str(h.normalized)), h
+    return None
 
 
 def _date_hits_near(
@@ -609,7 +801,11 @@ _MONTH_YEAR = re.compile(
 )
 
 
-def _month_near(text: str, keys: tuple[str, ...], window: int = 160) -> list[tuple[date, RuleHit]]:
+def _month_near(
+    text: str,
+    keys: tuple[str, ...] | re.Pattern[str] | Callable[[str], list[int]],
+    window: int = 160,
+) -> list[tuple[date, RuleHit]]:
     """The first month named with its year and no day after one of ``keys``, as the whole month:
     its first and its last day, each read at the year and the month as written. A month that is
     part of a date ("30 ივნისი 2026") is the date's, and not read here."""
@@ -881,18 +1077,19 @@ class AoaChecker:
             key_at = max((s for s in key_starts if s <= hit.start), default=hit.start)
             if not self._in_advance_clause(hit.start) and not _contract_is_subject(text, key_at):
                 return d, hit
-        # An act dated only in its heading ("ქ. თბილისი, 31.08.2026"): the first date, when it
-        # opens the document and is not the contract's.
-        head = next((h for h in hits if h.start < _HEADER_CHARS), None)
-        if head is not None and not _CONTRACT_WORD.search(
-            text, max(0, head.start - 60), head.end + 30
-        ):
-            return date.fromisoformat(str(head.normalized)), head
-        return None
+        return _heading_date(text, hits)
 
     def _period_hits(self) -> list[tuple[date, RuleHit]]:
-        """The service period's dates, read after "შესრულდა" / "შესრულების თარიღი" / "...
-        პერიოდი" (``_date_hits_near``). Every rule that needs the period reads it here.
+        """The service period's dates, and where each is written. Every rule that needs the
+        period reads it here, and so does the extraction (``document_facts``): one reader.
+
+        Read first after the words that open it (``_period_opens``): a key or a label
+        ("შესრულდა", "შესრულების თარიღი", "მომსახურების გაწევის პერიოდი:", "პერიოდი:") within
+        ``_date_hits_near``'s reach, a verb of work done in the past ("შესრულებულია", "გაწეულ
+        იქნა", "განხორციელდა") in its own sentence; failing dates, a month named after them.
+        One date read so is the range it is a day of, when its sentence writes one. Failing all
+        of that, the period is known by its form (``_period_ranges``, ``_month_by_form``): GOLD_SPEC
+        2 reads an act's service period "by its form whatever the verb" (red team R4, AOA-R4-03).
 
         A date an advance is named before is a payment's, as for the act's own date
         (``_act_date``): "ავანსი გადახდილია 2026 წლის 10 სექტემბერს" written after the period does
@@ -901,10 +1098,12 @@ class AoaChecker:
         ავანსი ..."). Named after the period's own dates, it takes nothing from them: "... 30
         აპრილის ჩათვლით, ავანსი კი ..." still ends on 30 April. The advance is named as
         ``read_advance`` names it, so "წინასწარ შეთანხმებული გრაფიკით" (a schedule agreed
-        beforehand) and "in advance" name none.
+        beforehand) and "in advance" name none. A date that names the contract
+        (``contract_named_by``, "2026 წლის 9 მარტის № 318 ხელშეკრულების") is never the period's.
         """
         text = self.aoa.text
-        opens = sorted(m.end() for k in _PERIOD_KEYS for m in re.finditer(re.escape(k), text))
+        opens = _period_opens(text)
+        ends = [e for _, e, _ in opens]
         act = self._act_date()
 
         def is_act(h: RuleHit) -> bool:
@@ -916,21 +1115,125 @@ class AoaChecker:
                 return True
             return _act_dated_right_before(text, h.start)
 
+        def opened_for(h: RuleHit) -> bool:
+            """Whether words that open the period reach ``h``: a key or a label within the
+            keys' reach, a verb of work done only in ``h``'s own sentence."""
+            a, _ = self._sentence_of(h.start)
+            return any(
+                e <= h.start and (not scoped or a <= start)
+                for start, e, scoped in opens
+                if h.start - start <= _PERIOD_REACH
+            )
+
         def in_period(h: RuleHit) -> bool:
-            if _CONTRACT_REFERENCE.match(text, h.end):
+            if contract_named_by(text, h) is not None:
                 return False  # "... შესრულდა 2026 წლის 1 მარტის ხელშეკრულების შესაბამისად"
-            i = bisect_right(opens, h.start)
-            opened = opens[i - 1] if i else None
+            if not opened_for(h):
+                return False
+            i = bisect_right(ends, h.start)
+            opened = ends[i - 1] if i else None
             a, b = self._sentence_of(h.start)
             if opened is not None and _ADVANCE_NAMED.search(text, opened, h.start):
                 return False
             return not ((opened is None or opened < a) and _ADVANCE_NAMED.search(text, a, b))
 
-        out = [(d, h) for d, h in _date_hits_near(text, _PERIOD_KEYS, skip=is_act) if in_period(h)]
+        out = [
+            (d, h)
+            for d, h in _date_hits_near(text, _period_key_starts, _PERIOD_REACH, skip=is_act)
+            if in_period(h)
+        ]
+        if len({d for d, _ in out}) >= 2:
+            return out
         if not out:
             # "შესრულდა 2026 წლის ივნისის თვეში": a month with no day is the whole month
-            out = [(d, h) for d, h in _month_near(text, _PERIOD_KEYS) if in_period(h)][:2]
+            month = [(d, h) for d, h in _month_near(text, _period_key_starts) if in_period(h)]
+            if month:
+                return month[:2]
+        ranges = self._period_ranges()
+        if out:
+            # one date read after the words that open the period: the range it is a day of
+            at = out[0][1].start
+            around = [r for r in ranges if r[0][1].start <= at < r[1][1].end]
+            return list(around[0][:2]) if around else out
+        best = min((r[2] for r in ranges), default=None)
+        chosen = [r for r in ranges if r[2] == best]
+        if best is not None and (best < _BARE_RANGE or len(ranges) == 1):
+            return list(chosen[0][:2])
+        return self._month_by_form()
+
+    def _period_ranges(
+        self,
+    ) -> list[tuple[tuple[date, RuleHit], tuple[date, RuleHit], int]]:
+        """Every range an act's sentences write, in document order, that may be its service
+        period: its first day, its last, and how surely it is the period - a sentence with a
+        verb of work done or a period label first (0), then one naming the service (1), then
+        any other (``_BARE_RANGE``).
+
+        Not a range in a sentence about an advance, the contract's validity, a guarantee or the
+        work still to be done (a recital of the contract's window, ``_CONTRACT_WINDOW``, where
+        no verb of work done stands beside it); not a date that dates the act or names the
+        contract. Two dates of one sentence written as a range - "... 1 ივნისიდან ... 30 ივნისის
+        ჩათვლით", "01.06.2026 - 30.06.2026", "2026 წლის 1-30 ივნისის პერიოდში" - are one."""
+        text = self.aoa.text
+        act = self._act_date()
+        hits = [
+            h
+            for h in find_dates(text)
+            if (act is None or h.start != act[1].start)
+            and not _act_dated_right_before(text, h.start)
+            and contract_named_by(text, h) is None
+        ]
+        labels = [a for a, _, scoped in _period_opens(text) if not scoped]
+        out: list[tuple[tuple[date, RuleHit], tuple[date, RuleHit], int]] = []
+        for a, b in self.aoa.sentences():
+            if (
+                _ADVANCE_WORDS.search(text, a, b)
+                or _VALIDITY.search(text, a, b)
+                or _NOT_A_TERM.search(text, a, b)
+            ):
+                continue
+            performed = _PERFORMED.search(text, a, b) is not None
+            if _CONTRACT_WINDOW.search(text, a, b) and not performed:
+                continue
+            inside = [h for h in hits if a <= h.start < b]
+            if not inside:
+                continue
+            found = _range_in(text, (a, b), inside, takes_effect=False)
+            start, end = found.start, found.end
+            if start is None:
+                continue
+            first = next(h for h in inside if h.normalized == start.isoformat())
+            last = next((h for h in reversed(inside) if h.normalized == str(end)), None)
+            if end is None:
+                last = _yearless_end(text, first, b)
+                end = date.fromisoformat(str(last.normalized)) if last is not None else None
+            if end is None or last is None or start > end:
+                continue
+            if performed or any(a <= k < b for k in labels):
+                rank = 0
+            elif _SERVICE_WORDS.search(text, a, b):
+                rank = 1
+            else:
+                rank = _BARE_RANGE
+            out.append(((start, first), (end, last), rank))
         return out
+
+    def _month_by_form(self) -> list[tuple[date, RuleHit]]:
+        """A service period stated as a whole month in a sentence about the service, no word
+        opening it: "2026 წლის ივნისის თვეში" - its first day and its last, both at the month."""
+        text = self.aoa.text
+        for m in _MONTH_PERIOD.finditer(text):
+            month = _month_ka(m.group("m"))
+            if month is None:
+                continue
+            a, b = self._sentence_of(m.start())
+            if not _SERVICE_WORDS.search(text, a, b) or _ADVANCE_WORDS.search(text, a, b):
+                continue
+            first = date(int(m.group("y")), month, 1)
+            return [
+                (d, _date_hit(d, m.group(0), m.start(), m.end())) for d in (first, _last_day(first))
+            ]
+        return []
 
     def _period(self) -> _Period:
         """The service period (``_period_hits``), with a year put right when the period ends
