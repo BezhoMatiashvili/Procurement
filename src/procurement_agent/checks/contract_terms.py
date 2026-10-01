@@ -948,7 +948,8 @@ def is_window_length(text: str, start: int, end: int) -> bool:
     if length is None:
         return False
     return any(
-        (a + h.start, a + h.end) == (start, end) and (int(str(h.normalized)[1:-1]), h.unit) == length
+        (a + h.start, a + h.end) == (start, end)
+        and (int(str(h.normalized)[1:-1]), h.unit) == length
         for h in find_durations(sentence)
     )
 
@@ -990,9 +991,9 @@ def read_term(text: str, *, sentences: list[tuple[int, int]] | None = None) -> C
             continue
         inside = _hits_between(hits, starts, a, b)
         if performs:
-            window = _range_in(text, (a, b), inside, takes_effect=False)
-            performance.append(window)
-            if window.end is None:
+            stated = _range_in(text, (a, b), inside, takes_effect=False)
+            performance.append(stated)
+            if stated.end is None:
                 length = _performance_length(text, (a, b), inside)
                 if length is not None:
                     performance_lengths.add(length)

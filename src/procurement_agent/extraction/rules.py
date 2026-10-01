@@ -1299,12 +1299,12 @@ def _only_until_the_work(text: str, a: int, b: int) -> bool:
         for m in keyword_pattern(kw).finditer(sentence):
             tail = _WORD_TAIL.match(sentence, m.end())
             word_end = tail.end() if tail is not None else m.end()
-            if sentence[m.start() : word_end].endswith("მდე"):
-                found = True
-            elif _UNTIL_THE_WORK_EN.search(sentence, max(0, m.start() - 40), m.start()):
-                found = True
-            else:
+            until = sentence[m.start() : word_end].endswith("მდე") or _UNTIL_THE_WORK_EN.search(
+                sentence, max(0, m.start() - 40), m.start()
+            )
+            if not until:
                 return False
+            found = True
     return found
 
 
