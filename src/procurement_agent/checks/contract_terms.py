@@ -615,13 +615,14 @@ class ContractTerm:
 
 #: A clause on how long the contract is in force: the contract itself is named, then the verb -
 #: "„ხელშეკრულება“ ძალაში შედის ... და მოქმედებს ...", "ხელშეკრულების მოქმედების ვადა", "The
-#: Contract is valid until ...". A power of attorney, a price list or a duty is "in force until"
-#: a day as well, and with the template's open-ended validity that day would become the
-#: contract's last: "ფასები მოქმედებს 2026 წლის 31 მარტამდე" is no end to the contract.
+#: Contract is valid until ...", "This Contract shall enter into force on ..." (red team R5,
+#: EXTRACTION-R5-13). A power of attorney, a price list or a duty is "in force until" a day as
+#: well, and with the template's open-ended validity that day would become the contract's last:
+#: "ფასები მოქმედებს 2026 წლის 31 მარტამდე" is no end to the contract.
 _VALIDITY = re.compile(
     r"ხელშეკრულება(?![ა-ჰ])[^;]{0,60}?(?:მოქმედებ|ძალაშ)"
     r"|ხელშეკრულების\W{0,3}(?:მოქმედებ|ძალაშ)"
-    r"|(?<![a-z])(?:contract|agreement)(?![a-z])[^;]{0,60}?(?<![a-z])(?:valid|in\s+force)",
+    r"|(?<![a-z])(?:contract|agreement)(?![a-z])[^;]{0,60}?(?<![a-z])(?:valid|in(?:to)?\s+force)",
     re.IGNORECASE,
 )
 #: A clause on when the work is to be done.
@@ -643,11 +644,23 @@ _PERFORMANCE_PASSIVE = re.compile(
 _THE_WORK = re.compile(r"მომსახურებ|სამუშაო", re.IGNORECASE)
 
 
+#: The performance as the end of the contract's validity, not as the work's window: "... shall
+#: remain in force until the full performance of the Parties' obligations", as Georgian says
+#: "... შესრულებამდე" (red team R5, EXTRACTION-R5-13). Matched against the text before the word.
+_UNTIL_PERFORMED = re.compile(
+    r"(?<![a-z])until\s+(?:the\s+)?(?:(?:full|complete|due|proper)\s+)?$", re.IGNORECASE
+)
+
+
 def performance_clause(text: str, a: int, b: int) -> bool:
     """Whether the sentence ``text[a:b]`` sets when the work is done: a performance verb
-    (``_PERFORMANCE``), or the work in the future passive where the sentence is no validity
-    clause (``_PERFORMANCE_PASSIVE``)."""
-    if _PERFORMANCE.search(text, a, b):
+    (``_PERFORMANCE``) that is no validity's "until the full performance" (``_UNTIL_PERFORMED``),
+    or the work in the future passive where the sentence is no validity clause
+    (``_PERFORMANCE_PASSIVE``)."""
+    if any(
+        _UNTIL_PERFORMED.search(text, max(a, m.start() - 40), m.start()) is None
+        for m in _PERFORMANCE.finditer(text, a, b)
+    ):
         return True
     return (
         _PERFORMANCE_PASSIVE.search(text, a, b) is not None
