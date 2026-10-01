@@ -985,6 +985,42 @@ The tests are in `tests/unit/test_compare_redteam3.py`, on invented text, each w
   ნოემბრამდე, 2026 წ.`) is read by `checks/document_facts` (COMPARE-R3-02); the compare side
   keeps the date's "until" once the date reader reads it.
 
+### Red team, round 4: what a value says, and what it only stands beside (2026-10-01)
+
+The tests are in `tests/unit/test_compare_redteam4.py`, on invented text, each with a near miss.
+
+* **A reader's reach is not its mask.** Round 3 masked a value with every word its reader read
+  over, so words that changed inside the reach were never compared: a penalty "per overdue day"
+  made "per overdue working day" or "per tenth overdue day" with no finding, and the costs a
+  price covers before "და დღგ-ს" could change freely (COMPARE-R4-07, R4-10). The mask is now the
+  words the canonical value encodes: `ყოველ` and the period's noun (`_per_period_words`), the
+  tax phrase's verb and its tax (`_tax_wording`). The words between are the line's own, and a
+  change in them is "text changed".
+* **The VAT inclusion reads across a list of costs** (R4-09). `contract_terms._KA_REACH` lets the
+  verb reach its tax over up to eight words joined by commas, `და` and `ასევე`, never past `,
+  ხოლო`, `გარდა`, a negation or a relative clause. One reader: the act check and the extraction
+  read the same wording the same way. Adding a cost to the list was a critical "VAT removed".
+* **A figure's words follow their figure** (R4-06). Words dropped from beside a figure, or added
+  beside it, while both versions write the same figures, are formatting (`_words_restyled`);
+  before, "10 (ათი) სამუშაო დღის" → "10 სამუშაო დღის" was a critical "Period in words removed"
+  for a term both versions state. Words dropped with a figure that changed are still reported.
+* **Restyles that are formatting**: a case ending hyphenated to a value (`5%-ის`, `30%-იან`,
+  R4-11), a quantity row's unit cell written another way (`კვ.მ` / `მ2`, R4-12), a count of days
+  that drops "calendar" or writes "ვადაში" (`20 კალენდარული დღის ვადაში` / `20-დღიან ვადაში`), a
+  contract number retyped in lower case (R4-13, compared and reported upper case).
+* **A fee per period is a price, labelled "Monthly fee" or "Unit price"** (R4-14, decided by the
+  lead as policy). A service contract's monthly fee in a clause of its own was read as a second
+  total: a fee raised was "Total amount" changed, and against another contract it was paired
+  with that contract's total while the real total was "removed". Read in the figure's own
+  clause (`_fee_per_period`), past the sentence's turns: the period's adjective before a word
+  for the price, or "per month" / "თვეში" after the figure. Not the adverb ("გადაიხდება
+  ყოველთვიურად", "paid monthly"), not the price of a number of months, not an advance.
+* **Waiting on the readers.** "20-დღიან ვადაში", "20 კალენდარულ დღეში" (R4-02) and "5 (ხუთი)%-ის"
+  (R4-03) are not read by the duration and percentage readers yet; that is fixed apart, in the
+  rules. The comparison's side is in place and was checked against those readers widened in a
+  scratch copy: every pair gives the expected result. The tests for those pairs skip until the
+  reader reads the form, then hold the comparison to it.
+
 ### The findings list is a list, not a dump
 
 Two different bid workbooks differ in over a thousand cells. Listing every one buried the

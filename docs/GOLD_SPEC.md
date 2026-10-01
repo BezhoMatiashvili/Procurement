@@ -422,6 +422,42 @@ Red team round 3 (compare) settled these cases:
   large to score pairwise is paired in order, and only lines with nothing alike are a removal
   and an addition.
 
+Red team round 4 (compare) settled these cases:
+
+* A figure's words dropped or added beside it, the figures of the line the same on both sides,
+  are formatting (`10 (ათი) სამუშაო დღის` / `10 სამუშაო დღის`, `2 (ორი) ეგზემპლარად` / `2
+  ეგზემპლარად`); words dropped with a figure that changed or went are still reported.
+* A value's own words are only those its canonical form encodes; the words a reader reaches over
+  are compared as the line's own. A penalty's period is `ყოველ` (`per`, `each`, `for each`) and
+  the period's noun: `ყოველ ვადაგადაცილებულ დღეზე` -> `ყოველ ვადაგადაცილებულ სამუშაო დღეზე`
+  (or `ყოველ მეათე ... დღეზე`, `for each calendar day` -> `for each working day`) is
+  `CMP.TEXT_CHANGED`, a warning; the day basis is no part of the penalty's value. A tax phrase
+  is its verb and its tax: in `ფასი მოიცავს ტრანსპორტირების ხარჯებს და დღგ-ს` the costs are the
+  line's words, and what the price covers changed is `CMP.TEXT_CHANGED`.
+* A VAT inclusion's verb reaches its tax across a list of costs joined by commas, `და` and
+  `ასევე` (`მოიცავს ტრანსპორტირების, მონტაჟის ხარჯებს და დღგ-ს` is `incl`; up to eight words),
+  never across `, ხოლო`, `გარდა`, a negation or a relative clause. A cost added to the list is
+  `CMP.TEXT_CHANGED` only.
+* A case ending hyphenated to a value is the value's (`5%-ის`, `10%-ს`, `30%-იან`): `0.1%-ის` /
+  `0.1 პროცენტის` is formatting. A word after a spaced dash (`5% - ...`) is not.
+* A count of days is of calendar days unless it names working days, and `ვადაში` after a count
+  is the term's own word: `20 კალენდარული დღის ვადაში`, `20 დღის ვადაში`, `20 დღეში` and `20-დღიან
+  ვადაში` are one delivery deadline, formatting. A payment term keeps the days it names (`P10D
+  working` -> `P10D` is `CMP.PAYMENT`). A rate's words between its figure and its sign (`5
+  (ხუთი)%-ის`) are the rate's: restating them is formatting and a changed rate is one
+  `CMP.PERCENT`. (Both hold where the readers read the form, red team R4-02/03.)
+* A unit cell of a quantity row restyled to the same unit of the closed list (`კვ.მ` / `მ2`,
+  `ცალი` / `ც.`, `კუბ.მ` / `მ3`) is formatting.
+* A contract number is compared and reported with its Latin letters upper case (`sp-2026/318`
+  is `SP-2026/318`); its Georgian letters stay as written.
+* **Policy: a fee per period is a price.** A fee its own clause states per month or per another
+  period (`ყოველთვიური მომსახურების ღირებულება`, `the monthly service fee`, `1 000 ლარი თვეში`,
+  `GEL 1,000 per month`) is `CMP.AMOUNT` labelled "Monthly fee" (per month) or "Unit price" (per
+  day, week, quarter or year), never a second "Total amount", whether its clause stands alone
+  or beside the total's after `, ხოლო`. A total paid month by month (`გადაიხდება ყოველთვიურად`,
+  `paid monthly`), the price of a number of months (`6 თვის მომსახურების ღირებულება`) and an
+  advance or guarantee paid monthly are no fee per period.
+
 ## 5. BOQ gold (per set, JSON) and the evaluation policy
 
 `samples/gold_boq/<set>.json`:
