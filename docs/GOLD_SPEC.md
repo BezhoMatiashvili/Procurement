@@ -275,6 +275,57 @@ How the rules read dates and periods (red-team round 4):
   (`მიღება-ჩაბარების აქტის გაფორმების თარიღი:`) is not, and an unlabelled date outside the
   preamble still is no signing date.
 
+How the rules read dates and periods (red team round 5):
+
+* **A date that names the contract, every reader.** Each reader of the act's date - the signing
+  verb, the keys, the heading - passes over a date that names the contract and takes the next
+  one: `აქტი შედგენილია 2026 წლის 15 მაისის ხელშეკრულების საფუძველზე` dates nothing (the heading
+  dates the act), `აქტი შედგა 2026 წლის 15 მაისის ხელშეკრულების საფუძველზე, 2026 წლის 30
+  ივნისს` is dated 30 June. A numeric date names the contract with its genitive or instrumental
+  on a hyphen too (`15.05.2026-ის ხელშეკრულების`, `-ისა`, `-ით`); `-დან`, `-მდე`, `-ში` and
+  `-ის ჩათვლით` mark a period and name nothing.
+* **An act's service month after a label, its year after the month's noun.** `საანგარიშო თვე:
+  2026 წლის ივნისი` (and `ანგარიშგების თვე:`) opens the period as `საანგარიშო პერიოდი:` does;
+  `ივნისის თვეში, 2026 წ.` and `ივნისის თვის განმავლობაში, 2026 წელი` are the month, as the
+  postposition sits on the month whichever side its year is. A year that opens a date of its own
+  (`ივნისის თვეში, 2026 წლის 20 მაისამდე`) is that date's.
+* **"Not later than" marks an end.** `არაუგვიანეს` (`no later than`, `not later than`) before a
+  date makes it a range's last day, the genitive with its emphatic vowel included (`არაუგვიანეს
+  2026 წლის 31 დეკემბრისა`, `არაუგვიანეს 31.12.2026-ისა`), one definition with the payment
+  deadline's. The state template's capped validity (`… მოქმედებს ვალდებულებების სრულ
+  შესრულებამდე, მაგრამ არაუგვიანეს 2026 წლის 31 დეკემბრამდე`) is the closed range to that day.
+* **The validity's "until fulfilled" is no performance.** A date in a validity clause whose only
+  performance word is the noun of its until-phrase (`შესრულებამდე`, `until the full performance
+  of …`) is the validity's, never an `execution_period`; a clause that sets the work's window
+  and names the validity besides (`შეასრულოს სამუშაოები … 31 ივლისამდე, ხელშეკრულების
+  მოქმედების ვადაში`) is still the work's.
+* **The English validity clause.** `This Contract shall enter into force on the date of its
+  signing and shall remain in force until …` is the validity: `into force` is a validity
+  predicate as `in force` is, and `until the full performance of the Parties' obligations` is an
+  open end, no performance window.
+* **A performance window stated as a first day and a length is the closed range** (a decision,
+  as round 4 decided for the validity): `გასწიოს მომსახურება 2026 წლის 1 ივნისიდან 12 (თორმეტი)
+  თვის განმავლობაში` is `2026-06-01/2027-06-01`, the length counted from the window's first day
+  by the validity's convention (the day kept, held to the month's last). The length follows the
+  first day directly (`… -დან 6 თვის ვადით`, `from 1 June 2026 for 12 months`) or the window's
+  label (`მომსახურების გაწევის ვადა: 12 თვე`, the first day stated in another clause); a report's
+  deadline in the window's sentence (`… -დან და წარმოადგინოს ანგარიში 10 დღის ვადაში`), a count
+  from another event (`მიწოდებიდან 12 თვის`) and a length beside an until-phrase close nothing,
+  and with no first day the window stays a duration. The length's own words, where no keyword
+  types them, are `execution_period`.
+* **A staged delivery's batches** (a decision): a delivery clause written as a list, each item
+  naming a batch or a stage (`პირველი პარტია - არაუგვიანეს …, მეორე პარტია - არაუგვიანეს …`,
+  `batch`, `stage`, `lot`), gives each item's date a `delivery_deadline`; the extraction states
+  each one, and a comparison labels each "Delivery deadline". A date in an item that names no
+  batch (an invoice's, a payment's) keeps its own type.
+* **An act of handover or of work done is an act.** `მიღება-გადაცემის აქტი` (also `საქონლის …`,
+  `მიღება - გადაცემის აქტი`) and `შესრულებული სამუშაოების / მომსახურების აქტი` are an act's
+  title on a line of their own near the top, in the nominative, with no clause number before
+  them and no full stop after: so the act's own date is `act_date` and the date its recital
+  names the contract by is `contract_date`. A contract naming that act in a clause
+  (`მიღება-გადაცემის აქტის გაფორმებიდან 10 დღეში`, `1.1. მიღება-გადაცემის აქტი ფორმდება …`) stays
+  a contract.
+
 How the rules read money, terms and lines (red-team round 4):
 
 * **Label lines (policy).** A `label: value` line with no full stop of its own - a short label
@@ -487,6 +538,19 @@ strict_findings: true             # anything else reported (any severity) is a f
     director - stays the power-of-attorney warning (`AOA.DIRECTOR`, no correction). The round's
     policy asked for a skip note where the contract names no attorney; that case already had
     this warning, which is kept (a test pins it), so it is never silent.
+* the act's date in English (red team R5): `This Act was signed on 30 June 2026`, `the
+  Certificate is executed on …` dates the act, and a late English act is an `AOA.ACT_DATE` error
+  corrected in English (`5 July 2026` -> `30 June 2026`); an act not in Georgian whose date is
+  not read gets an `AOA.ACT_DATE` skip note saying so, never the "date could not be found"
+  warning, which stays for a Georgian act;
+* **open question for the client** (red team R5, AOA-R5-12): a billing cycle across two months
+  (`15.06.2026-დან 14.07.2026-ის ჩათვლით`) signed on its last day is now an `AOA.ACT_DATE` error
+  corrected to the end of the second month (31 July), after the work ended. Client rule 4's
+  example is a whole month; whether a cycle that crosses a month boundary is signed on its last
+  day (clean, or at most an info note) or on the month's end is not decided, and the rule is
+  unchanged until the client says. The two candidates: (a) the period's last day when the period
+  crosses a month boundary, the month's end for a period inside one month; (b) either day
+  accepted;
 * The legacy `expected_findings:` / `forbidden_findings:` (rule ids only, `"*"` = must be
   completely clean) keep working and are checked as well.
 
@@ -623,6 +687,16 @@ Red team round 4 (compare) settled these cases:
   or beside the total's after `, ხოლო`. A total paid month by month (`გადაიხდება ყოველთვიურად`,
   `paid monthly`), the price of a number of months (`6 თვის მომსახურების ღირებულება`) and an
   advance or guarantee paid monthly are no fee per period.
+
+Red team round 5 (compare, dates) settled these cases:
+
+* A document's own date on one side only - a draft's blank (`„___“ ____ 2026 წ.`) filled in, or
+  the preamble date deleted - is `CMP.DATE` "Contract date" ("Act date" for an act), `None` on the
+  other side, when the other version writes no date of that value anywhere. Between a contract
+  and its act, the act's own date is no date added.
+* **Policy: a staged delivery's batch deadline is "Delivery deadline"** (`CMP.DURATION`), each
+  batch's date paired with its own: the second batch's date changed is one finding, both changed
+  two (section 2, red team round 5).
 
 ## 5. BOQ gold (per set, JSON) and the evaluation policy
 

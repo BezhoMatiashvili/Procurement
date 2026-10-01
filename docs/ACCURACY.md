@@ -410,6 +410,47 @@ miss that must not match (`tests/unit/test_redteam_r4_dates.py`):
   chunk rule but not by the term reader, so the validity "from signing" was lost. The term
   reader now takes a labelled signing date anywhere when the preamble has none.
 
+Red team round 5 (2026-10-01) found these in the date and term readers, each fixed by rule with a
+unit test and a near miss beside it (`tests/unit/test_r5_dates_and_terms.py`):
+
+* **Every act-date reader passes over the contract's date** (AOA-R5-01). The signing-verb branch
+  of `AoaChecker._act_date` took the first date in its sentence, so `აქტი შედგენილია 2026 წლის 15
+  მაისის ხელშეკრულების საფუძველზე` dated a correct June act 15 May (an error). All three readers
+  now drop the dates `contract_named_by` claims, and that predicate reads a numeric date's case
+  on a hyphen (`15.05.2026-ის ხელშეკრულების`).
+* **A service month after a label, its year after the month's noun** (AOA-R5-07): `საანგარიშო
+  თვე: …` opens the period, and `ივნისის თვეში, 2026 წ.` is the month - a correct act got a
+  warning and a late one passed.
+* **An English act** (AOA-R5-11, a regression of AOA-15): round 4 taught the period reader English
+  service words, so an English act's period was read and its date was not, and a correct act got
+  the "date not found" warning. The act's date is read in English (`This Act was signed on …`)
+  and, unread on an act not in Georgian, is a skip note.
+* **"Not later than" ends a range** (EXTRACTION-R5-01): `არაუგვიანეს 2026 წლის 31 დეკემბრისა` was
+  read as the validity's first day. `contract_terms._NOT_LATER_THAN` serves the range reader and
+  the payment deadline.
+* **The validity's "until fulfilled"** (EXTRACTION-R5-02): `შესრულებამდე` in the state
+  template's validity clause made the chunk classifier type its cap a bare `execution_period`.
+  A date in a validity clause whose only performance word is that until-phrase is the validity's.
+* **The English validity clause** (EXTRACTION-R5-13): `shall enter into force … and shall remain
+  in force until …` was no validity (`into force` was not a predicate), and `until the full
+  performance` was read as a performance window.
+* **An act of handover or of work done** (EXTRACTION-R5-03) was read as a contract, so the act's
+  own date replaced the contract's. `document_facts._ACT_FAMILY_TITLE` accepts those titles on a
+  line of their own only - in the nominative, no clause number, no full stop - so a contract that
+  names the act in a clause stays a contract.
+* **A performance window of a first day and a length** (AOA-R5-06, policy decided by the lead):
+  it was open-ended, and a late act passed silently. It is the closed range now, as the validity
+  is since round 4; `contract_terms._performance_length` takes only a length right after the
+  window's first day or its label, so a report's deadline in the same sentence closes nothing.
+  A comparison of such a clause whose length changed reports the period and, as round 4's
+  validity length already did, the length's own duration beside it: two findings for one change,
+  left to the comparison's de-duplication.
+* **A staged delivery** (COMPARE-R5-11, policy): each batch's date is a delivery deadline.
+* **A preamble date on one side** (COMPARE-R5-10): a draft's date filled in or deleted was "Date
+  (unclassified)"; it is "Contract date", when the other version writes no date of that value.
+* **Not changed: a billing cycle across two months** (AOA-R5-12) is corrected to the month's end
+  after the work ended; it is an open question for the client (GOLD_SPEC 3).
+
 ### Scanned PDFs cannot carry Word comments
 
 The client asked for findings marked in the document itself. `report/docx_annotate.py` writes
