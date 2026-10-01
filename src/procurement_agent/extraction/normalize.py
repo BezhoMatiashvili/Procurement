@@ -62,6 +62,13 @@ def normalize_spaces(s: str) -> str:
     return _WS.sub(" ", _SPACE_RE.sub(" ", s)).strip()
 
 
+def is_blank(value: str) -> bool:
+    """Whether ``value`` is a fill-in line, not text a person wrote: no letter and no digit, only
+    underscores, dots, ellipses, dashes and spaces ("___________", "……", "- - -"). A draft leaves
+    its party block so (red team R5, COMPARE-R5-07); a free-text reader yields nothing for it."""
+    return not any(ch.isalnum() for ch in value)
+
+
 def normalize_layout(s: str) -> str:
     """``normalize_confusables`` without the homoglyph fold: NFC, dashes and spaces, the letters
     as written. Folding a homoglyph replaces one character with one, so the two texts have the
@@ -590,6 +597,10 @@ ID_LABEL = (
     r"|(?<![ა-ჰ])საიდ(?:ენტიფიკაციო(?![ა-ჰ])|\.)\s*"
     r"(?:(?:კოდ|ნომ(?:ერ|რ))(?:ი|ის|ით|ად)?(?![ა-ჰ])|№)?"
     r"|(?<![ა-ჰ])პირადი\s*ნომ(?:ერ|რ)(?:ი|ის|ით|ად)?(?![ა-ჰ])"
+    # "პირადი №", "პირადი N": the sign in place of the noun, as in "საიდ. №" (red team R5,
+    # EXTRACTION-R5-16, the lead's decision). Only with the sign, which the separator then
+    # reads, and only before a personal number's eleven digits: "პირადი" alone is an adjective
+    r"|(?<![ა-ჰ])პირადი(?=\s*(?:N|№|#)(?![A-Za-z])\s*[:\-]?\s*\d{11}(?!\d))"
     # English labels start at a word boundary: "paid 204567890" is not "ID 204567890"
     r"|(?<![A-Za-z])(?:ID(?![A-Za-z])\s*(?:code|no\.?|number|№)?"
     r"|identification\s*(?:code|number|no\.?)|tax\s*id(?![A-Za-z])))"

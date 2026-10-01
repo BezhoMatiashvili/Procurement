@@ -585,6 +585,39 @@ Measured after the fixes: the three strict gold sets unchanged at 100%/100%, and
 off), the same cases with the same messages as on the code before these fixes - the spelling
 reader, which they do not touch - and 0% false positives on every harmless class.
 
+### Red team, round 5: the party readers (2026-10-01)
+
+Fixed in the shared readers (`extraction/normalize.py`, `anchors.py`, `georgian.lemma_word`) and
+in the act check's party matching, each with a unit test and a near miss
+(`tests/unit/test_redteam_r5_readers.py`):
+
+* **A party's name slipped in its signature block alone (AOA-R5-04).** The signature block
+  writes no code, so a slipped name matched no contract party and was "party not found in the
+  contract" with no correction, though the same slip in the preamble was corrected. A party
+  with no code whose name matches none is now matched to the contract party whose name it is a
+  slip of (`classify_difference` judges it a typo, or a word's final `ი` is dropped); where two
+  are that close, the side its role word gives decides. A name nothing like either party's
+  stays "not found", with no correction.
+* **A draft's blank is no value (COMPARE-R5-07).** `მისამართი: ______` was read as the address,
+  so filling it in was "changed" from underscores. A value with no letter and no digit
+  (`normalize.is_blank`) yields no fact, and so does a party name whose quotes after the legal
+  form hold only a blank (`შპს „______“`); the act check's own party record is unchanged.
+* **Where an address ends (EXTRACTION-R5-06).** The round-4 stop before `მისამართი:` left the
+  next address's qualifier (`, ფაქტობრივი`) in this one, and a treasury code, a VAT payer's
+  number or a website ran on into it. An address now also ends at a comma before one to four
+  words with no figure and a colon, before a qualified address label whatever the separator,
+  and before a website; a part of the address with its colon (`კორპუსი: 3`, `სართ. 4:`) stays.
+* **A double surname (EXTRACTION-R5-12).** The name readers stopped at a hyphen. A second part
+  of three letters or more that is no case ending, postposition, title or side is now part of
+  the surname, and only that last part takes the nominative. The act check compares the whole
+  name: a correct pair is clean and a slip in the second part is `AOA.DIRECTOR` (pinned).
+* **`პირადი №` (EXTRACTION-R5-16, the lead's policy).** `პირადი` with a number sign before
+  eleven digits labels a personal number; `პირადი` alone, or before nine digits, does not.
+
+Measured after the fixes: the three strict gold sets unchanged at 100%/100% (client_v2, ts2,
+ts3), and `scripts/mutate_aoa.py --seed 167 --per-class 6` detects every error class at 100%
+with its correction and place, and 0% false positives on every harmless class.
+
 ### Red team, round 3: what the act check reads, and what a correction says (2026-10-01)
 
 Round 3 found figures written in forms the readers did not know, and corrections that were

@@ -223,6 +223,10 @@ def lemma_word(word: str, *, cases: Collection[Case] | None = None) -> str:
     hyphenated = _HYPHENATED_ENDING.fullmatch(word)
     if hyphenated is not None:
         return hyphenated.group("stem")
+    head, hyphen, tail = word.rpartition("-")
+    if hyphen and is_georgian_word(head) and is_georgian_word(tail) and len(tail) >= 3:
+        # a double surname, "ხურციძე-ლომაიას": only its last part inflects (red team R5)
+        return f"{head}-{lemma_word(tail, cases=cases)}"
     if not is_georgian_word(word):
         return word
     case = case_of(word)
