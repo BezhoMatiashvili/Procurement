@@ -553,6 +553,8 @@ def read_book(path: Path, name: str) -> Book:
         summary = read_summary(wv[cands[0]], wf[cands[0]], names, set(sheets))
         if summary:
             summary.sheet = cands[0]
+    elif len(sheets) == 1:
+        summary = bill_chain(wv, next(iter(sheets.values())))
     return Book(
         path=path,
         name=name,
@@ -562,6 +564,64 @@ def read_book(path: Path, name: str) -> Book:
         uncached=uncached,
         values=wv,
         formulas=wf,
+    )
+
+
+def bill_chain(wv, sheet: Sheet) -> SummaryInfo | None:
+    """GOLD_SPEC 5, round 4: a single-sheet schedule with no Summary states its totals under
+    the bill - its total (TOTAL COST), the VAT and the total incl. VAT rows below the last row
+    with a quantity. None unless a row says it is the total incl. VAT."""
+    ws = wv[sheet.name]
+    amount_c, desc_c = sheet.cols["amount"], sheet.cols["desc"]
+    last = max((r.row for r in sheet.rows if r.qty is not None), default=sheet.number_row)
+    roles: dict[str, tuple[int, float | Text | None]] = {}
+    for r in range(last + 1, ws.max_row + 1):
+        label = next(
+            (
+                fold(ws.cell(r, c).value)
+                for c in [desc_c, *range(1, amount_c)]
+                if isinstance(ws.cell(r, c).value, str) and fold(ws.cell(r, c).value)
+            ),
+            "",
+        )
+        if not label:
+            continue
+        value = number(ws.cell(r, amount_c).value)
+        role = None
+        if INCL_VAT.search(label):
+            role = "incl_vat"
+        elif EXCL_VAT.search(label):
+            role = "excl_vat"
+        elif VAT_ROW.match(label):
+            role = "vat"
+        elif re.match(r"(?:SUB-?TOTAL|TOTAL|GRAND TOTAL)\b", label) and "total_cost" not in roles:
+            role = "total_cost"
+        if role and role not in roles:
+            roles[role] = (r, value)
+    if "incl_vat" not in roles or "total_cost" not in roles:
+        return None
+    checks: list[dict] = []
+    tc, vat, inc = (
+        roles[k][1] if k in roles and is_num(roles[k][1]) else None
+        for k in ("total_cost", "vat", "incl_vat")
+    )
+    if tc is not None and inc is not None:
+        exp = math.fsum([tc, vat or 0.0])  # type: ignore[list-item]
+        checks.append(
+            {
+                "check": "incl_vat = total + vat (under the bill)",
+                "expected": r2(exp),
+                "stated": r2(inc),  # type: ignore[arg-type]
+                "ok": same_money(exp, inc),  # type: ignore[arg-type]
+            }
+        )
+    return SummaryInfo(
+        sheet=sheet.name,
+        total_col=amount_c,
+        rows=roles,
+        notes=[f"no Summary sheet: the totals are read under the bill of {sheet.name}"],
+        links=[],
+        checks=checks,
     )
 
 
@@ -595,7 +655,8 @@ def match_rows(t_rows: list[Row], b_rows: list[Row]) -> tuple[dict[int, Row], di
 
     # 1. item number + description
     assign([(t, b, 1.0) for t in cand_t for b in cand_b if t.item == b.item and t.fdesc == b.fdesc])
-    # 2. same item number, descriptions >= 0.9 alike
+    # 2. same item number, descriptions >= 0.9 alike - or the template's description kept whole
+    # with the bidder's offer written after it (GOLD_SPEC 5, round 4)
     pairs = []
     for t in cand_t:
         if t.row in out or not t.item:
@@ -604,10 +665,46 @@ def match_rows(t_rows: list[Row], b_rows: list[Row]) -> tuple[dict[int, Row], di
             if b.row in used or b.item != t.item:
                 continue
             rt = difflib.SequenceMatcher(None, t.fdesc, b.fdesc).ratio()
-            if rt >= 0.9:
-                pairs.append((t, b, rt))
+            if rt >= 0.9 or keeps_template_text(t.fdesc, b.fdesc):
+                pairs.append((t, b, min(rt, 0.999)))
+    assign(pairs)
+    # 3. an item number stored as a number ("1.10" read back as 1.1), the description the same
+    pairs = []
+    for t in cand_t:
+        if t.row in out or (number := item_number(t.item)) is None:
+            continue
+        for b in cand_b:
+            if (
+                b.row not in used
+                and (t.numeric_item or b.numeric_item)
+                and item_number(b.item) == number
+                and b.fdesc == t.fdesc
+            ):
+                pairs.append((t, b, 1.0))
     assign(pairs)
     return out, ratio
+
+
+def keeps_template_text(t: str, b: str) -> bool:
+    """The bid's folded description is the template's whole, then words of the bidder's own,
+    starting where a word ends ("PIPE 20" is not kept by "PIPE 200")."""
+    return bool(t) and len(b) > len(t) and b.startswith(t) and not b[len(t)].isalnum()
+
+
+def item_number(item: str) -> float | None:
+    """An item number as a spreadsheet stores it as a number ("1.10" -> 1.1)."""
+    text = item.strip().rstrip(".")
+    return float(text) if re.fullmatch(r"\d{1,3}(?:\.\d{1,3})?", text) else None
+
+
+#: GOLD_SPEC 5, round 4: the lump sum's names, one unit (never item, set, pcs or a litre)
+LUMP_SUM = {"LS", "LUMPSUM", "LUMP-SUM"}
+
+
+def unit_key(unit: str) -> str:
+    """A unit as compared here: folded (GOLD_SPEC 1), and the lump sum's names as one."""
+    squeezed = re.sub(r"[\s.]", "", fold(unit))
+    return "LS" if squeezed in LUMP_SUM else fold(unit)
 
 
 # ------------------------------------------------------------------------------- bid check
@@ -745,7 +842,7 @@ def check_bid(tpl: Book, bid: Book, placeholders: set[tuple[str, int]] | None = 
                 leaf_rows[b.row] = b.amount  # type: ignore[assignment]
             if not t.unit and b.unit:
                 res["unit_filled"].append({"sheet": sname, "item": t.item, "bid_unit": b.unit})
-            elif fold(t.unit) != fold(b.unit):
+            elif unit_key(t.unit) != unit_key(b.unit):
                 res["unit_changed"].append(
                     {"sheet": sname, "item": t.item, "template_unit": t.unit, "bid_unit": b.unit}
                 )
@@ -1129,6 +1226,13 @@ DECISIONS = [
     "The item number is the first non-empty cell between the No column and the Description column.",
     "Positions match on item number + folded description, then same item number with "
     "difflib ratio >= 0.9 (description_changed); one to one, nearest row first.",
+    "Round 4 (lead's policies): a bid description that keeps the template's whole and adds the "
+    "bidder's own words after it (the offered make or model) is the position under the same "
+    "item number (description_changed); an item number stored as a number ('1.10' read back "
+    "as 1.1) is the position when the folded description is the same; a row with its own "
+    "amount product is a position whatever its quantity formula adds; LS, L.S., lump sum and "
+    "lump-sum are one unit; a single-sheet schedule with no Summary sheet takes its total, VAT "
+    "and total incl. VAT from the rows under its bill.",
     "A blank bid unit against a template unit is a unit change with bid_unit ''; a unit the bidder "
     "wrote where the template left it blank is listed under unit_filled, not as a change.",
     "A template quantity of blank or 0 makes the position 'filled_blank' when the bidder gives a "
