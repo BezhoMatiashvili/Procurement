@@ -749,6 +749,31 @@ def test_a_hidden_draft_priced_by_a_bidder_is_shown_never_evaluated(tmp_path: Pa
     _, (a, b) = _hidden_draft_compare(tmp_path, draft_priced_by="A")
     assert len(a.priced_headings) == len(_LINES) and not b.priced_headings
     assert a.evaluated_cost == pytest.approx(_COST)
+    # the draft adds into neither the stated nor the sheets' total: nothing to break down
+    assert a.difference == {}
+
+
+def test_a_section_the_bidder_hid_is_still_that_section(tmp_path: Path) -> None:
+    # the template's bill is visible; bidder A hides it and types its Summary as values, so
+    # nothing links the hidden sheet - it is still the section, compared and evaluated
+    books = []
+    for name, factor in (("T", None), ("A", 1.0), ("B", 0.9)):
+        bill, total = _bill(factor)
+        summary = _summary(total)
+        if name == "A":
+            summary = {k: v.value if isinstance(v, Fx) else v for k, v in summary.items()}
+        path = _save_hidden(
+            tmp_path / f"{name}.xlsx",
+            {"SUMMARY": summary, _SHEET: bill},
+            {_SHEET} if name == "A" else set(),
+        )
+        books.append(read_boq(path, name=name))
+    assert books[1].hidden_sheets == [_SHEET]
+    a, b = compare_all(books[0], books[1:])
+    assert "BOQ.SHEET_UNREADABLE" not in _rules(a)
+    assert a.evaluated_cost == pytest.approx(_COST)
+    assert a.common_scope_positions == len(_LINES)
+    assert (a.colour, b.colour) == ("red", "green")
 
 
 @pytest.mark.parametrize(("linked", "hidden"), [(True, True), (False, False)])
@@ -878,3 +903,29 @@ def test_a_price_list_not_closed_by_its_total_incl_vat_alone_is_not_ranked_so(
     a, b = _price_list_compare(tmp_path, label, **kw)  # type: ignore[arg-type]
     for comp in (a, b):
         assert comp.markup_factor is None and comp.colour is None
+
+
+def test_a_bid_closing_on_incl_vat_alone_against_a_template_chain_is_not_ranked(
+    tmp_path: Path,
+) -> None:
+    # near miss: the template closes Total, VAT 18%, Total incl. VAT; read at markup 1.0, a bid
+    # collapsing that into one "Total incl. VAT" over the same pre-VAT prices would come out
+    # 18% cheaper than it is
+    def chain(factor: float | None) -> Cells:
+        bill, total = _bill(factor, close="Total")
+        bill[(8, 2)], bill[(8, 6)] = "VAT 18%", Fx("=F7*0.18", total * 0.18)
+        bill[(9, 2)], bill[(9, 6)] = "Total incl. VAT", Fx("=F7+F8", total * 1.18)
+        return bill
+
+    sheets = {
+        "T": chain(None),
+        "A": _bill(1.0, close="Total incl. VAT")[0],
+        "B": chain(0.95),
+    }
+    books = [
+        read_boq(_save(tmp_path / f"{n}.xlsx", {"1. GOODS": cells}), name=n)
+        for n, cells in sheets.items()
+    ]
+    a, b = compare_all(books[0], books[1:])
+    assert a.markup_factor is None and a.colour is None
+    assert b.markup_factor == pytest.approx(1.18)

@@ -678,6 +678,12 @@ def bill_chain(wv, sheet: Sheet) -> SummaryInfo | None:
     )
 
 
+def incl_vat_alone(book: Book) -> bool:
+    """The book's totals come from a bill closed on its total incl. VAT alone (round 5)."""
+    rows = book.summary.rows if book.summary is not None else {}
+    return "incl_vat" in rows and rows.get("total_cost") == rows["incl_vat"]
+
+
 def unpriced_template(book: Book) -> bool:
     for sh in book.sheets.values():
         for r in sh.rows:
@@ -884,7 +890,9 @@ def check_bid(tpl: Book, bid: Book, placeholders: set[tuple[str, int]] | None = 
     costs: dict[str, float] = {}
     priced: list[str] = []
     for sname, tsh in tpl.sheets.items():
-        bsh = bid.sheets.get(sname)
+        # a section of the template the bidder hid is still that section (round 5: only the
+        # template's own hidden drafts are no sections)
+        bsh = bid.sheets.get(sname) or bid.hidden.get(sname)
         if bsh is None:
             if sname in bid.sheet_names:
                 notes.append(f"{sname}: sheet present but its header block was not recognised")
@@ -1079,7 +1087,7 @@ def check_bid(tpl: Book, bid: Book, placeholders: set[tuple[str, int]] | None = 
     res["unpriced_sheets"] = [
         sname
         for sname, tsh in tpl.sheets.items()
-        if sname in bid.sheets
+        if (sname in bid.sheets or sname in bid.hidden)
         and any(t.kind == "position" for t in tsh.rows)
         and not any(k.split("|")[0] == sname for k in priced)
         and not any(h["sheet"] == sname for h in res["heading_priced"])
@@ -1089,6 +1097,10 @@ def check_bid(tpl: Book, bid: Book, placeholders: set[tuple[str, int]] | None = 
     res["evaluated_cost"] = round(math.fsum(costs.values()), 2)
     # Summary
     s = bid.summary
+    if incl_vat_alone(bid) and not incl_vat_alone(tpl):
+        # round 5: a bill closed on its total incl. VAT alone, where the template's bill goes
+        # Total, VAT, Total incl. VAT, states no total the way the template asks: not ranked
+        s = None
     stated = {"total_cost": None, "excl_vat": None, "incl_vat": None}
     if s:
         for k in stated:

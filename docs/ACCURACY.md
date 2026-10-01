@@ -1588,7 +1588,9 @@ The lead's policies of round 5, each in GOLD_SPEC 5 and the gold writer:
 * **A price list closed by its total incl. VAT (R5-13)** - the prices including the tax, one
   closing row plainly adding them - is ranked on that row as both TOTAL COST and the total incl.
   VAT (markup 1.0). A total incl. VAT scaled onto a pre-VAT sum, or followed by other valued
-  rows, is not read so, and such a bid stays unranked as before.
+  rows, is not read so, and such a bid stays unranked as before; so does a bid closing on its
+  total incl. VAT alone where the template's bill goes Total, VAT, Total incl. VAT, which at
+  markup 1.0 would rank its pre-VAT prices 18% low among bidders marked up 1.18.
 * **A contingency between the bill's Total and its carried total (R5-16)** is part of the
   chain: the positions are held against the first sum row whatever its label, the rows after it
   being rates of it and the carried total built from those. The rows are told by how they are
@@ -1596,7 +1598,8 @@ The lead's policies of round 5, each in GOLD_SPEC 5 and the gold writer:
 * **A hidden template sheet the Summary does not link (R5-17)** is no section: one info note on
   the template (`BOQ.SHEET_SKIPPED`), no SECTION_UNPRICED on every bidder; a bidder who prices it
   is shown like a priced non-position. The client templates' hidden calculation sheet, which
-  has no bill on it, stays a helper sheet.
+  has no bill on it, stays a helper sheet. The rule is the template's: a bidder who hides one of
+  the template's sections (their Summary typed as values, linking nothing) still returns it.
 * **The usual Georgian unit spellings are one unit (R5-18):** the man-hour კაც/სთ = კაც.სთ =
   კაც-სთ (and the man-day and machine-hour likewise, each apart from the hour), შტ = ც = ცალი,
   კვტ = kW (apart from kWh), მთვ = month, გრ.მ = m.

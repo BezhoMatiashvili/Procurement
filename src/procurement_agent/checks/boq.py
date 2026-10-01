@@ -1441,12 +1441,14 @@ def _read_boq(values: Workbook, formulas: Workbook, *, name: str) -> BoqWorkbook
         sheet = _read_sheet(
             book, ws, wf, sheet_name, cols, header_row, linked_rows.get(sheet_name, set())
         )
-        if hidden:
-            book.hidden_bills[sheet_name] = sheet
-            continue
         closing = _closing_line(sheet, linked_rows.get(sheet_name, set()))
         if closing is not None:
             sheet.subtotal, sheet.subtotal_row = closing.amount, closing.row
+        if hidden:
+            # kept apart; a bid's hidden sheet that is a section of the template is still that
+            # section (``compare_bid``)
+            book.hidden_bills[sheet_name] = sheet
+            continue
         book.sheets[sheet_name] = sheet
     if summary_sheet is None and len(book.sheets) == 1:
         _summary_from_bill(book, next(iter(book.sheets.values())))
@@ -2563,6 +2565,31 @@ def compare_bid(template: BoqWorkbook, bid: BoqWorkbook) -> BidComparison:
         out.findings.append(_no_cached_values_finding(bid))
         return out
 
+    sections = {n: s for n, s in bid.hidden_bills.items() if n in template.sheets}
+    if sections:
+        # the policy concerns the template's hidden drafts: a bid that hides one of the
+        # template's sections (its Summary typed as values, or missing, links nothing) still
+        # returns that section - read as hidden, it was "unreadable" and left every bidder's
+        # common scope
+        bid = replace(
+            bid,
+            sheets={
+                n: bid.sheets.get(n) or sections[n]
+                for n in bid.sheet_order
+                if n in bid.sheets or n in sections
+            },
+            hidden_bills={n: s for n, s in bid.hidden_bills.items() if n not in sections},
+        )
+    if (
+        bid.summary_in_bill is not None
+        and _closed_incl_vat(bid.summary_rows)
+        and not (template.summary_in_bill is not None and _closed_incl_vat(template.summary_rows))
+    ):
+        # a bid that closes its bill on a total incl. VAT alone where the template's bill goes
+        # Total, VAT, Total incl. VAT: read at markup 1.0 it would be ranked on prices the
+        # template's chain says are before VAT - it states no total incl. VAT the way the
+        # template asks, and is not ranked
+        bid = replace(bid, summary_rows=[], summary={}, summary_in_bill=None)
     priced_template_sheets = set(template.sheets) | set(template.unreadable_sheets)
     out.added_sheets = [s for s in bid.sheet_order if s not in template.sheet_order]
     out.removed_sheets = [s for s in template.sheet_order if s not in bid.sheet_order]
@@ -3104,7 +3131,10 @@ def _evaluate(out: BidComparison, bid: BoqWorkbook) -> None:
         "quantities": quantities,
         "added_lines": sum(b.amount or 0.0 for b in out.added if b.kind == "position"),
         "optional_items": sum(b.amount or 0.0 for b in out.priced_optional),
-        "priced_headings": sum(b.amount or 0.0 for b in out.priced_headings),
+        # a hidden draft the bidder priced adds into neither the stated nor the sheets' total
+        "priced_headings": sum(
+            b.amount or 0.0 for b in out.priced_headings if b.sheet in bid.sheets
+        ),
         "added_sheets": sum(bid.sheets[s].total for s in out.added_sheets if s in bid.sheets),
         "summary": (out.stated_total_cost or 0.0) - bid.total,
     }

@@ -927,15 +927,19 @@ Policy (client BOQ rules 2, 3, 5, 6 and the user's decision of 2026-09-28):
   only closing row is its total incl. VAT ("სულ ჯამი (დღგ-ს ჩათვლით)") - the prices including
   the tax, the row plainly adding them, no other valued row under the bill - is ranked on that
   row, which closes the sheet and plays both TOTAL COST and the total incl. VAT (markup 1.0); a
-  total incl. VAT computed onto a pre-VAT sum (`=SUM(F2:F6)*1.18`) is not read so. Without a row
+  total incl. VAT computed onto a pre-VAT sum (`=SUM(F2:F6)*1.18`) is not read so, and a bid
+  closing so where the template's own bill goes Total, VAT, Total incl. VAT is not ranked (read
+  at markup 1.0, prices the template says are before VAT would rank 18% low). Without a row
   saying incl. VAT there, the bid is
   not ranked and its skip note says it has no Summary sheet stating a total incl. VAT. With
   several priced sheets and no Summary, none is read so. A hidden sheet laid out as a bill that
   the Summary does not link to (an earlier draft kept in the template) is no priced section
   (round 5, the lead's decision): it is said once on the template (`BOQ.SHEET_SKIPPED`, info),
   never "section left unpriced" on the bidders; a bidder who prices it is shown like a priced
-  non-position (`BOQ.HEADING_PRICED`) and never evaluated. A hidden sheet with no bill on it
-  stays a helper sheet, and sheet presence still counts hidden sheets. A chart sheet is an added sheet, never read as a
+  non-position (`BOQ.HEADING_PRICED`) and never evaluated. The rule is the template's: a
+  section of the template that a bidder hid is still that section, whatever their Summary
+  links. A hidden sheet with no bill on it stays a helper sheet, and sheet presence still counts
+  hidden sheets. A chart sheet is an added sheet, never read as a
   table. A bid workbook that cannot be read at all is reported on that bidder alone
   (`BOQ.UNREADABLE`) and takes no part in the common scope; the other bids are compared.
 

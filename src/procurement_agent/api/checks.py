@@ -654,6 +654,8 @@ def _ref_from_diff(d: LineDiff) -> BoqLineRef:
         template_qty=d.template_qty,
         bid_qty=d.bid_qty,
         amount=d.amount,
+        # a blank line filled in without a price that can be read: listed, never evaluated
+        status=None if d.priced else "unpriced",
     )
 
 

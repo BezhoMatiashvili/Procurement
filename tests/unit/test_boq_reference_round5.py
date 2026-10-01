@@ -307,3 +307,40 @@ def test_a_price_list_closed_by_its_total_incl_vat_alone_is_ranked_on_it(
     assert a["markup_factor"] == 1.0
     assert a["sheet_subtotals"] == {"1. GOODS": 1400.0}
     assert gold["colours"] == {"red": ["A"], "green": ["B"]}
+
+
+def test_a_section_the_bidder_hid_is_still_that_section(tmp_path: Path) -> None:
+    dig = ("1.1", "Trench excavation", "m3", 10.0)
+    notes: Cells = {(1, 1): "Notes to bidders"}  # a workbook's only sheet cannot be hidden
+    template = _ref_bill(((*dig, None, None),), template=True)
+    _save(tmp_path / "template.xlsx", {"Notes": notes, "1. WORKS": template})
+    bid_a = {"Notes": notes, "1. WORKS": _ref_bill(((*dig, 110.0, 1100.0),))}
+    _save_hidden(tmp_path / "A.xlsx", bid_a, {"1. WORKS"})
+    _save(tmp_path / "B.xlsx", {"Notes": notes, "1. WORKS": _ref_bill(((*dig, 100.0, 1000.0),))})
+    gold = ref.build_gold(tmp_path, tmp_path / "template.xlsx")
+    assert gold["bids"]["A"]["evaluated_cost"] == 1100.0
+    assert [x["item"] for x in gold["common_scope"]] == ["1.1"]
+
+
+def test_a_bid_closing_on_incl_vat_alone_against_a_template_chain_is_not_ranked(
+    tmp_path: Path,
+) -> None:
+    dig = ("1.1", "Trench excavation", "m3", 10.0)
+
+    def chain(rate: float | None) -> Cells:
+        line = (*dig, rate, None if rate is None else 10.0 * rate)
+        cells = _ref_bill((line,), template=rate is None)
+        total = 10.0 * (rate or 0.0)
+        cells[(4, 2)] = "TOTAL"
+        cells[(5, 2)], cells[(5, 6)] = "VAT 18%", Fx("=F4*0.18", total * 0.18)
+        cells[(6, 2)], cells[(6, 6)] = "TOTAL INCL. VAT", Fx("=F4+F5", total * 1.18)
+        return cells
+
+    alone = _ref_bill(((*dig, 100.0, 1000.0),))
+    alone[(4, 2)] = "TOTAL INCL. VAT"
+    _save(tmp_path / "template.xlsx", {"1. WORKS": chain(None)})
+    _save(tmp_path / "A.xlsx", {"1. WORKS": alone})
+    _save(tmp_path / "B.xlsx", {"1. WORKS": chain(95.0)})
+    gold = ref.build_gold(tmp_path, tmp_path / "template.xlsx")
+    assert gold["bids"]["A"]["markup_factor"] is None
+    assert gold["bids"]["B"]["markup_factor"] == pytest.approx(1.18)
