@@ -361,6 +361,10 @@ _PERIOD_KEYS = (
     "მომსახურების პერიოდ",
     "გაწევის პერიოდ",
     "მიწოდების პერიოდ",
+    # the month the act reports on, as a label: "საანგარიშო თვე: 2026 წლის ივნისი" (red team R5,
+    # AOA-R5-07)
+    "საანგარიშო თვ",
+    "ანგარიშგების თვ",
 )
 #: ... and a bare "პერიოდი:" label, opening its line after a clause number: "2. პერიოდი:
 #: 01.06.2026 - 30.06.2026". A period another word qualifies ("საგარანტიო პერიოდი:",
@@ -809,13 +813,17 @@ def _act_dated_right_before(text: str, pos: int) -> bool:
 
 
 #: A month and its year with no day before the month: "2026 წლის ივნისის (თვეში)", "2026 წ.
-#: ივნისი", and the other order, "ივნისი 2026", "ივნისი, 2026 წ.". The month is any of its forms
+#: ივნისი", and the other order, "ივნისი 2026", "ივნისი, 2026 წ.", the month's own noun between
+#: them as a date's postposition may stand there ("ივნისის თვეში, 2026 წ.", "ივნისის თვის
+#: განმავლობაში, 2026 წელი", red team R5: AOA-R5-07). The month is any of its forms
 #: (``MONTH_FORMS``), which a pattern of letters leaves to be looked up.
 _YEAR_MONTH = re.compile(
     rf"(?<![\d.])(?P<y>(?:19|20)\d\d)\s*(?:წლის|წ\.)\s*(?P<m>[{GEORGIAN}]+)(?![{GEORGIAN}])"
 )
 _MONTH_YEAR = re.compile(
-    rf"(?<![{GEORGIAN}\d])(?P<m>[{GEORGIAN}]+)\s*,?\s+(?P<y>(?:19|20)\d\d)(?!\d|\.\d)"
+    rf"(?<![{GEORGIAN}\d])(?P<m>[{GEORGIAN}]+)"
+    r"(?:\s+თვ(?:ე|ის|ეში)(?:\s+განმავლობაში)?)?"
+    r"\s*,?\s+(?P<y>(?:19|20)\d\d)(?!\d|\.\d)"
     rf"(?:\s*(?:წლის|წელი|წ\.)(?![{GEORGIAN}]))?"
 )
 
