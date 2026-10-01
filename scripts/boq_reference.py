@@ -127,6 +127,14 @@ def formula_of(cell: object) -> str | None:
     return None
 
 
+_RANGE = r"\$?[A-Z]{1,3}\$?\d+(?::\$?[A-Z]{1,3}\$?\d+)?"
+#: a formula that only adds cells of its own sheet: =SUM(F2:F6), =F2+F3 (nothing scaled)
+PLAIN_SUM = re.compile(
+    rf"=\s*\+?\s*(?:SUM\s*\(\s*{_RANGE}(?:\s*[,;]\s*{_RANGE})*\s*\)|{_RANGE}(?:\s*\+\s*{_RANGE})*)\s*",
+    re.IGNORECASE,
+)
+
+
 def own_row_only(formula: str, row: int) -> bool:
     refs = refs_of(formula)
     return bool(refs) and all(r1 == row and r2_ == row for _, r1, _, r2_ in refs)
@@ -292,17 +300,17 @@ def read_sheet(ws_v, ws_f, name: str, hdr) -> Sheet:
         if any(t.startswith("SUB-TOTAL") or t.startswith("SUBTOTAL") for t in texts):
             subtotal_rows.append(r)
     if not subtotal_rows:
-        # round 5 (the lead's decision): with no SUB-TOTAL row, the sheet's own total is the
-        # first row after the last quantity whose amount adds rows above it, whatever it is
-        # labelled ("Total", "ჯამი"); a contingency and a carried total below it are built from
-        # it and are not read as the positions' total
+        # round 5 (the lead's decisions): with no SUB-TOTAL row, the sheet's own total is the
+        # first row after the last quantity whose amount plainly adds rows above it, whatever
+        # it is labelled ("Total", "ჯამი", or a price list's "Total incl. VAT"); a contingency
+        # and a carried total below it are built from it and are not the positions' total
         qty_rows = [
             r for r in range(nr + 1, last + 1) if ws_v.cell(r, cols["qty"]).value is not None
         ]
         for r in range(max(qty_rows, default=nr) + 1, last + 1):
-            f = formula_of(ws_f.cell(r, cols["amount"]))
-            refs = refs_of(f) if f else []
-            if refs and not own_row_only(f or "", r) and all(r2_ < r for _, _, _, r2_ in refs):
+            f = formula_of(ws_f.cell(r, cols["amount"])) or ""
+            refs = refs_of(f)
+            if PLAIN_SUM.fullmatch(f) and refs and all(r2_ < r for _, _, _, r2_ in refs):
                 subtotal_rows.append(r)
                 break
     end = subtotal_rows[-1] if subtotal_rows else last + 1
@@ -606,6 +614,7 @@ def bill_chain(wv, sheet: Sheet) -> SummaryInfo | None:
     last = max((r.row for r in sheet.rows if r.qty is not None), default=sheet.number_row)
     roles: dict[str, tuple[int, float | Text | None]] = {}
     between: list[float] = []  # valued rows between the total and the VAT (a contingency)
+    valued: list[int] = []  # every labelled row under the bill stating a number
     for r in range(last + 1, ws.max_row + 1):
         label = next(
             (
@@ -627,10 +636,21 @@ def bill_chain(wv, sheet: Sheet) -> SummaryInfo | None:
             role = "vat"
         elif re.match(r"(?:SUB-?TOTAL|TOTAL|GRAND TOTAL)\b", label) and "total_cost" not in roles:
             role = "total_cost"
+        if is_num(value):
+            valued.append(r)
         if role and role not in roles:
             roles[role] = (r, value)
         elif role is None and "total_cost" in roles and "vat" not in roles and is_num(value):
             between.append(value)  # type: ignore[arg-type]
+    if (
+        set(roles) == {"incl_vat"}
+        and valued == [roles["incl_vat"][0]]
+        and sheet.subtotal_row == roles["incl_vat"][0]
+    ):
+        # round 5 (the lead's decision): a price list whose only closing row is its total incl.
+        # VAT, plainly adding the prices (which include the tax), is ranked on that row as both
+        # its total and its total incl. VAT
+        roles["total_cost"] = roles["incl_vat"]
     if "incl_vat" not in roles or "total_cost" not in roles:
         return None
     checks: list[dict] = []

@@ -825,3 +825,56 @@ def test_a_row_between_that_is_no_rate_of_the_total_leaves_the_carried_total_clo
     a, _ = _contingency_compare(tmp_path, "Total", between=1000.0)
     [gap] = [f for f in a.findings if f.rule_id == "BOQ.RECONCILE"]
     assert "row 9" in gap.message_en
+
+
+# --- R5-13 (the lead's policy): a price list closed by its total incl. VAT alone --------------
+
+
+def _price_list_compare(
+    tmp_path: Path, label: str, *, scale: str = "", after: tuple[str, str] | None = None
+) -> list[BidComparison]:
+    """One sheet, no Summary: the bill closed by "<label>" (``=SUM(F2:F6)<scale>``), and an
+    ``after`` row (label, formula) under it if given."""
+    books = []
+    for name, factor in (("T", None), ("A", 1.0), ("B", 0.9)):
+        bill, total = _bill(factor, close=label)
+        if scale:
+            bill[(7, 6)] = Fx(f"=SUM(F2:F6){scale}", total * 1.18)
+        if after is not None:
+            bill[(8, 2)] = after[0]
+            bill[(8, 6)] = Fx(after[1], total * 0.18 / 1.18)
+        books.append(read_boq(_save(tmp_path / f"{name}.xlsx", {"1. GOODS": bill}), name=name))
+    return compare_all(books[0], books[1:])
+
+
+@pytest.mark.parametrize(
+    "label", ["სულ ჯამი (დღგ-ს ჩათვლით)", "Total incl. VAT", "ჯამი დღგ-ით", "TOTAL WITH VAT"]
+)
+def test_a_price_list_closed_by_its_total_incl_vat_is_ranked_on_it(
+    tmp_path: Path, label: str
+) -> None:
+    a, b = _price_list_compare(tmp_path, label)
+    for comp in (a, b):
+        assert comp.totals_from == "bill"
+        assert comp.markup_factor == pytest.approx(1.0)
+        assert not {"BOQ.RECONCILE", "BOQ.NOT_RANKED"} & set(_rules(comp))
+    assert a.stated_incl_vat == pytest.approx(_COST)
+    assert a.common_scope_total == pytest.approx(_COST)
+    assert b.common_scope_total == pytest.approx(_COST * 0.9)
+    assert (a.colour, b.colour) == ("red", "green")
+
+
+@pytest.mark.parametrize(
+    ("label", "kw"),
+    [
+        ("Total", {}),  # no row says incl. VAT
+        ("Total incl. VAT", {"scale": "*1.18"}),  # the tax added onto a pre-VAT sum
+        ("Total incl. VAT", {"after": ("of which VAT 18%", "=F7*18/118")}),  # not the only row
+    ],
+)
+def test_a_price_list_not_closed_by_its_total_incl_vat_alone_is_not_ranked_so(
+    tmp_path: Path, label: str, kw: dict[str, object]
+) -> None:
+    a, b = _price_list_compare(tmp_path, label, **kw)  # type: ignore[arg-type]
+    for comp in (a, b):
+        assert comp.markup_factor is None and comp.colour is None

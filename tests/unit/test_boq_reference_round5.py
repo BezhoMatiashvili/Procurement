@@ -274,3 +274,36 @@ def test_the_positions_are_held_against_the_total_before_a_contingency(
     a = gold["bids"]["A"]
     assert a["sheet_subtotals"] == {"1. WORKS": 3000.0}
     assert a["sheet_amounts"] == {"1. WORKS": 3000.0}
+
+
+@pytest.mark.parametrize("scaled", [False, True])
+def test_a_price_list_closed_by_its_total_incl_vat_alone_is_ranked_on_it(
+    tmp_path: Path, scaled: bool
+) -> None:
+    lines = (("1", "Laser printer A4 mono", "pcs", 6.0), ("2", "UPS 1500 VA", "pcs", 8.0))
+
+    def book(name: str, factor: float | None) -> None:
+        cells = _ref_bill(
+            tuple(
+                (*x, None if factor is None else 100.0 * factor, x[3] * 100.0 * (factor or 0.0))
+                for x in lines
+            ),
+            template=factor is None,
+        )
+        total = 1400.0 * (factor or 0.0)
+        cells[(5, 2)] = "სულ ჯამი (დღგ-ს ჩათვლით)"
+        cells[(5, 6)] = Fx("=SUM(F3:F4)*1.18", total * 1.18) if scaled else Fx("=SUM(F3:F4)", total)
+        _save(tmp_path / f"{name}.xlsx", {"1. GOODS": cells})
+
+    book("template", None)
+    book("A", 1.0)
+    book("B", 0.9)
+    gold = ref.build_gold(tmp_path, tmp_path / "template.xlsx")
+    a = gold["bids"]["A"]
+    if scaled:  # near miss: the tax added onto a pre-VAT sum is no VAT-inclusive price list
+        assert a["markup_factor"] is None and gold["colours"] == {"red": [], "green": []}
+        return
+    assert a["stated"] == {"total_cost": 1400.0, "excl_vat": None, "incl_vat": 1400.0}
+    assert a["markup_factor"] == 1.0
+    assert a["sheet_subtotals"] == {"1. GOODS": 1400.0}
+    assert gold["colours"] == {"red": ["A"], "green": ["B"]}

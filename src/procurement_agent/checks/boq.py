@@ -669,6 +669,9 @@ class BoqLine:
     numeric_item: bool = False
     #: the rows of this sheet the amount cell's formula refers to (none for a typed amount)
     amount_rows: tuple[int, ...] = ()
+    #: the amount cell is a plain sum of cells of this sheet (``=SUM(F2:F6)``, ``=F2+F3``) -
+    #: nothing scaled, nothing typed in
+    amount_is_sum: bool = False
 
     @property
     def key(self) -> str:
@@ -1276,6 +1279,13 @@ _PRODUCT_OF_CELLS = re.compile(r"=\s*\$?[A-Z]{1,3}\$?\d+\s*\*\s*\$?[A-Z]{1,3}\$?
 #: A formula shaped like a sum: "=SUM(G13:G19)", "=G13+G14". Whose rows it adds decides whether
 #: the row is a parent (``_sums_other_rows``).
 _SUM_OF_ROWS = re.compile(r"^=\s*(?:SUM\s*\(|\$?[A-Z]{1,3}\$?\d+\s*\+)", re.IGNORECASE)
+_REF = r"\$?[A-Z]{1,3}\$?\d+(?::\$?[A-Z]{1,3}\$?\d+)?"
+#: A formula that is nothing but a sum of cells of its own sheet: "=SUM(F2:F6)", "=F2+F3+F4",
+#: "=SUM(F2:F4,F6)" - nothing scaled ("=SUM(F2:F6)*1.18"), nothing typed in.
+_PLAIN_SUM = re.compile(
+    rf"=\s*\+?\s*(?:SUM\s*\(\s*{_REF}(?:\s*[,;]\s*{_REF})*\s*\)|{_REF}(?:\s*\+\s*{_REF})*)\s*",
+    re.IGNORECASE,
+)
 
 
 def _line_kind(
@@ -1463,11 +1473,23 @@ def _summary_from_bill(book: BoqWorkbook, sheet: BoqSheet) -> None:
         for ln in sheet.lines
         if ln.row >= sheet.subtotal_row and ln.kind != "position"
     ]
-    if not any(_plays("incl", r.label) for r in rows[1:]):
+    if not any(_plays("incl", r.label) for r in rows[1:]) and not _closed_incl_vat(rows):
         return
     book.summary_rows = rows
     book.summary = _summary_mapping(rows)
     book.summary_in_bill = sheet.name
+
+
+def _closed_incl_vat(rows: list[SummaryRow]) -> bool:
+    """A bill's closing rows that are its total incl. VAT alone: the closing total says it
+    includes the tax and no row after it plays any part of the chain - a VAT-inclusive price
+    list, ranked on that row as both TOTAL COST and the total incl. VAT (markup 1.0; the lead's
+    round-5 policy)."""
+    return (
+        bool(rows)
+        and _plays("incl", rows[0].label)
+        and not any(_plays(role, r.label) for r in rows[1:] for role in _CHAIN)
+    )
 
 
 def _is_number_row(ws: object, row: int) -> bool:
@@ -1672,6 +1694,7 @@ def _read_sheet(
                 non_numeric=tuple(non_numeric),
                 numeric_item=numeric_item,
                 amount_rows=tuple(_formula_rows(amount_formula)) if amount_formula else (),
+                amount_is_sum=bool(amount_formula and _PLAIN_SUM.fullmatch(amount_formula)),
             )
         )
     return sheet
@@ -1714,7 +1737,24 @@ def _closing_line(sheet: BoqSheet, linked_rows: set[int]) -> BoqLine | None:
     closing = linked[-1] if linked else labelled[-1] if labelled else None
     if closing is not None:
         return _total_before_rates(after, closing) or closing
-    return subtotals[-1] if subtotals else None
+    if subtotals:
+        return subtotals[-1]
+    return _incl_vat_closing(sheet, last)
+
+
+def _incl_vat_closing(sheet: BoqSheet, last: int) -> BoqLine | None:
+    """A price list whose only closing row is its total incl. VAT ("სულ ჯამი (დღგ-ს ჩათვლით)"),
+    the prices themselves including the tax: that row closes the sheet (the lead's round-5
+    policy) - where it plainly adds the rows above it and no VAT or other total row follows the
+    positions. A total incl. VAT computed from a pre-VAT sum (``=SUM(F2:F6)*1.18``) is not."""
+    below = [ln for ln in sheet.lines if ln.row > last and ln.kind != "position"]
+    totals = [ln for ln in below if ln.amount is not None or ln.amount_rows]
+    if len(totals) != 1 or not _INCL_VAT.search(totals[0].description):
+        return None
+    row = totals[0]
+    if row.quantity is not None or not row.amount_is_sum:
+        return None
+    return row if all(r < row.row for r in row.amount_rows) else None
 
 
 def _total_before_rates(after: list[BoqLine], closing: BoqLine) -> BoqLine | None:
@@ -2001,6 +2041,10 @@ def summary_roles(book: BoqWorkbook) -> dict[str, SummaryRow]:
         # it is labelled ("Total", "სულ")
         roles["cost"] = rows[0]
         start = 1
+        if _closed_incl_vat(rows):
+            # a VAT-inclusive price list closed by its total incl. VAT alone: that row is both
+            roles["incl"] = rows[0]
+            return roles
     elif costs:
         after = next(
             (
