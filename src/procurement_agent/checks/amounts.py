@@ -19,6 +19,7 @@ from procurement_agent.extraction.rules import (
     _TABLE_CELL,
     _TOTAL_ROW,
     _norm_currency,
+    _words_before,
     find_amounts,
 )
 from procurement_agent.extraction.schemas import FactType
@@ -231,7 +232,9 @@ class DigitsAndWords:
 
     @property
     def digits_raw(self) -> str:
-        return self.raw[: self.digits_span[1] - self.span[0]].strip()
+        # the figure may stand after its words: "სამი ათას (3 000) ლარს"
+        a, b = self.digits_span[0] - self.span[0], self.digits_span[1] - self.span[0]
+        return self.raw[max(0, a) : b].strip()
 
 
 #: Every word a numeral up to a thousand is written with, and the scale words: the vocabulary a
@@ -350,6 +353,40 @@ def digits_and_words(text: str) -> list[DigitsAndWords]:
                 digits_span=digits_span,
                 words_span=words_span,
                 numeral=looks_like_numeral(words),
+            )
+        )
+    out.extend(_words_then_digits(text, out))
+    return sorted(out, key=lambda p: p.span[0])
+
+
+#: The figure in brackets after its words, a currency after it: "სამი ათას (3 000) ლარს" (red team
+#: R5, AOA-R5-03). The words are found by the amount reader's own rule (``rules._words_before``).
+_DIGITS_IN_BRACKETS = re.compile(rf"\(\s*({FIGURE})\s*\)(?=\s*{CURRENCY})")
+
+
+def _words_then_digits(text: str, found: list[DigitsAndWords]) -> list[DigitsAndWords]:
+    """Every amount written words first with its figure in brackets, as a pair: the same check
+    of the two halves as for "3 000 (სამი ათასი) ლარს". A bracket another pair holds is left."""
+    out: list[DigitsAndWords] = []
+    for m in _DIGITS_IN_BRACKETS.finditer(text):
+        if any(p.span[0] <= m.start() < p.span[1] for p in found):
+            continue
+        at = _words_before(text, m.start())
+        digits = parse_number(m.group(1))
+        if at is None or digits is None:
+            continue
+        words_end = len(text[: m.start()].rstrip())
+        words, spelled = read_words(text[at:words_end])
+        out.append(
+            DigitsAndWords(
+                digits=digits,
+                words=words,
+                spelled=spelled,
+                raw=text[at : m.end()],
+                span=(at, m.end()),
+                digits_span=m.span(1),
+                words_span=(at, words_end),
+                numeral=True,
             )
         )
     return out

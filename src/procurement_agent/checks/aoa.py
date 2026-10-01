@@ -156,6 +156,7 @@ from procurement_agent.extraction.rules import (
     _REFERENCE,
     RuleHit,
     _month_ka,
+    _words_before,
     find_dates,
     month_ka_correction,
 )
@@ -4311,7 +4312,12 @@ def _fee_like(value: float, written: str) -> str:
         else:
             out += tetri.group(1).rstrip()
         return (out + rest[tetri.end() :]).strip()
-    out = written[: figure.start()] + render_figure_like(value, figure.group(0))
+    lead = written[: figure.start()]
+    words_at = _words_before(lead, len(lead.rstrip(" (")))
+    if words_at is not None and lead.rstrip().endswith("("):
+        # the words first, the figure in brackets: "სამი ათას (3 000) ლარს" (red team R5)
+        lead = lead[:words_at] + words_like(value, lead[words_at:].rstrip(" (")) + " ("
+    out = lead + render_figure_like(value, figure.group(0))
     words = _FEE_WORDS_AFTER.match(rest)
     if words is not None:
         # the bracket's own currency and tetri words kept: "(ასი ლარი და 00 თეთრი)"

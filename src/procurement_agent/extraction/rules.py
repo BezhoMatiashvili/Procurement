@@ -56,11 +56,14 @@ _CUR_CASES = r"(?:ი|ის|ისა|ს|ით|ად)?"
 #: case the sentence needs - "აშშ დოლარს" (dative) is how a Georgian act states a dollar fee.
 #: Sterling only as "pound sterling": "100 pounds" is a weight as often as it is money. The lari
 #: may be "ქართული ლარი", "Lari", or abbreviated "ლ." - which is also a litre, so an amount in
-#: "ლ." is kept only where a word about money types it (``find_amounts``).
+#: "ლ." is kept only where a word about money types it (``find_amounts``). A currency's name may
+#: carry its adjective of origin in the case the noun takes: "ქართული ლარი", "ამერიკული დოლარი",
+#: "ამერიკულ დოლარს" (red team R5, AOA-R5-10: the adjective broke the match, so a dollar fee
+#: written so was no fee at all).
 _CUR_RE = (
     r"₾|\$|€|£|GEL|USD|EUR|GBP"
     rf"|(?:ქართულ(?:ი|მა)?\s+)?ლარ{_CUR_CASES}"
-    rf"|(?:აშშ\s*|ა\.შ\.შ\.\s*)?დოლარ{_CUR_CASES}"
+    rf"|(?:აშშ\s*|ა\.შ\.შ\.\s*|ამერიკულ(?:ი|მა)?\s+)?დოლარ{_CUR_CASES}"
     r"|ევრო(?:ს|თი|დ)?"
     rf"|(?:გირვანქა|ფუნტი?)\s*სტერლინგ{_CUR_CASES}"
     r"|(?:US\s*|U\.S\.\s*)?dollars?|euros?|pounds?\s+sterling|lari"
@@ -352,6 +355,30 @@ _AMOUNT_BEFORE = re.compile(
     rf"({_CUR_BEFORE_RE})\s*({_NUM_RE})(?![\d]){_WORDS_BEFORE_MAGNITUDE}(?:\s*({_MAGNITUDE_RE}))?",
     re.IGNORECASE,
 )
+#: The figure in brackets after its words, then the currency: "სამი ათას ოთხას ორმოცდაათი (3 450)
+#: ლარს" - the order a duration ("ათი (10) დღე") and a rate ("ნული მთელი ორი (0.2) პროცენტი")
+#: are read in already (red team R5, AOA-R5-03). The words before the bracket must read as a
+#: number (``_words_before``): "ღირებულება (3 450) ლარი" is no such amount.
+_AMOUNT_WORDS_FIRST = re.compile(
+    rf"\(\s*({_NUM_RE})\s*\)\s*({_CUR_RE})(?![A-Za-zა-ჰ])",
+    re.IGNORECASE,
+)
+#: The Georgian words right before a bracket, the number's among them: up to ten.
+_WORDS_BEFORE_BRACKET = re.compile(r"(?<![ა-ჰ])((?:[ა-ჰ]+\s+){0,9}[ა-ჰ]+)\s*$")
+_WORDS_FIRST_REACH = 160
+
+
+def _words_before(text: str, at: int) -> int | None:
+    """Where the number written in words right before ``at`` starts: the longest run of words
+    ending there that reads as a whole number (``parse_number_words``), or None."""
+    run = _WORDS_BEFORE_BRACKET.search(text, max(0, at - _WORDS_FIRST_REACH), at)
+    if run is None:
+        return None
+    for word in re.finditer(r"[ა-ჰ]+", run.group(1)):
+        value = parse_number_words(run.group(1)[word.start() :])
+        if value is not None and value > 0:
+            return run.start(1) + word.start()
+    return None
 
 
 def _magnitude(word: str | None) -> float:
@@ -917,7 +944,37 @@ def find_amounts(text: str) -> list[RuleHit]:
                     confidence=0.7 if ft else 0.5,
                 )
             )
-    return hits
+    for m in _AMOUNT_WORDS_FIRST.finditer(text):
+        # the words first, the figure in brackets: one amount, words to currency; its value is
+        # the figure's, as it is when the figure comes first
+        words_at = _words_before(text, m.start())
+        value = parse_number(m.group(1))
+        if words_at is None or value is None:
+            continue
+        span = (words_at, m.end())
+        if any(_overlaps(span, other) for other in seen):
+            continue
+        cur = _norm_currency(m.group(2))
+        if cur == "GEL":
+            value, tetri_end = _with_tetri(text, m.group(1), span[1], value)
+            span = (span[0], tetri_end)
+        ft = _money_type(text, span)
+        if ft is None and m.group(2) == _LARI_ABBREVIATION:
+            continue
+        seen.add(span)
+        hits.append(
+            RuleHit(
+                type=ft or FactType.amount,
+                value=f"{value:,.2f} {cur}" if cur else f"{value:,.2f}",
+                raw_text=text[span[0] : span[1]],
+                start=span[0],
+                end=span[1],
+                normalized=value,
+                currency=cur,
+                confidence=0.7 if ft else 0.5,
+            )
+        )
+    return sorted(hits, key=lambda h: (h.start, h.end))
 
 
 # --- dates -------------------------------------------------------------------------------------
