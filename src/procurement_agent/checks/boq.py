@@ -3686,6 +3686,10 @@ _STATUS_TEXT = {
     "optional": "optional (placeholder for other items)",
     "optional_priced": "EXCLUDED: the bidder's own additional items",
 }
+#: The statuses that leave a position out of a bidder's analysis, every one listed in the
+#: merged Summary's "Excluded from the analysis" block - taken from the status texts, so a new
+#: excluded status cannot be left out of the block (a priced placeholder once was).
+_EXCLUDED_STATUSES = frozenset(s for s, text in _STATUS_TEXT.items() if text.startswith("EXCLUDED"))
 
 
 def _put(ws: object, row: int, col: int, value: object) -> None:
@@ -4024,17 +4028,9 @@ def _write_excluded_block(ws: object, row: int, comps: list[BidComparison]) -> i
             for b in comp.priced_headings
         )
         entries.extend(
-            (_STATUS_TEXT.get(p.status, p.status), p.sheet, p.row, p.item_no, p.description)
+            (_STATUS_TEXT[p.status], p.sheet, p.row, p.item_no, p.description)
             for p in comp.positions
-            if p.status
-            in (
-                "removed",
-                "unpriced",
-                "non_numeric",
-                "sheet_missing",
-                "sheet_unreadable",
-                "prices_not_read",
-            )
+            if p.status in _EXCLUDED_STATUSES
         )
         for kind, sheet, line_row, item, desc in entries:
             for col, value in enumerate((kind, comp.bidder, sheet, line_row, item, desc[:200]), 1):

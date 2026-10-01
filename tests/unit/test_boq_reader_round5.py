@@ -15,6 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from openpyxl import load_workbook
 
 from procurement_agent.checks.boq import (
     BidComparison,
@@ -28,6 +29,7 @@ from procurement_agent.checks.boq import (
     read_boq,
     reconcile_summary,
     template_findings,
+    write_merged_workbook,
 )
 from tests.unit.test_boq_reader_round4 import (
     _COST,
@@ -549,3 +551,38 @@ def test_lettered_sections_that_include_roman_shaped_letters_stay_letters() -> N
     # and a lone "I" among lettered sections is one of them, not a chapter of its own
     rows = [_srow(r, item, f"Section {item}", 100.0) for r, item in enumerate("GHI", 2)]
     assert reconcile_summary(_summary_book([*rows, _srow(5, "", "TOTAL COST", 300.0)])) == []
+
+
+# --- R5-10: a priced placeholder in the merged workbook's excluded block ----------------------
+
+
+def test_the_excluded_block_lists_a_priced_placeholder(tmp_path: Path) -> None:
+    other = ("1.6", "Other works to be listed here by the tenderer", "LS")
+    template = (*((*x[:4], None, None) for x in _LINES), (*other, None, None, None))
+    priced = tuple((*x[:4], x[4], x[3] * x[4]) for x in _LINES)
+    bids = {
+        "P": (*priced, (*other, 2.0, 900.0, 1800.0)),
+        "Q": (*priced[:3], *priced[4:], (*other, None, None, None)),  # 1.4 removed
+    }
+    books = []
+    for name, lines in {"T": template, **bids}.items():
+        bill, total = _cells(lines, template=name == "T")
+        summary = _summary(total, closing=len(lines) + 2)
+        books.append(
+            read_boq(
+                _save(tmp_path / f"{name}.xlsx", {"SUMMARY": summary, _SHEET: bill}), name=name
+            )
+        )
+    comps = compare_all(books[0], books[1:])
+    assert [b.item_no for b in comps[0].priced_optional] == ["1.6"]
+    out = write_merged_workbook(books[0], books[1:], comps, tmp_path / "merged.xlsx")
+    ws = load_workbook(out)["SUMMARY"]
+    rows = [[c.value for c in row] for row in ws.iter_rows(max_col=6)]
+    start = next(
+        i for i, r in enumerate(rows) if str(r[0]).startswith("Excluded from the analysis")
+    )
+    excluded = {(r[1], r[4]): r[0] for r in rows[start + 2 :] if r[1]}
+    assert excluded == {
+        ("P", "1.6"): "EXCLUDED: the bidder's own additional items",
+        ("Q", "1.4"): "EXCLUDED: removed by the bidder",
+    }
