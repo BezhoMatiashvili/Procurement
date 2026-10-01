@@ -3116,6 +3116,13 @@ class AoaChecker:
             # a BIC and its "XXX" branch form name one office (ISO 9362): compared as one code
             known = {_bank_key(x) for x in c}
             extra = sorted(x for x in a if _bank_key(x) not in known)
+            if unit == "SWIFT" and c:
+                # a real branch of a bank the contract names by its 8-character code: the same
+                # institution, so a warning naming the branch (red team R5, AOA-R5-13, policy)
+                branches = [x for x in extra if _branch_of(x, known)]
+                extra = [x for x in extra if x not in branches]
+                for x in branches:
+                    self._branch_warning(x)
             if a and c and extra:
                 mismatched = True
                 payee = self._payee_bank(unit)
@@ -3148,6 +3155,26 @@ class AoaChecker:
         if not mismatched:
             self._bank_owner()
             self._bank_pairing()
+
+    def _branch_warning(self, code: str) -> None:
+        """AOA.BANK, a warning: the act's bank code is a branch (its last three characters) of
+        the bank the contract names by the 8-character code. The institution is the same and
+        the account is the IBAN's, so the payment is not misdirected; the branch is named for a
+        person to confirm."""
+        branch, bank = code[8:].upper(), code[:8].upper()
+        stated = sorted(self.contract.bank("SWIFT")) if self.contract is not None else []
+        expected = next((x for x in stated if _bank_key(x) == bank), bank)
+        self._add(
+            "AOA.BANK",
+            "warning",
+            f"ბანკის კოდს დამატებული აქვს ფილიალის კოდი {branch}: {code} vs ხელშეკრულება "
+            f"{expected} — ბანკი იგივეა, შეამოწმეთ ფილიალი",
+            f"the bank code adds the branch code {branch}: {code} vs contract {expected} - the "
+            "same bank; check the branch",
+            expected=expected,
+            actual=code,
+            span=self._find_span(code),
+        )
 
     def _sub_accounts(self) -> None:
         """AOA.BANK, a warning: one account whose currency sub-account the act and the contract
@@ -3260,6 +3287,8 @@ class AoaChecker:
             want = c_pairs.get(iban)
             if want is None or _bank_key(want) == _bank_key(code):
                 continue
+            if _branch_of(code, {_bank_key(want)}):
+                continue  # a branch of the very bank: rule_bank's warning says so
             self._add(
                 "AOA.BANK",
                 "error",
@@ -3294,6 +3323,12 @@ class AoaChecker:
             for m in table_totals
             if not any(a < m.span[1] and m.span[0] < b for a, b in read)
         ]
+        running = [r.money for r in self.aoa.amounts() if r.role == "running"]
+        if not act and running:
+            # every figure the act states is a running one: the note names them (GOLD_SPEC 3),
+            # never a "no fee" warning (red team R5, AOA-R5-08)
+            self._running_note(running)
+            return
         if not act:
             # A fee whose currency stands in another table cell is not read as money: say that
             # no fee could be read and let a person look, rather than call the act wrong.
@@ -3314,20 +3349,8 @@ class AoaChecker:
                 "no price found in the contract to compare against",
             )
             return
-        running = [r.money for r in self.aoa.amounts() if r.role == "running"]
         if running:
-            # the work done to date, the contract's balance or what was paid before: no fee of
-            # this act, and nothing the contract's price can confirm (red team R4, AOA-R4-08)
-            shown = ", ".join(m.raw for m in running[:5])
-            self._skip(
-                "AOA.FEE",
-                f"აქტში მითითებული თანხები ({shown}) ხელშეკრულების მიმდინარე მაჩვენებლებია "
-                "(დღემდე შესრულებული, დარჩენილი ან უკვე გადახდილი) და არა ამ აქტის საფასური: "
-                "ხელშეკრულების ღირებულებას არ შედარდა",
-                f"the act's amounts {shown} are running figures of the contract (done to date, "
-                "the balance left or paid before), not this act's fee: they were not compared "
-                "with the contract's price",
-            )
+            self._running_note(running)
         if table_lines:
             shown = ", ".join(m.raw for m in table_lines[:5])
             self._skip(
@@ -3345,13 +3368,22 @@ class AoaChecker:
         parts = [r for r in act if r.role in ("advance", "remainder")]
         matched = [r.money for r in fees if _states(prices, r.money)]
         wrong = [r for r in fees if not _states(prices, r.money)]
-        if parts and not _fee_parts_add_up(parts, matched, prices):
+        # an advance stated only as a share ("ავანსის (30%) გამოქვითვით"): the remainder is the
+        # rest of the fee (red team R5, AOA-R5-02)
+        shares = [
+            share.percent
+            for doc in (self.aoa, self.contract)
+            for share in doc.advance(in_act=doc is self.aoa).shares
+            if 0 < share.percent < 100
+        ]
+        if parts and not _fee_parts_add_up(parts, matched, prices, shares):
             # a part the contract itself states (its advance) is not the one that is wrong
             wrong += [
                 r
                 for r in parts
                 if not _states(prices, r.money)
                 and not _states([c.money for c in contract if c.role == r.role], r.money)
+                and not (r.role == "advance" and _share_of(r.money, prices, shares))
             ]
         for r in sorted(wrong, key=lambda r: r.money.span):
             self._fee_finding(r, prices, contract)
@@ -3361,6 +3393,21 @@ class AoaChecker:
         for r in before_vat:
             self._net_finding(r, prices, contract)
         self._vat_amount_findings(fees, [*nets, *before_vat], prices)
+
+    def _running_note(self, running: list[Money]) -> None:
+        """The skip note for the act's running figures of the contract: the work done to date,
+        the contract's balance or what was paid before - no fee of this act, and nothing the
+        contract's price can confirm (red team R4, AOA-R4-08)."""
+        shown = ", ".join(m.raw for m in running[:5])
+        self._skip(
+            "AOA.FEE",
+            f"აქტში მითითებული თანხები ({shown}) ხელშეკრულების მიმდინარე მაჩვენებლებია "
+            "(დღემდე შესრულებული, დარჩენილი ან უკვე გადახდილი) და არა ამ აქტის საფასური: "
+            "ხელშეკრულების ღირებულებას არ შედარდა",
+            f"the act's amounts {shown} are running figures of the contract (done to date, "
+            "the balance left or paid before), not this act's fee: they were not compared "
+            "with the contract's price",
+        )
 
     def _net_finding(
         self, r: RoledAmount, prices: list[Money], contract: list[RoledAmount]
@@ -4426,6 +4473,16 @@ def _bank_key(code: str) -> str:
     return code[:8] if len(code) == 11 and code.endswith("XXX") else code
 
 
+def _branch_of(code: str, banks: set[str]) -> str | None:
+    """The branch code of an 11-character BIC whose first eight characters - the institution,
+    its country and its location (ISO 9362) - are one of ``banks`` (8-character forms, as
+    ``_bank_key`` gives them), with a real branch, not "XXX". None for anything else."""
+    code = code.upper()
+    if len(code) == 11 and not code.endswith("XXX") and code[:8] in banks:
+        return code[8:]
+    return None
+
+
 def _closest(
     value: str, candidates: Sequence[str], *, preferred: frozenset[str] = frozenset()
 ) -> str | None:
@@ -4660,7 +4717,23 @@ def _plus_vat(net: float, gross: float, rate: float) -> bool:
     )
 
 
-def _fee_parts_add_up(parts: list[RoledAmount], fees: list[Money], prices: list[Money]) -> bool:
+def _share_of(money: Money, prices: list[Money], shares: Sequence[float]) -> bool:
+    """Whether ``money`` is a stated share (percent) of a price in its currency: the advance
+    the contract sets as "30% of the price", written out as a figure in the act."""
+    return any(
+        amounts_equal(round(p.value * n / 100, 2), money.value)
+        for p in prices
+        if p.currency == money.currency
+        for n in shares
+    )
+
+
+def _fee_parts_add_up(
+    parts: list[RoledAmount],
+    fees: list[Money],
+    prices: list[Money],
+    shares: Sequence[float] = (),
+) -> bool:
     """Whether the act's advance and remainder lines are its fee paid in parts.
 
     Per currency, the advances and the remainder must add up to a fee the act states and the
@@ -4669,7 +4742,9 @@ def _fee_parts_add_up(parts: list[RoledAmount], fees: list[Money], prices: list[
     already paid, and "the rest" goes without saying. An act that states its fee only in parts
     has no fee line for them to make up; then the advance and the remainder must add up to a
     price the contract states. A line the act restates counts once or as often as it is written,
-    whichever adds up.
+    whichever adds up. With no advance figure, an advance the act or the contract states as a
+    share (``shares``, in percent) leaves the remainder that share's rest of the fee: 70 of 100
+    after a 30% advance (red team R5, AOA-R5-02).
     """
     for currency in dict.fromkeys(r.money.currency for r in parts):
         advances = [
@@ -4681,7 +4756,15 @@ def _fee_parts_add_up(parts: list[RoledAmount], fees: list[Money], prices: list[
         advance = {sum(advances), sum(set(advances))}
         rest = {sum(rests), sum(set(rests))}
         totals = [f.value for f in fees if f.currency == currency]
-        if totals and rests:
+        if rests and not advances and shares:
+            targets = totals or [p.value for p in prices if p.currency == currency]
+            ok = any(
+                amounts_equal(round(t * (100 - n) / 100, 2), r)
+                for n in shares
+                for r in rest
+                for t in targets
+            )
+        elif totals and rests:
             ok = any(amounts_equal(a + r, t) for a in advance for r in rest for t in totals)
         elif totals:
             ok = any(min(advance) <= t + 0.01 for t in totals)

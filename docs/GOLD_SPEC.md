@@ -529,9 +529,18 @@ strict_findings: true             # anything else reported (any severity) is a f
   done to date (`დღემდე შესრულებული … ღირებულება`), the contract's balance (`ხელშეკრულების
   დარჩენილი ღირებულება`, `ხელშეკრულების ნაშთი`) and what was paid before (`წინა აქტებით
   ანაზღაურებულია`, `უკვე გადახდილი`, `სულ ანაზღაურებულია`), named so by the words before the
-  figure in its clause. It is not compared, and `AOA.FEE` leaves a skip note naming it. A total
-  word alone (`სულ`, `ჯამი`), the contract's total and the fee's remainder after an advance are
-  not running figures.
+  figure in its clause. It is not compared, and `AOA.FEE` leaves a skip note naming it - also
+  when it is the act's only figure, never a "no fee" warning (red team R5). A total word alone
+  (`სულ`, `ჯამი`), the contract's total, the fee's remainder after an advance and the value of
+  the services `უკვე შესრულებული` (already performed: the act's own work, AOA-R5-08) are not
+  running figures.
+* What is left to pay once the advance is deducted (red team R5, AOA-R5-02: `ავანსის (30%)
+  გამოქვითვით ანაზღაურებას ექვემდებარება 70 ლარი`, `გამოქვითული ავანსი: 30 ლარი; გადასახდელი
+  თანხა: 70 ლარი`) is the fee's remainder, a part of the fee, never a second fee: the deduction
+  word must name the advance (a tax deducted is the net fee), and the payable word must be the
+  figure's own. It adds up with the advance's figure, or - when the act or the contract states
+  the advance only as a share - as the fee less that share. A remainder that adds up is not
+  compared; one that does not is compared like a fee.
 * Which rule owns which mistake:
   * wrong digits and/or words of the fee → `AOA.FEE` (+ `AOA.AMOUNT_WORDS` when digits and words
     disagree); words misspelled (`ასოი`) → `AOA.AMOUNT_WORDS`, an error, with the correct words
@@ -546,7 +555,8 @@ strict_findings: true             # anything else reported (any severity) is a f
     no second fee when another fee the act states is it with VAT added at 18%, or at a rate the
     documents write beside VAT; with the VAT amount written out, net + VAT must make the fee.
     VAT is `დღგ`, `დ.ღ.გ.` or `დ.ღ.გ`, with or without its case ending, before or after
-    `ჩათვლით`. Beside another fee the act states (red team R3), such a figure is compared with
+    `ჩათვლით`, joined to it by a space or a hyphen (`დღგ-ჩათვლით`, `დ.ღ.გ.-ჩათვლით`, red team
+    R5). Beside another fee the act states (red team R3), such a figure is compared with
     the price before VAT (the price less VAT at that rate) and corrected to it, never to the
     price; a breakdown whose fee and net are right but do not add up with the VAT amount is the
     VAT amount's mistake (`AOA.FEE`, correction = the fee less the net). A figure before VAT the
@@ -586,7 +596,12 @@ strict_findings: true             # anything else reported (any severity) is a f
   * a bank code or plot code not the contract's → one `AOA.BANK` / `AOA.CADASTRAL` per value,
     correction = the contract value it is a slip or two from, the contractor's own on a tie;
     a value near none is corrected to the contractor's own, or to the only contract value; no
-    correction when that still leaves a choice. A BIC and its `XXX` branch form are one code;
+    correction when that still leaves a choice. A BIC and its `XXX` branch form are one code.
+    An 11-character BIC with a real branch code against the contract's 8-character BIC of the
+    same bank (`AAAAGE22TBS` against `AAAAGE22`) is an `AOA.BANK` warning naming the branch,
+    text = the act's code, correction = the contract's (red team R5, AOA-R5-13, policy); the
+    reverse (the contract's branch against the act's 8-character code) and two different
+    branches are not decided and stay errors;
   * an act not written in Georgian: what the rules read off Georgian wording (the parties'
     codes, the project, the period) is a skip note saying so, never a finding - an English
     label's code included;

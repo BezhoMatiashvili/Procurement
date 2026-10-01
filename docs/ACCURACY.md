@@ -752,6 +752,58 @@ Round 4's act-check defects owned here (`tests/unit/test_aoa_redteam_r4.py`):
   nothing else) whom no party of either document is read with leaves an `AOA.DIRECTOR` skip
   note: not compared, never silent.
 
+### Red team, round 5: the fee in parts, VAT joined by a hyphen, a branch BIC (2026-10-01)
+
+Round 5's act-check defects owned here (`tests/unit/test_aoa_r5_fee_tax_bank.py`):
+
+* **What is paid once the advance is deducted** (AOA-R5-02). A correct act that writes its fee
+  and then what is left to pay once the contract's advance is deducted (`ავანსის (30%)
+  გამოქვითვით ანაზღაურებას ექვემდებარება 70 ლარი`, `გამოქვითული ავანსი: 30 ლარი; გადასახდელი
+  თანხა: 70 ლარი`, `აქედან გამოიქვითება ავანსი 30 ლარი, ხოლო ასანაზღაურებელია 70 ლარი`) had an
+  `AOA.FEE` error "correcting" the 70 to the full price. `amount_roles` now calls such a figure
+  the fee's `remainder` when the words before it deduct the advance (a `გამოქვით…` /
+  `გამოიქვით…` / `გამოკლ…` form beside `ავანს…`, or `less / net of / after deducting the
+  advance`) and the figure's own clause, after the amount before it, then names what is to be
+  paid (`ანაზღაურებას ექვემდებარება`, `ასანაზღაურებ…`, `გადასახდელ…`, `გადაიხდ…`, `დარჩენ…`,
+  `payable`, `due`). The deduction is looked for in the figure's sentence, and back across a
+  `;` only past the advance's own figure (case `გამოქვითული ავანსი: 30 ლარი; გადასახდელი
+  თანხა: …`) - never across a full stop or into a clause that opens with its number, and the
+  noun `ანაზღაურება` alone is the fee itself: a contract's `ავანსი გამოიქვითება;` followed by
+  `4.3. ყოველთვიური ანაზღაურება შეადგენს 100 ლარს` states its price. The deduction must be the
+  advance's: `საშემოსავლო გადასახადის გამოქვითვით ასანაზღაურებელია 900 ლარი` (a natural
+  person's net fee) stays the fee, as do `სულ ასანაზღაურებელია` and an advance named after the
+  payable word (`გადასახდელი ავანსი: 30 ლარი`). When the act gives the advance only as a share
+  (in the act or the contract, `30%`), the remainder adds up when it is the fee less that share
+  (`_fee_parts_add_up`); an advance figure that is that share of the price is the contract's own,
+  not a slip, when the parts do not add up. A remainder that is neither (75 of 100 after 30%) is
+  still compared and reported.
+* **"Already performed" is this act's work** (AOA-R5-08). `უკვე შესრულებული მომსახურების
+  ღირებულება` was read as a running figure, so a correct act got a "no fee could be read"
+  warning and a wrong fee passed. `უკვე` marks a running figure only before `გადახდილ…` or
+  `ანაზღაურებულ…`, as the documented list always said; `დღემდე შესრულებული` (done to date) is
+  still one. And an act whose every figure is a running one now gets the `AOA.FEE` skip note
+  naming them, never the "no fee" warning, which stays for an act with no figure at all. An
+  override for "this act's" words (`ამ აქტით`, `საანგარიშო თვეში`) before a running word was
+  not added: with `შესრულებულ` gone no probe needs it, and `საანგარიშო თვის ჩათვლით დღემდე
+  შესრულებული` (to date, this month included) is a running figure such an override would take
+  for the fee.
+* **VAT joined to "including" by a hyphen** (AOA-R5-09). `დღგ-ჩათვლით` was one word to the tax
+  reader, whose word tail swallowed `-ჩათვლით`, so a VAT-registered entrepreneur's act was
+  told it does not say VAT is included; `დ.ღ.გ.-ჩათვლით` also made the fee read as the tax
+  amount (the tax-after pattern stopped short of the abbreviation's own stop), leaving the
+  finding with no quote. A tax word's tail now never runs over a hyphen into `ჩათვლით`,
+  `გათვალისწინებით`, `გარეშე`, `გამოკლებით` or `ჩაუთვლელად`, and a hyphen joins a tax to them as
+  a space does (`დღგ-გარეშე` is an exclusion). `18 ლარი დ.ღ.გ.` closing its clause is still the
+  tax, and `დღგ-ს გადამხდელის ნომერი` still a label.
+* **A branch BIC** (AOA-R5-13, policy decided by the lead). An 11-character BIC with a real
+  branch code (`AAAAGE22TBS`) against the contract's 8-character BIC of the same bank (or its
+  `XXX` form) is an `AOA.BANK` warning naming the branch, text = the act's code, correction =
+  the contract's code - not an error: the first eight characters name the institution (ISO
+  9362) and the account is the IBAN's, compared on its own. The bank-pairing check takes such a
+  branch for its bank. Another bank with a branch, the contract's branch against the act's
+  8-character code, and two different real branches are not covered by the decision and stay
+  errors.
+
 ## LLM configuration, and why
 
 Three settings were established by reading what the model actually receives:

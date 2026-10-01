@@ -225,9 +225,10 @@ _QUALIFIER_REACH = 20
 #: ("100 ლარი დღგ: 18 ლარი"). No list of them is ever complete, and a price read as the tax
 #: leaves the act with no fee at all, so only a tax that closes the clause counts. A comma or a
 #: "+" between the figure and the tax adds the tax to a price, so neither is allowed there.
-#: Matched at the end of the figure.
+#: Nor does the dotted abbreviation stop short of its own stop: "დ.ღ.გ.-ჩათვლით" goes on
+#: (red team R5, AOA-R5-09). Matched at the end of the figure.
 _TAX_AFTER = re.compile(
-    rf"\s*\(?\s*(?:{_KA_VAT}|vat)(?:-?ის|-?ს)?(?![\w-])"
+    rf"\s*\(?\s*(?:{_KA_VAT}|vat)(?:-?ის|-?ს)?(?![\w-])(?!\.-)"
     r"(?:\s*\(\s*\d{1,2}(?:[.,]\d{1,2})?\s*%\s*\))?+"
     r"(?=\s*(?:[.,;)]|$|(?:სახით|ოდენობით)(?![ა-ჰ])))",
     re.IGNORECASE,
@@ -242,11 +243,12 @@ _TAX_AFTER = re.compile(
 #: marker: it states the fee or the contract's total; "სულ ანაზღაურებულია" (paid in all) is one,
 #: "სულ ასანაზღაურებელია" (to be paid in all) is the fee. Nor is "დარჩენილი თანხა" without the
 #: contract named (the fee's second part after an advance), nor "-დან დღემდე", a period that
-#: ends today.
+#: ends today. Nor "უკვე შესრულებული" (already performed) alone: an act states the work it
+#: accepts as performed, and its value is the act's own fee (red team R5, AOA-R5-08).
 _RUNNING = re.compile(
     r"(?<![ა-ჰ])(?:"
     r"(?<!დან )დღემდე|ამ\s+დრომდე|კუმულაციურ[ა-ჰ]*|ზრდადი\s+ჯამ[ა-ჰ]*"
-    r"|წინა\s+(?:აქტ|პერიოდ)[ა-ჰ]*|უკვე\s+(?:გადახდილ|ანაზღაურებულ|შესრულებულ)[ა-ჰ]*"
+    r"|წინა\s+(?:აქტ|პერიოდ)[ა-ჰ]*|უკვე\s+(?:გადახდილ|ანაზღაურებულ)[ა-ჰ]*"
     r"|(?:ადრე|სულ)\s+(?:გადახდილ|ანაზღაურებულ)[ა-ჰ]*"
     r"|ხელშეკრულებ(?:ის|ით)\s+(?:დარჩენილ|ნაშთ|აუთვისებელ)[ა-ჰ]*"
     r")(?![ა-ჰ])"
@@ -268,6 +270,71 @@ _RUNNING_YIELDS_TO: frozenset[AmountRole | None] = frozenset(
 _FEE_NAMED = re.compile(
     r"საფასურ|ავანს|დარჩენ|ნაშთ|ტრანშ|(?<![a-z])(?:fee|advance|remainder)", re.IGNORECASE
 )
+
+
+#: The advance deducted, named with the advance itself: "ავანსის (30%) გამოქვითვით", "ავანსის
+#: თანხის გამოკლებით", "გამოქვითული ავანსი", "გამოიქვითება ავანსი", "less the advance". The
+#: deduction alone says nothing of the advance: "საშემოსავლო გადასახადის გამოქვითვით" is a
+#: natural person's net fee.
+_DEDUCTION = r"(?:გამო(?:ი)?ქვით|გამოკლ)[ა-ჰ]*"
+_ADVANCE_DEDUCTED = re.compile(
+    rf"(?<![ა-ჰ])ავანს[ა-ჰ]*(?:\s*\([^()\n]{{0,20}}\))?(?:\s+თანხ[ა-ჰ]*)?\s+{_DEDUCTION}"
+    rf"|(?<![ა-ჰ]){_DEDUCTION}\s+ავანს[ა-ჰ]*"
+    r"|(?<![a-z])(?:less|minus|after\s+deducting|net\s+of)\s+(?:the\s+)?advance(?![a-z])"
+    r"|(?<![a-z])advance\s+deducted(?![a-z])",
+    re.IGNORECASE,
+)
+#: What is left to pay, after the deduction and before the figure: "ანაზღაურებას ექვემდებარება",
+#: "გადასახდელი თანხა", "ასანაზღაურებელია", "გადაიხდება", "payable". Not the noun
+#: "ანაზღაურება" alone: it is the fee itself ("ყოველთვიური ანაზღაურება შეადგენს 100 ლარს").
+_PAYABLE = re.compile(
+    r"(?<![ა-ჰ])(?:ანაზღაურებას\s+ექვემდებარება|(?:ასანაზღაურებ|გადასახდელ|გადაიხდ|დარჩენ)[ა-ჰ]*)"
+    r"|(?<![a-z])(?:payable|to\s+be\s+paid|due)(?![a-z])",
+    re.IGNORECASE,
+)
+_ADVANCE_WORD = re.compile(r"(?<![ა-ჰ])ავანს|(?<![a-z])advance(?![a-z])", re.IGNORECASE)
+#: How far back from a figure the advance's deduction may stand. It is looked for across a ";"
+#: only past the advance's own figure ("გამოქვითული ავანსი: 30 ლარი; გადასახდელი თანხა: 70
+#: ლარი"), never across a full stop or into a clause that opens with its own number: a
+#: contract's "ავანსი გამოიქვითება;\n4.3. ყოველთვიური ანაზღაურება 100 ლარი" states the price.
+_DEDUCTION_REACH = 160
+
+
+def _clause_reach(
+    spans: list[tuple[int, int]], i: int | None, start: int, text: str, *, past_advance: bool
+) -> int:
+    """Where the words before the figure at ``start`` that may still speak of it begin: its
+    sentence's start, or - when ``past_advance`` (the amount before it is the advance, in an
+    earlier sentence) - an earlier one's when only a ";" ends the sentences between and none of
+    them opens with a clause number."""
+    if i is None:
+        return start
+    lo = spans[i][0]
+    while (
+        past_advance
+        and i > 0
+        and text[spans[i - 1][1] - 1] == ";"
+        and _CLAUSE_NUMBER.match(text, spans[i][0]) is None
+        and start - spans[i - 1][0] <= _DEDUCTION_REACH
+    ):
+        i -= 1
+        lo = spans[i][0]
+    return max(lo, start - _DEDUCTION_REACH)
+
+
+def _remains_after_the_advance(text: str, lo: int, own: int, start: int) -> bool:
+    """Whether the words before the figure at ``start`` (from ``lo``) deduct the advance, and
+    its own clause (from ``own``, the end of the amount before it) then says what is left to
+    pay: the figure is the fee's remainder (red team R5, AOA-R5-02). The payable word must be
+    the figure's own, so a fee stated after the remainder ("..., ხოლო საფასური 100 ლარი") is not
+    taken for it."""
+    found = list(_ADVANCE_DEDUCTED.finditer(text, lo, start))
+    if not found:
+        return False
+    payable = list(_PAYABLE.finditer(text, max(found[-1].end(), own), start))
+    # the advance named after what is to be paid is the figure's own name: "გადასახდელი
+    # ავანსი 30 ლარი" is the advance
+    return bool(payable) and _ADVANCE_WORD.search(text, payable[-1].end(), start) is None
 
 
 def _names_a_running_figure(text: str, lo: int, start: int) -> bool:
@@ -315,7 +382,9 @@ def amount_roles(text: str, *, sentences: list[tuple[int, int]] | None = None) -
     lend its word to the price in the next one. A tax amount is the exception: only a tax named
     right before or right after the figure makes it one (``_TAX_BEFORE``, ``_TAX_AFTER``).
     Penalties are kept and named. A figure its clause names as a running figure of the
-    contract - done to date, the balance left, paid before (``_RUNNING``) - is "running".
+    contract - done to date, the balance left, paid before (``_RUNNING``) - is "running". A
+    figure the words before it name as what is left to pay once the advance is deducted
+    ("ავანსის გამოქვითვით ანაზღაურებას ექვემდებარება 70 ლარი") is the fee's "remainder".
     """
     spans = sentence_spans(text) if sentences is None else sentences
     out: list[RoledAmount] = []
@@ -325,6 +394,7 @@ def amount_roles(text: str, *, sentences: list[tuple[int, int]] | None = None) -
         i = _sentence_index(spans, start)
         a, b = spans[i] if i is not None else (start, end)
         b = max(b, end)
+        own_from = previous_end
         clause_from, previous_end = max(a, previous_end), end
         role: AmountRole | None
         opened = text.rfind("(", max(0, start - 40), start)
@@ -338,6 +408,11 @@ def amount_roles(text: str, *, sentences: list[tuple[int, int]] | None = None) -
             role = "tax"
         else:
             role = nearest_keyword_group(text[a:b], start - a, end - a, _ROLE_KEYWORDS)
+        past_advance = bool(out) and out[-1].role == "advance" and out[-1].money.span[0] < a
+        if role in (None, "price", "advance") and _remains_after_the_advance(
+            text, _clause_reach(spans, i, start, text, past_advance=past_advance), own_from, start
+        ):
+            role = "remainder"
         if role not in _RUNNING_YIELDS_TO and _names_a_running_figure(text, clause_from, start):
             role = "running"
         out.append(RoledAmount(money=money, role=role))
@@ -377,15 +452,21 @@ TaxKind = Literal["net", "inclusion", "exclusion", "exempt", "mention"]
 #: A Georgian tax word in any case: tax, tax-related, VAT (დღგ-ს, დღგ-ის, or spelled out),
 #: income tax, pension (საპენსიო შენატანი). The tail is possessive: a shorter word must never
 #: let a lookahead after it pass ("გადასახადებ|ის გარეშე" is still "without taxes").
-_KA_TAX = (
-    r"(?<![ა-ჰ])(?:დამატებული\s+ღირებულების\s+გადასახად|გადასახად|საგადასახად|"
-    rf"{_KA_VAT}|საშემოსავლო|საპენსიო)[ა-ჰ-]*+"
-)
-_KA_WORD = r"[ა-ჰ][ა-ჰ-]*+"
 #: "including" and "taking into account" - the instrumental only: "კანონმდებლობით
 #: გათვალისწინებული გადასახადები" (the taxes the law provides for) includes nothing.
 _KA_INCLUDING = r"(?:ჩათვლით|გათვალისწინებით)"
 _KA_EXCLUDING = r"(?:გარეშე|გამოკლებით|ჩაუთვლელად)"
+#: A word's tail: letters and hyphens, but never a hyphen that joins "including" or "excluding"
+#: on - "დღგ-ჩათვლით" is VAT and "including", not one word (red team R5, AOA-R5-09).
+_KA_TAIL = rf"(?:(?!-\s*(?:{_KA_INCLUDING}|{_KA_EXCLUDING})(?![ა-ჰ]))[ა-ჰ-])*+"
+#: Between a tax and its "including" / "excluding": a space, or a hyphen ("დღგ-ჩათვლით",
+#: "დ.ღ.გ.-ჩათვლით", "დღგ-გარეშე").
+_KA_JOIN = r"(?:\s*-\s*|\s+)"
+_KA_TAX = (
+    r"(?<![ა-ჰ])(?:დამატებული\s+ღირებულების\s+გადასახად|გადასახად|საგადასახად|"
+    rf"{_KA_VAT}|საშემოსავლო|საპენსიო){_KA_TAIL}"
+)
+_KA_WORD = rf"[ა-ჰ]{_KA_TAIL}"
 #: A tax word and up to three words after it, joined by spaces, a comma, "და" or "ან" - the
 #: taxes a phrase names: "საშემოსავლო და საპენსიო გადასახადების", "საშემოსავლო გადასახადისა და
 #: საპენსიო შენატანის". "და" (and) and "ან" (or) join the words and are not counted among them.
@@ -442,7 +523,7 @@ _KA_ADDED_AFTER = r"(?!\s+(?:დამატებით|(?:და)?(?:ემა
 _INCLUSION = re.compile(
     "|".join(
         (
-            rf"{_KA_TAX_RUN}\s+{_KA_INCLUDING}",
+            rf"{_KA_TAX_RUN}{_KA_JOIN}{_KA_INCLUDING}",
             # not "ძალაში შედის" (enters into force)
             rf"(?<!არ )(?:მოიცავს|შეიცავს|ითვალისწინებს|(?<!ძალაში )შედის|მათ\s+შორის)"
             rf"{_KA_REACH}{_KA_TAX}(?!\s+{_KA_EXCLUDING}){_KA_ADDED_AFTER}",
@@ -467,7 +548,7 @@ _INCLUSION = re.compile(
 _EXCLUSION = re.compile(
     "|".join(
         (
-            rf"{_KA_TAX_RUN}\s+{_KA_EXCLUDING}",
+            rf"{_KA_TAX_RUN}{_KA_JOIN}{_KA_EXCLUDING}",
             rf"არ\s+(?:მოიცავს|შეიცავს|ითვალისწინებს|შედის){_KA_REACH}{_KA_TAX}",
             rf"{_KA_TAX}\s+არ\s+შედის",
             # "+ დღგ", and with its rate: "+ 18% დღგ"; "plus 18% VAT"
