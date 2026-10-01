@@ -179,9 +179,16 @@ def test_a_sheet_whose_price_columns_are_not_recognised_says_so_not_that_it_is_u
 # --- a quantity taken from elsewhere ----------------------------------------------------------
 
 
-def _kind(qty_formula: str, *, names: dict[str, str] | None = None, local: bool = False) -> str:
+def _kind(
+    qty_formula: str,
+    *,
+    names: dict[str, str] | None = None,
+    local: bool = False,
+    amount: bool = True,
+) -> str:
     """The kind of row 7 of a sheet "1. WORKS" whose quantity is ``qty_formula`` and whose amount
-    is its own row's product; ``names`` are defined names (sheet-scoped with ``local``)."""
+    is its own row's product (``amount``; else it has no amount cell); ``names`` are defined
+    names (sheet-scoped with ``local``)."""
     from openpyxl.workbook.defined_name import DefinedName
 
     from procurement_agent.checks.boq import _line_kind
@@ -194,7 +201,8 @@ def _kind(qty_formula: str, *, names: dict[str, str] | None = None, local: bool 
         scope = wf.defined_names if local else formulas.defined_names
         scope[name] = DefinedName(name, attr_text=target)
     wf.cell(7, 6, qty_formula)
-    wf.cell(7, 8, "=G7*F7")
+    if amount:
+        wf.cell(7, 8, "=G7*F7")
     cols = {"desc": 2, "qty": 6, "amount": 8}
     return _line_kind(values.active, wf, cols, 7, "Waterproofing membrane", True)
 
@@ -227,7 +235,10 @@ def test_a_quantity_added_up_from_a_take_off_sheet_or_constants_is_the_positions
     ],
 )
 def test_a_quantity_adding_up_rows_of_its_own_sheet_is_still_a_parent(formula: str) -> None:
-    assert _kind(formula) == "heading"
+    # a row with no amount of its own; one with its own rate and amount is a position whatever
+    # its quantity adds (the lead's round-4 policy, test_boq_reader_round4)
+    assert _kind(formula, amount=False) == "heading"
+    assert _kind(formula) == "position"
 
 
 def test_a_quantity_over_a_defined_name_is_a_parent_only_where_the_name_is_rows_of_this_sheet() -> (
@@ -235,10 +246,11 @@ def test_a_quantity_over_a_defined_name_is_a_parent_only_where_the_name_is_rows_
 ):
     here = {"Block_Q": "'1. WORKS'!$F$8:$F$12"}
     there = {"Survey_Q": "'Take-off'!$D$2:$D$5"}
-    assert _kind("=SUM(Block_Q)", names=here) == "heading"
-    assert _kind("=SUM(Block_Q)", names=here, local=True) == "heading"
+    assert _kind("=SUM(Block_Q)", names=here, amount=False) == "heading"
+    assert _kind("=SUM(Block_Q)", names=here, local=True, amount=False) == "heading"
+    assert _kind("=SUM(Survey_Q)", names=there, amount=False) == "position"
+    assert _kind("=SUM(Survey_Q)", names=there, local=True, amount=False) == "position"
     assert _kind("=SUM(Survey_Q)", names=there) == "position"
-    assert _kind("=SUM(Survey_Q)", names=there, local=True) == "position"
 
 
 def test_a_bill_whose_quantities_come_from_a_take_off_sheet_is_evaluated(tmp_path: Path) -> None:

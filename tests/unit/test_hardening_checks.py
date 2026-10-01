@@ -13,6 +13,7 @@ import pytest
 from openpyxl import Workbook, load_workbook
 
 from procurement_agent.checks.boq import (
+    MERGED_COLUMNS,
     compare_all,
     read_boq,
     write_merged_workbook,
@@ -297,7 +298,8 @@ def test_repeated_position_keeps_each_bidder_price_in_the_merged_workbook(tmp_pa
     bid = read_boq(boq_file(tmp_path / "b.xlsx", priced), name="B")
     out = write_merged_workbook(template, [bid], compare_all(template, [bid]), tmp_path / "m.xlsx")
     ws = load_workbook(out, data_only=True)["1. WORKS"]
-    rates = [ws.cell(r, 11).value for r in range(2, ws.max_row + 1) if ws.cell(r, 5).value == "B"]
+    rate = MERGED_COLUMNS["rate_total"]
+    rates = [ws.cell(r, rate).value for r in range(2, ws.max_row + 1) if ws.cell(r, 5).value == "B"]
     assert rates == [7.0, 9.0]
 
 

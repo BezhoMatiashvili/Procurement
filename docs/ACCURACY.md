@@ -1310,15 +1310,14 @@ real number needs labelled paraphrases and substitutions, which this corpus does
 
 ## BOQ comparison
 
-Measured 2026-10-01, after the third red-team round on the BOQ reader (`unit_filled` now
-scored, hence the higher counts):
+Measured 2026-10-01, after the fourth red-team round on the BOQ reader:
 
 | harness | result |
 |---|---|
 | `scripts/evaluate_boq.py`, client set | 106/106 checks |
 | `scripts/evaluate_boq.py`, test set 2 | 106/106 checks |
 | `scripts/evaluate_boq.py`, test set 3 | 132/132 checks |
-| `scripts/mutate_boq.py --seed 19 --per-class 3` | 50 valid mutants (one `swap` set aside by the harness as invalid), 17 classes, 100% pass, 0 false positives, 0 control false positives |
+| `scripts/mutate_boq.py --seed 29 --per-class 3` | 51 valid mutants, 17 classes, 100% pass, 0 false positives, 0 control false positives |
 
 The red team's round-2 probes were each workbooks laid out otherwise than the client's
 template: a group header over rate and amount sub-columns, a quantity split per building, a
@@ -1465,6 +1464,85 @@ Policy questions round 3 left open, with the recommended answer:
   "cost(s)", word-bounded so "Indirect costs" (an overheads name) never plays it, plus
   "პირდაპირი ხარჯები სულ" and "სამშენებლო სამუშაოების ღირებულება" - with the role order kept
   (the last such row before the chain goes on).
+
+### Red team, round 4 (BOQ-R4-01 to BOQ-R4-19)
+
+The same harnesses after the fixes: `evaluate_boq.py` 106/106, 106/106 and 132/132;
+`mutate_boq.py --seed 29 --per-class 3`: 51 valid mutants, 17 classes, 100% pass, 0 false
+positives, 0 control false positives. On the gold sets no column map, position, total or colour
+moved, and the 49 repro scripts of rounds 1-3 print what they printed before. Each defect is a synthetic test in `tests/unit/test_boq_reader_round4.py`, the gold
+writer's side of the lead's policies in `tests/unit/test_boq_reference_round4.py`; the rules
+are in GOLD_SPEC 5.
+
+* **One header reader for the bill and the Summary (R4-01, 02, 08).** A label naming its column
+  in English and Georgian side by side ("Description / აღწერა", or on two lines) made the
+  template sheet unreadable and nothing was evaluated; the parts are now read and must agree.
+  The description and quantity are read by rule (Description of works / goods, Name of works,
+  Quantity of work, რაოდ., რ-ბა), the Georgian total-price names (ჯამური / საერთო / სულ ფასი)
+  are the line amount, and a bare "Price" is bound by its place - the unit rate before a line
+  amount, the amount where none follows - so an amount slip under "Qty | Price | Amount" is
+  reported instead of priced in. The Summary used a separate, shorter vocabulary: "Description
+  of works", "Cost (GEL)", "Price", "Sum" left every bidder unranked under "no row states the
+  total incl. VAT"; it now reads with the bill's names, and an unrecognised Summary header says
+  so.
+* **The rows that close a sheet (R4-04, 05, 07).** A contingency or VAT row computed from the
+  sub-total (`=F7*E8`, no quantity or unit) was read as a position - the tax in the cost and a
+  false gap on every faithful bid; a product over another row is the position's slip only on a
+  row with a measure. A single SUB-TOTAL that positions follow is a section's, not the sheet's
+  closing total. A closing total labelled across the item column or in the Unit or Rate column
+  is read by its role, so a SUM range one row short is reported wherever the label sits.
+* **The Summary chain (R4-03, 06, 11).** A section row summing a range (`=SUM('1. WORKS'!F2:F6)`)
+  was held against the range's first row; it is held against the range's positions, and a
+  range scaled or mixed is not checked. "V.A.T." and "დ.ღ.გ." are the tax. A chain row's rate
+  is the one its label states or the one typed beside it; a "% of total" share column is no
+  rate. A profit rate read from the label alone holds on TOTAL COST or on TOTAL COST +
+  overheads, so the labels never widen the open "profit on cost + overheads" question above.
+* Units: "100 m2" is "100 მ2" (a multiplier kept, the measure folded; R4-09). An "Other(s)"
+  position "to be specified by the Engineer" is described work, not a placeholder (R4-10). A
+  sheet priced by its component rates alone is priced, and the merged sheets show every
+  component (machinery too) and the rate the evaluation used (R4-12); their columns are looked
+  up by key (`boq.MERGED_COLUMNS`), the machinery column shifting the later ones by one.
+
+The lead's policies of round 4, each in GOLD_SPEC 5 and the gold writer:
+
+* **The offered make or model after the template's description (R4-13).** Same item number,
+  the template's text kept whole and the bidder's words after it from a word's end: the
+  position, `BOQ.DESCRIPTION_CHANGED` at info. "Pipe 20" against "Pipe 200 mm" stays two
+  positions. The 70-character truncation of the matching key is left as it is (it feeds the
+  sequence alignment and the scorer's keys); a long description re-worded past its 70th
+  character still matches without the 0.9 similarity check, which is the length dependence the
+  verifier named.
+* **A row with its own rate and amount (R4-14)** is a position whatever its quantity formula
+  adds; a quantity adding other rows makes a parent only on a row with no amount of its own.
+  The round-2 tests of parents were reworded to rows without an amount, and assert the policy
+  for rows with one.
+* **A single-sheet schedule with no Summary (R4-16)** is ranked on its Total, VAT and Total incl.
+  VAT rows, a contingency between the total and the VAT taxed with it - only where the template
+  has no Summary either: a bid dropping the template's Summary is not ranked. Without such rows the
+  skip note says the workbook has no Summary sheet; no per-bidder finding is added, as fifteen
+  earlier tests of Summary-less bills hold that such bids carry no findings.
+* **LS, L.S., lump sum and lump-sum are one unit (R4-18)**, apart from item, set, pcs and the
+  litre.
+* **An item number stored as a number (R4-19)**, "1.10" read back as 1.1, is the position when
+  the description is the template's word for word, nearest row first; typed as the text "1.1"
+  it remains a renumbering.
+
+Spec gaps round 4 left open, with the recommended answer:
+
+* **"Allow for any other works necessary to complete ... as per drawings" (BOQ-R4-15).** GOLD_SPEC
+  5 lists "any other item(s), work(s) or cost(s)" in any wording, and also says the same words
+  further into a described position are no invitation. Recommended: "any other item / work /
+  cost" invites the bidder only where it opens the description (after an optional "Any" or
+  "Provide") or where the bidder is addressed (list, specify, by the bidder / tenderer); after
+  "Allow for", "Include for", or with a described scope ("necessary to complete ... as per
+  drawings / specification") it is a described sweep-up position and is evaluated.
+* **A coefficient cell in every amount formula (BOQ-R4-17,** `=D2*E2*$H$1`). Read by the letter,
+  every position is a subtotal, nothing is evaluated and every bidder gets a false RECONCILE.
+  Recommended: a product of the row's own quantity and rate is the position's amount whatever
+  constant factors multiply it - plain numbers or an absolute reference to one cell outside the
+  bill's lines; and, separately, a priced template sheet that ends with no position while its
+  rows carry quantities says so once on the template (`BOQ.PRICES_NOT_READ` or a new
+  `BOQ.NO_POSITIONS`), with the per-bidder RECONCILE on that sheet suppressed.
 
 ## Known gaps
 
