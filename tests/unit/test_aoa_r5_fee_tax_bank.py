@@ -108,6 +108,34 @@ class TestTheRemainderAfterTheAdvance:
         assert both[0] == (70.0, "remainder")
         assert both[1][1] in (None, "price")
 
+    def test_a_contract_s_price_after_its_deduction_clause_is_a_price(self) -> None:
+        """Near misses: the contract says the advance is deducted and then, past a ";" or in a
+        numbered clause of its own, states the monthly price - "ანაზღაურება" there is the fee
+        itself, and no advance figure stands between."""
+        for text in (
+            "4.2. ავანსი გამოიქვითება პროპორციულად;\n"
+            "4.3. ყოველთვიური ანაზღაურება შეადგენს 100 ლარს.",
+            "ავანსი გამოიქვითება პროპორციულად; ყოველთვიური ანაზღაურება შეადგენს 100 ლარს.",
+            "ავანსი გამოიქვითება პროპორციულად; საფასური გადაიხდება ყოველთვიურად, "
+            "100 ლარის ოდენობით.",
+            "ანაზღაურებიდან ავანსი გამოიქვითება, ხოლო ყოველთვიური ანაზღაურება შეადგენს 100 ლარს.",
+        ):
+            assert _roles(text)[-1][1] in (None, "price"), text
+
+    def test_a_fee_slip_against_such_a_contract_is_still_caught(self) -> None:
+        contract = CONTRACT.replace(
+            "4.1. ღირებულება შეადგენს 100 (ასი) ლარს, რომელიც მოიცავს გადასახადებს მათ შორის "
+            "დღგ-ს.",
+            "4.1. ხელშეკრულების ჯამური ღირებულება შეადგენს 600 ლარს; ავანსი 30%, რომელიც "
+            "ყოველთვიურად გამოიქვითება;\n4.2. ყოველთვიური ანაზღაურება შეადგენს 100 (ასი) ლარს, "
+            "რომელიც მოიცავს გადასახადებს.",
+        )
+        assert contract != CONTRACT
+        assert _substantive(_check(ACT, contract)) == []
+        slip = ACT.replace("100 (ასი) ლარს", "110 ლარს")
+        found = [(f.severity, f.quote, f.expected) for f in _of(_check(slip, contract), "AOA.FEE")]
+        assert found == [("error", "110 ლარს", "100 ლარს")]
+
 
 # --- AOA-R5-08: the value of the services "already performed" is the act's own fee ---------------
 

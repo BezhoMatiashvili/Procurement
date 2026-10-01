@@ -689,10 +689,14 @@ Round 5's act-check defects owned here (`tests/unit/test_aoa_r5_fee_tax_bank.py`
   `AOA.FEE` error "correcting" the 70 to the full price. `amount_roles` now calls such a figure
   the fee's `remainder` when the words before it deduct the advance (a `გამოქვით…` /
   `გამოიქვით…` / `გამოკლ…` form beside `ავანს…`, or `less / net of / after deducting the
-  advance`) - looked for back across a `;` but never across a full stop - and the figure's own
-  clause, after the amount before it, then names what is to be paid (`ანაზღაურებ…`,
-  `ასანაზღაურებ…`, `გადასახდელ…`, `გადაიხდ…`, `დარჩენ…`, `payable`, `due`). The deduction must
-  be the advance's: `საშემოსავლო გადასახადის გამოქვითვით ასანაზღაურებელია 900 ლარი` (a natural
+  advance`) and the figure's own clause, after the amount before it, then names what is to be
+  paid (`ანაზღაურებას ექვემდებარება`, `ასანაზღაურებ…`, `გადასახდელ…`, `გადაიხდ…`, `დარჩენ…`,
+  `payable`, `due`). The deduction is looked for in the figure's sentence, and back across a
+  `;` only past the advance's own figure (case `გამოქვითული ავანსი: 30 ლარი; გადასახდელი
+  თანხა: …`) - never across a full stop or into a clause that opens with its number, and the
+  noun `ანაზღაურება` alone is the fee itself: a contract's `ავანსი გამოიქვითება;` followed by
+  `4.3. ყოველთვიური ანაზღაურება შეადგენს 100 ლარს` states its price. The deduction must be the
+  advance's: `საშემოსავლო გადასახადის გამოქვითვით ასანაზღაურებელია 900 ლარი` (a natural
   person's net fee) stays the fee, as do `სულ ასანაზღაურებელია` and an advance named after the
   payable word (`გადასახდელი ავანსი: 30 ლარი`). When the act gives the advance only as a share
   (in the act or the contract, `30%`), the remainder adds up when it is the fee less that share

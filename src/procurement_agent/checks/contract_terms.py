@@ -284,26 +284,37 @@ _ADVANCE_DEDUCTED = re.compile(
     re.IGNORECASE,
 )
 #: What is left to pay, after the deduction and before the figure: "ანაზღაურებას ექვემდებარება",
-#: "გადასახდელი თანხა", "ასანაზღაურებელია", "გადაიხდება", "payable".
+#: "გადასახდელი თანხა", "ასანაზღაურებელია", "გადაიხდება", "payable". Not the noun
+#: "ანაზღაურება" alone: it is the fee itself ("ყოველთვიური ანაზღაურება შეადგენს 100 ლარს").
 _PAYABLE = re.compile(
-    r"(?<![ა-ჰ])(?:ანაზღაურებ|ასანაზღაურებ|გადასახდელ|გადაიხდ|დარჩენ)[ა-ჰ]*"
+    r"(?<![ა-ჰ])(?:ანაზღაურებას\s+ექვემდებარება|(?:ასანაზღაურებ|გადასახდელ|გადაიხდ|დარჩენ)[ა-ჰ]*)"
     r"|(?<![a-z])(?:payable|to\s+be\s+paid|due)(?![a-z])",
     re.IGNORECASE,
 )
 _ADVANCE_WORD = re.compile(r"(?<![ა-ჰ])ავანს|(?<![a-z])advance(?![a-z])", re.IGNORECASE)
 #: How far back from a figure the advance's deduction may stand. It is looked for across a ";"
-#: ("გამოქვითული ავანსი: 30 ლარი; გადასახდელი თანხა: 70 ლარი") but never across a full stop.
+#: only past the advance's own figure ("გამოქვითული ავანსი: 30 ლარი; გადასახდელი თანხა: 70
+#: ლარი"), never across a full stop or into a clause that opens with its own number: a
+#: contract's "ავანსი გამოიქვითება;\n4.3. ყოველთვიური ანაზღაურება 100 ლარი" states the price.
 _DEDUCTION_REACH = 160
 
 
-def _clause_reach(spans: list[tuple[int, int]], i: int | None, start: int, text: str) -> int:
+def _clause_reach(
+    spans: list[tuple[int, int]], i: int | None, start: int, text: str, *, past_advance: bool
+) -> int:
     """Where the words before the figure at ``start`` that may still speak of it begin: its
-    sentence's start, or an earlier one's when only a ";" ends the sentences between."""
+    sentence's start, or - when ``past_advance`` (the amount before it is the advance, in an
+    earlier sentence) - an earlier one's when only a ";" ends the sentences between and none of
+    them opens with a clause number."""
     if i is None:
         return start
     lo = spans[i][0]
     while (
-        i > 0 and text[spans[i - 1][1] - 1] == ";" and start - spans[i - 1][0] <= _DEDUCTION_REACH
+        past_advance
+        and i > 0
+        and text[spans[i - 1][1] - 1] == ";"
+        and _CLAUSE_NUMBER.match(text, spans[i][0]) is None
+        and start - spans[i - 1][0] <= _DEDUCTION_REACH
     ):
         i -= 1
         lo = spans[i][0]
@@ -396,8 +407,9 @@ def amount_roles(text: str, *, sentences: list[tuple[int, int]] | None = None) -
             role = "tax"
         else:
             role = nearest_keyword_group(text[a:b], start - a, end - a, _ROLE_KEYWORDS)
+        past_advance = bool(out) and out[-1].role == "advance" and out[-1].money.span[0] < a
         if role in (None, "price", "advance") and _remains_after_the_advance(
-            text, _clause_reach(spans, i, start, text), own_from, start
+            text, _clause_reach(spans, i, start, text, past_advance=past_advance), own_from, start
         ):
             role = "remainder"
         if role not in _RUNNING_YIELDS_TO and _names_a_running_figure(text, clause_from, start):
