@@ -79,7 +79,7 @@ comparison; seeds 71, 101, 131, 163, 197 and 199, 12 cases per class each:
 `scripts/mutate_boq.py` (17 classes: quantity, unit, added/removed/reordered lines, description
 edits, hard-coded or wrong arithmetic, shifted Summary, renamed headers, text in numeric cells,
 merged cells, hidden rows, missing cached values, reconciliation, filled blanks), seeds 11, 17,
-23, 31 and 41: every valid mutant 100% (a mutant whose deletion breaks a Summary formula into
+23, 31, 41 and 43: every valid mutant 100% (a mutant whose deletion breaks a Summary formula into
 `#REF!` is reported invalid, not scored).
 
 ### Scanned PDFs (OCR inside the Docker image, Tesseract `kat+eng`, 216 dpi)
@@ -108,15 +108,32 @@ completed in the next round):
 | 5 | 614 | 48 | 7.8% | 12 |
 
 The rate fell and flattened: about **one deliberately unusual variant in thirteen** still found a
-defect in round 5 (all of round 5's were then fixed, but round 5's fixes were not themselves
-red-teamed). That is the honest measure of what an unseen wording or layout may still do; the
+defect in round 5. Of the 285 confirmed, all are fixed except those under "Known limits" below
+(English documents, a bare "თარიღი:" label, and the open policy questions); a few fixed only in
+part in their round were completed in a later one, and their repros pass. Round 5's fixes were
+not themselves red-teamed. After the rounds, four BOQ questions left open were decided and
+built (2026-10-01): a bid in another currency (`BOQ.CURRENCY`, not ranked), a negative rate
+(`BOQ.NEGATIVE_RATE`, no price), a discount below the total incl. VAT (`BOQ.DISCOUNT`), TOTAL
+COST by its usual names, and a profit rate typed beside its total held on cost + overheads. That is the honest measure of what an unseen wording or layout may still do; the
 client's own documents and the three test sets pass completely. The decisions taken on the
 policy questions are in docs/GOLD_SPEC.md; the ones left open are listed below.
 
 ### Tests
 
-3,984 unit and integration tests, 93.7% line coverage (`scripts/check.sh --offline`: ruff,
+4,014 unit and integration tests, 93.7% line coverage (`scripts/check.sh --offline`: ruff,
 format, mypy strict, bandit, pytest).
+
+### The deployable image
+
+`docker build` of this branch, run as compose runs it (read-only root, tmpfs, every capability
+dropped, models mounted read-only, no extra mounts): `/health` and `/ready` 200; the client's
+acts checked against the Word contract give the same findings as the dev box, prose spelling
+from the dictionary baked into the image; scan 4174 parsed through the image's OCR in about 18
+s, its planted fee and amount-in-words errors reported, no false error, and its OCR misreads
+(`მოედაწი` for `მოედანი`) reported as "possibly misread from the scan - check the paper
+original" warnings. The image still carries CUDA wheels from `main`'s lock (several GB; the
+CPU-only torch index does not cover every package that pulls them) - an image-size issue, not an
+accuracy one.
 
 ### Known limits
 
@@ -131,10 +148,15 @@ format, mypy strict, bandit, pytest).
   a warning.
 * **A misspelled surname that no longer declines regularly** ("ტოგონძიე" for "ტოგონიძე") is
   reported in the comparison with its value read off its genitive ("ტოგონძიი").
+* **A bare "თარიღი:" label** is not read as the act's date (it may be the contract's), and
+  English act and contract wording is out of scope.
 * **Open policy questions** for the client: an act whose billing cycle crosses two months
   (dated at the cycle's end or the month's end), resource-based estimates in BOQs (a work row
   whose resource rows carry the amounts), a sweep-up "any other works" line every bidder prices,
-  and a fixed coefficient cell in every amount formula.
+  a fixed coefficient cell in every amount formula, which total a bid offers when it gives a
+  discount below its total incl. VAT, pairing a contract's and an act's parties by role in the
+  comparison, and whether a one-sided date counts as carried when the other document states it
+  in another role.
 
 ## The central design decision: read the label, do not ask the model
 

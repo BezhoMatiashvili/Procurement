@@ -250,9 +250,9 @@ Word comment marks), rules and anchors only:
 | act check, mutation harness (20 error classes, 6 fresh seeds) | 100% detected, 100% corrected in the act's own form, 100% of Word comments placed |
 | harmless edits (14 classes: styles, layouts, formats) | 0% false positives |
 | comparison of the same mutated pairs | 100% per class (one known edge case) |
-| BOQ mutation harness (17 classes, 5 seeds) | 100% of valid mutants |
+| BOQ mutation harness (17 classes, 6 seeds) | 100% of valid mutants |
 | scanned acts (OCR) against the Word contract | every planted mistake reported, no false error |
-| five adversarial red-team rounds | 285 confirmed defects found and fixed test-first; the rate fell from 17% to 8% of deliberately unusual variants |
+| five adversarial red-team rounds | 285 confirmed defects, fixed test-first except the known limits in docs/ACCURACY.md; the rate fell from 17% to 8% of deliberately unusual variants |
 
 **The sets above were looked at while fixing, so these are tuned numbers.** The honest ones are
 the first runs on unseen data (Test Set 3: extraction precision 88.8% / recall 87.6% before any
