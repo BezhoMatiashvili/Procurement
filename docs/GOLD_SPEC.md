@@ -178,7 +178,7 @@ How the rules read money, terms and names (red-team round 3):
   `transfer`. A clause after a semicolon that opens with the balance (`; the balance within 10
   working days`, `; დარჩენილი თანხა - ...`) pays with the verb before it.
 * **VAT.** `net` is a status only where it qualifies money: not `net of VAT` (`excl`), `net 30
-  days`, `net weight`, `ნეტო წონა`. Tax wording in a conditional clause (`თუ ... არ არის დღგ-ს
+  days`, `net weight`, `ნეტო წონა`; before a money figure it is (`NET 900 ლარი`). Tax wording in a conditional clause (`თუ ... არ არის დღგ-ს
   გადამხდელი, ...`, `If the Contractor is not registered as a VAT payer, ...`) decides the
   status only when nothing else states one.
 * **Penalties.** A rate is a `penalty` only with a penalty word in its own sentence (a heading's
