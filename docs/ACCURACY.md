@@ -131,9 +131,10 @@ acts checked against the Word contract give the same findings as the dev box, pr
 from the dictionary baked into the image; scan 4174 parsed through the image's OCR in about 18
 s, its planted fee and amount-in-words errors reported, no false error, and its OCR misreads
 (`მოედაწი` for `მოედანი`) reported as "possibly misread from the scan - check the paper
-original" warnings. The image still carries CUDA wheels from `main`'s lock (several GB; the
-CPU-only torch index does not cover every package that pulls them) - an image-size issue, not an
-accuracy one.
+original" warnings. The image still carries CUDA wheels, as `main`'s did: `uv.lock` resolves torch
+2.14.0 from PyPI (the CUDA build, which pulls the `nvidia-*` packages) although `pyproject.toml`
+names the CPU-only index for it. Re-locking against that index should drop several GB - an
+image-size issue, not an accuracy one, left for its own change.
 
 ### Known limits
 
