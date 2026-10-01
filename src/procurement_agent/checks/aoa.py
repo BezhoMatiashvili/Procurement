@@ -23,15 +23,17 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
+from functools import lru_cache
 from itertools import pairwise
 from typing import Literal
 
 from procurement_agent.checks.amounts import (
     CURRENCY,
-    FIGURE,
+    FIGURE_TETRI,
     DigitsAndWords,
     Money,
     digits_and_words,
+    header_money,
     render_figure_like,
     words_for,
     words_like,
@@ -312,6 +314,11 @@ _ACT_DATED_BEFORE = re.compile(
 #: The act's own signing, "აქტი გაფორმდა <date>" / "გაფორმების თარიღი: <date>", and the other
 #: ways an act says when it was drawn up or signed.
 _ACT_SIGNED = re.compile(rf"გაფორმდა|{_ACT_DATE_LABEL}|{_ACT_DRAWN_UP}")
+#: The signing verb, and a word the length of a slip of it (``_slipped_signing``).
+_SIGNING_VERB = "გაფორმდა"
+_SIGNING_VERB_LIKE = re.compile(r"(?<![ა-ჰ])[ა-ჰ]{7,9}(?![ა-ჰ])")
+#: The act named right before its signing verb: "აქტი ", "„აქტი“ ".
+_ACT_NAMED_BEFORE = re.compile(r"აქტი[\s„“”\"']*$")
 #: An advance or prepayment clause: a date there is a payment's, never the act's.
 _ADVANCE_WORDS = re.compile(r"ავანს|წინასწარ|advance|prepay", re.IGNORECASE)
 #: What opens the service period: "შესრულდა …", a "შესრულების თარიღი" heading, and the other
@@ -516,7 +523,7 @@ _CONTRACT_REFERENCE = re.compile(r"\s*[„“\"]?\s*(?:N\s*\S+\s*)?ხელშ�
 
 def _date_hits_near(
     text: str,
-    keys: tuple[str, ...] | re.Pattern[str],
+    keys: tuple[str, ...] | re.Pattern[str] | Callable[[str], list[int]],
     window: int = 160,
     *,
     skip: Callable[[RuleHit], bool] | None = None,
@@ -545,11 +552,48 @@ def _date_hits_near(
     return out
 
 
-def _key_starts(text: str, keys: tuple[str, ...] | re.Pattern[str]) -> list[int]:
-    """Where each keyword (or each match of a pattern) starts in ``text``."""
+def _key_starts(
+    text: str, keys: tuple[str, ...] | re.Pattern[str] | Callable[[str], list[int]]
+) -> list[int]:
+    """Where each keyword (or each match of a pattern, or each start a reader finds) starts in
+    ``text``."""
     if isinstance(keys, re.Pattern):
         return [m.start() for m in keys.finditer(text)]
+    if callable(keys):
+        return keys(text)
     return [m.start() for k in keys for m in re.finditer(re.escape(k), text)]
+
+
+@lru_cache(maxsize=8)
+def _slipped_signing(text: str) -> tuple[tuple[int, int], ...]:
+    """The signing verb written with a one-letter slip, after the act's name: "„აქტი“ გაორმდა
+    2026 წლის 30 სექტემბერი" (red team R3). The prose spelling rule reports the slip; the date
+    after it is still the act's. Only after "აქტი": "ხელშეკრულება გაორმდა" is the contract's."""
+    return tuple(
+        m.span()
+        for m in _SIGNING_VERB_LIKE.finditer(text)
+        if m.group() != _SIGNING_VERB
+        and damerau(m.group(), _SIGNING_VERB, cap=1) == 1
+        and _ACT_NAMED_BEFORE.search(text, max(0, m.start() - 12), m.start())
+    )
+
+
+def _act_date_key_starts(text: str) -> list[int]:
+    """Where a date may follow the words that date the act (``_ACT_DATE_KEYS``), the signing
+    verb with a slip in it too (``_slipped_signing``)."""
+    starts = [m.start() for m in _ACT_DATE_KEYS.finditer(text)]
+    return sorted(starts + [a for a, _ in _slipped_signing(text)])
+
+
+def _act_dated_right_before(text: str, pos: int) -> bool:
+    """Whether the words that date the act stand right before ``pos`` (``_ACT_DATED_BEFORE``),
+    the signing verb with a slip in it too."""
+    if _ACT_DATED_BEFORE.search(text, max(0, pos - 30), pos) is not None:
+        return True
+    return any(
+        b <= pos and pos - b <= 30 and not re.sub(r"[\s:,]", "", text[b:pos])
+        for _, b in _slipped_signing(text)
+    )
 
 
 #: A month and its year with no day before the month: "2026 წლის ივნისის (თვეში)", "2026 წ.
@@ -822,18 +866,18 @@ class AoaChecker:
         """
         text = self.aoa.text
         hits = find_dates(text)
-        for m in _ACT_SIGNED.finditer(text):
-            if _contract_is_subject(text, m.start()):
+        # the words that date the act, a slip in the signing verb allowed (red team R3)
+        signed = sorted([m.span() for m in _ACT_SIGNED.finditer(text)] + [*_slipped_signing(text)])
+        for key_start, key_end in signed:
+            if _contract_is_subject(text, key_start):
                 continue  # "ხელშეკრულება გაფორმდა ..." dates the contract, not the act
-            end = self._sentence_of(m.start())[1]
-            hit = next((h for h in hits if m.end() <= h.start < end), None)
-            if hit is not None and not _ADVANCE_WORDS.search(text, m.end(), hit.start):
+            end = self._sentence_of(key_start)[1]
+            hit = next((h for h in hits if key_end <= h.start < end), None)
+            if hit is not None and not _ADVANCE_WORDS.search(text, key_end, hit.start):
                 return date.fromisoformat(str(hit.normalized)), hit
-        for d, hit in _date_hits_near(text, _ACT_DATE_KEYS):
-            key_at = max(
-                (s for s in _key_starts(text, _ACT_DATE_KEYS) if s <= hit.start),
-                default=hit.start,
-            )
+        key_starts = _act_date_key_starts(text)
+        for d, hit in _date_hits_near(text, _act_date_key_starts):
+            key_at = max((s for s in key_starts if s <= hit.start), default=hit.start)
             if not self._in_advance_clause(hit.start) and not _contract_is_subject(text, key_at):
                 return d, hit
         # An act dated only in its heading ("ქ. თბილისი, 31.08.2026"): the first date, when it
@@ -869,7 +913,7 @@ class AoaChecker:
             among them."""
             if act is not None and h.start == act[1].start:
                 return True
-            return _ACT_DATED_BEFORE.search(text, max(0, h.start - 30), h.start) is not None
+            return _act_dated_right_before(text, h.start)
 
         def in_period(h: RuleHit) -> bool:
             if _CONTRACT_REFERENCE.match(text, h.end):
@@ -1291,6 +1335,65 @@ class AoaChecker:
             )
         ]
 
+    def _net_labelled(self) -> list[RoledAmount]:
+        """The act's fees an exclusion of VAT ("დღგ-ს გარეშე") labels, each phrase one figure:
+        the one it follows straight after ("500 ლარი დღგ-ს გარეშე"), else the first after it in
+        its sentence ("(დღგ-ს გარეშე 505 ლარი)", "რაც დღგ-ს გარეშე შეადგენს 500 ლარს"), else the
+        one before it within ``_NET_LABEL_REACH``. In "590 ლარს დღგ-ს ჩათვლით (დღგ-ს გარეშე 500
+        ლარი)" the phrase is the 500's, not the 590's (red team R3, AOA-R3-08)."""
+        amounts = self.aoa.amounts()
+        fees = [r for r in amounts if r.role in (None, "price")]
+        out: list[RoledAmount] = []
+        for phrase in tax_phrases(self.aoa.text):
+            if phrase.kind != "exclusion" or "vat" not in phrase.names:
+                continue
+            a, b = phrase.span
+            before = max(
+                (r for r in amounts if r.money.span[1] <= a),
+                key=lambda r: r.money.span[1],
+                default=None,
+            )
+            after = min(
+                (r for r in amounts if r.money.span[0] >= b),
+                key=lambda r: r.money.span[0],
+                default=None,
+            )
+            gap = self.aoa.text[before.money.span[1] : a] if before is not None else None
+            if before is not None and gap is not None and not re.sub(r"[\s,(]", "", gap):
+                meant: RoledAmount | None = before
+            elif after is not None and self._sentence_of(after.money.span[0])[0] <= a:
+                meant = after
+            elif before is not None and a - before.money.span[1] <= _NET_LABEL_REACH:
+                meant = before
+            else:
+                meant = None
+            if meant is not None and meant in fees and meant not in out:
+                out.append(meant)
+        return out
+
+    def _before_vat(self) -> list[RoledAmount]:
+        """Every figure the act gives as its fee before VAT: the parts of ``_net_parts``, and a
+        figure an exclusion of VAT labels (``_net_labelled``) beside another fee the act states
+        in its currency that no such label names - "… 590 ლარს დღგ-ს ჩათვლით (დღგ-ს გარეშე 505
+        ლარი)", right or not (red team R3, AOA-R3-08). It is compared with the price before VAT,
+        never with the price. A figure before VAT the act states alone is its fee, and stays
+        one (round 2)."""
+        nets = self._net_parts()
+        fees = [r for r in self.aoa.amounts() if r.role in (None, "price") and r not in nets]
+        labelled = [r for r in self._net_labelled() if r in fees]
+        beside_a_fee = [
+            r
+            for r in labelled
+            if any(g not in labelled and g.money.currency == r.money.currency for g in fees)
+        ]
+        return [*nets, *beside_a_fee]
+
+    def _vat_rate(self) -> float:
+        """The VAT rate a price is taken apart at: the one rate the documents write beside VAT
+        other than Georgia's 18%, else 18%."""
+        written = [r for r in self._vat_rates() if r != _VAT_RATE_DEFAULT]
+        return written[0] if len(written) == 1 else _VAT_RATE_DEFAULT
+
     def _vat_rates(self) -> list[float]:
         """The VAT rates a fee may be restated at: Georgia's 18%, and any rate the act or the
         contract writes beside VAT ("დღგ 18%", "20% VAT")."""
@@ -1575,7 +1678,7 @@ class AoaChecker:
         if self.contractor_type == "company":
             return  # rules 5-8 do not apply to a company; the summary says so (_NOT_APPLICABLE)
         rule = _TAX_RULES[self.contractor_type]
-        nets = self._net_parts()
+        nets = self._before_vat()
         # "დღგ-ს გარეშე" beside the fee before tax says what that part is, not what the fee is
         phrases = [p for p in tax_phrases(self.aoa.text) if not self._qualifies_net(p, nets)]
         fees = [m for m in self._fee_amounts() if all(m != r.money for r in nets)]
@@ -1855,7 +1958,10 @@ class AoaChecker:
 
         The party reader keeps one form of a signatory and takes another that differs only in
         its ending for the same person, a slip in the ending included ("მელაძის" and "მელაძი");
-        the rule compares each form found here on its own (``_same_person``)."""
+        the rule compares each form found here on its own (``_same_person``). So does it a form
+        with the first name as its initial ("ნ. ბერიძი" beside "ნოდარ ბერიძის", red team R3,
+        AOA-R3-07): the party reader takes the two for one person, and the initialled form's
+        surname is compared on its own."""
         parts = normalize_name(name).split()
         if len(parts) < 2 or not all(is_georgian_word(w) for w in parts):
             return [(form, [span]) for form, span in self._written_forms(name)]
@@ -1881,7 +1987,12 @@ class AoaChecker:
                 ):
                     span = (first[1], surname[2])
                     forms.setdefault(self.aoa.as_written(*span), []).append(span)
-        return list(forms.items())
+        initials = r"\s*".join(rf"{re.escape(p[0])}\." for p in parts[:-1])
+        pattern = rf"(?<![{GEORGIAN}]){initials}\s*([{GEORGIAN}]+)(?![{GEORGIAN}])"
+        for m in re.finditer(pattern, self.aoa.text):
+            if _near_word(m.group(1), parts[-1]):
+                forms.setdefault(self.aoa.as_written(*m.span()), []).append(m.span())
+        return sorted(forms.items(), key=lambda form: form[1][0])
 
     def _owner_at(self, pos: int) -> Party | None:
         """The act party whose block ``pos`` stands in: the one named last before it - by its
@@ -2716,6 +2827,15 @@ class AoaChecker:
         if self.contract is None:  # run() calls the contract rules only with a contract
             raise RuntimeError(_NO_CONTRACT)
         act = [r for r in self.aoa.amounts() if r.role not in _NOT_THE_FEE]
+        # a price table's total whose currency only the column header names ("ღირებულება
+        # (ლარი)") is a fee the act states too (red team R3, AOA-R3-09)
+        table_totals, table_lines = header_money(self.aoa.text)
+        read = [r.money.span for r in self.aoa.amounts()]
+        act += [
+            RoledAmount(money=m, role="price")
+            for m in table_totals
+            if not any(a < m.span[1] and m.span[0] < b for a, b in read)
+        ]
         if not act:
             # A fee whose currency stands in another table cell is not read as money: say that
             # no fee could be read and let a person look, rather than call the act wrong.
@@ -2736,9 +2856,20 @@ class AoaChecker:
                 "no price found in the contract to compare against",
             )
             return
-        # the fee before tax, beside the tax that makes it the fee, is the fee in parts
+        if table_lines:
+            shown = ", ".join(m.raw for m in table_lines[:5])
+            self._skip(
+                "AOA.FEE",
+                f"აქტის ცხრილში თანხები ({shown}) ვალუტას მხოლოდ სვეტის სათაურში ასახელებს და "
+                "ჯამის სტრიქონი არ აქვს: ხელშეკრულების ღირებულებას არ შედარდა",
+                f"the act's table gives amounts ({shown}) whose currency only the column header "
+                "names, with no total row: they were not compared with the contract's price",
+            )
+        # the fee before tax, beside the tax that makes it the fee, is the fee in parts; a
+        # figure labelled before VAT beside the fee is compared with the price before VAT
         nets = self._net_parts()
-        fees = [r for r in act if r.role in (None, "price") and r not in nets]
+        before_vat = [r for r in self._before_vat() if r not in nets]
+        fees = [r for r in act if r.role in (None, "price") and r not in nets + before_vat]
         parts = [r for r in act if r.role in ("advance", "remainder")]
         matched = [r.money for r in fees if _states(prices, r.money)]
         wrong = [r for r in fees if not _states(prices, r.money)]
@@ -2755,6 +2886,85 @@ class AoaChecker:
         for r in fees:
             if r not in wrong:
                 self._fee_words_finding(r, prices)
+        for r in before_vat:
+            self._net_finding(r, prices, contract)
+        self._vat_amount_findings(fees, [*nets, *before_vat], prices)
+
+    def _net_finding(
+        self, r: RoledAmount, prices: list[Money], contract: list[RoledAmount]
+    ) -> None:
+        """A figure the act gives as its fee before VAT (``_before_vat``) against the contract's
+        prices before VAT: a price the contract states as such, or a price with VAT taken off at
+        a rate the documents allow. Its correction is the price before VAT, as the act writes the
+        figure - never the price itself, which written there would make the act wrong."""
+        m = r.money
+        same = list(dict.fromkeys(p.value for p in prices if p.currency == m.currency))
+        if not same:
+            self._fee_finding(r, prices, contract)  # another currency: the fee rule says so
+            return
+        rates = self._vat_rates()
+        if any(
+            amounts_equal(m.value, p) or any(_plus_vat(m.value, p, rate) for rate in rates)
+            for p in same
+        ):
+            return
+        rate = self._vat_rate()
+        nets = list(dict.fromkeys(round(p / (1 + rate), 2) for p in same))
+        meant = nets[0] if len(nets) == 1 else _nearest_price(m.value, nets)
+        span = self._fee_span(m)
+        fix = None if meant is None else _fee_like(meant, self.aoa.text[span[0] : span[1]])
+        actual = _money_text(m)
+        shown = ", ".join(f"{n:,.2f} {m.currency}" for n in nets)
+        self._add(
+            "AOA.FEE",
+            "error",
+            f"საფასური დღგ-ს გარეშე {actual} არ ემთხვევა ხელშეკრულებით განსაზღვრულ ღირებულებას "
+            f"დღგ-ს გარეშე ({shown})",
+            f"the fee before VAT {actual} matches no contract price before VAT ({shown})",
+            expected=fix,
+            actual=actual,
+            span=span,
+        )
+
+    def _vat_amount_findings(
+        self, fees: list[RoledAmount], nets: list[RoledAmount], prices: list[Money]
+    ) -> None:
+        """The VAT amount of a breakdown that does not add up: the act states its fee, the fee
+        before VAT and the VAT, and net + VAT is not the fee (GOLD_SPEC 3). When the fee is the
+        contract's price, the one wrong is the VAT when the net is right, and the finding is on
+        the VAT with the fee less the net as its correction (red team R3, AOA-R3-08); a wrong
+        net is ``_net_finding``'s, and when net + VAT make the fee the VAT follows the net."""
+        rates = self._vat_rates()
+        for t in (r for r in self.aoa.amounts() if r.role == "tax"):
+            cur = t.money.currency
+            gross = [g for g in fees if g.money.currency == cur and _states(prices, g.money)]
+            parts = [n for n in nets if n.money.currency == cur]
+            if not gross or not parts:
+                continue
+            at = t.money.span[0]
+            g = min(gross, key=lambda r: abs(r.money.span[0] - at)).money
+            n = min(parts, key=lambda r: abs(r.money.span[0] - at)).money
+            if amounts_equal(n.value + t.money.value, g.value):
+                continue
+            if not any(_plus_vat(n.value, g.value, rate) for rate in rates):
+                continue  # the net is wrong too: its own finding says so
+            vat = round(g.value - n.value, 2)
+            if amounts_equal(t.money.value, vat):
+                continue
+            actual = _money_text(t.money)
+            fix = _fee_like(vat, self.aoa.text[t.money.span[0] : t.money.span[1]])
+            self._add(
+                "AOA.FEE",
+                "error",
+                f"დღგ-ს თანხა {actual} არ ემთხვევა: {_money_text(n)} დღგ-ს გარეშე და {actual} "
+                f"დღგ ერთად არ შეადგენს საფასურს {_money_text(g)}; დღგ უნდა იყოს "
+                f"{vat:,.2f} {cur}",
+                f"the VAT amount {actual} does not fit: {_money_text(n)} before VAT plus {actual} "
+                f"VAT is not the fee {_money_text(g)}; the VAT is {vat:,.2f} {cur}",
+                expected=fix,
+                actual=actual,
+                span=t.money.span,
+            )
 
     def _fee_words_finding(self, r: RoledAmount, prices: list[Money]) -> None:
         """A fee whose figure is the contract's price while its words state another amount: the
@@ -2940,15 +3150,47 @@ class AoaChecker:
                     span=(first, last),
                 )
                 return
+        # no one year is the mistake: the correction is the term itself, written the way the
+        # act writes its period, over the whole period as written (red team R3, AOA-R3-11)
+        written, fixed = self._period_as_term(period_hits, lo, hi)
         self._add(
             "AOA.PERIOD_IN_TERM",
             "error",
             f"შესრულების პერიოდი {min(period)}..{max(period)} სცდება {name_ka} {shown}",
             f"execution period {min(period)}..{max(period)} falls outside {name_en} {shown}",
-            expected=shown,
-            actual=f"{min(period)}..{max(period)}",
-            span=(outside[0].start, outside[0].end),
+            expected=fixed,
+            actual=written,
+            span=(first, last),
         )
+
+    def _period_as_term(
+        self, hits: list[tuple[date, RuleHit]], lo: date | None, hi: date | None
+    ) -> tuple[str, str]:
+        """The period as the act writes it, and the same text with its ends moved to the term's
+        ``lo`` and ``hi``, each end in its own date style - its case, its postposition
+        ("-დან"), its separators. An end the term leaves open stays as written. A month written
+        with no day ("2026 წლის ივნისის თვეში") has no day to move: the term is written out in
+        the act's long style instead ("2026 წლის 1 ივნისიდან 2027 წლის 31 მაისის ჩათვლით")."""
+        text = self.aoa.text
+        ordered = sorted((h for _, h in hits), key=lambda h: (h.start, h.end))
+        a, b = ordered[0], ordered[-1]
+        written = self.aoa.as_written(a.start, b.end)
+
+        def moved(d: date | None, h: RuleHit) -> str:
+            if d is None:
+                return self.aoa.as_written(h.start, h.end)
+            return render_date_like(d, h.raw_text, following=text[h.end : h.end + 40])
+
+        if (a.start, a.end) == (b.start, b.end):
+            words = re.findall(rf"[{GEORGIAN}]+", a.raw_text)
+            if any(w in MONTH_FORMS for w in words) and lo and hi:
+                # the month's genitive stem, "ივნის" of "ივნისის", carries both ends' forms
+                start = render_date_like(lo, f"{lo.year} წლის 1 მაისიდან")
+                end = render_date_like(hi, f"{hi.year} წლის 1 მაისის", following="ჩათვლით")
+                return written, f"{start} {end} ჩათვლით"
+            return written, f"{moved(lo, a)} - {moved(hi, a)}"
+        fixed = moved(lo, a) + self.aoa.as_written(a.end, b.start) + moved(hi, b)
+        return written, fixed
 
     def _period_year_repair(
         self, reading: _Period, window: tuple[date | None, date | None, str] | None
@@ -3451,15 +3693,26 @@ def _same_person(written: str, named: str) -> bool:
 
     ``names_match`` strips a final "ე" or "ი" as an ending, so it takes "მელაძი" for "მელაძე";
     neither is a form of the other: "-ძე" gives "-ძის", "-ძეს", "-ძემ", and "-შვილი" gives
-    "-შვილის", "-შვილმა". A name in another script is compared as ``names_match`` does."""
+    "-შვილის", "-შვილმა". A name in another script is compared as ``names_match`` does.
+
+    A first name written as its initial ("ნ. ბერიძე") is the named person's when it is the
+    first letter of theirs; the surname is then held to the same rule (red team R3, AOA-R3-07):
+    "ნ. ბერიძი" is no form of "ნოდარ ბერიძე"."""
     a, b = normalize_name(written).split(), normalize_name(named).split()
     if not a or len(a) != len(b):
         return False
     if not all(is_georgian_word(w) for w in (*a, *b)):
         return names_match(written, named)
-    if not all(same_word(x, y) for x, y in zip(a[:-1], b[:-1], strict=True)):
+    if not all(_same_first(x, y) for x, y in zip(a[:-1], b[:-1], strict=True)):
         return False
     return lemma_word(b[-1]) in word_lemmas(a[-1])
+
+
+def _same_first(written: str, named: str) -> bool:
+    """A first name (or a patronymic) the same word in some form, or its initial."""
+    if len(written) == 1 or len(named) == 1:
+        return written[0] == named[0]
+    return same_word(written, named)
 
 
 def _near_word(word: str, target: str) -> bool:
@@ -3573,7 +3826,7 @@ def _fee_like(value: float, written: str) -> str:
     the lari ("700 ლარი და 50 თეთრი") are the value's own, and dropped when it has none. Text
     the pattern does not recognise yields the bare figure.
     """
-    figure = re.search(FIGURE, written)
+    figure = re.search(FIGURE_TETRI, written)
     if figure is None:
         return _plain(value)
     rest = written[figure.end() :]

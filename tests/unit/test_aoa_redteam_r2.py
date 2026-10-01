@@ -102,7 +102,8 @@ class TestNetRestatedAtTheVatRate:
             "(ხუთას ოთხმოცდაათი) ლარს."
         )
         [finding] = _of(_check(act, _VAT_CONTRACT), "AOA.FEE")
-        assert finding.actual == "500.00 GEL"
+        # the fee and the net are right: the VAT amount is the slip (red team R3, AOA-R3-08)
+        assert (finding.actual, finding.expected) == ("80.00 GEL", "90 ლარს")
 
 
 # --- AOA-R2-08: the fee's correction is the one price it is a slip of ----------------------------
@@ -299,10 +300,12 @@ class TestPeriodEndpointYear:
         )
 
     def test_an_end_outside_the_term_by_months_keeps_the_term_as_the_reference(self) -> None:
-        """No one year puts it right: the term is reported, as before."""
+        """No one year puts it right: the term is reported, as before - in the act's own date
+        style since round 3 (AOA-R3-11)."""
         report = self._report("2026 წლის 1 აპრილიდან 2026 წლის 30 ოქტომბრის ჩათვლით")
         [finding] = _of(report, "AOA.PERIOD_IN_TERM")
-        assert finding.expected == "2026-03-01..2026-09-01"
+        assert finding.expected == "2026 წლის 1 მარტიდან 2026 წლის 1 სექტემბრის"
+        assert "2026-03-01..2026-09-01" in finding.message_en
 
 
 # --- AOA-R2-15: tetri written after the lari ------------------------------------------------------
