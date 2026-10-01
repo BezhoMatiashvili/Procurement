@@ -3081,6 +3081,13 @@ class AoaChecker:
             # a BIC and its "XXX" branch form name one office (ISO 9362): compared as one code
             known = {_bank_key(x) for x in c}
             extra = sorted(x for x in a if _bank_key(x) not in known)
+            if unit == "SWIFT" and c:
+                # a real branch of a bank the contract names by its 8-character code: the same
+                # institution, so a warning naming the branch (red team R5, AOA-R5-13, policy)
+                branches = [x for x in extra if _branch_of(x, known)]
+                extra = [x for x in extra if x not in branches]
+                for x in branches:
+                    self._branch_warning(x)
             if a and c and extra:
                 mismatched = True
                 payee = self._payee_bank(unit)
@@ -3113,6 +3120,26 @@ class AoaChecker:
         if not mismatched:
             self._bank_owner()
             self._bank_pairing()
+
+    def _branch_warning(self, code: str) -> None:
+        """AOA.BANK, a warning: the act's bank code is a branch (its last three characters) of
+        the bank the contract names by the 8-character code. The institution is the same and
+        the account is the IBAN's, so the payment is not misdirected; the branch is named for a
+        person to confirm."""
+        branch, bank = code[8:].upper(), code[:8].upper()
+        stated = sorted(self.contract.bank("SWIFT")) if self.contract is not None else []
+        expected = next((x for x in stated if _bank_key(x) == bank), bank)
+        self._add(
+            "AOA.BANK",
+            "warning",
+            f"ბანკის კოდს დამატებული აქვს ფილიალის კოდი {branch}: {code} vs ხელშეკრულება "
+            f"{expected} — ბანკი იგივეა, შეამოწმეთ ფილიალი",
+            f"the bank code adds the branch code {branch}: {code} vs contract {expected} - the "
+            "same bank; check the branch",
+            expected=expected,
+            actual=code,
+            span=self._find_span(code),
+        )
 
     def _sub_accounts(self) -> None:
         """AOA.BANK, a warning: one account whose currency sub-account the act and the contract
@@ -3225,6 +3252,8 @@ class AoaChecker:
             want = c_pairs.get(iban)
             if want is None or _bank_key(want) == _bank_key(code):
                 continue
+            if _branch_of(code, {_bank_key(want)}):
+                continue  # a branch of the very bank: rule_bank's warning says so
             self._add(
                 "AOA.BANK",
                 "error",
@@ -4377,6 +4406,16 @@ def _bank_key(code: str) -> str:
     8-character form, the institution's primary office (ISO 9362). Anything else as it is."""
     code = code.upper()
     return code[:8] if len(code) == 11 and code.endswith("XXX") else code
+
+
+def _branch_of(code: str, banks: set[str]) -> str | None:
+    """The branch code of an 11-character BIC whose first eight characters - the institution,
+    its country and its location (ISO 9362) - are one of ``banks`` (8-character forms, as
+    ``_bank_key`` gives them), with a real branch, not "XXX". None for anything else."""
+    code = code.upper()
+    if len(code) == 11 and not code.endswith("XXX") and code[:8] in banks:
+        return code[8:]
+    return None
 
 
 def _closest(
