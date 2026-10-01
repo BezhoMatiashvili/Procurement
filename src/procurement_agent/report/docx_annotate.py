@@ -148,6 +148,19 @@ def _locate(
     return None
 
 
+def whole_word_spans(text: str, needle: str) -> list[tuple[int, int]]:
+    """Every place ``needle`` stands as whole words in ``text``, in order - the places a comment
+    for it would mark (``_locate``), so a check that names some of them (``Finding.places``)
+    counts them the way annotation does."""
+    needle = needle.strip()
+    out: list[tuple[int, int]] = []
+    at = 0
+    while needle and (found := _locate(text, needle, at, whole=True)) is not None:
+        out.append(found)
+        at = found[1]
+    return out
+
+
 def _runs_covering(paragraph: Paragraph, needle: str, start_at: int = 0) -> list[Run] | None:
     """Split runs as needed so ``needle`` is covered by a whole number of runs."""
     found = _cover_next(paragraph, needle, start_at, whole=True) or _cover_next(

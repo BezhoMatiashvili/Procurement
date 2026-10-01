@@ -110,3 +110,66 @@ class TestCopiedIntoTheSignatureOnly:
         act = _TWO_DIRECTORS.replace("დირექტორი: დავით მელაძე", "დირექტორი: ზურაბ ქობალია")
         found = [(f.quote, f.places) for f in _of(_check(act), "AOA.DIRECTOR")]
         assert found == [("ზურაბ ქობალია", None)]
+
+
+# --- AOA-R4-06: the act's date is marked where the act is dated, not on a correct copy -----------
+
+_SIGNED = "აქტი გაფორმდა 2026 წლის 30 აპრილი"
+_PERIOD = "მომსახურება შესრულდა 2026 წლის 1 აპრილიდან 2026 წლის 30 აპრილის ჩათვლით."
+#: The act recites the contract's date, as acts do.
+_RECITAL = ACT.replace(
+    "„შემკვეთის“ პროექტ",
+    "ვინაიდან მხარეებმა 2026 წლის 1 მარტს გააფორმეს ხელშეკრულება,\n„შემკვეთის“ პროექტ",
+)
+
+
+class TestActDateMarkedOnlyWhereTheActIsDated:
+    def test_the_recital_s_contract_date_is_not_marked(self, tmp_path: Path) -> None:
+        act = _RECITAL.replace(_SIGNED, "აქტი გაფორმდა 2026 წლის 1 მარტს")
+        report = _check(act)
+        [f] = _of(report, "AOA.ACT_DATE")
+        assert (f.quote, f.expected) == ("2026 წლის 1 მარტს", "2026 წლის 30 აპრილს")
+        assert f.places == ((1,), 2)
+        assert _commented_lines(tmp_path, act, [f]) == ["აქტი გაფორმდა 2026 წლის 1 მარტს"]
+
+    def test_the_period_s_end_is_not_marked(self, tmp_path: Path) -> None:
+        act = ACT.replace(
+            _PERIOD, "მომსახურება შესრულდა 01.04.2026-დან 29.04.2026-ის ჩათვლით."
+        ).replace(_SIGNED, "აქტი გაფორმდა 29.04.2026")
+        [f] = _of(_check(act), "AOA.ACT_DATE")
+        assert (f.quote, f.expected) == ("29.04.2026", "30.04.2026")
+        assert _commented_lines(tmp_path, act, [f]) == ["აქტი გაფორმდა 29.04.2026"]
+
+    def test_the_act_dated_twice_is_marked_twice(self, tmp_path: Path) -> None:
+        """Near miss: an act that writes its own date in its heading and again where it is
+        signed is wrong at both places."""
+        act = ACT.replace("მიღება-ჩაბარების აქტი\n", "მიღება-ჩაბარების აქტი\n05.05.2026\n").replace(
+            _SIGNED, "აქტი გაფორმდა 05.05.2026"
+        )
+        [f] = _of(_check(act), "AOA.ACT_DATE")
+        assert f.places is None
+        assert _commented_lines(tmp_path, act, [f]) == ["05.05.2026", "აქტი გაფორმდა 05.05.2026"]
+
+    def test_a_date_written_once_is_marked_there(self) -> None:
+        [f] = _of(_check(ACT.replace(_SIGNED, "აქტი გაფორმდა 2026 წლის 5 მაისი")), "AOA.ACT_DATE")
+        assert f.places is None
+
+    def test_the_act_dated_before_the_contract_marks_the_act_s_date_only(
+        self, tmp_path: Path
+    ) -> None:
+        """AOA.ACT_DATE_IN_TERM reads the same date, and marks it the same way."""
+        act = _RECITAL.replace("2026 წლის 1 მარტს გააფორმეს", "2026 წლის 20 თებერვალს გააფორმეს")
+        act = act.replace(_SIGNED, "აქტი გაფორმდა 2026 წლის 20 თებერვალს")
+        found = _of(_check(act), "AOA.ACT_DATE_IN_TERM")
+        assert found
+        lines = _commented_lines(tmp_path, act, found)
+        assert lines == ["აქტი გაფორმდა 2026 წლის 20 თებერვალს"]
+
+    def test_places_are_counted_as_annotation_counts_them(self) -> None:
+        """The shared reader: a date inside a longer word is no place of it (near miss)."""
+        from procurement_agent.report.docx_annotate import whole_word_spans
+
+        text = "30.04.2026-ის ჩათვლით; 130.04.20261; აქტი 30.04.2026"
+        assert whole_word_spans(text, "30.04.2026") == [(0, 10), (42, 52)]
+        assert whole_word_spans("ივნისიდან და ივნის", "ივნის") == [(13, 18)]
+        assert whole_word_spans("ტექსტი", " ") == []

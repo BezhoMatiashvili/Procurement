@@ -149,6 +149,7 @@ from procurement_agent.extraction.rules import RuleHit, find_dates, month_ka_cor
 from procurement_agent.extraction.schemas import FactType
 from procurement_agent.extraction.spellcheck import Difference, best_match, classify_difference
 from procurement_agent.fx.provider import NullRateProvider, RateProvider
+from procurement_agent.report.docx_annotate import whole_word_spans
 
 ContractorType = Literal[
     "company", "natural_person", "individual_entrepreneur_vat", "small_business", "foreign"
@@ -889,6 +890,27 @@ class AoaChecker:
             return date.fromisoformat(str(head.normalized)), head
         return None
 
+    def _act_date_places(self, hit: RuleHit) -> tuple[tuple[int, ...], int] | None:
+        """Which places of the act's date, as written at ``hit``, a finding about it marks
+        (``Finding.places``; red team R4, AOA-R4-06): the act's own date - where ``_act_date``
+        read it, after the words that date the act, or alone in the heading - and never another
+        correct copy of the same date, the recital's contract date or the period's end. None
+        when every place is the act's own, or when ``hit`` is not among them."""
+        text = self.aoa.text
+        spans = whole_word_spans(text, text[hit.start : hit.end])
+        at = next((i for i, (a, b) in enumerate(spans) if a < hit.end and hit.start < b), None)
+        if at is None:
+            return None
+
+        def own(span: tuple[int, int]) -> bool:
+            a, b = span
+            if _act_dated_right_before(text, a):
+                return True
+            return a < _HEADER_CHARS and not _CONTRACT_WORD.search(text, max(0, a - 60), b + 30)
+
+        mine = [i for i, span in enumerate(spans) if i == at or own(span)]
+        return None if len(mine) == len(spans) else (tuple(mine), len(spans))
+
     def _period_hits(self) -> list[tuple[date, RuleHit]]:
         """The service period's dates, read after "შესრულდა" / "შესრულების თარიღი" / "...
         პერიოდი" (``_date_hits_near``). Every rule that needs the period reads it here.
@@ -1483,6 +1505,7 @@ class AoaChecker:
                 "one cannot be told",
                 actual=act_hit.raw_text,
                 span=(act_hit.start, act_hit.end),
+                places=self._act_date_places(act_hit),
             )
             return
         if window is not None and _within(act_date, window) and not _within(expected, window):
@@ -1504,6 +1527,7 @@ class AoaChecker:
             ),
             actual=act_hit.raw_text,
             span=(act_hit.start, act_hit.end),
+            places=self._act_date_places(act_hit),
         )
 
     def rule_month_spelling(self) -> None:
@@ -3294,6 +3318,7 @@ class AoaChecker:
                 expected=allowed,
                 actual=str(d),
                 span=(hit.start, hit.end),
+                places=self._act_date_places(hit),
             )
         elif valid_until is not None and d > valid_until:
             self._add(
@@ -3305,6 +3330,7 @@ class AoaChecker:
                 expected=allowed,
                 actual=str(d),
                 span=(hit.start, hit.end),
+                places=self._act_date_places(hit),
             )
         elif perform_until is not None and d > perform_until:
             ka = (
@@ -3331,6 +3357,7 @@ class AoaChecker:
                 expected=_window_text(term.signed, perform_until),
                 actual=str(d),
                 span=(hit.start, hit.end),
+                places=self._act_date_places(hit),
                 confidence=0.8,
             )
 
