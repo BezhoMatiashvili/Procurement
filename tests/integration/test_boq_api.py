@@ -377,3 +377,43 @@ def test_a_bid_in_another_currency_is_not_ranked_and_says_why(client: TestClient
         "Company-3: is priced in another currency than the template (see its findings), so it "
         "is not ranked"
     }
+
+
+def test_the_new_bid_findings_reach_the_report_the_page_and_the_workbook(
+    client: TestClient,
+) -> None:
+    """A negative rate, a discount below the total incl. VAT and a bid in lari, together:
+    the API reports each, the BOQ page renders and the merged workbook downloads, with the
+    bid in lari present but not coloured."""
+    template = _upload(client, "T.xlsx", build_real_boq())
+    names = ["Company-1", "Company-2", "Company-3", "Company-4"]
+    specs = [
+        Bid(),
+        Bid(factor=0.9, rates={(CIVIL, "1.3"): -21.5}),
+        Bid(factor=0.95, discount=0.05),
+        Bid(factor=0.5, currency="GEL"),
+    ]
+    bids = [
+        _upload(client, f"{n}.xlsx", build_real_boq(s)) for n, s in zip(names, specs, strict=True)
+    ]
+    report = _check(client, template, bids)
+    rules = {b["bidder"]: {f["rule_id"] for f in b["findings"]} for b in report["leaderboard"]}
+    assert "BOQ.NEGATIVE_RATE" in rules["Company-2"]
+    assert "BOQ.DISCOUNT" in rules["Company-3"]
+    assert "BOQ.CURRENCY" in rules["Company-4"]
+    by_name = {b["bidder"]: b for b in report["leaderboard"]}
+    assert by_name["Company-4"]["colour"] is None and by_name["Company-4"]["rank_basis"] is None
+    assert by_name["Company-2"]["comparable"] is False
+
+    query = f"template={template}&bids={','.join(bids)}"
+    page = client.get(f"/ui/checks/boq?{query}", headers=H)
+    assert page.status_code == 200, page.text
+    for rule in ("BOQ.NEGATIVE_RATE", "BOQ.DISCOUNT", "BOQ.CURRENCY"):
+        assert rule in page.text
+    r = client.get(f"/ui/checks/boq/merged.xlsx?{query}", headers=H)
+    assert r.status_code == 200
+    wb = load_workbook(io.BytesIO(r.content))
+    assert "SUMMARY" in wb.sheetnames
+    cells = [str(c.value) for ws in wb.worksheets for row in ws.iter_rows() for c in row]
+    assert any("EXCLUDED: a negative rate" in v for v in cells)
+    assert any("Company-4" in v for v in cells)

@@ -201,6 +201,8 @@ class Bid:
     vat: float = 0.18
     #: the currency the price headers name ("Rate in USD")
     currency: str = "USD"
+    #: a discount rate given below the total incl. VAT, with the total after it
+    discount: float = 0.0
 
 
 def build_real_boq(
@@ -479,10 +481,19 @@ def _write_summary(
     vat = _total(put, spec, row, f"=F{excl_row}*G{row}", excl * spec.vat, "", "VAT")
     put(row, 7, spec.vat)
     row += 1
+    incl_row = row
     put(row, 2, "TOTAL PRICE INCLUDING VAT")
-    _total(
+    incl = _total(
         put, spec, row, f"=SUM(F{excl_row}:F{row - 1})", excl + vat, "", "TOTAL PRICE INCLUDING VAT"
     )
+    if spec.discount:
+        row += 1
+        put(row, 2, "Discount")
+        put(row, 7, spec.discount)
+        put(row, 6, f"=-F{incl_row}*G{row}", -incl * spec.discount)
+        row += 1
+        put(row, 2, "TOTAL PRICE AFTER DISCOUNT")
+        put(row, 6, f"=F{incl_row}+F{row - 1}", incl * (1 - spec.discount))
 
 
 def _total(
