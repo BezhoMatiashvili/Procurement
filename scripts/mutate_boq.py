@@ -1481,7 +1481,8 @@ def check_merged(
         for r in range(1, ws.max_row + 1):
             who = ws.cell(r, 5).value
             if who == marker:
-                blocks.append((str(ws.cell(r, 14).value or ""), set()))
+                analysis = B.MERGED_COLUMNS["analysis"]
+                blocks.append((str(ws.cell(r, analysis).value or ""), set()))
             elif blocks and who:
                 blocks[-1][1].add(str(who))
             elif blocks and who is None and ws.cell(r, 1).value is None:

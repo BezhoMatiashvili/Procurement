@@ -14,7 +14,7 @@ import io
 from pathlib import Path
 
 import pytest
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 import tests.boq_factory as factory
 from procurement_agent.checks.boq import (
@@ -811,3 +811,45 @@ def test_a_position_specified_by_the_engineer_is_described_work(text: str) -> No
 )
 def test_an_other_position_asking_the_bidder_is_still_a_placeholder(text: str) -> None:
     assert _PLACEHOLDER.search(text)
+
+
+# --- R4-12: a bill priced by its component rates only -----------------------------------------
+
+
+def _components_bill(rates: tuple[float, float, float] | None) -> Cells:
+    head = ("No", "Description", "Unit", "Qty", "Materials", "Labour", "Machinery")
+    cells: Cells = {(1, c): h for c, h in enumerate(head, 1)}
+    for r, (item, desc, unit, qty, _) in enumerate(_LINES[:2], 2):
+        cells.update({(r, 1): item, (r, 2): desc, (r, 3): unit, (r, 4): qty})
+        if rates is not None:
+            cells.update({(r, 5): rates[0], (r, 6): rates[1], (r, 7): rates[2]})
+    return cells
+
+
+def test_a_bill_priced_by_its_components_only_is_priced_and_shown_whole(tmp_path: Path) -> None:
+    from procurement_agent.checks.boq import MERGED_COLUMNS, write_merged_workbook
+
+    t = read_boq(_save(tmp_path / "t.xlsx", {_SHEET: _components_bill(None)}), name="T")
+    a = read_boq(_save(tmp_path / "a.xlsx", {_SHEET: _components_bill((7.0, 4.2, 2.8))}), name="A")
+    (comp,) = compare_all(t, [a])
+    assert comp.evaluated_cost == pytest.approx((120.0 + 30.0) * 14.0)
+    assert "BOQ.SECTION_UNPRICED" not in _rules(comp)
+    assert comp.unpriced_sheets == []
+
+    out = write_merged_workbook(t, [a], [comp], tmp_path / "m.xlsx")
+    ws = load_workbook(out)[_SHEET]
+    header = [c.value for c in ws[1]]
+    assert "Machinery" in header
+    a_row = next(
+        r for r in range(2, ws.max_row + 1) if ws.cell(r, MERGED_COLUMNS["bidder"]).value == "A"
+    )
+    assert ws.cell(a_row, MERGED_COLUMNS["rate_machinery"]).value == pytest.approx(2.8)
+    assert ws.cell(a_row, MERGED_COLUMNS["rate_total"]).value == pytest.approx(14.0)
+    assert "component rates added" in ws.cell(a_row, MERGED_COLUMNS["analysis"]).value
+
+
+def test_a_bill_with_no_price_at_all_is_still_unpriced(tmp_path: Path) -> None:
+    t = read_boq(_save(tmp_path / "t.xlsx", {_SHEET: _components_bill(None)}), name="T")
+    a = read_boq(_save(tmp_path / "a.xlsx", {_SHEET: _components_bill((0.0, 0.0, 0.0))}), name="A")
+    (comp,) = compare_all(t, [a])
+    assert comp.unpriced_sheets == [_SHEET]

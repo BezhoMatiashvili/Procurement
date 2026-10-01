@@ -15,6 +15,7 @@ import pytest
 from openpyxl import Workbook, load_workbook
 
 from procurement_agent.checks.boq import (
+    MERGED_COLUMNS,
     BoqWorkbook,
     SummaryRow,
     compare_all,
@@ -643,18 +644,20 @@ def test_the_merged_sheets_keep_every_position_and_mark_the_exclusions(tmp_path:
         if ws.cell(r, 5).value == "— template —":
             item = ws.cell(r, 1).value
         elif item is not None:
-            rows[(item, ws.cell(r, 5).value)] = ws.cell(r, 14).value
+            rows[(item, ws.cell(r, 5).value)] = ws.cell(r, MERGED_COLUMNS["analysis"]).value
     assert rows[("1.2", "B")] == "EXCLUDED: removed by the bidder"
     assert rows[("1.2", "A")] == "evaluated; outside common scope"
     assert rows[("1.1", "A")] == "evaluated; common scope"
     added = [r for r in range(1, ws.max_row + 1) if ws.cell(r, 1).value == "1.4.1"]
-    assert len(added) == 1 and ws.cell(added[0], 14).value == "EXCLUDED: added by the bidder"
+    analysis = ws.cell(added[0], MERGED_COLUMNS["analysis"]).value
+    assert len(added) == 1 and analysis == "EXCLUDED: added by the bidder"
 
 
 def _amount_fills(path: Path) -> dict[str, str]:
     """Bidder -> the fill of their amount cell on the first line of the merged sheet."""
     ws = load_workbook(path)[SECTION]
-    return {str(ws.cell(r, 5).value): str(ws.cell(r, 12).fill.fgColor.rgb) for r in (3, 4, 5)}
+    amount = MERGED_COLUMNS["amount"]
+    return {str(ws.cell(r, 5).value): str(ws.cell(r, amount).fill.fgColor.rgb) for r in (3, 4, 5)}
 
 
 def test_merged_line_colours_never_split_a_tie(tmp_path: Path) -> None:

@@ -615,7 +615,10 @@ class BoqLine:
 
     @property
     def is_priced(self) -> bool:
-        return bool(self.amount) or bool(self.rate_total)
+        """The bidder put a price on the line: an amount, a rate, or the component rates a
+        rate is built of (GOLD_SPEC 5) - a sheet priced by components only is no unpriced one.
+        """
+        return bool(self.amount) or bool(self.rate_total) or any(self.component_rates)
 
     @property
     def component_rates(self) -> tuple[float | None, ...]:
@@ -3418,22 +3421,26 @@ _EXCLUDED = PatternFill("solid", fgColor="FFF2CC")
 _HEAD = PatternFill("solid", fgColor="D0D7E5")
 _BOLD = Font(bold=True)
 
-_MERGED_HEADERS = (
-    ("Item", 10),
-    ("Description / აღწერა", 52),
-    ("Unit", 8),
-    ("Template qty", 12),
-    ("Bidder", 14),
-    ("Qty", 10),
-    ("Δ qty", 9),
-    ("Materials", 11),
-    ("Labor", 11),
-    ("Delivery", 11),
-    ("Unit rate", 12),
-    ("Amount", 14),
-    ("Evaluated (template qty)", 16),
-    ("Analysis / ანალიზი", 34),
+#: The merged sheets' columns, (key, title, width). The component rates are made from
+#: ``_COMPONENTS``: listed by hand, the machinery rate was shown nowhere.
+_MERGED_COLUMNS: tuple[tuple[str, str, int], ...] = (
+    ("item", "Item", 10),
+    ("description", "Description / აღწერა", 52),
+    ("unit", "Unit", 8),
+    ("template_qty", "Template qty", 12),
+    ("bidder", "Bidder", 14),
+    ("qty", "Qty", 10),
+    ("delta", "Δ qty", 9),
+    *((f"rate_{part}", part.title(), 11) for part in _COMPONENTS),
+    ("rate_total", "Unit rate", 12),
+    ("amount", "Amount", 14),
+    ("evaluated", "Evaluated (template qty)", 16),
+    ("analysis", "Analysis / ანალიზი", 34),
 )
+_MERGED_HEADERS = tuple((title, width) for _, title, width in _MERGED_COLUMNS)
+#: Each merged-sheet column by its key ("rate_total", "analysis"), numbered from 1.
+MERGED_COLUMNS = {key: i for i, (key, _, _) in enumerate(_MERGED_COLUMNS, 1)}
+_M = MERGED_COLUMNS
 
 #: How each position status reads in the merged workbook's "Analysis" column.
 _STATUS_TEXT = {
@@ -3536,12 +3543,12 @@ def write_merged_workbook(
         _style_header(ws)
         row = 2
         for t_line in t_sheet.lines:
-            _put(ws, row, 1, t_line.item_no)
-            _put(ws, row, 2, t_line.description[:250])
-            _put(ws, row, 3, t_line.unit)
-            _put(ws, row, 4, t_line.quantity)
-            _put(ws, row, 5, "— template —")
-            _put(ws, row, 14, t_line.kind)
+            _put(ws, row, _M["item"], t_line.item_no)
+            _put(ws, row, _M["description"], t_line.description[:250])
+            _put(ws, row, _M["unit"], t_line.unit)
+            _put(ws, row, _M["template_qty"], t_line.quantity)
+            _put(ws, row, _M["bidder"], "— template —")
+            _put(ws, row, _M["analysis"], t_line.kind)
             for col in range(1, len(_MERGED_HEADERS) + 1):
                 ws.cell(row, col).fill = _TEMPLATE_ROW
             row += 1
@@ -3551,46 +3558,64 @@ def write_merged_workbook(
             for bid, matched, evals in zip(bids, matched_by_bidder, evals_by_bidder, strict=True):
                 line = matched.get(ref)
                 ev = evals.get(ref)
-                _put(ws, row, 5, bid.name)
+                _put(ws, row, _M["bidder"], bid.name)
                 if line is not None:
-                    delta = None
-                    if line.quantity is not None and t_line.quantity is not None:
-                        delta = round(line.quantity - t_line.quantity, 6) or None
-                    _put(ws, row, 6, line.quantity)
-                    _put(ws, row, 7, delta)
-                    _put(ws, row, 8, line.rate_materials)
-                    _put(ws, row, 9, line.rate_labor)
-                    _put(ws, row, 10, line.rate_delivery)
-                    _put(ws, row, 11, line.rate_total)
-                    _put(ws, row, 12, line.amount)
-                    if delta and t_line.kind == "position" and t_line.quantity:
-                        ws.cell(row, 7).fill = _HIGH
-                    if t_line.kind != "position" and line.kind == "position" and line.amount:
-                        _put(ws, row, 14, "EXCLUDED: priced where the template has no position")
-                        ws.cell(row, 14).fill = _EXCLUDED
+                    _write_bid_line(ws, row, t_line, line, ev)
                 else:
-                    _put(ws, row, 6, "— missing —")
-                    ws.cell(row, 6).fill = _HIGH
+                    _put(ws, row, _M["qty"], "— missing —")
+                    ws.cell(row, _M["qty"]).fill = _HIGH
                 if ev is not None:
-                    _put(ws, row, 13, cents(ev.cost))
+                    _put(ws, row, _M["evaluated"], cents(ev.cost))
                     text = _STATUS_TEXT.get(ev.status, ev.status)
                     if ev.priced:
                         text += "; common scope" if ev.in_common_scope else "; outside common scope"
-                    _put(ws, row, 14, text)
+                    if line is not None and ev.rate and not line.rate_total:
+                        text += f"; unit rate = {_rate_source(line)}"
+                    _put(ws, row, _M["analysis"], text)
                     if not ev.priced:
-                        ws.cell(row, 14).fill = _EXCLUDED
+                        ws.cell(row, _M["analysis"]).fill = _EXCLUDED
                 bidder_rows.append(row)
                 row += 1
             # amounts are comparable on every row that carries one, including the section
             # subtotals; unit rates only mean something on a line with a quantity
-            _colour_extremes(ws, bidder_rows, 12)
+            _colour_extremes(ws, bidder_rows, _M["amount"])
             if t_line.quantity:
-                _colour_extremes(ws, bidder_rows, 11)
+                _colour_extremes(ws, bidder_rows, _M["rate_total"])
         row = _write_added_block(ws, row + 1, sheet_name, comparisons)
 
     _write_report_sheets(wb, template, comparisons, outliers or [])
     wb.save(out_path)
     return out_path
+
+
+def _write_bid_line(
+    ws: object, row: int, t_line: BoqLine, line: BoqLine, ev: PositionEval | None
+) -> None:
+    """One bidder's line under its template line: quantity, every component rate, the unit
+    rate - the one the evaluation used where the bid states none (the components added, or the
+    amount over the quantity) - and the amount."""
+    delta = None
+    if line.quantity is not None and t_line.quantity is not None:
+        delta = round(line.quantity - t_line.quantity, 6) or None
+    _put(ws, row, _M["qty"], line.quantity)
+    _put(ws, row, _M["delta"], delta)
+    for key in _COMPONENT_RATES:
+        _put(ws, row, _M[key], getattr(line, key))
+    rate = line.rate_total or (ev.rate if ev is not None else None)
+    _put(ws, row, _M["rate_total"], rate)
+    _put(ws, row, _M["amount"], line.amount)
+    if delta and t_line.kind == "position" and t_line.quantity:
+        ws.cell(row, _M["delta"]).fill = _HIGH  # type: ignore[attr-defined]
+    if t_line.kind != "position" and line.kind == "position" and line.amount:
+        _put(ws, row, _M["analysis"], "EXCLUDED: priced where the template has no position")
+        ws.cell(row, _M["analysis"]).fill = _EXCLUDED  # type: ignore[attr-defined]
+
+
+def _rate_source(line: BoqLine) -> str:
+    """How the evaluation built a unit rate the bid does not state (``_unit_rate``)."""
+    if not line.partial_rate and any(line.component_rates):
+        return "the component rates added"
+    return "amount / quantity"
 
 
 def _write_added_block(ws: object, row: int, sheet_name: str, comps: list[BidComparison]) -> int:
@@ -3602,18 +3627,19 @@ def _write_added_block(ws: object, row: int, sheet_name: str, comps: list[BidCom
     ws.cell(row, 2).font = _BOLD  # type: ignore[attr-defined]
     row += 1
     for bidder, line in added:
-        for col, value in (
-            (1, line.item_no),
-            (2, line.description[:250]),
-            (3, line.unit),
-            (5, bidder),
-            (6, line.quantity),
-            (11, line.rate_total),
-            (12, line.amount),
-            (14, "EXCLUDED: added by the bidder"),
+        for key, value in (
+            ("item", line.item_no),
+            ("description", line.description[:250]),
+            ("unit", line.unit),
+            ("bidder", bidder),
+            ("qty", line.quantity),
+            *((k, getattr(line, k)) for k in _COMPONENT_RATES),
+            ("rate_total", line.rate_total),
+            ("amount", line.amount),
+            ("analysis", "EXCLUDED: added by the bidder"),
         ):
-            _put(ws, row, col, value)
-        ws.cell(row, 14).fill = _EXCLUDED  # type: ignore[attr-defined]
+            _put(ws, row, _M[key], value)
+        ws.cell(row, _M["analysis"]).fill = _EXCLUDED  # type: ignore[attr-defined]
         row += 1
     return row
 
