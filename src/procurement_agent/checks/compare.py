@@ -3181,9 +3181,10 @@ def _classify(
         return "changed", "cosmetic", [], ["CMP.FORMATTING"], inline
 
     hidden = hidden_character_rules(a.text, b.text)
+    slipped = _slip_only(a.text, b.text)
     values = (
         []  # a letter slipped: the words say what they said (``_slip_only``)
-        if _slip_only(a.text, b.text)
+        if slipped
         else deltas_between(_in_its_column(a.text, ca), _in_its_column(b.text, cb))
     )
     counted = _cell_quantity(a.text, ca), _cell_quantity(b.text, cb)
@@ -3214,6 +3215,8 @@ def _classify(
     if deltas:
         mat = "critical" if any(d.is_critical for d in deltas) else "substantive"
         return "changed", mat, deltas, sorted({d.rule_id for d in deltas} | set(hidden)), inline
+    if slipped:  # the slip is the change: never formatting, whatever its words still say
+        return "changed", "substantive", [], sorted({*hidden, "CMP.TEXT_CHANGED"}), inline
     if not hidden and (
         _numeric_reformat(a.text, b.text)
         or _layout_key(a.text) == _layout_key(b.text)

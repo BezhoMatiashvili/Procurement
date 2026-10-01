@@ -109,6 +109,16 @@ def test_a_change_inside_a_table_cell_and_its_own_paragraph_is_one_finding() -> 
     assert f.expected is not None and "ხარისხიანად" in f.expected
 
 
+@pytest.mark.parametrize("slip", ["გადასახადებჟის", "გადასახადბის", "გძდასახადების"])
+def test_a_slip_in_a_values_wording_is_reported_and_flips_no_value(slip: str) -> None:
+    """A letter added, dropped or typed wrong in the word a value is read from: the value did not
+    change (no CMP.VAT "incl -> None"), but the line did - it is never mere formatting."""
+    line = "მომსახურების საფასური შეადგენს 2 400 (ორი ათას ოთხასი) ლარს გადასახადების ჩათვლით."
+    found = run([*ACT, line], [*ACT, line.replace("გადასახადების", slip)]).findings
+    assert [f.rule_id for f in found] in (["CMP.TEXT_CHANGED"], ["CMP.SPELLING"])
+    assert slip in (found[0].actual or "")
+
+
 def test_a_relabelled_price_is_not_a_change() -> None:
     left = ["ფასი შეადგენს 100 ლარს."]
     right = ["ღირებულება შეადგენს 100 ლარს."]
