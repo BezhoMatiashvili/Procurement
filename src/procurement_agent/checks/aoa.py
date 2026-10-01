@@ -2007,12 +2007,16 @@ class AoaChecker:
 
     def _places_of_director(
         self, p: Party, form: str, spans: list[tuple[int, int]]
-    ) -> tuple[tuple[int, int] | None, tuple[tuple[int, ...], int] | None]:
+    ) -> tuple[tuple[int, int] | None, tuple[tuple[int, ...], int] | None] | None:
         """Where the wrong ``form`` of ``p``'s director is ``p``'s: the first such place, and
         which of the form's places those are (``Finding.places``). A name copied from the other
         party - the customer's director written for the contractor - is right where it stands
         in the customer's block, and only the contractor's places are to be marked. Every place
-        is, when none of them is plainly another party's correct director."""
+        is, when none of them is plainly another party's correct director.
+
+        None when every place is another party's correct director (red team R4, AOA-R4-01): the
+        customer's director copied into the contractor's signature alone leaves the customer's
+        own preamble genitive right, and that form is no mistake of the contractor's at all."""
         others: list[int] = []
         for i, (start, _) in enumerate(spans):
             owner = self._owner_at(start)
@@ -2022,7 +2026,9 @@ class AoaChecker:
             if owned is not None and any(_same_person(form, cd) for cd in owned.directors):
                 others.append(i)
         mine = [i for i in range(len(spans)) if i not in others]
-        if not others or not mine:
+        if not mine and others:
+            return None
+        if not others:
             return (spans[0] if spans else None), None
         return spans[mine[0]], (tuple(mine), len(spans))
 
@@ -2175,7 +2181,10 @@ class AoaChecker:
                         f"compared with {match.name}'s",
                     )
                     continue
-                span, places = self._places_of_director(p, form, spans)
+                where = self._places_of_director(p, form, spans)
+                if where is None:
+                    continue  # every place of it is another party's own director, written right
+                span, places = where
                 # compared on the nominative, so a genitive in either document is no mistake
                 guess = best_match(lemma(form), [lemma(c) for c in theirs])
                 diff = guess[1] if guess else None
