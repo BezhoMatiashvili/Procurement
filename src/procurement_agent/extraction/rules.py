@@ -14,7 +14,7 @@ from dataclasses import dataclass, replace
 from datetime import date
 from typing import Literal
 
-from procurement_agent.extraction.georgian import month_typo
+from procurement_agent.extraction.georgian import month_typo, parse_number_words
 from procurement_agent.extraction.normalize import (
     FIGURE,
     FIGURE_SPACE,
@@ -952,13 +952,15 @@ def _bracketed_or_bare(figure: str, lookbehind: str) -> str:
 
 
 #: A percentage: the sign, or the word - "0.3 პროცენტის", "0.3 (ნული მთელი სამი) პროცენტი",
-#: "ნული მთელი სამი (0.3) პროცენტი", "0.2 percent", "0.2 per cent". Not the adjective
-#: "პროცენტული" ("10 პროცენტული პუნქტი").
+#: "ნული მთელი სამი (0.3) პროცენტი", "0.2 percent", "0.2 per cent"; the figure's words may
+#: stand before the sign as before the word ("5 (ხუთი)%-ის", "0.1 (ნული მთელი ერთი) %-ის").
+#: Not the adjective "პროცენტული" ("10 პროცენტული პუნქტი"), and not a bracket holding a
+#: figure ("5 (3.1)%").
 _PCT = re.compile(
     # "(18%)" is a rate in brackets: the bare figure may follow "(", and the bracketed one
     # wins where it can ("(0.2) პროცენტის")
     _bracketed_or_bare(r"\d{1,3}(?:[.,]\d{1,2})?", r"(?<![\d.,])")
-    + r"\s*(?:%|(?:\([^()\d]{1,60}\)\s*)?(?:პროცენტ(?!ულ)[ა-ჰ]*|per\s?cent(?![a-z])))",
+    + r"\s*(?:\([^()\d]{1,60}\)\s*)?(?:%|პროცენტ(?!ულ)[ა-ჰ]*|per\s?cent(?![a-z]))",
     re.IGNORECASE,
 )
 _PCT_NUMBER = re.compile(r"\d{1,3}(?:[.,]\d{1,2})?")
@@ -1330,19 +1332,41 @@ def is_penalty_rate(text: str, start: int, end: int) -> bool:
 # (10) დღე" are both how contracts write it, as are "24 (twenty-four) months" and "ten (10)
 # days". Only a closed bracket: "1) დღის ..." is a list item, not one day.
 _COUNT = _bracketed_or_bare(r"\d{1,4}", r"(?<![\d(])")
+#: Which days a count counts, in every case the adjective takes ("კალენდარული", "კალენდარულ
+#: დღეში") and abbreviated with its stop ("სამ. დღის", "კალ. დღის"). Without the stop "სამ" is
+#: the numeral three ("სამ დღეში").
+_QUALIFIER_KA = r"კალენდარულ[ა-ჰ]*|სამუშაო|საბანკო|სამ\.|კალ\."
+#: The unit of time; "დღ(?!გ)": დღგ is VAT, and "18 დღგ-ს ჩათვლით" is not eighteen days.
+_UNIT_STEM_KA = r"(დღ(?!გ)|კვირ|თვ|წელ|წლ)[ა-ჰ]*"
 _DUR_KA = re.compile(
-    rf"{_COUNT}\s*(?:\(\s*[ა-ჰ ]+\s*\)\s*)?(კალენდარული|სამუშაო|საბანკო)?\s*"
-    # "დღ(?!გ)": დღგ is VAT, and "18 დღგ-ს ჩათვლით" is not eighteen days
-    r"(დღ(?!გ)|კვირ|თვ|წელ|წლ)[ა-ჰ]*",
+    # the count, then its unit as a word or as the adjective hyphenated to it: "20 დღე",
+    # "20-დღიან ვადაში", "12-თვიანი"; never an ordinal ("20-ე დღეს", "მე-20 დღეს")
+    rf"(?<!მე-){_COUNT}(?:-(?=დღ(?!გ)|კვირ|თვ|წლ)|\s*(?:\(\s*[ა-ჰ ]+\s*\)\s*)?(?:({_QUALIFIER_KA})\s*)?)"
+    + _UNIT_STEM_KA,
     re.IGNORECASE,
 )
+#: A unit of time right after a word, with the days it counts: where a count written only in
+#: words ends ("თხუთმეტი სამუშაო დღის", "ათი სამ. დღის").
+_UNIT_AFTER_WORDS = re.compile(
+    rf"(?<=[ა-ჰ])\s+(?:({_QUALIFIER_KA})\s*)?{_UNIT_STEM_KA}", re.IGNORECASE
+)
+#: The words right before it, the count's among them: up to eight.
+_WORDS_BEFORE_UNIT = re.compile(r"(?<![ა-ჰ])((?:[ა-ჰ]+\s+){0,7}[ა-ჰ]+)$")
+_WORDS_REACH = 120
 _DUR_EN = re.compile(
     rf"{_COUNT}\s*(?:\([a-z\- ]+\)\s*)?(calendar|working|business|banking)?\s*"
     r"(day|week|month|year)s?\b",
     re.IGNORECASE,
 )
 _UNIT_KA = {"დღ": "day", "კვირ": "week", "თვ": "month", "წელ": "year", "წლ": "year"}
-_QUAL_KA = {"კალენდარული": "calendar", "სამუშაო": "working", "საბანკო": "banking"}
+
+
+def _qualifier_ka(word: str) -> str:
+    """Which days a Georgian qualifier counts, from its stem: "კალენდარულ(ი)" and "კალ." are
+    calendar days, "სამუშაო" and "სამ." working days, "საბანკო" banking days."""
+    if word.startswith("კალ"):
+        return "calendar"
+    return "banking" if word == "საბანკო" else "working"
 
 
 #: The event a count starts from, which is not what the count measures: "მიწოდებიდან 10 დღის
@@ -1372,47 +1396,96 @@ def _duration_context(text: str) -> str:
     return "".join(chars)
 
 
+def _in_brackets(text: str, pos: int) -> bool:
+    opened = text.rfind("(", 0, pos)
+    return opened >= 0 and text.rfind(")", opened, pos) < 0
+
+
+def _counts_in_words(text: str, figures: list[tuple[int, int]]) -> list[tuple[int, int, int]]:
+    """Every count of time written only in words, as (start, count, where its unit begins):
+    "თხუთმეტი სამუშაო დღის" is 15 working days (docs/GOLD_SPEC.md section 2: a count written
+    in words is the same duration as its figure). The longest run of words right before the
+    unit that is a whole number; not words in brackets, which are a figure's own, nor words a
+    figure stands right before, nor a count its figure already reads (``figures``), nor an
+    ordinal ("მეორე დღეს"), which is no number."""
+    out: list[tuple[int, int, int]] = []
+    for unit in _UNIT_AFTER_WORDS.finditer(text):
+        run = _WORDS_BEFORE_UNIT.search(text, max(0, unit.start() - _WORDS_REACH), unit.start())
+        if run is None:
+            continue
+        found: tuple[int, int] | None = None
+        for word in re.finditer(r"[ა-ჰ]+", run.group(1)):  # the longest run that is a number
+            value = parse_number_words(run.group(1)[word.start() :])
+            if value is not None and value > 0:
+                found = run.start(1) + word.start(), value
+                break
+        if found is None:
+            continue
+        start, value = found
+        if (
+            _in_brackets(text, start)
+            or text[:start].rstrip().endswith(tuple("0123456789)"))
+            or any(_overlaps((start, unit.end()), f) for f in figures)
+        ):
+            continue
+        out.append((start, value, unit.start()))
+    return out
+
+
 def find_durations(text: str) -> list[RuleHit]:
     hits: list[RuleHit] = []
     context = _duration_context(text)
-    for pat, is_ka in ((_DUR_KA, True), (_DUR_EN, False)):
-        for m in pat.finditer(text):
+    # (match, Georgian, the count when written in words, where the count starts)
+    found: list[tuple[re.Match[str], bool, int | None, int]] = [
+        (m, is_ka, None, m.start())
+        for pat, is_ka in ((_DUR_KA, True), (_DUR_EN, False))
+        for m in pat.finditer(text)
+    ]
+    for start, count, at in _counts_in_words(text, [m.span() for m, *_ in found]):
+        unit_match = _UNIT_AFTER_WORDS.match(text, at)
+        if unit_match is not None:
+            found.append((unit_match, True, count, start))
+    for m, is_ka, count, start in found:
+        if count is None:
             n = int(m.group(1) or m.group(2))
             qual = m.group(3).lower() if m.group(3) else None
             unit = m.group(4).lower()
-            if is_ka and unit.startswith("წ") and n >= 1900:
-                continue  # "2026 წლის ..." is a date ("of the year 2026"), not a duration
-            if is_ka:
-                # group 3 is exactly one of the stems, so it is the key as it stands; slicing
-                # it to three letters turned "კვირ" into "კვი" and weeks into "2 კვირs"
-                unit = _UNIT_KA.get(unit, unit)
-                qual = _QUAL_KA.get(qual, qual) if qual else None
-            ft = _classify(
-                context,
-                m.start(),
-                m.end(),
-                (
-                    FactType.warranty_period,
-                    FactType.delivery_deadline,
-                    FactType.execution_period,
-                    FactType.payment_terms,
-                    FactType.validity_period,
-                ),
+        else:
+            n, qual, unit = count, m.group(1), m.group(2).lower()
+        end = m.end()
+        if is_ka and unit.startswith("წ") and n >= 1900:
+            continue  # "2026 წლის ..." is a date ("of the year 2026"), not a duration
+        if is_ka:
+            # the unit group is exactly one of the stems, so it is the key as it stands; slicing
+            # it to three letters turned "კვირ" into "კვი" and weeks into "2 კვირs"
+            unit = _UNIT_KA.get(unit, unit)
+            qual = _qualifier_ka(qual) if qual else None
+        ft = _classify(
+            context,
+            start,
+            end,
+            (
+                FactType.warranty_period,
+                FactType.delivery_deadline,
+                FactType.execution_period,
+                FactType.payment_terms,
+                FactType.validity_period,
+            ),
+        )
+        label = f"{n} {qual + ' ' if qual else ''}{unit}{'s' if n != 1 else ''}"
+        hits.append(
+            RuleHit(
+                type=ft or FactType.duration,
+                value=label,
+                raw_text=text[start:end],
+                start=start,
+                end=end,
+                normalized=f"P{n}{unit[0].upper()}" if unit != "week" else f"P{n}W",
+                unit=unit,
+                confidence=0.7 if ft else 0.45,
             )
-            label = f"{n} {qual + ' ' if qual else ''}{unit}{'s' if n != 1 else ''}"
-            hits.append(
-                RuleHit(
-                    type=ft or FactType.duration,
-                    value=label,
-                    raw_text=m.group(0),
-                    start=m.start(),
-                    end=m.end(),
-                    normalized=f"P{n}{unit[0].upper()}" if unit != "week" else f"P{n}W",
-                    unit=unit,
-                    confidence=0.7 if ft else 0.45,
-                )
-            )
-    return hits
+        )
+    return sorted(hits, key=lambda h: h.start)
 
 
 # --- contract numbers --------------------------------------------------------------------------
@@ -1463,6 +1536,16 @@ _CONTRACT_NO_BEFORE = re.compile(
 )
 
 
+_LATIN_LOWER = re.compile(r"[a-z]+")
+
+
+def _upper_latin(reference: str) -> str:
+    """A reference in its canonical case: Latin letters upper case ("sp-2026/318" is
+    "SP-2026/318"), Georgian letters as written - ``str.upper`` would turn them into Mtavruli
+    ("12/2026-ა" is no "12/2026-Ა")."""
+    return _LATIN_LOWER.sub(lambda m: m.group(0).upper(), reference)
+
+
 def find_contract_numbers(text: str) -> list[RuleHit]:
     hits: list[RuleHit] = []
     matches = list(_CONTRACT_NO.finditer(text))
@@ -1472,7 +1555,7 @@ def find_contract_numbers(text: str) -> list[RuleHit]:
         if not any(_overlaps(m.span(1), other.span(1)) for other in matches)
     ]
     for m in matches:
-        number = _SPACED_SLASH.sub("/", m.group(1))
+        number = _upper_latin(_SPACED_SLASH.sub("/", m.group(1)))
         if len(number) < 2 or not any(ch.isdigit() for ch in number):
             continue
         hits.append(
@@ -1647,7 +1730,7 @@ def normalize_fact_value(ft: FactType, value: str) -> str | float | None:
         return m.group(0) if m else None
     if ft == FactType.contract_number:
         m = _REFERENCE_TOKEN.fullmatch(_SPACED_SLASH.sub("/", _LEADING_MARKER.sub("", v)))
-        found = m.group(0) if m else ""
+        found = _upper_latin(m.group(0)) if m else ""
         return found if len(found) >= 2 and any(ch.isdigit() for ch in found) else None
     if ft in _MONEY_TYPES:
         hit = _only(find_amounts(v), v)
