@@ -4652,7 +4652,7 @@ def _explained_elsewhere(hunk: Hunk, deltas: list[ValueDelta]) -> bool:
 
 
 def _stem_words(text: str) -> frozenset[str]:
-    """The words of ``text`` in any case form: "ჭიჭინაძის" and "ჭიჭინაძე" are one word."""
+    """The words of ``text`` in any case form: "კალანაძის" and "კალანაძე" are one word."""
     return frozenset(name_stem(w) for w in _WORD.findall(normalize_name(text)))
 
 
@@ -4900,7 +4900,7 @@ def _says_more(hunk: Hunk, shown: list[ValueDelta], *, whole: bool) -> bool:
         for w in _WORD.findall(normalize_name(text or ""))
     }
     # and a value's words as the line's layout splits them: a bank code too short to be masked
-    # ("TBCGE22") reads "tbcge 22" on the line
+    # ("NBGGE22") reads "tbcge 22" on the line
     told |= {
         name_stem(w)
         for d in shown

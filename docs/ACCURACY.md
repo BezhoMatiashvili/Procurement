@@ -147,8 +147,8 @@ image-size issue, not an accuracy one, left for its own change.
 * **Prose spelling** rests on the hunspell `ka_GE` dictionary, which lacks words and forms:
   83-92% of random typos are found, and a correction no document writes is a note to check, not
   a warning.
-* **A misspelled surname that no longer declines regularly** ("ტოგონძიე" for "ტოგონიძე") is
-  reported in the comparison with its value read off its genitive ("ტოგონძიი").
+* **A misspelled surname that no longer declines regularly** ("მერგანძიე" for "მერგანიძე", an invented name) is
+  reported in the comparison with its value read off its genitive ("მერგანძიი").
 * **A bare "თარიღი:" label** is not read as the act's date (it may be the contract's), and
   English act and contract wording is out of scope.
 * **Open policy questions** for the client: an act whose billing cycle crosses two months

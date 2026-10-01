@@ -667,7 +667,7 @@ findings:
   - rule: CMP.BANK
     label: Bank code              # the label the finding must carry (English)
     before: TBCBGE22
-    after: BAGAGE22
+    after: NBGEGE22
     severity: error
 strict_findings: true             # any other substantive finding is a false positive
 allowed_findings: [CMP.FORMATTING]

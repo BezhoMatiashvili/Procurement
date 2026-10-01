@@ -667,8 +667,10 @@ STRINGS: dict[str, tuple[str, str]] = {
         "მოდელით გადამოწმება ვერ დასრულდა; ზემოთ მხოლოდ წესების შენიშვნებია.",
     ),
     "docs.lead": (
-        "Everything you have uploaded. Open a document to extract fields from it.",
-        "ყველა ატვირთული ფაილი. ველების ამოსაღებად გახსენით დოკუმენტი.",
+        "Everything you have uploaded. Open a document to see what was read from it, the checks "
+        "it took part in, or to extract fields from it.",
+        "ყველა ატვირთული ფაილი. გახსენით დოკუმენტი, რომ ნახოთ რა წაიკითხა სისტემამ, რომელ "
+        "შემოწმებებში მონაწილეობდა, ან ამოიღოთ ველები.",
     ),
     "docs.upload": ("Upload", "ატვირთვა"),
     "doc.delete.lead": (
@@ -699,6 +701,78 @@ STRINGS: dict[str, tuple[str, str]] = {
     "jobkind.extract": ("Extraction", "ამოღება"),
     "jobkind.compare_explain": ("Model explanation", "მოდელით ახსნა"),
     "jobkind.aoa_review": ("Model review", "მოდელით გადამოწმება"),
+    # --- every job opens its result ---
+    "job.lead": ("Open a job to see its result.", "გახსენით დავალება მისი შედეგის სანახავად."),
+    "job.result": ("Result", "შედეგი"),
+    "job.view": ("View", "ნახვა"),
+    "result.gone": ("This result is no longer available.", "ეს შედეგი აღარ არის ხელმისაწვდომი."),
+    # --- what the reading job produced ---
+    "reading.title": ("What was read", "წაკითხული შინაარსი"),
+    "reading.lead": (
+        "The text, tables and cells the system took from this file. Fields and checks are "
+        "made from exactly this.",
+        "ფაილიდან აღებული ტექსტი, ცხრილები და უჯრები. ველებიც და შემოწმებებიც სწორედ "
+        "აქედან მზადდება.",
+    ),
+    "reading.failed": ("The document could not be read.", "დოკუმენტის წაკითხვა ვერ მოხერხდა."),
+    "reading.unavailable": (
+        "The stored reading of this document is no longer available. Upload the file again.",
+        "ამ დოკუმენტის შენახული წაკითხვა აღარ არის ხელმისაწვდომი. ატვირთეთ ფაილი თავიდან.",
+    ),
+    "reading.empty": (
+        "Nothing readable was found in this file.",
+        "ამ ფაილში წაკითხვადი ტექსტი ვერ მოიძებნა.",
+    ),
+    "reading.scanned": (
+        "This PDF has no text of its own; the text below was recognised from the page images "
+        "(OCR). Check figures and codes against the page.",
+        "ამ PDF-ს საკუთარი ტექსტი არ აქვს; ქვემოთ მოცემული ტექსტი გვერდების გამოსახულებიდან "
+        "არის ამოცნობილი (OCR). ციფრები და კოდები გადაამოწმეთ გვერდზე.",
+    ),
+    "reading.truncated": (
+        "Not read (size limit): {note}",
+        "არ წაიკითხა (ზომის ლიმიტი): {note}",
+    ),
+    "reading.cut": (
+        "Only the first {n} items are shown.",
+        "ნაჩვენებია მხოლოდ პირველი {n} ელემენტი.",
+    ),
+    "reading.part": ("Part {p} of {n}", "ნაწილი {p} / {n}"),
+    "reading.prev": ("Previous", "წინა"),
+    "reading.next": ("Next", "შემდეგი"),
+    "reading.table": ("Table {n}", "ცხრილი {n}"),
+    "reading.continued": ("continued", "გაგრძელება"),
+    "reading.cols_hidden": ("{n} more columns are not shown.", "კიდევ {n} სვეტი არ ჩანს."),
+    "reading.stat.pages": ("pages", "გვერდი"),
+    "reading.stat.paragraphs": ("paragraphs", "აბზაცი"),
+    "reading.stat.tables": ("tables", "ცხრილი"),
+    "reading.stat.sheets": ("sheets", "ფურცელი"),
+    "reading.earlier": ("Earlier extractions", "წინა ამოღებები"),
+    # --- the checks a file took part in ---
+    "checks.title": (
+        "Checks this file took part in",
+        "შემოწმებები, რომლებშიც ეს ფაილი მონაწილეობდა",
+    ),
+    "checks.lead": (
+        "Open one to see its report again. It is recalculated from the stored files.",
+        "გახსენით შემოწმება, რომ ანგარიში ხელახლა ნახოთ. ის შენახული ფაილებიდან "
+        "თავიდან გამოითვლება.",
+    ),
+    "checks.none": (
+        "No checks yet. Reports you open from now on are listed here.",
+        "შემოწმებები ჯერ არ არის. ამიერიდან გახსნილი ანგარიშები აქ გამოჩნდება.",
+    ),
+    "checks.col.check": ("Check", "შემოწმება"),
+    "checks.col.as": ("This file as", "ეს ფაილი როგორც"),
+    "checks.col.with": ("With", "სხვა ფაილები"),
+    "checks.col.opened": ("Last opened", "ბოლოს გაიხსნა"),
+    "checks.open": ("Open report", "ანგარიშის გახსნა"),
+    "checks.role.act": ("Acceptance act", "მიღება-ჩაბარების აქტი"),
+    "checks.role.contract": ("Contract", "ხელშეკრულება"),
+    "checks.role.template": ("Template", "შაბლონი"),
+    "checks.role.bid": ("Bidder's workbook", "კომპანიის BOQ"),
+    "checks.role.left": ("Original", "ორიგინალი"),
+    "checks.role.right": ("Revised", "შესწორებული"),
 }
 
 

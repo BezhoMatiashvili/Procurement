@@ -531,8 +531,8 @@ def test_a_malformed_bank_code_changed_beside_the_amount_words_is_two_findings()
     and the amount in words, both already reported."""
     line = (
         "საფასური შეადგენს 100 (ორასი) ლარს გადასახადების ჩათვლით. ბანკი: სს „ნიმუშის ბანკი“; "
-        "ბანკის კოდი: BAGAGE22; ა/ა: GE18BG0000000677777777"
+        "ბანკის კოდი: NBGEGE22; ა/ა: GE29NB0000000101904917"
     )
-    changed = line.replace("(ორასი)", "(ასი)").replace("BAGAGE22", "TBCGE22")
+    changed = line.replace("(ორასი)", "(ასი)").replace("NBGEGE22", "NBGGE22")
     rules = [rule for rule, _, _ in found(["აქტი", line], ["აქტი", changed])]
     assert sorted(rules) == ["CMP.AMOUNT_WORDS", "CMP.BANK"]

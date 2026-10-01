@@ -24,6 +24,7 @@ DYNAMIC_PREFIXES = (
     "task.",
     "status.",
     "jobkind.",
+    "checks.role.",
 )
 
 
@@ -53,6 +54,18 @@ def test_every_key_used_in_a_template_exists() -> None:
 def test_every_contractor_type_has_a_label(value: str) -> None:
     """The <select> is built from get_args(ContractorType); a new type must not render blank."""
     assert f"contractor.{value}" in STRINGS
+
+
+@pytest.mark.parametrize("role", ["act", "contract", "template", "bid", "left", "right"])
+def test_every_role_a_file_can_play_in_a_check_has_a_label(role: str) -> None:
+    """The document page names a file's role in each check by ``checks.role.<role>``, built with
+    ``~``, so a role added to ``history`` without a label would show its bare key."""
+    assert f"checks.role.{role}" in STRINGS
+
+
+@pytest.mark.parametrize("kind", ["aoa", "boq", "compare"])
+def test_every_kind_of_check_has_a_title(kind: str) -> None:
+    assert f"task.{kind}.title" in STRINGS
 
 
 @pytest.mark.parametrize("severity", ["error", "warning", "info"])

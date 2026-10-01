@@ -21,8 +21,9 @@
 <table class="list">
   <thead><tr><th>{{ t('doc.name') }}</th><th>{{ t("doc.kind") }}</th><th class="num">{{ t("doc.pages") }}</th><th>{{ t("doc.status") }}</th><th>{{ t("doc.uploaded") }}</th><th>{{ t("doc.expires") }}</th></tr></thead>
   <tbody>
+  {# the name is the real link; data-href lets a click anywhere on the row follow it #}
   {% for d in documents %}
-  <tr>
+  <tr data-href="/ui/documents/{{ d.id }}">
     <td class="primary"><a href="/ui/documents/{{ d.id }}">{{ d.display_name }}</a></td>
     <td data-label="{{ t('doc.kind') }}"><span class="kind">{{ d.kind }}</span></td>
     <td data-label="{{ t('doc.pages') }}" class="num">{{ d.page_count or "" }}</td>

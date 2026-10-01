@@ -19,6 +19,7 @@ from procurement_agent.extraction.georgian import (
     number_words_typo,
     parse_number_words,
     render_date_like,
+    same_word,
 )
 
 
@@ -68,6 +69,44 @@ def test_a_correction_takes_the_case_of_the_word_it_corrects() -> None:
     assert in_case_of("ზღვის ხედისთვის", "მზის ქალაქის") == "მზის ქალაქისთვის"
 
 
+def test_a_slip_one_edit_from_two_cases_takes_the_case_the_documents_write() -> None:
+    """ "ბილდინში" is one edit from the nominative "ბილდინგი" (გ for შ) and from the inessive
+    "ბილდინგში" (გ dropped). The contract writes the name in the nominative and never in the
+    inessive, so the correction is the nominative (mutation harness, seed 211: the party name's
+    correction came out in the inessive). An ending one edit off that no other case explains as well
+    keeps its case."""
+    assert in_case_of("შპს ნიმუში ტესტ ბილდინში", "შპს ნიმუში ტესტ ბილდინგი") == (
+        "შპს ნიმუში ტესტ ბილდინგი"
+    )
+    assert in_case_of("შპს „ნიმუში ტესტ ბილდინში“", "შპს „ნიმუში ტესტ ბილდინგი“") == (
+        "შპს „ნიმუში ტესტ ბილდინგი“"
+    )
+    # the genitive slip has no nominative one edit away: it keeps its case
+    assert in_case_of("შპს ნიმუში ტესტ ბილდინის", "შპს ნიმუში ტესტ ბილდინგი") == (
+        "შპს ნიმუში ტესტ ბილდინგის"
+    )
+    # a written inessive is the case meant
+    assert (
+        in_case_of(
+            "შპს ნიმუში ტესტ ბილდინში",
+            "შპს ნიმუში ტესტ ბილდინგი",
+            written=["შპს ნიმუში ტესტ ბილდინგი", "შპს ნიმუში ტესტ ბილდინგში"],
+        )
+        == "შპს ნიმუში ტესტ ბილდინგში"
+    )
+
+
+def test_one_case_written_with_and_without_the_dropped_vowel_is_two_words() -> None:
+    """A noun's genitive drops the vowel or keeps it, never both: "ნიმუშავლის" against
+    "ნიმუშაველის" is a slip in one of them, not one word (mutation harness, seed 211: an address
+    with the vowel dropped went unreported). Across cases the vowel still comes and goes."""
+    assert not same_word("ნიმუშავლის", "ნიმუშაველის")
+    assert not same_word("სექტემბერის", "სექტემბრის")
+    assert same_word("მოედნის", "მოედანი")
+    assert same_word("ნიმუშაველის", "ნიმუშაველი")
+    assert same_word("სექტემბრის", "სექტემბერს")
+
+
 def test_a_double_surname_declines_in_its_last_part() -> None:
     """A hyphenated double surname is one name whose last part takes the case ending: its case
     is read there and a correction is inflected there (red team R5, a double surname slipped in
@@ -84,7 +123,7 @@ def test_case_of_reads_the_ending() -> None:
     assert case_of("კაპანაძის") == "gen"
     assert case_of("ქალაქისთვის") == "gen_tvis"
     assert case_of("კაპანაძე") == "nom"
-    assert case_of("სილქ") == "nom"
+    assert case_of("ლოფთ") == "nom"
     # a vowel stem's one-letter endings: the ergative "-მ", the adverbial "-დ"
     assert case_of("მხარემ") == "erg"
     assert case_of("უზრუნველყოფად") == "adv"
@@ -226,7 +265,7 @@ def test_a_common_noun_in_a_drops_it_before_the_genitive() -> None:
     # the "-ი" nouns and the surnames keep their forms
     assert lemma_word("ველის") == "ველი"
     assert lemma_word("ლომიას") == "ლომია"
-    assert lemma_word("ტოგონიძის") == "ტოგონიძე"
+    assert lemma_word("მერგანიძის") == "მერგანიძე"
     assert inflect_word("ტყებუჩავა", "gen") == "ტყებუჩავას"
 
 

@@ -169,7 +169,7 @@ def test_a_letter_dropped_from_the_project_name_is_reported() -> None:
 
 def test_same_word_allows_case_endings_but_not_a_missing_letter() -> None:
     assert same_word("რეზიდენსისთვის", "რეზიდენსი")
-    assert same_word("ტოგონიძის", "ტოგონიძე")
+    assert same_word("მერგანიძის", "მერგანიძე")
     assert same_word("ლომიას", "ლომია")
     assert same_word("ლაზურმა", "ლაზური")
     assert same_word("რეზიდენსისათვის", "რეზიდენსი")

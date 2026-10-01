@@ -11,6 +11,7 @@ import re
 import time
 import zipfile
 from collections.abc import Iterator
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
@@ -28,6 +29,7 @@ from procurement_agent.config import Settings, get_settings
 from procurement_agent.db import session_scope
 from procurement_agent.main import create_app
 from procurement_agent.models import Job
+from procurement_agent.ui import reading
 from procurement_agent.ui.routes import _env
 from tests.boq_factory import DOORS, LINES, Bid, blank, build_boq, build_real_boq
 from tests.unit.test_aoa_llm import ReadingLLM
@@ -50,6 +52,7 @@ NEW_TEMPLATES = [
     "check_boq.html",
     "check_compare.html",
     "expired.html",
+    "parse.html",
 ]
 
 
@@ -131,6 +134,45 @@ def _stub_doc() -> SimpleNamespace:
     return SimpleNamespace(id="a" * 32, display_name="act.docx", kind="docx")
 
 
+def _stub_reading() -> dict[str, object]:
+    """The context ``parse.html`` is given for a finished reading, with a block of every kind -
+    so a variable the template forgot to be given fails here and not on a page someone opened."""
+    grid = (reading.GridRow(label="3", cells=("a", "b")),)
+    blocks = (
+        reading.Block(kind="heading", text="Heading", page=1),
+        reading.Block(kind="text", text="Body", page=1),
+        reading.Block(kind="list_item", text="Item", page=2),
+        reading.Block(kind="table", number=1, rows=(reading.GridRow(label="", cells=("c",)),)),
+        reading.Block(kind="sheet", title="BOQ", columns=("A", "B"), rows=grid, continued=True),
+    )
+    return {
+        "job": SimpleNamespace(
+            id="c" * 32, status=SimpleNamespace(value="done"), message=None, progress=100
+        ),
+        "doc": SimpleNamespace(
+            id="a" * 32,
+            display_name="act.pdf",
+            kind="pdf",
+            status=SimpleNamespace(value="ready"),
+            page_count=3,
+            error=None,
+        ),
+        "view": reading.Reading(
+            blocks=blocks,
+            part=1,
+            parts=2,
+            stats=reading.Stats(paragraphs=2, tables=1, sheets=1),
+            cut=5,
+            limit=10,
+        ),
+        "notes": ["sheet 'BOQ': only the first 20000 rows were read"],
+        "scanned": True,
+        "earlier": [
+            SimpleNamespace(id="d" * 32, created_at=datetime(2026, 9, 25, 13, 7), message="3 facts")
+        ],
+    }
+
+
 #: The act report's model-review context with no review on offer, for a direct render.
 _NO_REVIEW: dict[str, object] = {
     "can_review": False,
@@ -195,11 +237,54 @@ def test_every_new_template_renders_under_strict_undefined(name: str) -> None:
             "sev_of": lambda h: "info",
             "can_explain": True,
         },
+        **_stub_reading(),
         **_NO_REVIEW,
     )
 
 
-@pytest.mark.parametrize("name", [*NEW_TEMPLATES, "_findings.html", "_diff.html"])
+@pytest.mark.parametrize(
+    "state",
+    [
+        {"job": {"status": "running"}},
+        {"job": {"status": "failed", "message": "boom"}, "doc": {"error": "conversion failed"}},
+        {"view": None},
+        {"view": reading.build([])},
+    ],
+    ids=["running", "failed", "parse gone", "nothing readable"],
+)
+def test_the_reading_page_renders_every_state_under_strict_undefined(
+    state: dict[str, dict[str, object] | None],
+) -> None:
+    """``parse.html`` has a branch for each thing a reading job can be; each must render."""
+    ctx = _stub_reading()
+    for name, change in state.items():
+        if change is None or isinstance(change, reading.Reading):
+            ctx[name] = change
+            continue
+        parts = ctx[name]
+        assert isinstance(parts, SimpleNamespace)
+        for field, value in change.items():
+            if field == "status":
+                value = SimpleNamespace(value=value)
+            setattr(parts, field, value)
+    html = _env.get_template("parse.html").render(
+        lang="ka", t=lambda key, **kw: key, current_path="/ui/jobs/x", user="dev", **ctx
+    )
+    assert "reading.title" in html
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        *NEW_TEMPLATES,
+        "_findings.html",
+        "_diff.html",
+        "_reading_pager.html",
+        "document.html",
+        "documents.html",
+        "job.html",
+    ],
+)
 def test_no_new_template_carries_an_inline_script_or_style(name: str) -> None:
     """The CSP is script-src 'self' with no 'unsafe-inline', enforced by header only - without
     this test the first thing that notices a stray onclick= is a browser."""
@@ -279,7 +364,7 @@ def test_the_compare_report_counts_critical_values_and_labels_them_in_its_langua
     counted lines), and the values table names them in the page's language (it was always
     Georgian)."""
     left = "საფასური შეადგენს 100 (ასი) ლარს; ბანკის კოდი: TBCBGE22.\nსხვა პუნქტი უცვლელია."
-    right = left.replace("100 (ასი)", "150 (ას ორმოცდაათი)").replace("TBCBGE22", "BAGAGE22")
+    right = left.replace("100 (ასი)", "150 (ას ორმოცდაათი)").replace("TBCBGE22", "NBGEGE22")
     a = _word(client, "v1.docx", left)
     b = _word(client, "v2.docx", right)
     client.post("/ui/lang", data={"lang": "en", "next": "/ui/"}, headers=SAME_ORIGIN)

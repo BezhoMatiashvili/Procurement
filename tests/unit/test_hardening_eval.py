@@ -54,7 +54,7 @@ def test_a_fragment_of_a_value_is_not_the_value(
         (FactType.warranty_period, "24", "P24M"),
         (FactType.contract_date, "2026-03-15", "2026-03-15"),
         (FactType.total_amount, "48750.00", "48 750,00"),
-        (FactType.project_name, "სილქ თაუნი", "სილქ თაუნის პროექტი"),
+        (FactType.project_name, "ლოფთ თაუნი", "ლოფთ თაუნის პროექტი"),
         (FactType.party_address, "ქ. თბილისი, რუსთაველის 12", "თბილისი, რუსთაველის 12"),
     ],
 )

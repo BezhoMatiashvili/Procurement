@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block title %}{{ t("reading.title") }} · {{ doc.display_name }}{% endblock %}
+{% block content %}
+<a class="back" href="/ui/documents/{{ doc.id }}">{{ icon("arrow-left") }}{{ doc.display_name }}</a>
+<div class="page-head">
+  <h1>{{ t("reading.title") }} <code class="muted small">{{ job.id[:8] }}</code>
+    <span class="status {{ job.status.value }}" id="job-status">{{ t("status." ~ job.status.value) }}</span></h1>
+  <p class="muted lead">{{ t("reading.lead") }}</p>
+</div>
+
+{% if job.status.value in ("queued", "running") %}
+<div class="card" data-poll-job="{{ job.id }}" role="status" aria-live="polite">
+  <div class="row"><span id="job-message">{{ job.message or t("status." ~ job.status.value) }}</span>
+    <span class="num muted" id="job-pct">{{ job.progress }}%</span></div>
+  <progress id="job-progress" value="{{ job.progress }}" max="100"></progress>
+</div>
+{% elif job.status.value != "done" %}
+<div class="card notice is-error">{{ icon("alert") }}<div>
+  <p><strong>{{ t("reading.failed") }}</strong></p>
+  {% if doc.error or job.message %}<p>{{ doc.error or job.message }}</p>{% endif %}
+</div></div>
+{% elif view is none %}
+<div class="card notice is-info">{{ icon("info") }}<div><p>{{ t("reading.unavailable") }}</p></div></div>
+{% else %}
+{% set st = view.stats %}
+{% if doc.page_count or st.paragraphs or st.tables or st.sheets %}
+<ul class="stats stats-fit">
+  {% if doc.page_count %}<li class="stat"><span class="v">{{ doc.page_count }}</span><span class="l">{{ t("reading.stat.pages") }}</span></li>{% endif %}
+  {% if st.paragraphs %}<li class="stat"><span class="v">{{ st.paragraphs }}</span><span class="l">{{ t("reading.stat.paragraphs") }}</span></li>{% endif %}
+  {% if st.tables %}<li class="stat"><span class="v">{{ st.tables }}</span><span class="l">{{ t("reading.stat.tables") }}</span></li>{% endif %}
+  {% if st.sheets %}<li class="stat"><span class="v">{{ st.sheets }}</span><span class="l">{{ t("reading.stat.sheets") }}</span></li>{% endif %}
+</ul>
+{% endif %}
+{% if scanned %}<p class="card caveat caveat-title">{{ icon("alert") }}<span>{{ t("reading.scanned") }}</span></p>{% endif %}
+{% for n in notes %}<p class="card caveat caveat-title">{{ icon("alert") }}<span>{{ t("reading.truncated", note=n) }}</span></p>{% endfor %}
+{% if view.cut %}<p class="card caveat caveat-title">{{ icon("alert") }}<span>{{ t("reading.cut", n=view.limit) }}</span></p>{% endif %}
+
+{% if doc.status.value == "ready" %}
+<div class="actions">
+  <a class="btn" href="/ui/documents/{{ doc.id }}#extract">{{ icon("file-search") }}{{ t("extract.title") }}</a>
+</div>
+{% endif %}
+{% if earlier %}
+<h2>{{ t("reading.earlier") }}</h2>
+<ul class="recent">
+  {% for j in earlier %}
+  <li><a href="/ui/jobs/{{ j.id }}">{{ icon("file-search") }}
+    <span class="name">{{ j.created_at.strftime("%Y-%m-%d %H:%M") }}</span>
+    <span class="when">{{ j.message or "" }}</span></a></li>
+  {% endfor %}
+</ul>
+{% endif %}
+
+{% if not view.blocks %}
+<div class="card empty">{{ icon("file") }}<p>{{ t("reading.empty") }}</p></div>
+{% else %}
+{% include "_reading_pager.html" %}
+<div class="reading">
+  {# the PDF page is marked where it changes, as a link to the page itself #}
+  {% set ns = namespace(page=none) %}
+  {% for b in view.blocks %}
+    {% if doc.kind == "pdf" and b.page and b.page != ns.page %}
+    <p class="read-page"><a href="/api/v1/documents/{{ doc.id }}/pages/{{ b.page }}.png" target="_blank" rel="noopener">{{ t("fact.page") }} {{ b.page }}</a></p>
+    {% set ns.page = b.page %}
+    {% endif %}
+    {% if b.kind == "heading" %}
+    <h3 class="read-h">{{ b.text }}</h3>
+    {% elif b.kind == "list_item" %}
+    <p class="read-li">{{ b.text }}</p>
+    {% elif b.kind == "text" %}
+    <p class="read-p">{{ b.text }}</p>
+    {% else %}
+    {% set label = b.title if b.kind == "sheet" else t("reading.table", n=b.number) %}
+    <section class="read-grid">
+      <h4>{{ label }}{% if b.continued %} <span class="muted small">({{ t("reading.continued") }})</span>{% endif %}</h4>
+      <div class="table-scroll" tabindex="0" role="region" aria-label="{{ label }}">
+        <table class="read-table">
+          {% if b.columns %}
+          <thead><tr><td class="rowno"></td>{% for c in b.columns %}<th scope="col">{{ c }}</th>{% endfor %}</tr></thead>
+          {% endif %}
+          <tbody>
+          {% for r in b.rows %}
+            <tr>{% if b.columns %}<th scope="row" class="rowno">{{ r.label }}</th>{% endif %}{% for c in r.cells %}<td>{{ c }}</td>{% endfor %}</tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% if b.hidden_columns %}<p class="muted small">{{ t("reading.cols_hidden", n=b.hidden_columns) }}</p>{% endif %}
+    </section>
+    {% endif %}
+  {% endfor %}
+</div>
+{% include "_reading_pager.html" %}
+{% endif %}
+{% endif %}
+{% endblock %}

@@ -3,15 +3,15 @@ right, numbers in words, words mixing alphabets, dates in a document's own style
 
 Every rule that compares an act with its contract, and every correction it proposes, goes
 through here. Before this module a correction was copied from wherever the contract happened to
-state the value - usually its preamble, in the genitive - so a Word comment on "გიორგი ჭიჭინია"
-in a signature block said "should be: გიორგი ჭიჭინაძის", which is itself wrong in that place.
+state the value - usually its preamble, in the genitive - so a Word comment on "გიორგი კალანია"
+in a signature block said "should be: გიორგი კალანაძის", which is itself wrong in that place.
 
-Georgian inflects a noun phrase on its last word only ("დირექტორის გიორგი ჭიჭინაძის სახით": the
+Georgian inflects a noun phrase on its last word only ("დირექტორის გიორგი კალანაძის სახით": the
 first name stays in the nominative). The case endings used in these documents are few, so the
 morphology is a table, not a model:
 
 * consonant stems, nominative ``-ი``: ``ბერიშვილი`` -> ``ბერიშვილის``, ``ბერიშვილით``;
-* the truncating ``-ძე`` surnames: ``ჭიჭინაძე`` -> ``ჭიჭინაძის`` but ``ჭიჭინაძეს``;
+* the truncating ``-ძე`` surnames: ``კალანაძე`` -> ``კალანაძის`` but ``კალანაძეს``;
 * vowel stems in ``-ა -ე -ო -უ`` (and first names in ``-ი`` such as ``გიორგი``): ``ლომია`` ->
   ``ლომიას``;
 * postpositions on top: ``-ისთვის``, ``-ში``, ``-ზე``, ``-თან``, ``-იდან``, ``-ამდე``.
@@ -158,7 +158,7 @@ def _stem_class(lemma: str) -> Literal["consonant", "bare", "truncating", "vowel
     if lemma.endswith("ი") and lemma not in _I_VOWEL_NAMES and len(lemma) > 2:
         return "consonant"
     if lemma[-1] not in _VOWELS:
-        return "bare"  # a loanword that ends in a consonant: "დეველოპმენტ", "სილქ"
+        return "bare"  # a loanword that ends in a consonant: "დეველოპმენტ", "ლოფთ"
     return "vowel"
 
 
@@ -191,7 +191,7 @@ def inflect_word(lemma: str, case: Case) -> str:
 
 def case_of(word: str) -> Case:
     """The case a word is written in, read off its ending. Nominative when nothing matches: a
-    vowel-final word, or a consonant-final loanword stem ("სილქ"). A double surname is read in
+    vowel-final word, or a consonant-final loanword stem ("ლოფთ"). A double surname is read in
     its last part."""
     if (double := _double_name(word)) is not None:
         return case_of(double[1])
@@ -224,7 +224,7 @@ _HYPHENATED_ENDING = re.compile(
 
 
 def lemma_word(word: str, *, cases: Collection[Case] | None = None) -> str:
-    """The nominative of one inflected word: ``ტოგონიძის`` -> ``ტოგონიძე``,
+    """The nominative of one inflected word: ``მერგანიძის`` -> ``მერგანიძე``,
     ``თაუერსისთვის`` -> ``თაუერსი``, ``ლომიას`` -> ``ლომია``, ``ბერიშვილით`` -> ``ბერიშვილი``.
 
     ``cases``, when the caller knows them, are the cases the word's place allows: a name in
@@ -268,7 +268,7 @@ def _lemma_candidates(word: str) -> list[str]:
         if c != case or not word.endswith(ending) or len(word) - len(ending) < 3:
             continue
         stem = word[: len(word) - len(ending)]
-        # consonant stem ("ბერიშვილ" + "ი"), truncating ("ტოგონიძ" + "ე", "ხეობ" + "ა"), vowel
+        # consonant stem ("ბერიშვილ" + "ი"), truncating ("მერგანიძ" + "ე", "ხეობ" + "ა"), vowel
         # stem as is. "-ობის"/"-ების" is far more often "-ობა"/"-ება" ("ხეობა", "საზოგადოება")
         # than "-ობი"/"-ები"; a plural ("სახლების") is the price of that guess.
         if stem.endswith("ძ"):
@@ -287,7 +287,7 @@ def _lemma_candidates(word: str) -> list[str]:
 
 
 def _split_quotes(phrase: str) -> tuple[str, str, str]:
-    """Leading quotes, the phrase, trailing quotes: „სილქ თაუერსისთვის“ -> („, ..., “)."""
+    """Leading quotes, the phrase, trailing quotes: „ლოფთ თაუერსისთვის“ -> („, ..., “)."""
     q = re.escape(QUOTE_CHARS)
     m = re.fullmatch(rf"([{q}\s]*)(.*?)([{q}\s]*)", phrase)
     if m is None:  # pragma: no cover - the pattern matches every string
@@ -330,22 +330,23 @@ def in_case_of(wrong: str, right: str, *, written: Collection[str] = ()) -> str:
     written, so a name that drops a vowel before its ending ("წერეთლის" of "წერეთელი") keeps the
     form the contract writes rather than one built from the nominative ("წერეთელის").
 
-    >>> in_case_of("გიორგი ჭიჭინია", "გიორგი ჭიჭინაძის")
-    'გიორგი ჭიჭინაძე'
+    >>> in_case_of("გიორგი კალანია", "გიორგი კალანაძის")
+    'გიორგი კალანაძე'
     """
     forms = list(written)
     right_lemma = lemma(right)
     if forms:
         nominatives = attested_nominatives([right, *forms])
         right_lemma = nominatives[0]
-        case = _case_meant(wrong, right_lemma)
-        same = [
-            normalize_spaces(f)
+        mine = [
+            (normalize_spaces(f), phrase_case(f))
             for f, n in zip(forms, nominatives[1:], strict=True)
-            if n == right_lemma and phrase_case(f) == case
+            if n == right_lemma
         ]
+        case = _case_meant(wrong, right_lemma, {phrase_case(right), *(c for _, c in mine)})
+        same = [f for f, c in mine if c == case]
         return same[0] if same else inflect(right_lemma, case)
-    return inflect(right_lemma, _case_meant(wrong, right_lemma))
+    return inflect(right_lemma, _case_meant(wrong, right_lemma, {phrase_case(right)}))
 
 
 #: A word's last syllable with the vowel some nouns drop before their ending put back: "წერეთლი"
@@ -374,13 +375,18 @@ def attested_nominatives(forms: Collection[str]) -> list[str]:
     return [next((o for o in lemmas if _restores(o, n)), n) for n in lemmas]
 
 
-def _case_meant(wrong: str, right_lemma: str) -> Case:
+def _case_meant(wrong: str, right_lemma: str, written: Collection[Case] = ()) -> Case:
     """The case ``wrong`` was meant in, ``right_lemma`` being the name it misspells.
 
     Its ending says so, unless the ending is itself the slip: "ბარამიზე" ends like the
     postposition "-ზე", but it is "ბარამიძე" with Shift missed on "ძ" - one letter from that
     nominative, two from "ბარამიძეზე". When the form the ending reads is more than one edit
     away and a form of the name in one other case is one edit away, that case was meant.
+
+    ``written`` are the cases the documents write the name in. A slip one edit from the case
+    its ending reads and one edit from another case too is read in the other one when only that
+    one is written: a letter put in for the last consonant reads like a postposition ("-ში"),
+    and the documents that never write the name so are the evidence.
     """
     read = phrase_case(wrong)
     _, wrong_core, _ = _split_quotes(normalize_spaces(wrong))
@@ -388,9 +394,12 @@ def _case_meant(wrong: str, right_lemma: str) -> Case:
     if not wrong_core.split() or not right_core.split():
         return read
     last, name = wrong_core.split()[-1], right_core.split()[-1]
-    if not is_georgian_word(last) or damerau(last, inflect_word(name, read), cap=2) <= 1:
+    if not is_georgian_word(last):
         return read
     near = {inflect_word(name, c): c for c in CASES if damerau(last, inflect_word(name, c)) <= 1}
+    if damerau(last, inflect_word(name, read), cap=2) <= 1:
+        others = {c for c in near.values() if c != read and c in written}
+        return others.pop() if read not in written and len(others) == 1 else read
     return next(iter(near.values())) if len(near) == 1 else read
 
 
@@ -406,7 +415,7 @@ def _stems_of(word: str) -> set[str]:
         if word.endswith(ending) and len(word) - len(ending) >= 3:
             out.add(word[: -len(ending)])
     if len(word) >= 4 and word[-1] in f"{_VOWELS}ს":
-        out.add(word[:-1])  # "ლაზური" -> "ლაზურ", "ლომიას" -> "ლომია", "ტოგონიძე" -> "ტოგონიძ"
+        out.add(word[:-1])  # "ლაზური" -> "ლაზურ", "ლომიას" -> "ლომია", "მერგანიძე" -> "მერგანიძ"
     return out
 
 
@@ -467,6 +476,10 @@ def same_word(a: str, b: str) -> bool:
     if a == b:
         return True
     if not (is_georgian_word(a) and is_georgian_word(b)):
+        return False
+    if syncopated(a) == b or syncopated(b) == a:
+        # one ending written with the vowel and without it: a noun drops it or keeps it, so
+        # one of the two is a slip (the vowel dropped from a genitive that keeps it)
         return False
     return bool(word_lemmas(a) & word_lemmas(b))
 

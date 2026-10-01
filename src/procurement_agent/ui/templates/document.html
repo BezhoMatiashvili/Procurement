@@ -14,8 +14,32 @@
 </div>
 {% if doc.error %}<div class="card notice is-error">{{ icon("alert") }}<div><p>{{ doc.error }}</p></div></div>{% endif %}
 
+{# The reports this file went into. Each is recomputed when opened, from the stored files; the
+   link carries the same documents and options the person opened it with. #}
+<h2>{{ t("checks.title") }}</h2>
+{% if checks %}
+<p class="muted">{{ t("checks.lead") }}</p>
+<table class="list">
+  <thead><tr><th>{{ t("checks.col.check") }}</th><th>{{ t("checks.col.as") }}</th><th>{{ t("checks.col.with") }}</th>
+    <th>{{ t("checks.col.opened") }}</th><th>{{ t("job.result") }}</th></tr></thead>
+  <tbody>
+  {% for c in checks %}
+  <tr data-href="{{ c.url }}">
+    <td class="primary"><a href="{{ c.url }}">{{ t("task." ~ c.kind ~ ".title") }}</a></td>
+    <td data-label="{{ t('checks.col.as') }}">{{ t("checks.role." ~ c.role) }}</td>
+    <td data-label="{{ t('checks.col.with') }}">{%- if c.others -%}{{ c.others | join(", ") }}{%- if c.more %} +{{ c.more }}{% endif -%}{%- endif -%}</td>
+    <td data-label="{{ t('checks.col.opened') }}" class="num">{{ c.opened.strftime("%Y-%m-%d %H:%M") }}</td>
+    <td data-label="{{ t('job.result') }}" class="go"><a href="{{ c.url }}">{{ t("checks.open") }}{{ icon("arrow-right") }}</a></td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted empty-state">{{ t("checks.none") }}</p>
+{% endif %}
+
 {% if doc.status.value == "ready" %}
-<form method="post" action="/ui/documents/{{ doc.id }}/extract" class="card">
+<form method="post" action="/ui/documents/{{ doc.id }}/extract" class="card" id="extract">
   <h2>{{ icon("file-search") }} {{ t("extract.title") }}</h2>
   <fieldset>
     <legend>{{ t("extract.fields") }}</legend>
@@ -51,17 +75,21 @@
 
 <h2>{{ t("job.title") }}</h2>
 {% if jobs %}
+<p class="muted">{{ t("job.lead") }}</p>
 <table class="list">
   <thead><tr><th>{{ t("job.one") }}</th><th>{{ t("doc.kind") }}</th><th>{{ t("doc.status") }}</th>
-    <th class="num">{{ t("job.progress") }}</th><th>{{ t("job.message") }}</th></tr></thead>
+    <th class="num">{{ t("job.progress") }}</th><th>{{ t("job.message") }}</th><th>{{ t("job.result") }}</th></tr></thead>
   <tbody>
+  {# Every job opens its result. The anchor is the real link (keyboard, new tab, no JavaScript);
+     data-href lets a click anywhere on the row follow it. #}
   {% for j in jobs %}
-  <tr>
-    <td class="primary">{% if j.kind == "extract" %}<a href="/ui/jobs/{{ j.id }}"><code>{{ j.id[:8] }}</code></a>{% else %}<code>{{ j.id[:8] }}</code>{% endif %}</td>
+  <tr data-href="/ui/jobs/{{ j.id }}">
+    <td class="primary"><a href="/ui/jobs/{{ j.id }}"><code>{{ j.id[:8] }}</code></a></td>
     <td data-label="{{ t('doc.kind') }}">{{ t("jobkind." ~ j.kind) }}</td>
     <td data-label="{{ t('doc.status') }}"><span class="status {{ j.status.value }}">{{ t("status." ~ j.status.value) }}</span></td>
     <td data-label="{{ t('job.progress') }}" class="num">{{ j.progress }}%</td>
     <td data-label="{{ t('job.message') }}" class="muted">{%- if j.message -%}{{ j.message }}{%- endif -%}</td>
+    <td data-label="{{ t('job.result') }}" class="go"><a href="/ui/jobs/{{ j.id }}">{{ t("job.view") }}{{ icon("arrow-right") }}</a></td>
   </tr>
   {% endfor %}
   </tbody>

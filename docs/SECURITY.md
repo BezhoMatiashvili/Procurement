@@ -10,7 +10,7 @@ IT/security team as-is.
 |---|---|---|
 | Uploaded documents | `/data/uploads/<uuid>.<ext>`, mode `0600`, owned by the unprivileged `app` user | **Never** |
 | Parsed structure (Docling JSON) and extraction results | `/data/results/<uuid>/`, mode `0600` | **Never** |
-| Metadata (owner, size, SHA-256, status, timestamps) and the audit trail | SQLite `/data/app.db`, mode `0600` | **Never** |
+| Metadata (owner, size, SHA-256, status, timestamps), the audit trail, and the list of checks run (which check, over which document ids, with which options — never document content; removed with the documents) | SQLite `/data/app.db`, mode `0600` | **Never** |
 | LLM prompts | HTTP to the Ollama container over a Docker **internal** network (no route to the internet) | **Never** |
 | Logs | stdout of the container (JSON), content-free — see §5 | Only if the operator ships them |
 
@@ -81,7 +81,9 @@ Every upload is treated as hostile (`security/upload_guard.py`):
 * Each user may hold at most `PA_MAX_ACTIVE_JOBS_PER_USER` (default 20) queued or running
   jobs, so one script cannot starve the single worker for everybody else.
 * Append-only audit table + JSON log line for: upload (accepted/denied), extraction start,
-  result read (JSON/XLSX), check results and exports, delete, retention delete, UI login
+  result read (JSON/XLSX), a document's content shown as text (`document.content_view`, the
+  "what was read" page) or as a page image, check results and exports, delete, retention
+  delete, UI login
   (ok/denied) and logout, refused cross-origin requests. Fields: actor, action, outcome,
   document id, job id, client IP, timestamp.
 * A dev-only bypass key (`PA_DEV_API_KEY`) exists for local testing; `PA_ENV=prod` **refuses to

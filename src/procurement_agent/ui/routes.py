@@ -15,6 +15,7 @@ from markupsafe import Markup
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
+from procurement_agent import history
 from procurement_agent.api import documents as docs_api
 from procurement_agent.api.checks import (
     BoqCheckRequest,
@@ -47,11 +48,11 @@ from procurement_agent.checks.fx_invoice import parse_advance
 from procurement_agent.config import Settings, get_settings
 from procurement_agent.db import get_session
 from procurement_agent.extraction.labels import LABELS
-from procurement_agent.extraction.pipeline import result_dir
+from procurement_agent.extraction.pipeline import is_scanned_pdf, load_segments, result_dir
 from procurement_agent.extraction.schemas import DEFAULT_TARGETS, ExtractionResult, FactType
 from procurement_agent.jobs.worker import Worker
-from procurement_agent.models import Document, Job, JobStatus
-from procurement_agent.security.audit import audit, audit_now
+from procurement_agent.models import CheckRun, Document, DocumentStatus, Job, JobStatus
+from procurement_agent.security.audit import audit, audit_now, log
 from procurement_agent.security.auth import (
     COOKIE_NAME,
     Principal,
@@ -63,6 +64,7 @@ from procurement_agent.security.auth import (
     lookup_ui_session,
     revoke_ui_session,
 )
+from procurement_agent.ui import reading
 from procurement_agent.ui.i18n import LANG_COOKIE, Lang, lang_of, t
 
 router = APIRouter(prefix="/ui", tags=["ui"], include_in_schema=False)
@@ -307,7 +309,13 @@ def document_page(
     jobs = sorted(doc.jobs, key=lambda j: j.created_at, reverse=True)
     targets = [(t.value, LABELS[t][0], LABELS[t][1]) for t in DEFAULT_TARGETS]
     return _render(
-        request, "document.html", user=principal.user, doc=doc, jobs=jobs, targets=targets
+        request,
+        "document.html",
+        user=principal.user,
+        doc=doc,
+        jobs=jobs,
+        targets=targets,
+        checks=_checks_for(session, principal, doc),
     )
 
 
@@ -360,6 +368,11 @@ def extract(
 # --- jobs / results ----------------------------------------------------------------------------
 
 
+#: Jobs whose answer is read in a report: the model's explanation of a comparison, or its review
+#: of an act's notes, is applied there, so that is where their row leads.
+_REPORT_JOBS = ("compare_explain", "aoa_review")
+
+
 @router.get("/jobs/{job_id}")
 def job_page(
     request: Request,
@@ -367,16 +380,32 @@ def job_page(
     principal: Annotated[Principal, Depends(authenticate)],
     session: Annotated[Session, Depends(get_session)],
     settings: Annotated[Settings, Depends(get_settings)],
+    part: str = "1",
 ) -> Response:
+    """The result of one job, whatever it was.
+
+    Reading shows what was read from the file, extraction its fields, and the two model jobs
+    send you on to the report they belong to. ``part`` pages through a long reading; it is read
+    by hand, so a link edited into nonsense still opens the page.
+    """
     try:
         job = owned_job(session, principal, job_id, live_document=True)
     except HTTPException:
         return _expired(request, principal, "/ui/documents")
+    if job.kind in _REPORT_JOBS:
+        return RedirectResponse(
+            _report_job_url(session, job), status_code=status.HTTP_303_SEE_OTHER
+        )
+    if job.kind == "parse":
+        return _reading_page(request, principal, session, settings, job, reading.parse_part(part))
     result: ExtractionResult | None = None
+    gone = False
     if job.kind == "extract" and job.status == JobStatus.done:
         path = result_dir(settings, job.document_id) / "jobs" / f"{job.id}.json"
-        if path.exists():
+        try:
             result = ExtractionResult.model_validate_json(path.read_text())
+        except (OSError, ValueError):
+            gone = True  # swept or damaged: say so, rather than a header and nothing under it
     return _render(
         request,
         "job.html",
@@ -384,9 +413,99 @@ def job_page(
         job=job,
         doc=job.document,
         result=result,
+        gone=gone,
         # the stored label is English; the Georgian page names each field in Georgian
         labels=LABELS,
     )
+
+
+def _reading_page(
+    request: Request,
+    principal: Principal,
+    session: Session,
+    settings: Settings,
+    job: Job,
+    part: int,
+) -> Response:
+    """What the reading job produced: the file's content as the system took it.
+
+    Built on every view from the stored parse - the segments the comparison reads - so it cannot
+    disagree with the checks and nothing is stored a second time. A parse that is gone or will
+    not load is a notice, not a 500. Showing the content is reading the document, so it is
+    audited the way a rendered page image is.
+    """
+    doc = job.document
+    view: reading.Reading | None = None
+    notes: list[str] = []
+    scanned = False
+    if job.status == JobStatus.done and doc.status == DocumentStatus.ready:
+        try:
+            segments = load_segments(settings, doc.id, doc.kind, notes=notes)
+            scanned = is_scanned_pdf(settings, doc.id, doc.kind)
+            view = reading.build(segments, part, max_items=settings.compare_max_segments)
+        except Exception as e:  # a stored parse can be missing or damaged: the page says so
+            log.warning(
+                "reading_unavailable", job_id=job.id, document_id=doc.id, error=type(e).__name__
+            )
+            view, notes, scanned = None, [], False
+        else:
+            audit(
+                session,
+                actor=principal.user,
+                action="document.content_view",
+                document_id=doc.id,
+                job_id=job.id,
+                ip=client_ip(request),
+                detail=f"part {view.part} of {view.parts}",
+            )
+    earlier = sorted(
+        (j for j in doc.jobs if j.kind == "extract" and j.status == JobStatus.done),
+        key=lambda j: j.created_at,
+        reverse=True,
+    )[:5]
+    return _render(
+        request,
+        "parse.html",
+        user=principal.user,
+        job=job,
+        doc=doc,
+        view=view,
+        notes=notes,
+        scanned=scanned,
+        earlier=earlier,
+    )
+
+
+def _report_job_url(session: Session, job: Job) -> str:
+    """Where a model job's answer is read: the report it was queued from.
+
+    Both kinds hang off one document and carry the other in ``params``. An act review does not
+    keep the contractor type or the advance the report was opened with - the job never needed
+    them - so those come from the recorded check when there is one, and are otherwise left out:
+    the act is then read as the rules alone read it, with the review applied.
+    """
+    params = job.params
+    if job.kind == "compare_explain":
+        left = params.get("left")
+        if isinstance(left, str) and left:
+            query = urlencode({"left": left, "right": job.document_id, "job": job.id})
+            return f"/ui/checks/compare?{query}"
+    elif job.kind == "aoa_review":
+        contract = params.get("contract")
+        documents = [(job.document_id, "act")]
+        if isinstance(contract, str) and contract:
+            documents.append((contract, "contract"))
+        run = history.find_run(session, job.owner, "aoa", documents)
+        recorded = run.params if run is not None else {}
+        query_params = {
+            name: str(recorded[name]) for name in _RUN_OPTIONS["aoa"] if recorded.get(name)
+        }
+        query_params["act"] = job.document_id
+        if len(documents) > 1:
+            query_params["contract"] = documents[1][0]
+        query_params["review"] = job.id
+        return f"/ui/checks/aoa?{urlencode(query_params)}"
+    return f"/ui/documents/{job.document_id}"
 
 
 # --- tasks: upload steps -----------------------------------------------------------------------
@@ -498,6 +617,9 @@ def aoa_report(
         )
     except HTTPException as e:
         return _http_error(request, principal, e, "/ui/start/aoa")
+    _remember_aoa(
+        session, principal, aoa_doc, contract_doc, ctype, (advance_amount, advance_date), review_row
+    )
     audit(
         session,
         actor=principal.user,
@@ -652,6 +774,13 @@ def boq_report(
         return _http_error(request, principal, e, "/ui/start/boq")
 
     report, _, _, _ = run_boq(settings, template_doc, bid_docs)
+    history.record_run(
+        session,
+        owner=principal.user,
+        kind="boq",
+        documents=[(template_doc.id, "template"), *((d.id, "bid") for d in bid_docs)],
+        params={"template": template_doc.id, "bids": [d.id for d in bid_docs]},
+    )
     audit(
         session,
         actor=principal.user,
@@ -888,6 +1017,14 @@ def compare_report(
         )
         return f"{label}: {body}" + (f" ({note})" if note else "")
 
+    history.record_run(
+        session,
+        owner=principal.user,
+        kind="compare",
+        documents=[(left_doc.id, "left"), (right_doc.id, "right")],
+        params={"left": left_doc.id, "right": right_doc.id, **({"job": job} if job else {})},
+        keep=("job",),
+    )
     audit(
         session,
         actor=principal.user,
@@ -1083,6 +1220,83 @@ def _http_error(request: Request, principal: Principal, exc: HTTPException, agai
 
 def _lang(request: Request) -> Lang:
     return lang_of(request.cookies.get(LANG_COOKIE))
+
+
+#: What each report's URL may carry besides its documents. Anything else in a stored check is
+#: ignored when its link is rebuilt, so a damaged row cannot put a stray parameter in a URL.
+_RUN_OPTIONS: dict[str, tuple[str, ...]] = {
+    "aoa": ("act", "contract", "contractor_type", "advance_amount", "advance_date", "review"),
+    "compare": ("left", "right", "job"),
+}
+
+
+def _remember_aoa(
+    session: Session,
+    principal: Principal,
+    act: Document,
+    contract: Document | None,
+    ctype: str | None,
+    advance: tuple[str | None, str | None],
+    review: Job | None,
+) -> None:
+    """Record the act check that was just opened, with the options its URL carried."""
+    params: dict[str, object] = {"act": act.id}
+    documents = [(act.id, "act")]
+    if contract is not None:
+        params["contract"] = contract.id
+        documents.append((contract.id, "contract"))
+    if ctype:
+        params["contractor_type"] = ctype
+    for name, value in zip(("advance_amount", "advance_date"), advance, strict=True):
+        if value and value.strip():
+            params[name] = value.strip()[:64]  # as typed: the report reads it leniently
+    if review is not None:
+        params["review"] = review.id
+    history.record_run(
+        session,
+        owner=principal.user,
+        kind="aoa",
+        documents=documents,
+        params=params,
+        keep=("review",),
+    )
+
+
+def _report_url(run: CheckRun) -> str:
+    """The link that opens a recorded check again: its own route, its documents, its options."""
+    params = run.params
+    if run.kind == "boq":
+        bids = params.get("bids")
+        query = {
+            "template": str(params.get("template", "")),
+            "bids": ",".join(str(b) for b in bids) if isinstance(bids, list) else "",
+        }
+    else:
+        query = {
+            name: str(params[name]) for name in _RUN_OPTIONS.get(run.kind, ()) if params.get(name)
+        }
+    return f"/ui/checks/{run.kind}?{urlencode(query)}"
+
+
+def _checks_for(session: Session, principal: Principal, doc: Document) -> list[dict[str, object]]:
+    """The checks this file took part in, as the document page lists them."""
+    out: list[dict[str, object]] = []
+    for run in history.runs_for_document(session, principal.user, doc.id):
+        if run.kind not in ("aoa", "boq", "compare"):
+            continue
+        role = next((p.role for p in run.documents if p.document_id == doc.id), "")
+        others = [p.document.display_name for p in run.documents if p.document_id != doc.id]
+        out.append(
+            {
+                "kind": run.kind,
+                "role": role,
+                "others": others[:3],
+                "more": max(len(others) - 3, 0),
+                "opened": run.last_opened_at,
+                "url": _report_url(run),
+            }
+        )
+    return out
 
 
 def _by_severity(findings: list[Finding]) -> list[tuple[str, list[Finding]]]:

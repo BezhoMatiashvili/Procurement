@@ -6,7 +6,7 @@ import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
 
-from sqlalchemy import JSON, DateTime, Enum, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from procurement_agent.db import Base
@@ -88,6 +88,51 @@ class Job(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     document: Mapped[Document] = relationship(back_populates="jobs")
+
+
+class CheckRun(Base):
+    """A report somebody opened: which check, over which documents, with which options.
+
+    Metadata only, like every table here - the ids and the options that were in the report's own
+    URL, never what the documents say. A report is recomputed from the stored files each time it
+    is opened, so this is all it takes to open one again from the page of a file it used. One row
+    per check, not per view (``history.record_run``); it goes when any of its documents does.
+    """
+
+    __tablename__ = "check_runs"
+    __table_args__ = (UniqueConstraint("owner", "key"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    owner: Mapped[str] = mapped_column(String(128), index=True)
+    kind: Mapped[str] = mapped_column(String(16))  # "aoa" | "boq" | "compare"
+    #: sha256 of the kind and the documents: what makes two views of one check one row
+    key: Mapped[str] = mapped_column(String(64))
+    params: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    last_opened_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, index=True
+    )
+
+    documents: Mapped[list[CheckRunDocument]] = relationship(
+        back_populates="run", cascade="all, delete-orphan"
+    )
+
+
+class CheckRunDocument(Base):
+    """A document a check took part in, and as what: "act", "bid", "left" and so on."""
+
+    __tablename__ = "check_run_documents"
+
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("check_runs.id", ondelete="CASCADE"), primary_key=True
+    )
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+    role: Mapped[str] = mapped_column(String(16))
+
+    run: Mapped[CheckRun] = relationship(back_populates="documents")
+    document: Mapped[Document] = relationship()
 
 
 class AuditLog(Base):

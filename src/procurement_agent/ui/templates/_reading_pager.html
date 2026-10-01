@@ -1,0 +1,10 @@
+{# Previous / next part of a long reading. Plain links, so it works without JavaScript. Included
+   twice by parse.html - above the content and below it - and only when there is more than one
+   part. #}
+{% if view.parts > 1 %}
+<nav class="pager" aria-label="{{ t('reading.part', p=view.part, n=view.parts) }}">
+  {% if view.part > 1 %}<a class="btn secondary" href="/ui/jobs/{{ job.id }}?part={{ view.part - 1 }}">{{ icon("arrow-left") }}{{ t("reading.prev") }}</a>{% else %}<span></span>{% endif %}
+  <span class="muted num">{{ t("reading.part", p=view.part, n=view.parts) }}</span>
+  {% if view.part < view.parts %}<a class="btn secondary" href="/ui/jobs/{{ job.id }}?part={{ view.part + 1 }}">{{ t("reading.next") }}{{ icon("arrow-right") }}</a>{% else %}<span></span>{% endif %}
+</nav>
+{% endif %}

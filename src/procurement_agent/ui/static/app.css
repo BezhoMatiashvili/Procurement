@@ -262,7 +262,7 @@ table.list {
   /* no overflow:hidden here — it would make this table the sticky thead's scroll container */
 }
 /* break-word, never anywhere, at table widths: `anywhere` lowers a column's minimum width to one
-   character, which is how "BAGAGE22" came out as "BAGAG / E22" and a header as "კო / მპა". */
+   character, which is how "NBGEGE22" came out as "BAGAG / E22" and a header as "კო / მპა". */
 th, td { text-align:left; padding:11px 14px; border-bottom:1px solid var(--line); vertical-align:top;
          overflow-wrap:break-word; }
 th { font-weight:600; font-size:13px; color:var(--muted); background:var(--surface-2); }
@@ -741,9 +741,52 @@ img { outline:1px solid rgba(0,0,0,.1); outline-offset:-1px; }
 .explain-box > p, .explain-box > div { margin:0; flex:1 1 320px; }
 .explain-box button { min-height:40px; padding:8px 16px; }
 
+/* --- results: pressable rows and the reading view ------------------------------------------- */
+/* A row that is a link. The anchor in its first cell is the real one; a click elsewhere on the
+   row follows it (app.js). The row already tints on hover from 701px up. */
+tr[data-href] { cursor:pointer; }
+td.go a { display:inline-flex; align-items:center; gap:6px; font-weight:600; text-decoration:none; white-space:nowrap; }
+td.go a:hover { text-decoration:underline; }
+td.go .i { transition:transform 150ms; }
+tr[data-href]:hover td.go .i { transform:translateX(3px); }
+
+/* What was read. Text first, grids as scrollable tables. Not .grid / .cell: those are taken. */
+.reading { margin:16px 0; }
+.read-h { margin:22px 0 6px; font-size:16px; text-wrap:balance; }
+/* pre-line keeps the line breaks the parser found and still wraps */
+.read-p, .read-li { margin:0 0 8px; max-width:78ch; white-space:pre-line; text-wrap:pretty; }
+.read-li { position:relative; padding-left:18px; }
+.read-li::before { content:"•"; position:absolute; left:4px; color:var(--muted); }
+.read-page { display:flex; align-items:center; gap:10px; margin:20px 0 8px; font-size:13px; color:var(--muted); }
+.read-page::after { content:""; flex:1 1 auto; height:1px; background:var(--line); }
+.read-page a { display:inline-block; padding:2px 10px; border-radius:999px; background:var(--surface-2);
+               color:var(--muted); text-decoration:none; }
+.read-page a:hover { color:var(--accent); }
+.read-grid { margin:16px 0; }
+.read-grid h4 { margin:0 0 6px; font-size:14px; }
+.table-scroll { max-width:100%; overflow-x:auto; border:1px solid var(--line); border-radius:var(--radius);
+                background:var(--card); box-shadow:var(--shadow-1); }
+/* as wide as its content, up to 46ch a cell, and the box scrolls: a figure is never squeezed onto three lines */
+table.read-table { border-collapse:separate; border-spacing:0; width:max-content; min-width:100%; font-size:14px; }
+table.read-table th, table.read-table td { padding:6px 10px; text-align:left; vertical-align:top; min-width:5ch; max-width:46ch;
+                                           white-space:pre-line; overflow-wrap:anywhere;
+                                           border-right:1px solid var(--line); border-bottom:1px solid var(--line); }
+table.read-table tr > :last-child { border-right:none; }
+table.read-table tbody tr:last-child > * { border-bottom:none; }
+table.read-table thead th, table.read-table thead td { background:var(--surface-2); color:var(--muted); font-size:12px;
+                                                       font-weight:600; text-align:center; }
+/* the sheet's own row numbers stay in view while a wide sheet scrolls */
+table.read-table .rowno { position:sticky; left:0; z-index:1; width:1%; min-width:0; white-space:nowrap; text-align:right;
+                          background:var(--surface-2); color:var(--muted); font-size:12px; font-weight:600;
+                          font-variant-numeric:tabular-nums; }
+/* one to four counts: tiles of their own size, not a row stretched to the page */
+.stats-fit { grid-template-columns:repeat(auto-fit, minmax(96px, 150px)); justify-content:start; }
+.pager { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px 12px; margin:16px 0; }
+
 /* --- print: this is the "printable PDF" ------------------------------------------------------ */
 @media print {
-  header.top, footer, .chips, .rerun, .btn, button, .danger-zone, .explain, .explain-box, .toc, .skip, .back, .diff-legend { display:none !important; }
+  header.top, footer, .chips, .rerun, .btn, button, .danger-zone, .explain, .explain-box, .toc, .skip, .back, .diff-legend, .pager { display:none !important; }
+  .table-scroll { overflow:visible; }
   /* a closed <details> renders nothing whatever its children say; print the evidence anyway */
   details::details-content { content-visibility:visible; display:contents; }
   .caveat { border-left-color:#8a5a00 !important; }

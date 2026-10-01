@@ -7,8 +7,8 @@ of the client's set got three errors that way. Two things here keep that apart f
 mistake:
 
 * ``repair_codes`` puts back the fixed shape of a code: an IBAN is "GE", two digits, a bank's
-  two letters and sixteen digits, so "CL188C0000000677777777" can only be
-  "GE18BG0000000677777777". A character is replaced only by one it is commonly misread as, and
+  two letters and sixteen digits, so "CL29N80000000101904917" can only be
+  "GE29NB0000000101904917". A character is replaced only by one it is commonly misread as, and
   only where the code's shape demands a letter or a digit; the text keeps its length, so every
   offset into it still points at the same place.
 * ``misread_explains`` says whether two values differ by no more than what scanning does - a

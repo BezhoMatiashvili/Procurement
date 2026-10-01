@@ -21,6 +21,9 @@
   <div class="actions"><a class="btn secondary" href="/ui/documents/{{ doc.id }}">{{ icon("refresh") }}{{ t("extract.again") }}</a></div>
 </div></div>
 {% endif %}
+{% if gone %}
+<div class="card notice is-info">{{ icon("info") }}<div><p>{{ t("result.gone") }}</p></div></div>
+{% endif %}
 
 {% if result %}
 <div class="result-head">

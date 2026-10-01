@@ -30,7 +30,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import delete, select, update
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from procurement_agent.checks.aoa import scope_review_items
 from procurement_agent.checks.aoa_llm import request_review
@@ -47,6 +47,7 @@ from procurement_agent.extraction.pipeline import (
     upload_path,
 )
 from procurement_agent.extraction.schemas import FactType
+from procurement_agent.history import forget_runs
 from procurement_agent.ingestion import docling_service
 from procurement_agent.llm.base import LLMClient
 from procurement_agent.models import Document, DocumentStatus, Job, JobStatus, UiSession
@@ -547,6 +548,10 @@ def mark_deleted(doc: Document) -> None:
             j.status = JobStatus.cancelled
             j.message = "document deleted"
             j.finished_at = datetime.now(UTC)
+    # The checks it took part in cannot be reproduced without it, so their records go too.
+    session = object_session(doc)
+    if session is not None:
+        forget_runs(session, doc.id)
 
 
 def delete_document_files(settings: Settings, doc_id: str, kind: str) -> None:

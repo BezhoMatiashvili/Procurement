@@ -9,7 +9,7 @@ from procurement_agent.extraction.ocr import misread_explains, repair_codes
 def test_a_scanned_iban_is_put_back_in_shape() -> None:
     assert repair_codes("ა/ა: CL29NB0000000101904917.") == "ა/ა: GE29NB0000000101904917."
     # a bank code read with a look-alike letter, and a digit read as a letter among the digits
-    assert repair_codes("GE18BC00000006777777O7") == "GE18BG0000000677777707"
+    assert repair_codes("GE29N800000001019049O7") == "GE29NB0000000101904907"
 
 
 def test_what_cannot_be_an_iban_is_left_alone() -> None:

@@ -51,7 +51,7 @@ _ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 #: Every number in a string, however it is grouped: "48 750,00", "0,1", "24".
 _NUMBER = re.compile(r"\d{1,3}(?:[ \u00a0,.]\d{3})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?")
 #: A free-text value counts as another one it is contained in only if it is at least this share
-#: of it. "სილქ თაუნი" inside "სილქ თაუნის პროექტი" is the same project; "თბილისი" inside a
+#: of it. "ლოფთ თაუნი" inside "ლოფთ თაუნის პროექტი" is the same project; "თბილისი" inside a
 #: full street address is not the same address.
 _MIN_TEXT_RATIO = 0.5
 
@@ -103,7 +103,7 @@ def values_match(fact_type: FactType, expected: str, actual: str) -> bool:
         return False
     # From a word start, and never stopping inside a number: "2026 03 1" must not be found in
     # "2026 03 15". A letter may follow, because Georgian inflects names by suffix -
-    # "სილქ თაუნი" is the same project as "სილქ თაუნის პროექტი".
+    # "ლოფთ თაუნი" is the same project as "ლოფთ თაუნის პროექტი".
     return re.search(rf"(?<!\w){re.escape(shorter)}(?!\d)", longer) is not None
 
 

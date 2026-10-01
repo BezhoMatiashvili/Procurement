@@ -108,4 +108,20 @@
       document.querySelectorAll("input[name=targets]").forEach(function (c) { c.checked = on; });
     });
   });
+
+  // A list row is a link. The anchor inside it stays the real one (keyboard, new tab, no
+  // JavaScript); this only lets a click on the rest of the row follow it. Plain left clicks
+  // only - Ctrl/Cmd/Shift/middle-click keep opening a new tab through the anchor - and never on
+  // a control inside the row or while text is being selected.
+  document.querySelectorAll("tr[data-href]").forEach(function (row) {
+    row.addEventListener("click", function (e) {
+      if (e.defaultPrevented || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+      if (e.target.closest("a, button, input, select, textarea, label, summary")) return;
+      var selection = window.getSelection && window.getSelection();
+      if (selection && String(selection).length) return;
+      var to = row.dataset.href || "";
+      if (to.indexOf("/ui/") !== 0) return; // only ever somewhere inside this interface
+      window.location.assign(to);
+    });
+  });
 })();
