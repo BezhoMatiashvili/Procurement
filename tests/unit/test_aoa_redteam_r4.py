@@ -330,3 +330,75 @@ class TestCurrencyCorrectionInTheActsWording:
 def _fee_sentence(sentence: str) -> str:
     assert _FEE_LINE in ACT
     return ACT.replace(_FEE_LINE, sentence)
+
+
+# --- AOA-R4-12: an attorney at the act's signature is compared, or a note says it was not --------
+
+_BY_PROXY = "წარმოდგენილი მინდობილობით მოქმედი პირის, თამარ გოგიჩაიშვილის სახით"
+_PROXY_CONTRACT = CONTRACT.replace("წარმოდგენილი დირექტორის ნინო კაპანაძის სახით", _BY_PROXY)
+_PROXY_ACT = ACT.replace("წარმოდგენილი დირექტორის ნინო კაპანაძის სახით", _BY_PROXY)
+
+
+def _signed_by(name: str, act: str = _PROXY_ACT) -> str:
+    return act.replace("დირექტორი ნინო კაპანაძე", f"მინდობილი პირი: {name}")
+
+
+def _run_with_signing_proxy(act: str, name: str) -> CheckReport:
+    """The check with ``name`` read as the customer's attorney from the signature block, as the
+    party reader reads it once it knows the signature's attorney title."""
+    from procurement_agent.checks.aoa import AoaChecker, DocumentView
+
+    view = DocumentView.build("aoa", act)
+    [customer] = [q for q in view.parties if q.name and "ალფა" in q.name]
+    customer.proxies.append(name)
+    return AoaChecker(aoa=view, contract=DocumentView.build("contract", _PROXY_CONTRACT)).run()
+
+
+class TestAttorneyAtTheSignature:
+    def test_the_pair_signed_by_the_contract_s_attorney_is_clean(self) -> None:
+        report = _check(_signed_by("თამარ გოგიჩაიშვილი"), _PROXY_CONTRACT)
+        assert _substantive(report) == []
+        assert not [s for s in report.skipped if s.rule_id == "AOA.DIRECTOR"]
+
+    def test_an_attorney_not_read_leaves_a_note(self) -> None:
+        for name in ("თამარ გოგიჩაიშვილო", "ნათია გოგიჩაიშვილი"):
+            report = _check(_signed_by(name), _PROXY_CONTRACT)
+            notes = [s for s in report.skipped if s.rule_id == "AOA.DIRECTOR"]
+            assert any(name in s.reason_en for s in notes), name
+
+    def test_a_slip_of_the_contract_s_attorney_is_an_error_with_its_correction(self) -> None:
+        act = _signed_by("თამარ გოგიჩაიშვილო")
+        report = _run_with_signing_proxy(act, "თამარ გოგიჩაიშვილო")
+        found = [(f.severity, f.quote, f.expected) for f in _of(report, "AOA.DIRECTOR")]
+        assert found == [("error", "თამარ გოგიჩაიშვილო", "თამარ გოგიჩაიშვილი")]
+
+    def test_another_person_asks_for_the_power_of_attorney(self) -> None:
+        act = _signed_by("ნათია გოგიჩაიშვილი")
+        report = _run_with_signing_proxy(act, "ნათია გოგიჩაიშვილი")
+        found = [(f.severity, f.quote, f.expected) for f in _of(report, "AOA.DIRECTOR")]
+        assert found == [("warning", "ნათია გოგიჩაიშვილი", None)]
+
+    def test_an_attorney_the_contract_does_not_name_is_still_a_warning(self) -> None:
+        """Near miss: with only the director in the contract, an attorney in the act is not
+        provably wrong - a warning asking for the power of attorney, never a correction."""
+        act = _PROXY_ACT.replace("თამარ გოგიჩაიშვილის", "თამარ გოგიჩაიშვილოს")
+        found = [(f.severity, f.expected) for f in _of(_check(act), "AOA.DIRECTOR")]
+        assert found and all(f == ("warning", None) for f in found)
+
+    def test_a_slip_in_the_preamble_is_corrected_too(self) -> None:
+        act = _PROXY_ACT.replace("თამარ გოგიჩაიშვილის", "თამარ გოგიჩაიშვილოს")
+        report = _check(act, _PROXY_CONTRACT)
+        found = [(f.severity, f.quote, f.expected) for f in _of(report, "AOA.DIRECTOR")]
+        assert found == [("error", "თამარ გოგიჩაიშვილოს", "თამარ გოგიჩაიშვილის")]
+
+    def test_the_word_in_prose_is_no_signature(self) -> None:
+        """Near misses: a power of attorney named in a sentence, and the title followed by more
+        than a name."""
+        act = _PROXY_ACT.replace(
+            "4. გაფორმების თარიღი",
+            "მინდობილობის საფუძველზე მოქმედებს მხარე.\n"
+            "მინდობილი პირი ვალდებულია წარადგინოს მინდობილობა ხელმოწერისას.\n"
+            "4. გაფორმების თარიღი",
+        )
+        report = _check(_signed_by("თამარ გოგიჩაიშვილი", act), _PROXY_CONTRACT)
+        assert not [s for s in report.skipped if s.rule_id == "AOA.DIRECTOR"]

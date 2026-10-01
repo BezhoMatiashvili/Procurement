@@ -477,6 +477,13 @@ class DocumentView:
 
 #: How far into a document its heading - and a date written in it - can reach.
 _HEADER_CHARS = 200
+#: A signature block's line for an attorney: its title, then the name alone on the line
+#: ("მინდობილი პირი: ლია ხუციშვილი", "მინდობილობით მოქმედი პირი ლია ხუციშვილი ____").
+_SIGNING_PROXY = re.compile(
+    r"^\s*(?:მინდობილი\s+პირი|მინდობილობით\s+მოქმედი\s+პირი"
+    r"|წარმომადგენელი\s*\(\s*მინდობილობით\s*\)|რწმუნებული)"
+    r"\s*[:\-\u2013]?\s*(?P<name>[ა-ჰ]+(?:\s+[ა-ჰ]+){1,2})[\s_./]*$"
+)
 _CONTRACT_WORD = re.compile(r"ხელშეკრულებ|contract", re.IGNORECASE)
 _ACT_WORD = re.compile(r"აქტ|\bact\b", re.IGNORECASE)
 
@@ -2159,6 +2166,30 @@ class AoaChecker:
             self._proxies(p, match)
             self._signatories(p, match, deputy=False)
             self._signatories(p, match, deputy=True)
+        self._unread_signing_proxies()
+
+    def _unread_signing_proxies(self) -> None:
+        """A skip note for an attorney the act's signature block names ("მინდობილი პირი: …") that
+        the party reader did not take for any party's signatory: what was not read is not
+        compared, and the report says so rather than stay silent (red team R4, AOA-R4-12)."""
+        # a name the act's parties are read with, or one the contract names (written right
+        # there, it needs no comparing)
+        parties = [*self.aoa.parties, *(self.contract.parties if self.contract else [])]
+        read = [n for q in parties for n in (*q.proxies, *q.directors, *q.deputies) if n]
+        for line in self.aoa.lines:
+            m = _SIGNING_PROXY.match(line)
+            if m is None:
+                continue
+            name = m.group("name")
+            if any(_same_person(name, n) for n in read):
+                continue
+            self._skip(
+                "AOA.DIRECTOR",
+                f"აქტს ხელს მინდობილობით აწერს „{name}“, რომელიც რომელიმე მხარის ხელმომწერად "
+                "ვერ წაიკითხა: ხელშეკრულებას არ შედარდა",
+                f"the act is signed under a power of attorney by '{name}', who was not read as "
+                "either party's signatory: not compared with the contract",
+            )
 
     def _signatories(self, p: Party, match: Party, *, deputy: bool) -> None:
         """AOA.DIRECTOR: the act's signatories for ``p`` against the contract's for ``match`` -
@@ -2183,66 +2214,82 @@ class AoaChecker:
                         f"'{d}', and the contract names no deputy: not compared",
                     )
                 continue
-            # The preamble writes the genitive, the signature block the nominative, and the
-            # party reader keeps one of them: every form the act writes of this person is
-            # compared, so a slip in one ("მელაძი") does not hide behind the other written
-            # right. Each wrong form has its own correction and every place of it marked.
-            forms = self._person_forms(d)
-            if not forms:
-                found = self._find_span(d)
-                forms = [(d, [found] if found else [])]
-            for written, spans in forms:
-                # a patronymic is no part of the name compared, and is kept in a correction
-                form, patronymic = split_patronymic(written)
-                # an inflection of the contract's name, and nothing else, is the same name
-                if any(_same_person(form, cd) for cd in theirs):
-                    continue
-                if (other := self._unread_party_of(form, match, theirs)) is not None:
-                    # the act writes that party in a form not read as one (AOA.PARTY_MISSING's
-                    # note): its signatory is no slip of this party's
-                    self._skip(
-                        "AOA.DIRECTOR",
-                        f"„{form}“ ყველაზე ახლოსაა {other.name}-ის ხელმომწერთან, მხარესთან, "
-                        f"რომელიც აქტში ვერ ამოიცნო: {match.name}-ის ხელმომწერს არ შედარდა",
-                        f"'{form}' is nearest to the signatory the contract names for "
-                        f"{other.name}, a party the act does not name in a form read as one: not "
-                        f"compared with {match.name}'s",
-                    )
-                    continue
-                where = self._places_of_director(p, form, spans)
-                if where is None:
-                    continue  # every place of it is another party's own director, written right
-                span, places = where
-                # compared on the nominative, so a genitive in either document is no mistake
-                guess = best_match(lemma(form), [lemma(c) for c in theirs])
-                diff = guess[1] if guess else None
-                typo = diff is not None and diff.looks_like_typo
-                hint_ka = " (როგორც ჩანს, შეცდომაა)" if typo else ""
-                hint_en = " (looks like a misspelling)" if typo else ""
-                # the correction in the act's own grammar, form by form
-                expected = keep_initial(form, in_case_of(form, guess[0])) if guess else None
-                if expected is not None:
-                    expected = with_patronymic(expected, patronymic)
-                self._add(
+            self._person_findings(p, match, d, theirs)
+
+    def _person_findings(self, p: Party, match: Party, d: str, theirs: list[str]) -> None:
+        """AOA.DIRECTOR errors for the act's signatory ``d`` of ``p`` against the people the
+        contract names for ``match`` in the same capacity (``theirs``: its heads, its deputies or
+        its attorneys)."""
+        # The preamble writes the genitive, the signature block the nominative, and the
+        # party reader keeps one of them: every form the act writes of this person is
+        # compared, so a slip in one ("მელაძი") does not hide behind the other written
+        # right. Each wrong form has its own correction and every place of it marked.
+        forms = self._person_forms(d)
+        if not forms:
+            found = self._find_span(d)
+            forms = [(d, [found] if found else [])]
+        for written, spans in forms:
+            # a patronymic is no part of the name compared, and is kept in a correction
+            form, patronymic = split_patronymic(written)
+            # an inflection of the contract's name, and nothing else, is the same name
+            if any(_same_person(form, cd) for cd in theirs):
+                continue
+            if (other := self._unread_party_of(form, match, theirs)) is not None:
+                # the act writes that party in a form not read as one (AOA.PARTY_MISSING's
+                # note): its signatory is no slip of this party's
+                self._skip(
                     "AOA.DIRECTOR",
-                    "error",
-                    f"ხელმომწერი არ ემთხვევა ხელშეკრულებას: „{written}“, უნდა იყოს "
-                    f"„{expected}“{hint_ka}",
-                    f"signatory does not match the contract: '{written}', expected "
-                    f"'{expected}'{hint_en}",
-                    expected=expected,
-                    actual=written,
-                    span=span,
-                    places=places,
+                    f"„{form}“ ყველაზე ახლოსაა {other.name}-ის ხელმომწერთან, მხარესთან, "
+                    f"რომელიც აქტში ვერ ამოიცნო: {match.name}-ის ხელმომწერს არ შედარდა",
+                    f"'{form}' is nearest to the signatory the contract names for "
+                    f"{other.name}, a party the act does not name in a form read as one: not "
+                    f"compared with {match.name}'s",
                 )
+                continue
+            where = self._places_of_director(p, form, spans)
+            if where is None:
+                continue  # every place of it is another party's own director, written right
+            span, places = where
+            # compared on the nominative, so a genitive in either document is no mistake
+            guess = best_match(lemma(form), [lemma(c) for c in theirs])
+            diff = guess[1] if guess else None
+            typo = diff is not None and diff.looks_like_typo
+            hint_ka = " (როგორც ჩანს, შეცდომაა)" if typo else ""
+            hint_en = " (looks like a misspelling)" if typo else ""
+            # the correction in the act's own grammar, form by form
+            expected = keep_initial(form, in_case_of(form, guess[0])) if guess else None
+            if expected is not None:
+                expected = with_patronymic(expected, patronymic)
+            self._add(
+                "AOA.DIRECTOR",
+                "error",
+                f"ხელმომწერი არ ემთხვევა ხელშეკრულებას: „{written}“, უნდა იყოს "
+                f"„{expected}“{hint_ka}",
+                f"signatory does not match the contract: '{written}', expected "
+                f"'{expected}'{hint_en}",
+                expected=expected,
+                actual=written,
+                span=span,
+                places=places,
+            )
 
     def _proxies(self, p: Party, match: Party) -> None:
         """AOA.DIRECTOR, as a warning: the act is signed for ``p`` under a power of attorney by
         someone the contract does not name. Not provably wrong - the client's rule says the
         authority must be checked - so the report asks for the power of attorney, at every place
-        the attorney is named, and proposes no name to write instead."""
+        the attorney is named, and proposes no name to write instead.
+
+        An attorney the contract names, written with a slip ("ლია ხუციშვილო" for the contract's
+        "ლია ხუციშვილი"), is no other person: an error corrected to the contract's attorney, as
+        for a director (red team R4, AOA-R4-12). The act's attorneys are the preamble's and the
+        signature block's, as the party reader reads them (``Party.proxies``)."""
         named = [*match.directors, *match.proxies]
         for proxy in p.proxies:
+            if any(_same_person(proxy, n) for n in named):
+                continue
+            if any(_slip_of_person(proxy, n) for n in match.proxies):
+                self._person_findings(p, match, proxy, match.proxies)
+                continue
             if any(names_match(proxy, n) for n in named):
                 continue
             director = match.directors[0] if match.directors else None
@@ -3779,6 +3826,15 @@ def _same_person(written: str, named: str) -> bool:
     if not all(_same_first(x, y) for x, y in zip(a[:-1], b[:-1], strict=True)):
         return False
     return lemma_word(b[-1]) in word_lemmas(a[-1])
+
+
+def _slip_of_person(written: str, named: str) -> bool:
+    """Whether ``written`` is ``named`` with a slip: the same number of words, each a form of
+    the other's or one slip from it (``_near_word``), and not the same person."""
+    a, b = normalize_name(written).split(), normalize_name(named).split()
+    if not a or len(a) != len(b) or _same_person(written, named):
+        return False
+    return all(_near_word(x, y) for x, y in zip(a, b, strict=True))
 
 
 def _same_first(written: str, named: str) -> bool:
