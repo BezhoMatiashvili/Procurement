@@ -1078,6 +1078,12 @@ def preamble_end(text: str) -> int | None:
     return min(ends, default=None)
 
 
+def _blank_name(name: str) -> bool:
+    """Whether a party's name, its legal form set aside, is a fill-in line or nothing at all."""
+    _form, _, rest = name.partition(" ")
+    return is_blank(rest)
+
+
 def find_anchors(text: str) -> list[AnchorHit]:
     """Anchor hits as flat facts, for the extraction pipeline."""
     text = _prepare(text)
@@ -1170,8 +1176,9 @@ def find_anchors(text: str) -> list[AnchorHit]:
     # anchors produce never reaches the pipeline, and the LLM is asked for it instead.
     for party in find_parties(text):
         # names come from the party parser, which is the only place that knows a bank named in
-        # the payment clause is not a contracting party
-        if party.name:
+        # the payment clause is not a contracting party. A draft's blank in the quotes after the
+        # legal form ("შპს „________“") names no party (red team R5, COMPARE-R5-07)
+        if party.name and not _blank_name(party.name):
             index = text.find(party.name)
             # a legal form written out is not the name's text: point at where the name stands
             start, end = (

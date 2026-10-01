@@ -132,6 +132,27 @@ def test_filling_in_a_drafts_blank_address_is_an_added_address() -> None:
     assert address == [("CMP.PARTY", None, "ქ. ფოთი, ნავსადგურის ქ. N8", "error")]
 
 
+@pytest.mark.parametrize("blank", ["______________", "............", "…………"])
+def test_a_blank_in_the_quotes_after_a_legal_form_is_no_party_name(blank: str) -> None:
+    """A draft that keeps the legal form and leaves the name a blank names no party: filling
+    it in is a name added, not one changed from the underscores."""
+    text = f"შპს „{blank}“ (ს/კ: ___________), მისამართი: ______ (შემდგომში „მიმწოდებელი“)"
+    assert _anchored(text, FactType.party_name) == []
+    report = run([text], [_FILLED_BLOCK])
+    names = [
+        (f.expected, f.actual)
+        for f in report.findings
+        if f.rule_id == "CMP.PARTY" and "party name" in (f.message_en or "").lower()
+    ]
+    assert names == [(None, "შპს ტყის ბილიკი")]
+
+
+def test_a_short_name_with_a_letter_or_a_figure_is_a_name() -> None:
+    """Near miss: a name of two characters is text, not a blank."""
+    assert _anchored("შპს „ა1“ (ს/კ 404717171)", FactType.party_name) == ["შპს ა1"]
+    assert _anchored("ი/მ ანა ბერიძე (პ/ნ 01009988776)", FactType.party_name) == ["ი/მ ანა ბერიძე"]
+
+
 # --- EXTRACTION-R5-06: an address ends before the next label ------------------------------------
 
 _TWO_ADDRESSES = (
