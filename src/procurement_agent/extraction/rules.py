@@ -421,7 +421,9 @@ def _is_share(text: str, start: int) -> bool:
     """Whether the amount at ``start`` restates a share of the value (a guarantee, an advance,
     the VAT inside the price) rather than stating the value. Its nearest keyword is the value's
     ("ღირებულების 5%-ის, 100 ლარის ოდენობით"), which names the base of the share, not the amount."""
-    return _SHARE_BEFORE.search(text, max(0, start - _SHARE_REACH), start) is not None
+    return _SHARE_BEFORE.search(
+        text, max(0, start - _SHARE_REACH), start
+    ) is not None or is_tax_amount(text, start)
 
 
 #: A tax named inside a bracket, before the figure there: "(დღგ-ს გარეშე 1 000 ლარი)", "(excl.
@@ -432,7 +434,7 @@ _BRACKET_REACH = 60
 _RESTATED_REACH = 60
 
 
-def restating_bracket(text: str, start: int) -> tuple[int, int] | None:
+def _restating_bracket(text: str, start: int) -> tuple[int, int] | None:
     """The bracket around the figure at ``start`` when it restates the money figure written right
     before it on another tax basis: "1 180 ლარს დღგ-ს ჩათვლით (დღგ-ს გარეშე 1 000 ლარი)", "GEL
     1,180 incl. VAT (excl. VAT GEL 1,000)". Its span, "(" to ")"; None otherwise.
@@ -517,6 +519,166 @@ def _named_in_own_clause(text: str, start: int) -> bool:
     )
 
 
+# --- a price restated on another tax basis -------------------------------------------------------
+
+#: A figure's tax basis: with the tax ("დღგ-ს ჩათვლით", "გადასახადების ჩათვლით", "including
+#: VAT") or without it ("დღგ-ს გარეშე", "excl. VAT", "net of VAT").
+_TAX_INCLUDED = re.compile(
+    r"(?:დ\.?ღ\.?გ\.?|გადასახად[ა-ჰ]*)(?:-?ის|-?ს)?\s+(?:\(\s*\d{1,2}(?:[.,]\d+)?\s*%\s*\)\s*)?"
+    r"ჩათვლით"
+    r"|(?<![a-z])(?:including|inclusive\s+of|incl\.?)\s+(?:\d{1,2}\s*%\s+)?(?:vat|tax(?:es)?)"
+    r"(?![a-z])|(?<![a-z])vat\s+(?:is\s+)?included(?![a-z])",
+    re.IGNORECASE,
+)
+_TAX_EXCLUDED = re.compile(
+    r"(?:დ\.?ღ\.?გ\.?|გადასახად[ა-ჰ]*)(?:-?ის|-?ს)?\s+(?:გარეშე|გამოკლებით)"
+    r"|(?<![a-z])(?:excluding|exclusive\s+of|excl\.?|net\s+of|before|without)\s+"
+    r"(?:vat|tax(?:es)?)(?![a-z])",
+    re.IGNORECASE,
+)
+#: The tax named as a figure's own label, right before it: "დღგ - 915.25 ლარი", "დღგ (18%):
+#: 915.25 ლარი", "დღგ-ს თანხა: ...", "VAT: GEL 180". Not the price's basis: "Price including
+#: VAT: 118 GEL" and "ფასი + დღგ: 1 180 ლარი" label the price (``_TAX_QUALIFIED``).
+_TAX_AMOUNT_LABEL = re.compile(
+    r"(?<![ა-ჰa-z])(?:დ\.?ღ\.?გ\.?|vat|value\s+added\s+tax)"
+    r"(?:(?:-?ის|-?ს)\s+(?:თანხა|ოდენობა)|\s+(?:თანხა|ოდენობა|amount))?"
+    r"(?:\s*\(\s*\d{1,2}(?:[.,]\d{1,2})?\s*%\s*\))?"
+    r"\s*[:=–—-]?\s*(?:(?:GEL|USD|EUR|GBP|₾|\$|€|£)\s*)?$",
+    re.IGNORECASE,
+)
+_TAX_QUALIFIED = re.compile(
+    r"(?<![a-z])(?:incl\.?|including|inclusive\s+of|excl\.?|excluding|exclusive\s+of|with|"
+    r"without|plus|net\s+of)\s*$|\+\s*$",
+    re.IGNORECASE,
+)
+_TAX_LABEL_REACH = 60
+
+
+def is_tax_amount(text: str, start: int) -> bool:
+    """Whether the money figure at ``start`` is the tax itself, labelled by the tax's name right
+    before it: "დღგ - 915.25 ლარი", "დღგ (18%): 915.25 ლარი" (docs/GOLD_SPEC.md section 2: the tax
+    the price holds is an ``amount``, never ``total_amount`` or ``price``)."""
+    before = text[max(0, start - _TAX_LABEL_REACH) : start]
+    label = _TAX_AMOUNT_LABEL.search(before)
+    return label is not None and _TAX_QUALIFIED.search(before, 0, label.start()) is None
+
+
+def _money_at(text: str, start: int) -> re.Match[str] | None:
+    return _AMOUNT_AFTER.match(text, start) or _AMOUNT_BEFORE.match(text, start)
+
+
+def _next_money(text: str, pos: int, stop: int) -> re.Match[str] | None:
+    found = [m for p in (_AMOUNT_AFTER, _AMOUNT_BEFORE) if (m := p.search(text, pos, stop))]
+    return min(found, key=lambda m: m.start()) if found else None
+
+
+def _has_money(text: str, a: int, b: int) -> bool:
+    return _next_money(text, a, b) is not None
+
+
+def _sentence_start(text: str, pos: int) -> int:
+    lo = max(0, pos - _CLAUSE_REACH)
+    stops = list(_SENTENCE_END.finditer(text, lo, pos))
+    return stops[-1].end() if stops else lo
+
+
+def _basis(text: str, a: int, b: int) -> tuple[str, re.Match[str]] | None:
+    """The last tax basis stated in ``text[a:b]``: ("incl" or "excl", its match)."""
+    found = [
+        (kind, m)
+        for kind, pat in (("incl", _TAX_INCLUDED), ("excl", _TAX_EXCLUDED))
+        for m in pat.finditer(text, a, b)
+    ]
+    return max(found, key=lambda f: f[1].start()) if found else None
+
+
+#: A total word naming the figure after it: "სულ 6 000 ლარი", "სულ დღგ-ს ჩათვლით: 6 000 ლარი",
+#: "ჯამი: ...", "Total: ...".
+_TOTAL_LABEL = re.compile(
+    r"(?<![ა-ჰa-z])(?:სულ|ჯამ[ა-ჰ]*|(?:grand\s+)?total)(?![ა-ჰa-z])[^.;\n\d]{0,40}$", re.IGNORECASE
+)
+#: A clause number opening a sentence: a new clause, never the price's own.
+_OPENS_CLAUSE = re.compile(r"\s*\d{1,2}(?:\.\d{1,2})+\.?\s")
+_BREAKDOWN_REACH = 200
+
+
+def _breakdown_part(text: str, start: int, end: int) -> bool:
+    """Whether the figure at ``text[start:end]`` opens a breakdown of the price: the VAT
+    labelled as such follows it, then the figure a total word names - "5 084.75 ლარი, დღგ -
+    915.25 ლარი, სულ 6 000 ლარი", also on lines of their own. The total is the one the total
+    word names; the figure before the tax is the price without it."""
+    tax = _next_money(text, end, end + _BREAKDOWN_REACH)
+    if tax is None or not is_tax_amount(text, tax.start()):
+        return False
+    total = _next_money(text, tax.end(), tax.end() + _BREAKDOWN_REACH)
+    return total is not None and _TOTAL_LABEL.search(text, tax.end(), total.start()) is not None
+
+
+def restatement(text: str, start: int) -> tuple[int, int] | None:
+    """The words that make the money figure at ``start`` the price restated on another tax
+    basis, not a second price; their span, or None. The figure is then an ``amount``, and the
+    tax wording inside the span is about it, not about the price (``document_facts`` reads the
+    VAT status so, and the money typing reads the figure so: the two cannot disagree).
+
+    * a bracket after the price: "1 180 ლარს დღგ-ს ჩათვლით (დღგ-ს გარეშე 1 000 ლარი)";
+    * a clause past a turn of the price's sentence that names a tax basis: "36 000 ლარს დღგ-ს
+      ჩათვლით, საიდანაც ღირებულება დღგ-ს გარეშე შეადგენს 30 508.47 ლარს", ", მათ შორის: დღგ-ს
+      გარეშე - 30 508.47 ლარი";
+    * the next sentence, stating the other basis of the price before it: "... 36 000 ლარს
+      დღგ-ს ჩათვლით. ღირებულება დღგ-ს გარეშე შეადგენს 30 508.47 ლარს.";
+    * the figure before the tax in a breakdown that a total closes (``_breakdown_part``).
+
+    A net figure stated alone ("ღირებულება დღგ-ს გარეშე შეადგენს 30 000 ლარს") is the price, and
+    so is a total its own clause names past a turn ("ავანსი 5 000 ლარი, ხოლო საერთო ღირებულება
+    დღგ-ს ჩათვლით 36 000 ლარი")."""
+    bracket = _restating_bracket(text, start)
+    if bracket is not None:
+        return bracket
+    money = _money_at(text, start)
+    if money is None:
+        return None
+    end = money.end()
+    sentence = _sentence_start(text, start)
+    # a turn may be the semicolon that ends the price's sentence: "6 000 ლარს; მათ შორის: ..."
+    turn = next(reversed(list(_AMOUNT_TURN.finditer(text, max(0, sentence - 1), start))), None)
+    if turn is not None:
+        own = text[turn.start() : start]
+        basis = _basis(text, turn.start(), start)
+        priced = _sentence_start(text, turn.start())
+        if (
+            basis is not None
+            and not _TOTAL_NAMED.search(own)
+            and not _PERIODIC.search(own)
+            and _has_money(text, priced, turn.start())
+            and not _PART_OF_PRICE.search(text, priced, turn.start())
+        ):
+            return basis[1].start(), end
+    basis = _basis(text, sentence, start)
+    if (
+        basis is not None
+        and turn is None
+        and sentence > 0
+        and not _OPENS_CLAUSE.match(text, sentence)
+        and not _has_money(text, sentence, start)
+    ):
+        previous = _sentence_start(text, sentence - 1)
+        before = _basis(text, previous, sentence)
+        if (
+            before is not None
+            and before[0] != basis[0]
+            and _has_money(text, previous, sentence)
+            and not _TOTAL_NAMED.search(text, sentence, start)
+        ):
+            return basis[1].start(), end
+    if _breakdown_part(text, start, end):
+        return (basis[1].start() if basis is not None else start), end
+    return None
+
+
+#: The name ``document_facts`` reads the restatement by; the bracket was its first form.
+restating_bracket = restatement
+
+
 def find_amounts(text: str) -> list[RuleHit]:
     hits: list[RuleHit] = []
     seen: set[tuple[int, int]] = set()
@@ -556,7 +718,7 @@ def find_amounts(text: str) -> list[RuleHit]:
                 ft = None
             if ft in (FactType.total_amount, FactType.price) and (
                 _is_share(text, span[0])
-                or restating_bracket(text, span[0]) is not None
+                or restatement(text, span[0]) is not None
                 or _named_in_own_clause(text, span[0])
             ):
                 # a guarantee, an advance or the VAT, as a share of the value; the price again
