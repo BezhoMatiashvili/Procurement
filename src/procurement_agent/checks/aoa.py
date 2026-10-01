@@ -627,8 +627,12 @@ _CONTRACT_NUMBER = rf"(?:{_NUMBER_MARKER})\s*{_REFERENCE}"
 #: მარტის ხელშეკრულების ...", "2026 წლის 9 მარტის № 318 ხელშეკრულების საფუძველზე" (its number
 #: in every form the number reader reads, red team R4: COMPARE-R4-01), "მხარეებმა 01.09.2026
 #: გააფორმეს ხელშეკრულება", "15.05.2026 წლის ხელშეკრულება". A comma only before a signing verb:
-#: "... 30 ივნისის ჩათვლით, ხელშეკრულების პირობების შესაბამისად" is the period's end.
+#: "... 30 ივნისის ჩათვლით, ხელშეკრულების პირობების შესაბამისად" is the period's end. A numeric
+#: date takes its case on a hyphen, the genitive or the instrumental ("15.05.2026-ის
+#: ხელშეკრულება", "-ისა", "-ით", red team R5: AOA-R5-01); "-დან", "-მდე" and "-ის ჩათვლით" are a
+#: period's first or last day, and a contract word after them names nothing.
 _CONTRACT_REFERENCE = re.compile(
+    r"(?:-(?:ისა?|ით)(?![ა-ჰ]))?"
     rf"(?:[\s,]*(?:გააფორმეს|გაფორმებული|დადებული|დადეს))?[\s{_Q}]*"
     rf"(?:{_CONTRACT_NUMBER}\s*|N\s*\S+\s*)?ხელშეკრულებ"
 )
@@ -1075,9 +1079,14 @@ class AoaChecker:
         that, the first date after either keyword as ``_date_hits_near`` reads it. A date in an
         advance clause is a payment's, never the act's: "... აქტის გაფორმების თარიღიდან 5 დღეში;
         ავანსი გადახდილია 2026 წლის 10 სექტემბერს" must not date the act 10 September.
+
+        Every reader passes over a date that names the contract (``contract_named_by``) and
+        takes the next one: "აქტი შედგენილია 2026 წლის 15 მაისის ხელშეკრულების საფუძველზე" is
+        dated by its heading, "აქტი შედგა 2026 წლის 15 მაისის ხელშეკრულების საფუძველზე, 2026
+        წლის 30 ივნისს" on 30 June (red team R5, AOA-R5-01).
         """
         text = self.aoa.text
-        hits = find_dates(text)
+        hits = [h for h in find_dates(text) if contract_named_by(text, h) is None]
         # the words that date the act, a slip in the signing verb allowed (red team R3)
         signed = sorted([m.span() for m in _ACT_SIGNED.finditer(text)] + [*_slipped_signing(text)])
         for key_start, key_end in signed:
@@ -1088,11 +1097,15 @@ class AoaChecker:
             if hit is not None and not _ADVANCE_WORDS.search(text, key_end, hit.start):
                 return date.fromisoformat(str(hit.normalized)), hit
         key_starts = _act_date_key_starts(text)
-        for d, hit in _date_hits_near(text, _act_date_key_starts):
+
+        def named(h: RuleHit) -> bool:
+            return contract_named_by(text, h) is not None
+
+        for d, hit in _date_hits_near(text, _act_date_key_starts, skip=named):
             key_at = max((s for s in key_starts if s <= hit.start), default=hit.start)
             if not self._in_advance_clause(hit.start) and not _contract_is_subject(text, key_at):
                 return d, hit
-        return _heading_date(text, hits)
+        return _heading_date(text, find_dates(text))
 
     def _act_date_places(self, hit: RuleHit) -> tuple[tuple[int, ...], int] | None:
         """Which places of the act's date, as written at ``hit``, a finding about it marks
