@@ -106,6 +106,7 @@ from procurement_agent.extraction.anchors import (
     PATRONYMIC,
     AnchorHit,
     Party,
+    defined_sides,
     find_anchors,
     find_parties,
     split_patronymic,
@@ -2098,6 +2099,20 @@ class AoaChecker:
                 "names, addresses and directors were not compared",
             )
             return
+        # a side the contract defines whose party it names in a form not read as one: its
+        # name, address and signatory go uncompared, and the report says so (red team R4)
+        sides = defined_sides(self.contract.text)
+        for role in sides if len(self.contract.parties) < len(sides) else []:
+            if not any(_side(q.role) == _side(role) for q in self.contract.parties):
+                self._skip(
+                    "AOA.PARTY_NAME",
+                    f"ხელშეკრულება განსაზღვრავს მხარეს „{role}“, მაგრამ მისი დასახელება ვერ "
+                    "წაიკითხა (სამართლებრივი ფორმა და დასახელება ბრჭყალებში), ამიტომ მისი "
+                    "დასახელება, მისამართი და ხელმომწერი არ შედარდა",
+                    f"the contract defines the party '{role}', but its name could not be read "
+                    "(a legal form and a quoted name), so its name, address and signatory were "
+                    "not compared",
+                )
         for m in self._matched_parties():
             p, match = m.party, m.match
             if m.code_of is not None and match is not None:
@@ -2207,6 +2222,25 @@ class AoaChecker:
         named = [*match.directors, *match.proxies]
         for proxy in p.proxies:
             if any(names_match(proxy, n) for n in named):
+                continue
+            # a slip of the attorney the contract names is that attorney misspelt, corrected
+            # as a director's slip is (red team R4, AOA-R4-12); anyone else is the warning below
+            guess = best_match(lemma(proxy), [lemma(c) for c in match.proxies])
+            if guess is not None and guess[1] is not None and guess[1].looks_like_typo:
+                written: list[tuple[str, tuple[int, int] | None]] = [*self._written_forms(proxy)]
+                for form, span in written or [(proxy, self._find_span(proxy))]:
+                    expected = keep_initial(form, in_case_of(form, guess[0]))
+                    self._add(
+                        "AOA.DIRECTOR",
+                        "error",
+                        f"მინდობილობით მოქმედი პირი არ ემთხვევა ხელშეკრულებას: „{form}“, უნდა "
+                        f"იყოს „{expected}“ (როგორც ჩანს, შეცდომაა)",
+                        f"the attorney does not match the contract: '{form}', expected "
+                        f"'{expected}' (looks like a misspelling)",
+                        expected=expected,
+                        actual=form,
+                        span=span,
+                    )
                 continue
             director = match.directors[0] if match.directors else None
             ka_dir = f"; ხელშეკრულებით ხელმომწერია {director}" if director else ""
@@ -3756,7 +3790,10 @@ def _match_party(p: Party, parties: list[Party]) -> _PartyMatch:
 #: Legal forms, as ``normalize_name`` leaves them, that a party's name starts with: the name
 #: proper is what follows them.
 _LEGAL_FORM_WORDS = frozenset(
-    {"შპს", "სს", "ააიპ", "სსიპ", "ი/მ", "ი", "მ", "ინდ", "ინდივიდუალური", "მეწარმე", "მეწარმ"}
+    {
+        *("შპს", "სს", "ააიპ", "სსიპ", "კს", "სპს", "ი/მ", "ი", "მ"),
+        *("ინდ", "ინდივიდუალური", "მეწარმე", "მეწარმ"),
+    }
 )
 
 

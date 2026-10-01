@@ -523,6 +523,59 @@ def parse_georgian_number_words(text: str) -> int | None:
     return total + current
 
 
+# --- legal forms ----------------------------------------------------------------------------------
+
+#: An individual entrepreneur, written out or shortened: "ინდივიდუალური მეწარმე", "ინდ. მეწარმე".
+ENTREPRENEUR = r"ინდ(?:\.|ივიდუალური)?\s*მეწარმ"
+
+
+def _dotted(letters: str) -> str:
+    """An abbreviation written with a full stop after each letter, a space after a stop allowed
+    and the last stop optional: "შ.პ.ს.", "შ. პ. ს.", "შ.პ.ს"."""
+    return r"\.\s?".join(letters) + r"\.?"
+
+
+#: A legal form written out in full, in any case, and its abbreviation: "შეზღუდული
+#: პასუხისმგებლობის საზოგადოება „…“" is "შპს „…“".
+SPELLED_OUT_LEGAL_FORMS: tuple[tuple[str, str], ...] = (
+    (r"შეზღუდული\s+პასუხისმგებლობის\s+საზოგადოებ[აისმ]{0,2}", "შპს"),
+    (r"სააქციო\s+საზოგადოებ[აისმ]{0,2}", "სს"),
+    (r"არასამეწარმეო\s*\(?\s*არაკომერციული\s*\)?\s*იურიდიული\s+პირ[ისმა]{0,2}", "ააიპ"),
+    (r"საჯარო\s+სამართლის\s+იურიდიული\s+პირ[ისმა]{0,2}", "სსიპ"),
+    (rf"{ENTREPRENEUR}[ეის]*", "ი/მ"),
+)
+#: A legal form abbreviated, in every spelling the documents use, and the abbreviation it folds
+#: to: a full stop after each letter ("შ.პ.ს.", "ს.ს.", "ა.ა.ი.პ.", "ს.ს.ი.პ."), or the optional
+#: letter of a non-commercial legal entity in brackets ("ა(ა)იპ"). One spelling of a form is
+#: the form (red team R4, AOA-R4-02, COMPARE-R4-05, EXTRACTION-R4-06): "ა(ა)იპ „…“" and "ააიპ
+#: „…“" name one party, and a party name carries the abbreviation.
+ABBREVIATED_LEGAL_FORMS: tuple[tuple[str, str], ...] = (
+    (rf"სსიპ|{_dotted('სსიპ')}", "სსიპ"),
+    (rf"ააიპ|ა\s?\(\s?ა\s?\)\s?იპ|{_dotted('ააიპ')}", "ააიპ"),
+    (rf"შპს|{_dotted('შპს')}", "შპს"),
+    (rf"სპს|{_dotted('სპს')}", "სპს"),
+    (rf"სს|{_dotted('სს')}", "სს"),
+    (rf"კს|{_dotted('კს')}", "კს"),
+    (r"ი\s*/\s*მ", "ი/მ"),
+)
+#: Every legal form a party's name is read after, written out or abbreviated, and its
+#: abbreviation. The one table the party reader, the comparison and the contractor's kind read.
+LEGAL_FORMS: tuple[tuple[str, str], ...] = SPELLED_OUT_LEGAL_FORMS + ABBREVIATED_LEGAL_FORMS
+#: Any legal form of ``LEGAL_FORMS``, as one alternation (no group of its own).
+LEGAL_FORM = "|".join(f"(?:{pattern})" for pattern, _ in LEGAL_FORMS)
+_LEGAL_FORMS_COMPILED = tuple((re.compile(pattern), short) for pattern, short in LEGAL_FORMS)
+
+
+def legal_form_abbreviation(written: str) -> str | None:
+    """The abbreviation of the legal form ``written`` ("შ.პ.ს." -> "შპს", "ა(ა)იპ" -> "ააიპ",
+    "სააქციო საზოგადოება" -> "სს"), or None when it is no legal form of ``LEGAL_FORMS``."""
+    written = written.strip()
+    for pattern, short in _LEGAL_FORMS_COMPILED:
+        if pattern.fullmatch(written):
+            return short
+    return None
+
+
 # --- identification codes -----------------------------------------------------------------------
 
 #: The labels a party's identification code is written behind, in every spelling the documents
