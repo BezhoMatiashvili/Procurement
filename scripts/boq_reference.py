@@ -575,6 +575,7 @@ def bill_chain(wv, sheet: Sheet) -> SummaryInfo | None:
     amount_c, desc_c = sheet.cols["amount"], sheet.cols["desc"]
     last = max((r.row for r in sheet.rows if r.qty is not None), default=sheet.number_row)
     roles: dict[str, tuple[int, float | Text | None]] = {}
+    between: list[float] = []  # valued rows between the total and the VAT (a contingency)
     for r in range(last + 1, ws.max_row + 1):
         label = next(
             (
@@ -598,6 +599,8 @@ def bill_chain(wv, sheet: Sheet) -> SummaryInfo | None:
             role = "total_cost"
         if role and role not in roles:
             roles[role] = (r, value)
+        elif role is None and "total_cost" in roles and "vat" not in roles and is_num(value):
+            between.append(value)  # type: ignore[arg-type]
     if "incl_vat" not in roles or "total_cost" not in roles:
         return None
     checks: list[dict] = []
@@ -606,10 +609,10 @@ def bill_chain(wv, sheet: Sheet) -> SummaryInfo | None:
         for k in ("total_cost", "vat", "incl_vat")
     )
     if tc is not None and inc is not None:
-        exp = math.fsum([tc, vat or 0.0])  # type: ignore[list-item]
+        exp = math.fsum([tc, *between, vat or 0.0])  # type: ignore[list-item]
         checks.append(
             {
-                "check": "incl_vat = total + vat (under the bill)",
+                "check": "incl_vat = total + rows between + vat (under the bill)",
                 "expected": r2(exp),
                 "stated": r2(inc),  # type: ignore[arg-type]
                 "ok": same_money(exp, inc),  # type: ignore[arg-type]

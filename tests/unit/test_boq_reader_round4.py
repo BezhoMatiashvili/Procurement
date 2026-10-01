@@ -683,6 +683,31 @@ def test_a_single_sheet_schedule_is_ranked_on_its_own_closing_rows(
         assert not {"BOQ.NOT_RANKED", "BOQ.RECONCILE", "BOQ.FILLED_BLANK"} & set(_rules(comp))
 
 
+def test_a_contingency_between_the_bills_total_and_its_vat_is_taxed_with_it(
+    tmp_path: Path,
+) -> None:
+    """Total, Contingency 5%, VAT on both, Total incl. VAT: the contingency is part of what VAT
+    is added to, and of the bidder's markup - never a gap in a faithful chain."""
+    books = []
+    for name, factor in (("t", None), ("A", 1.0), ("B", 0.9)):
+        cells, total = _bill(factor, close="Total")
+        sub = len(_LINES) + 2
+        cont, vat = total * 0.05, total * 1.05 * 0.18
+        rows = (
+            ("Contingency 5%", f"=F{sub}*0.05", cont),
+            ("VAT 18%", f"=(F{sub}+F{sub + 1})*0.18", vat),
+            ("Total incl. VAT", f"=F{sub}+F{sub + 1}+F{sub + 2}", total * 1.05 + vat),
+        )
+        for r, (label, formula, value) in enumerate(rows, sub + 1):
+            cells[(r, 2)] = label
+            cells[(r, 6)] = Fx(formula, value)
+        books.append(read_boq(_save(tmp_path / f"{name}.xlsx", {_SHEET: cells}), name=name))
+    a, b = compare_all(books[0], books[1:])
+    assert a.markup_factor == pytest.approx(1.05 * 1.18)
+    assert "BOQ.RECONCILE" not in _rules(a) + _rules(b)
+    assert (a.colour, b.colour) == ("red", "green")
+
+
 def test_a_vat_row_under_the_bill_off_its_rate_is_reported(tmp_path: Path) -> None:
     _, (a, b), _ = _schedules(tmp_path, vat_slip=50.0)
     [gap] = [f for f in a.findings if f.rule_id == "BOQ.RECONCILE"]

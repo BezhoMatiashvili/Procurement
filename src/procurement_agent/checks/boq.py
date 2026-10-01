@@ -3319,30 +3319,36 @@ def _reconcile_chain(
     rows: list[SummaryRow], roles: dict[str, SummaryRow], out: list[Finding], *, in_bill: bool
 ) -> None:
     """``in_bill``: the chain under a single-sheet schedule, whose closing total is before VAT
-    - the total VAT is added to when no row says excl. VAT."""
+    - with no row saying excl. VAT, the closing total and every valued row between it and the
+    VAT (a contingency) are what VAT is added to."""
     cost, overheads, profit = roles.get("cost"), roles.get("overheads"), roles.get("profit")
     excl, vat, incl = roles.get("excl"), roles.get("vat"), roles.get("incl")
 
-    def rated(part: SummaryRow | None, base: SummaryRow | None) -> None:
+    def rated(part: SummaryRow | None, base: list[SummaryRow]) -> None:
         """The row against its base x its rate: the rate its label states ("Overheads 10%")
         and the one typed beside it, either of which holding is enough."""
-        if part is None or base is None or part.value is None or base.value is None:
+        if part is None or not base or part.value is None or base[0].value is None:
             return
+        value = sum(r.value or 0.0 for r in base)
         rates = [x for x in (part.label_rate, part.rate) if x is not None]
-        if not rates or any(_same_money(part.value, base.value * x) for x in rates):
+        if not rates or any(_same_money(part.value, value * x) for x in rates):
             return
         rate = rates[0]
+        what = " + ".join(str(r.row) for r in base)
+        ka_rows = "სტრიქონები" if len(base) > 1 else "სტრიქონი"
         out.append(
             _summary_gap(
-                f"სტრიქონი {part.row} ({part.label[:30]}) ≠ სტრიქონი {base.row} x {rate:g}",
-                f"row {part.row} ({part.label[:30]}) against row {base.row} x {rate:g}",
+                f"სტრიქონი {part.row} ({part.label[:30]}) ≠ {ka_rows} {what} x {rate:g}",
+                f"row {part.row} ({part.label[:30]}) against row{'s' * (len(base) > 1)} "
+                f"{what} x {rate:g}",
                 part.value,
-                base.value * rate,
+                value * rate,
             )
         )
 
-    rated(overheads, cost)
-    rated(profit, cost)
+    costs = [cost] if cost is not None else []
+    rated(overheads, costs)
+    rated(profit, costs)
     if excl is not None and excl.value is not None and cost is not None and cost.value is not None:
         parts = _excl_parts(rows, cost, excl)
         want = sum(r.value or 0.0 for r in parts)
@@ -3356,14 +3362,17 @@ def _reconcile_chain(
                     want,
                 )
             )
-    if excl is None and cost is not None and (in_bill or _EXCL_VAT.search(cost.label)):
+    base = [excl] if excl is not None else []
+    if excl is None and cost is not None and _EXCL_VAT.search(cost.label):
         # "Total cost, excl. VAT" straight on to VAT: the cost is the total VAT is added to
-        excl = cost
-    rated(vat, excl)
-    if incl is not None and incl.value is not None and excl is not None and excl.value is not None:
-        want = excl.value + (vat.value or 0.0 if vat is not None else 0.0)
+        base = [cost]
+    elif excl is None and cost is not None and in_bill and (end := vat or incl) is not None:
+        base = _excl_parts(rows, cost, end)
+    rated(vat, base)
+    if incl is not None and incl.value is not None and base and base[0].value is not None:
+        want = sum(r.value or 0.0 for r in base) + (vat.value or 0.0 if vat is not None else 0.0)
         if not _same_money(incl.value, want):
-            joined = f"{excl.row} + {vat.row}" if vat is not None else str(excl.row)
+            joined = " + ".join(str(r.row) for r in [*base, *([vat] if vat is not None else [])])
             out.append(
                 _summary_gap(
                     f"სტრიქონი {incl.row} ({incl.label[:30]}) ≠ სტრიქონები {joined}",
