@@ -258,10 +258,10 @@ strict_findings: true             # anything else reported (any severity) is a f
     corrected to the other party's code;
   * a labelled code of the wrong length (7 to 13 digits) or grouped by hyphens or dots is read
     as the code the act states (red team R3): not the contract's → `AOA.ID_CODES`, text = the
-    code as printed, correction = the contract code it is two digit slips or fewer from (a digit
-    dropped, doubled or changed), written in the act's grouping (`987-654-312` →
-    `987-654-321`), and none when no contract code is that near; the message gives a wrong
-    length. Whether every party the contract codes must state its code in the act is not
+    code as printed, correction = the nearest contract code, written in the act's grouping
+    (`987-654-312` → `987-654-321`). A code of the wrong length is corrected only to a contract
+    code two digit slips or fewer from it (a digit dropped, doubled or changed), and otherwise
+    has none; the message gives its length. Whether every party the contract codes must state its code in the act is not
     decided: a code left out is silent;
   * a signatory written with a patronymic (`დავით გიორგის ძე მელაძე`) is compared on the first
     name and the surname; a finding quotes the whole name as written and its correction keeps
