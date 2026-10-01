@@ -26,11 +26,13 @@ upload ─► validate (type, size, magic bytes, zip-bomb, macros)
        ─► JSON / Excel / UI table with "show source" page images
 ```
 
-Georgian procurement documents are rigidly templated, so step 1 reads most fields exactly and
-instantly. On the client's test set it reads the seven label-anchored fields (parties, codes,
-directors, accounts, project, total) exactly, and the acceptance-act check never calls the LLM —
-which is why a check that used to take about ten minutes now takes under a second. Free-text
-fields such as payment terms or the subject are left to the model (see docs/ACCURACY.md).
+Georgian procurement documents are rigidly templated, so step 1 reads the fields exactly and
+instantly: parties, codes, directors, accounts, bank codes, projects and plots by their labels,
+and amounts, dates, periods, payment terms, VAT status, penalties and the subject by rules that
+know their Georgian wordings - every field in its canonical form (names in the nominative, ISO
+dates and ranges). The acceptance-act check never calls the LLM, which is why a check that used
+to take about ten minutes takes under a second. The model is off by default; asked, it only
+suggests fields the rules left empty, and its values are validated (see docs/ACCURACY.md).
 
 The LLM never sees the whole document and can never act — it only returns JSON that is
 validated and quote-checked against the text.
@@ -237,41 +239,26 @@ gitleaks scan of the full history.
 
 ## Accuracy and performance (this dev box: 18-core CPU, 30 GB RAM, no GPU)
 
-Measured with `scripts/evaluate.py` over the client's 7 Word documents (contract + 6 acceptance
-acts) and the 4 synthetic fixtures:
+Strict scoring against docs/GOLD_SPEC.md (canonical values compared exactly, every fact of an
+unlisted type a false positive, every finding scored with its correction and the places its
+Word comment marks), rules and anchors only:
 
-| gold set | precision | recall | rule findings | time |
-|---|---|---|---|---|
-| client (7 docs, rules + anchors), 7 anchor-friendly fields | 100% | 100% | every document matched | 0.7 s |
-| client (7 docs, rules + anchors), **all labelled fields** | 84.4% | 74.3% | every document matched | 0.8 s |
-| synthetic (4 fixtures) | 100% | 100% | every document matched | < 0.1 s |
+| measure | result |
+|---|---|
+| client set, Test Set 2, Test Set 3 (strict `scripts/evaluate.py`) | every field and every finding matched; nothing missing, nothing unexpected |
+| BOQ against an independent reference reader (`scripts/evaluate_boq.py`) | 106/106, 106/106, 132/132 checks: totals to the cent, common scope, colours, merged workbook |
+| act check, mutation harness (20 error classes, 6 fresh seeds) | 100% detected, 100% corrected in the act's own form, 100% of Word comments placed |
+| harmless edits (14 classes: styles, layouts, formats) | 0% false positives |
+| comparison of the same mutated pairs | 100% per class (one known edge case) |
+| BOQ mutation harness (17 classes, 5 seeds) | 100% of valid mutants |
+| scanned acts (OCR) against the Word contract | every planted mistake reported, no false error |
+| five adversarial red-team rounds | 285 confirmed defects found and fixed test-first; the rate fell from 17% to 8% of deliberately unusual variants |
 
-**Read these as fitting numbers, not held-out ones.** The label anchors were designed by reading
-this client's documents and the rules were tuned while watching this score, so it says the
-system handles *these* documents, not that it generalises.
-
-The two client rows are one run scored over different fields, and the gap is the point. The
-first covers the seven fields the anchors were built for. The second adds fields that had no
-gold labels until now — `vat_status`, `payment_terms`, `subject`, `execution_period`,
-`contract_date`, `penalty` — on which the deterministic layer scores **0%**, because it was
-never built to read them. They were not failing before; they were invisible, since
-`eval/gold.py` does not score a type nobody has labelled. That gap is the corpus for judging
-whether an LLM pass earns its cost.
-
-Three caveats before quoting any of it: the scanned PDFs (4172–4178) are not scored yet, because
-OCR runs only inside the Docker image; `total_amount` is the one originally-scored field with no
-anchor coverage, resting on keyword proximity, so the harness prints it under `fragile`; and
-eight of the twenty target fields — among them `price`, `quantity`, `delivery_deadline`,
-`warranty_period`, `validity_period`, `contract_number` — do not occur in these seven documents
-at all, so this corpus cannot measure them however it is scored. The honest test is the next
-document family, where the anchor hit rate is what will move first.
-
-"Rule findings matched" includes the constraint that matters most: the correct acceptance act
-produces **no** findings. All five errors the client planted are caught without the LLM,
-including the two the previous build missed — `100 (ორასი)`, where the digits and the Georgian
-number words disagree, and the four typos in Mistake #5. The harness also surfaced an error the
-client's own notes do not mention: Mistake #3 carries bank code `AAAGE22`, a seven-character
-code naming a different bank than the contract's `AAAAGE22`.
+**The sets above were looked at while fixing, so these are tuned numbers.** The honest ones are
+the first runs on unseen data (Test Set 3: extraction precision 88.8% / recall 87.6% before any
+fix) and the red-team rate: about one deliberately unusual wording or layout in thirteen still
+finds a defect. Measurements, the held-out runs, the decisions and the known limits are in
+**[docs/ACCURACY.md](docs/ACCURACY.md)**.
 
 | step | measured |
 |---|---|

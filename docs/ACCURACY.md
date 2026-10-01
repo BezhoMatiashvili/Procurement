@@ -27,43 +27,114 @@ must not, and `"*"` for a document that must be completely clean.
 
 ## Current results
 
-Rules and anchors only, no LLM (`scripts/evaluate.py --set all`, re-measured 2026-09-23):
+Measured 2026-10-01 on branch `accuracy-hardening` (rules and anchors only; the LLM is off by
+default and plays no part in any number below). Commands are in "How accuracy is measured".
 
-| set | fields scored | precision | recall | findings | time |
+### Strict evaluation against the gold sets (`scripts/evaluate.py --strict`, docs/GOLD_SPEC.md)
+
+Strict means canonical values compared exactly (names in the nominative, ISO dates and ranges,
+numbers as numbers), every fact of a type the gold does not list counted as a false positive,
+and every finding scored by rule, text, correction in the act's own form, severity and the
+number of places its Word comment marks.
+
+| set | documents | extraction (derived / labelled) | findings expected | missing | unexpected |
 |---|---|---|---|---|---|
-| client, 7 Word documents | 13 types, 109 values | 84.38% | 74.31% | all matched, correct act clean | 0.6 s |
-| client, the 7 anchor-friendly types¹ | 7 types, 80 values | 100% | 100% | — | — |
-| synthetic, 4 fixtures | 9 types, 18 values | 100% | 100% | all matched | < 0.1 s |
+| client (`client_v2`) | 6 acts, the contract, 6 compare pairs | 99/99 and 37/37 | all | 0 | 0 |
+| Test Set 2 (`ts2`) | 12 acts, the contract, compare pairs | 198/198 and 54/54 | all | 0 | 0 |
+| Test Set 3 (`ts3`) | 3 families, 23 acts, 3 contracts, compare pairs | 373/373 and 107/107 | all | 0 | 0 |
 
-¹ `bank_account`, `cadastral_code`, `party_director`, `party_id_code`, `party_name`,
-`project_name`, `total_amount`.
+These are **tuned** numbers: every set was looked at while fixing. The honest numbers are the
+first runs on data nobody had looked at, kept in `eval_runs/` (git-ignored):
 
-The overall client figure is below 100% because the gold set now also labels fields that the
-rules path does not attempt and the LLM path is meant to answer: `vat_status`,
-`payment_terms`, `subject`, `execution_period` and `contract_date` score 0% rules-only, and
-`penalty` 50% precision (one false positive). A number for these fields needs an LLM run
-(`--llm`); see "LLM-dependent fields" below.
+* Test Set 3, first run before any fix (`heldout-ts3-first-9f704c8.txt`): extraction strict
+  precision 88.8%, recall 87.6%; findings 50 matched, 9 missing, 20 unexpected.
+* Test Set 3 BOQ, first run (`heldout-ts3-boq-first-f65db38.txt`): 66 of 127 checks.
+* Prose spelling on 14 unseen texts (`heldout-prose-first-49f5827.txt`): 3 false flags on 7
+  acts checked against their contracts.
 
-These are **fitting** numbers. The anchors were designed by reading this client's documents and
-the rules were tuned while watching this score; the gold files were themselves corrected against
-extractor output where the document, not the expectation, turned out to be right. So the result
-says the system handles these documents, not that it generalises — and anchor hit rate, the
-measure meant to expose overfitting, is necessarily 100% on the corpus the anchors came from.
-It becomes informative on the next document family, which is when to look at it.
+### BOQ: an independent reference reader (`scripts/evaluate_boq.py`)
 
-Not yet scored: the scanned PDFs (OCR runs only inside the Docker image); `AOA.FX_INVOICE`,
-because neither client set has an act in a foreign currency, so no gold file expects it; and the
-contract-term, payment-term, party and scope rules (`AOA.ACT_DATE_IN_TERM`,
-`AOA.PAYMENT_DEADLINE`, `AOA.PAYMENT_METHOD`, `AOA.PAYMENT_ADVANCE`, `AOA.ID_CODE_PARTY`,
-`AOA.PARTY_ROLE`, `AOA.PARTY_MISSING`, `AOA.SUBJECT`, `AOA.SERVICES`), which fire on none of the
-client's acts — their planted mistakes exist only as synthetic unit tests. Nor is the model
-review of the subject and services: the figures above are rules-only, and so is every run of the
-evaluation (see "The act review" below).
+Totals to the cent at the template's quantities, common scope, colours, every finding, and
+every template position for every bidder in the merged workbook:
 
-The harness prints a `fragile` list: fields scoring well with **no** anchor coverage, carried by
-keyword proximity alone. `total_amount` is on it — it is found by the nearness of `საფასურ` or
-`ღირებულებ`, so a document that says `ანაზღაურება` instead would drop a field that currently
-reads as perfect.
+| set | checks |
+|---|---|
+| client (`AI Test`, 4 bidders, 13 sheets) | 106/106 |
+| Test Set 2 | 106/106 |
+| Test Set 3 (a second template: Georgian headers, a lettered Summary) | 132/132 |
+
+### Mutation harnesses (fresh seeds; mutated Word files parsed by Docling, as an upload is)
+
+`scripts/mutate_aoa.py` plants one change into a correct act and scores the act check and the
+comparison; seeds 71, 101, 131, 163, 197 and 199, 12 cases per class each:
+
+| | result |
+|---|---|
+| 20 error classes (codes, IBAN, BIC, plot, fee digits/words, act date, period year, director, party, address, project, month and number-word typos, a stray Latin/Cyrillic letter, removed project/plot, swapped roles) | 100% detected, 100% correction in the act's form, 100% of Word comments placed, on every seed |
+| 14 harmless classes (quote/dash/space styles, amount and date styles, run splits, table vs paragraphs, unquoted names, tetri, an equivalent in USD, a relabelled price, ...) | 0% false positives on every seed |
+| the comparison of the same pairs | 100% on every class, every seed, except one director slip that breaks its surname's declension (seed 199, see the limits) |
+| random one-letter typos in prose (`prose_typo`) | 83-92% detected; the misses are ties, letters no hand types, and words the dictionary lacks |
+| typing slips (`prose_slip`: neighbouring key, shift, doubled or extra letter, swap, drop) | 75-100% detected |
+
+`scripts/mutate_boq.py` (17 classes: quantity, unit, added/removed/reordered lines, description
+edits, hard-coded or wrong arithmetic, shifted Summary, renamed headers, text in numeric cells,
+merged cells, hidden rows, missing cached values, reconciliation, filled blanks), seeds 11, 17,
+23, 31 and 41: every valid mutant 100% (a mutant whose deletion breaks a Summary formula into
+`#REF!` is reported invalid, not scored).
+
+### Scanned PDFs (OCR inside the Docker image, Tesseract `kat+eng`, 216 dpi)
+
+The client's 7 scans, each paired with its Word twin by content: character error rate 0.16-0.40
+against the twin (an upper bound: layout order differs). Each scanned act checked against the
+**Word** contract: every planted mistake reported, no false error, the correct act clean. Against
+the **scanned** contract, the contract's own OCR is the limit: its IBAN and bank code read 0 of
+1, so Mistake #3's bank change cannot be compared and Mistake #4's wrong period year is reported
+as an act-date error; the correct act stays clean.
+
+### Five red-team rounds
+
+Each round, one agent per module wrote new adversarial documents (synthetic, never client data)
+- other wordings, layouts, number and date formats, combinations - and an independent verifier
+reproduced every claim. Every confirmed defect was fixed test-first, and each round re-ran every
+earlier round's repros as regressions (none regressed, but for two partial fixes found and
+completed in the next round):
+
+| round | variants tried | confirmed defects | share of variants | policy questions |
+|---|---|---|---|---|
+| 1 | 506 | 88 | 17.4% | 13 |
+| 2 | 546 | 58 | 10.6% | 8 |
+| 3 | 450 | 46 | 10.2% | 7 |
+| 4 | 584 | 45 | 7.7% | 13 |
+| 5 | 614 | 48 | 7.8% | 12 |
+
+The rate fell and flattened: about **one deliberately unusual variant in thirteen** still found a
+defect in round 5 (all of round 5's were then fixed, but round 5's fixes were not themselves
+red-teamed). That is the honest measure of what an unseen wording or layout may still do; the
+client's own documents and the three test sets pass completely. The decisions taken on the
+policy questions are in docs/GOLD_SPEC.md; the ones left open are listed below.
+
+### Tests
+
+3,984 unit and integration tests, 93.7% line coverage (`scripts/check.sh --offline`: ruff,
+format, mypy strict, bandit, pytest).
+
+### Known limits
+
+* **Unseen wording.** See the red-team table: new wordings still break about one variant in
+  thirteen of a deliberately adversarial set; most fail loudly (a skip note or "could not be
+  read"), not with a wrong answer.
+* **English documents.** An act or contract in English gets skip notes, not findings; English
+  party blocks and amounts in words are not read.
+* **A scanned contract** is only as good as its OCR: codes it misreads cannot be compared.
+* **Prose spelling** rests on the hunspell `ka_GE` dictionary, which lacks words and forms:
+  83-92% of random typos are found, and a correction no document writes is a note to check, not
+  a warning.
+* **A misspelled surname that no longer declines regularly** ("ტოგონძიე" for "ტოგონიძე") is
+  reported in the comparison with its value read off its genitive ("ტოგონძიი").
+* **Open policy questions** for the client: an act whose billing cycle crosses two months
+  (dated at the cycle's end or the month's end), resource-based estimates in BOQs (a work row
+  whose resource rows carry the amounts), a sweep-up "any other works" line every bidder prices,
+  and a fixed coefficient cell in every amount formula.
 
 ## The central design decision: read the label, do not ask the model
 
@@ -916,6 +987,8 @@ is what a rule and an LLM agreeing produce. The metric therefore measures differ
 configuration, and only the rules-only column is a true anchor rate.
 
 ## LLM-dependent fields
+
+*Historical (2026-09-23). Since the accuracy-hardening work these fields - `vat_status`, `payment_terms`, `subject`, `execution_period`, `contract_date`, `penalty` - are read by rules; see "Current results". The section is kept for the measurements behind the decision to keep the model optional.*
 
 `DEFAULT_TARGETS` has twenty fact types. The client gold set labels thirteen of them; the
 rules-and-anchors path reads seven of those exactly (the table above) and leaves
