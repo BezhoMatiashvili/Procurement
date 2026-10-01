@@ -725,7 +725,9 @@ was decided, and where one reader now serves several:
 * **One payment reader.** The words that make a clause a payment clause are built from verb
   roots (`rules.PAYMENT_WORDS`), which `contract_terms` reads for the act check and the
   extraction alike; the act check therefore also reads a deadline written with `გადაუხდის`. A
-  damages clause (`ზიან`, `damages`) is no payment clause, as a penalty's is not. English
+  damages clause (`ზიანს აუნაზღაურებს`, `damages`) is no payment clause, as a penalty's is not;
+  damage named only in passing (`თუ საქონელი არ არის დაზიანებული`, `free of damage`) leaves a
+  payment clause one. English
   `transfer` was left out: it moves goods as often as money.
 * **The VAT status is the price's.** The whole-document reader no longer lets wording decide the
   status that belongs to something else: a restated net figure's bracket

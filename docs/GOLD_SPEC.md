@@ -174,7 +174,8 @@ How the rules read money, terms and names (red-team round 3):
 * **Payment terms.** A payment clause is one whatever verb pays: every preverb and version of
   the roots pay (`გადაიხდის`, `გადაუხდის`, `გადაუხადოს`, `იხდის`), transfer (`გადაურიცხავს`,
   `ჩაირიცხება`), reimburse (`აუნაზღაურებს`, `აანაზღაურებს`) and settle, and English `pays`,
-  `paying`. Not a payer (`დღგ-ს გადამხდელი`), not damages (`ზიანს აუნაზღაურებს`), not English
+  `paying`. Not a payer (`დღგ-ს გადამხდელი`), not damages reimbursed (`ზიანს აუნაზღაურებს`; damage
+  named in passing, `თუ საქონელი არ არის დაზიანებული`, is), not English
   `transfer`. A clause after a semicolon that opens with the balance (`; the balance within 10
   working days`, `; დარჩენილი თანხა - ...`) pays with the verb before it.
 * **VAT.** `net` is a status only where it qualifies money: not `net of VAT` (`excl`), `net 30
