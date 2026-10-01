@@ -100,7 +100,15 @@ from procurement_agent.checks.fx_invoice import (
     plan_invoice,
     price_terms,
 )
-from procurement_agent.extraction.anchors import AnchorHit, Party, find_anchors, find_parties
+from procurement_agent.extraction.anchors import (
+    PATRONYMIC,
+    AnchorHit,
+    Party,
+    find_anchors,
+    find_parties,
+    split_patronymic,
+    with_patronymic,
+)
 from procurement_agent.extraction.georgian import (
     CASES,
     GEORGIAN,
@@ -1861,6 +1869,18 @@ class AoaChecker:
             if all(_near_word(w, p) for (w, _, _), p in zip(window, parts, strict=True)):
                 span = (window[0][1], window[-1][2])
                 forms.setdefault(self.aoa.as_written(*span), []).append(span)
+            elif len(parts) == 2 and i + 3 < len(found):
+                # a patronymic between the first name and the surname (red team R3, AOA-R3-06):
+                # the form is the name as written, patronymic and all
+                first, surname = window[0], found[i + 3]
+                between = self.aoa.text[first[2] : surname[1]]
+                if (
+                    PATRONYMIC.fullmatch(between.strip())
+                    and _near_word(first[0], parts[0])
+                    and _near_word(surname[0], parts[1])
+                ):
+                    span = (first[1], surname[2])
+                    forms.setdefault(self.aoa.as_written(*span), []).append(span)
         return list(forms.items())
 
     def _owner_at(self, pos: int) -> Party | None:
@@ -2026,7 +2046,9 @@ class AoaChecker:
             if not forms:
                 found = self._find_span(d)
                 forms = [(d, [found] if found else [])]
-            for form, spans in forms:
+            for written, spans in forms:
+                # a patronymic is no part of the name compared, and is kept in a correction
+                form, patronymic = split_patronymic(written)
                 # an inflection of the contract's name, and nothing else, is the same name
                 if any(_same_person(form, cd) for cd in theirs):
                     continue
@@ -2051,15 +2073,17 @@ class AoaChecker:
                 hint_en = " (looks like a misspelling)" if typo else ""
                 # the correction in the act's own grammar, form by form
                 expected = keep_initial(form, in_case_of(form, guess[0])) if guess else None
+                if expected is not None:
+                    expected = with_patronymic(expected, patronymic)
                 self._add(
                     "AOA.DIRECTOR",
                     "error",
-                    f"ხელმომწერი არ ემთხვევა ხელშეკრულებას: „{form}“, უნდა იყოს "
+                    f"ხელმომწერი არ ემთხვევა ხელშეკრულებას: „{written}“, უნდა იყოს "
                     f"„{expected}“{hint_ka}",
-                    f"signatory does not match the contract: '{form}', expected "
+                    f"signatory does not match the contract: '{written}', expected "
                     f"'{expected}'{hint_en}",
                     expected=expected,
-                    actual=form,
+                    actual=written,
                     span=span,
                     places=places,
                 )

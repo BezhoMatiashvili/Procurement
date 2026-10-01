@@ -1,7 +1,8 @@
 """Defects the third red-team round found in reading the parties, their codes and signatories.
 
 Each test names its defect (``samples/redteam/aoa/CONFIRMED_R3.md``): AOA-R3-01 (a code of the
-wrong length, or grouped by hyphens), AOA-R3-04 (an individual entrepreneur written out).
+wrong length, or grouped by hyphens), AOA-R3-04 (an individual entrepreneur written out),
+AOA-R3-05 (a functional director co-signing), AOA-R3-06 (a patronymic in a signatory's name).
 Synthetic text only: the pair is ``test_aoa_check``'s, every name and code invented, and each
 widened reading has a near miss beside it.
 """
@@ -17,7 +18,9 @@ from procurement_agent.checks.findings import CheckReport, Finding
 from procurement_agent.extraction.anchors import (
     _LEGAL_FORM,
     _legal_form,
+    find_anchors,
     find_parties,
+    split_patronymic,
 )
 from procurement_agent.extraction.normalize import (
     ID_CODE_RE,
@@ -225,3 +228,120 @@ def test_another_entrepreneur_written_out_is_still_another_party() -> None:
         _entrepreneur(ACT, "ინდივიდუალური მეწარმე", "ნანა ბერიძე"), _entrepreneur(CONTRACT, "ი/მ")
     )
     assert [f.severity for f in _of(report, "AOA.PARTY_NAME")] == ["error"]
+
+
+# --- AOA-R3-05: a financial, commercial or technical director is not the party's head -------------
+
+_SIGNATURE = "დირექტორი: დავით მელაძე"
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "ფინანსური დირექტორი",
+        "კომერციული დირექტორი",
+        "ტექნიკური დირექტორი",
+        "საოპერაციო დირექტორი",
+        "ფინანსური დირექტორის",
+    ],
+)
+def test_a_functional_director_co_signing_is_not_the_head(title: str) -> None:
+    act = ACT.replace(_SIGNATURE, f"{_SIGNATURE}\n{title}: ლევან წულაია")
+    assert _of(_check(act), "AOA.DIRECTOR") == []
+    [contractor] = [p for p in find_parties(act) if p.name == "შპს ბეტა სერვისი"]
+    assert contractor.directors == ["დავით მელაძე"]
+
+
+@pytest.mark.parametrize("title", ["გენერალური დირექტორი", "აღმასრულებელი დირექტორი"])
+def test_a_head_title_with_its_own_qualifier_is_still_the_head(title: str) -> None:
+    """The near miss: a second head under a head's title is compared, and is wrong here."""
+    act = ACT.replace(_SIGNATURE, f"{_SIGNATURE}\n{title}: ლევან წულაია")
+    [finding] = _of(_check(act), "AOA.DIRECTOR")
+    assert finding.actual == "ლევან წულაია"
+
+
+@pytest.mark.parametrize("surname", ["ჩიტაური", "სანტორო"])
+def test_a_signatory_whose_surname_ends_as_an_adjective_is_still_read(surname: str) -> None:
+    """The near miss for a flattened act: a surname in "-ური" or "სა-...-ო" right before the
+    next head's title is a name, not a qualifier of that title."""
+    act = (
+        ACT.replace("დირექტორი ნინო კაპანაძე", f"დირექტორი ნინო {surname}")
+        .replace("დირექტორის ნინო კაპანაძის", f"დირექტორის ნინო {surname}ს")
+        .replace("„შემსრულებელი“\nშპს „ბეტა სერვისი“\nდირექტორი: დავით მელაძე", "")
+        .replace(
+            f"დირექტორი ნინო {surname}\n", f"დირექტორი ნინო {surname}\nდირექტორი: დავით მელაძე\n"
+        )
+    )
+    names = [d for p in find_parties(act) for d in p.directors]
+    assert "დავით მელაძე" in names
+
+
+# --- AOA-R3-06: a patronymic in a signatory's name ------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("დირექტორი: დავით მელაძე", "დირექტორი: დავით გიორგის ძე მელაძე"),
+        ("დირექტორი ნინო კაპანაძე", "დირექტორი ნინო ზურაბის ასული კაპანაძე"),
+        ("დირექტორის დავით მელაძის სახით", "დირექტორის დავით გიორგის ძე მელაძის სახით"),
+    ],
+)
+def test_a_patronymic_is_no_part_of_the_name_compared(old: str, new: str) -> None:
+    act = ACT.replace(old, new) if old in ACT else ACT
+    contract = CONTRACT.replace(old, new) if old in CONTRACT else CONTRACT
+    assert _of(_check(act, contract), "AOA.DIRECTOR") == []
+
+
+def test_the_director_with_a_patronymic_is_read_as_first_name_and_surname() -> None:
+    act = ACT.replace("დირექტორი: დავით მელაძე", "დირექტორი: დავით გიორგის ძე მელაძე")
+    directors = [h for h in find_anchors(act) if h.type is FactType.party_director]
+    [hit] = [h for h in directors if "მელაძე" in h.value]
+    assert hit.value == "დავით მელაძე"
+    # the fact points at the name as the act writes it, not at the start of the text
+    assert hit.raw_text == "დავით გიორგის ძე მელაძე"
+
+
+def test_a_slip_in_a_surname_after_a_patronymic_is_still_an_error() -> None:
+    act = ACT.replace("დირექტორი: დავით მელაძე", "დირექტორი: დავით გიორგის ძე მელაძა")
+    [finding] = _of(_check(act), "AOA.DIRECTOR")
+    assert finding.severity == "error"
+    # the whole name as written is quoted, and its correction keeps the patronymic
+    assert (finding.quote, finding.actual, finding.expected) == (
+        "დავით გიორგის ძე მელაძა",
+        "დავით გიორგის ძე მელაძა",
+        "დავით გიორგის ძე მელაძე",
+    )
+
+
+def test_a_slip_in_a_genitive_after_a_patronymic_is_corrected_in_the_genitive() -> None:
+    act = ACT.replace(
+        "დირექტორის ნინო კაპანაძის სახით", "დირექტორის ნინო ზურაბის ასული კაპანაძას სახით"
+    )
+    [finding] = _of(_check(act), "AOA.DIRECTOR")
+    assert (finding.quote, finding.expected) == (
+        "ნინო ზურაბის ასული კაპანაძას",
+        "ნინო ზურაბის ასული კაპანაძის",
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "split"),
+    [
+        ("დავით გიორგის ძე მელაძე", ("დავით მელაძე", "გიორგის ძე")),
+        ("ნინო ზურაბის ასული კაპანაძე", ("ნინო კაპანაძე", "ზურაბის ასული")),
+        ("დავით მელაძე", ("დავით მელაძე", None)),
+        # near misses: no ძე/ასული, or not between the two names
+        ("დავით მელაძის ხელმოწერა თარიღი", ("დავით მელაძის ხელმოწერა თარიღი", None)),
+        ("დავით გიორგი ძე მელაძე", ("დავით გიორგი ძე მელაძე", None)),
+    ],
+)
+def test_a_patronymic_is_split_off_a_name(name: str, split: tuple[str, str | None]) -> None:
+    assert split_patronymic(name) == split
+
+
+def test_a_genitive_before_a_word_that_is_no_patronymic_is_read_as_before() -> None:
+    """The near miss: "<name> <genitive> <noun>" with no ძე/ასული reads two words, as it did."""
+    act = ACT.replace("დირექტორი: დავით მელაძე", "დირექტორი: დავით მელაძის ხელმოწერა")
+    [contractor] = [p for p in find_parties(act) if p.name == "შპს ბეტა სერვისი"]
+    assert contractor.directors == ["დავით მელაძის"]
