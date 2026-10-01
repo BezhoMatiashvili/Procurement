@@ -367,11 +367,19 @@ class TestAttorneyAtTheSignature:
         assert _substantive(report) == []
         assert not [s for s in report.skipped if s.rule_id == "AOA.DIRECTOR"]
 
-    def test_an_attorney_not_read_leaves_a_note(self) -> None:
-        for name in ("მზევინარ გოგიჩაიშვილო", "ციცინო გოგიჩაიშვილი"):
-            report = _check(_signed_by(name), _PROXY_CONTRACT)
-            notes = [s for s in report.skipped if s.rule_id == "AOA.DIRECTOR"]
-            assert any(name in s.reason_en for s in notes), name
+    def test_an_attorney_at_the_signature_is_read_and_compared(self) -> None:
+        """The party reader now reads "მინდობილი პირი: …" at the signature (red team R4-12), so
+        the attorney is compared end to end, not left to a note: a slip of the attorney the
+        contract names is an error with its correction, anyone else a warning to check the
+        power of attorney."""
+        slip = _check(_signed_by("მზევინარ გოგიჩაიშვილო"), _PROXY_CONTRACT)
+        other = _check(_signed_by("ციცინო გოგიჩაიშვილი"), _PROXY_CONTRACT)
+        assert [(f.severity, f.quote, f.expected) for f in _of(slip, "AOA.DIRECTOR")] == [
+            ("error", "მზევინარ გოგიჩაიშვილო", "მზევინარ გოგიჩაიშვილი")
+        ]
+        assert [(f.severity, f.quote, f.expected) for f in _of(other, "AOA.DIRECTOR")] == [
+            ("warning", "ციცინო გოგიჩაიშვილი", None)
+        ]
 
     def test_a_slip_of_the_contract_s_attorney_is_an_error_with_its_correction(self) -> None:
         act = _signed_by("მზევინარ გოგიჩაიშვილო")
