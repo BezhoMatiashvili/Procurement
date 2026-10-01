@@ -239,3 +239,49 @@ class TestRunningFiguresAreNoFee:
     def test_a_total_word_alone_is_still_a_wrong_fee(self) -> None:
         act = _with_figure("სულ: 150 ლარი.")
         assert [f.quote for f in _of(_check(act), "AOA.FEE")] == ["150 ლარი"]
+
+
+# --- AOA-R4-09: the term written in the act's style when the period writes its year once ---------
+
+
+class TestTermCorrectionWithTheYearWrittenOnce:
+    """The contract's term is 2026-03-01..2026-09-01; each period starts before it."""
+
+    def _expected(self, period: str) -> str | None:
+        act = ACT.replace(_PERIOD, f"მომსახურება შესრულდა {period}.")
+        [f] = _of(_check(act), "AOA.PERIOD_IN_TERM")
+        assert f.quote == period
+        return f.expected
+
+    def test_figures(self) -> None:
+        assert self._expected("25.02-30.04.2026") == "01.03.2026-01.09.2026"
+
+    def test_month_names(self) -> None:
+        assert (
+            self._expected("25 თებერვალი - 30 აპრილი, 2026 წ.")
+            == "1 მარტი, 2026 წ. - 1 სექტემბერი, 2026 წ."
+        )
+
+    def test_the_start_keeps_its_postposition(self) -> None:
+        assert (
+            self._expected("25 თებერვლიდან 30 აპრილის ჩათვლით, 2026 წ.")
+            == "1 მარტიდან, 2026 წ. 1 სექტემბრის ჩათვლით, 2026 წ."
+        )
+
+    def test_iso_stays_iso_and_full_dates_keep_their_style(self) -> None:
+        """Near misses: an act that writes ISO is corrected in ISO, and both ends with a year
+        keep their own style, as before."""
+        assert self._expected("2026-02-25 - 2026-04-30") == "2026-03-01 - 2026-09-01"
+        assert self._expected("25.02.2026-30.04.2026") == "01.03.2026-01.09.2026"
+
+    def test_the_year_is_borrowed_as_the_other_end_writes_it(self) -> None:
+        from procurement_agent.checks.aoa import _with_year_of
+
+        assert _with_year_of("25.05", "30.06.2026") == "25.05.2026"
+        assert _with_year_of("25 მაისიდან", "30 ივნისის ჩათვლით, 2026 წ.") == (
+            "25 მაისიდან, 2026 წ."
+        )
+        assert _with_year_of("25 მაისიდან", "2026 წლის 30 ივნისის") == "2026 წლის 25 მაისიდან"
+        # near misses: an end with its own year, and another end with none to lend
+        assert _with_year_of("25.05.2025", "30.06.2026") is None
+        assert _with_year_of("25.05", "30.06") is None

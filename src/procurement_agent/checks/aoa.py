@@ -3226,10 +3226,23 @@ class AoaChecker:
         a, b = ordered[0], ordered[-1]
         written = self.aoa.as_written(a.start, b.end)
 
-        def moved(d: date | None, h: RuleHit) -> str:
+        def moved(d: date | None, h: RuleHit, dated: RuleHit) -> str:
             if d is None:
                 return self.aoa.as_written(h.start, h.end)
-            return render_date_like(d, h.raw_text, following=text[h.end : h.end + 40])
+            following = text[h.end : h.end + 40]
+            out = render_date_like(d, h.raw_text, following=following)
+            if out != d.isoformat() or _ISO_WRITTEN.match(h.raw_text):
+                return out
+            # an end written without its year ("25.05-30.06.2026", "25 მაისიდან 30 ივნისის
+            # ჩათვლით, 2026 წ."): its own day and month, its "-დან" kept, with the year written
+            # as the other end writes it - or failing that, in the other end's style; never ISO
+            # unless the act wrote ISO (red team R4, AOA-R4-09)
+            for example in (_with_year_of(h.raw_text, dated.raw_text), dated.raw_text):
+                if example is not None and _YEAR_WRITTEN.search(example):
+                    out = render_date_like(d, example, following=following)
+                    if out != d.isoformat():
+                        return out
+            return out
 
         if (a.start, a.end) == (b.start, b.end):
             words = re.findall(rf"[{GEORGIAN}]+", a.raw_text)
@@ -3238,8 +3251,8 @@ class AoaChecker:
                 start = render_date_like(lo, f"{lo.year} წლის 1 მაისიდან")
                 end = render_date_like(hi, f"{hi.year} წლის 1 მაისის", following="ჩათვლით")
                 return written, f"{start} {end} ჩათვლით"
-            return written, f"{moved(lo, a)} - {moved(hi, a)}"
-        fixed = moved(lo, a) + self.aoa.as_written(a.end, b.start) + moved(hi, b)
+            return written, f"{moved(lo, a, a)} - {moved(hi, a, a)}"
+        fixed = moved(lo, a, b) + self.aoa.as_written(a.end, b.start) + moved(hi, b, a)
         return written, fixed
 
     def _period_year_repair(
@@ -4023,6 +4036,34 @@ def _fx_term_en(p: PricedTerm, currency: str, *, priced: bool) -> str:
     if priced and p.quote is not None and p.gel is not None:
         return f"{head} ({p.quote.rate:f}) = {p.gel:,.2f} {LOCAL_CURRENCY}"
     return head
+
+
+#: A date the act writes in ISO, which a correction may then write in ISO too.
+_ISO_WRITTEN = re.compile(r"\s*\d{4}-\d{2}-\d{2}")
+#: A four-digit year in a date as written.
+_YEAR_WRITTEN = re.compile(r"(?<!\d)(?:19|20)\d\d(?!\d)")
+#: A date that opens with its year: "2026 წლის 30 ივნისის", "2026 წ. 30 ივნისი".
+_YEAR_FIRST = re.compile(r"^\s*(?:19|20)\d\d\s*(?:წლის|წ\.)\s*")
+#: A date that closes with its year, and how it is joined on: "30.06.2026", "30 ივნისი, 2026 წ.".
+_YEAR_LAST = re.compile(
+    r"(?P<join>[./-]|,?\s*)(?P<year>(?:19|20)\d\d)(?P<tail>\s*წ(?:\.|[ა-ჰ]*))?\s*$"
+)
+
+
+def _with_year_of(yearless: str, dated: str) -> str | None:
+    """``yearless`` - a period's end written as a day and a month - with the year written the way
+    ``dated``, the period's other end, writes its own: "25.05" beside "30.06.2026" reads
+    "25.05.2026", "25 მაისიდან" beside "30 ივნისის ჩათვლით, 2026 წ." reads "25 მაისიდან, 2026
+    წ.", and beside "2026 წლის 30 ივნისის" reads "2026 წლის 25 მაისიდან". None when ``dated``
+    writes no year to borrow."""
+    own = yearless.strip()
+    if _YEAR_WRITTEN.search(own):
+        return None
+    if (m := _YEAR_FIRST.match(dated)) is not None:
+        return m.group(0).lstrip() + own
+    if (m := _YEAR_LAST.search(dated)) is not None:
+        return own + m.group("join") + m.group("year") + (m.group("tail") or "")
+    return None
 
 
 def _window_text(lo: date | None, hi: date | None) -> str:
