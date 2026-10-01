@@ -628,3 +628,100 @@ def test_a_summary_row_scaling_a_range_is_not_held_against_it(tmp_path: Path) ->
     summary = _range_summary(total, total * 0.1, f"=SUM('{_SHEET}'!F2:F6)*0.1")
     b = read_boq(_save(tmp_path / "b.xlsx", {"SUMMARY": summary, _SHEET: bill}))
     assert not [f for f in reconcile_summary(b) if "row 2 (WORKS)" in f.message_en]
+
+
+# --- R4-16 (policy): a single-sheet price schedule is ranked on its own closing rows -----------
+
+
+def _schedule(
+    factor: float | None, *, vat_cell: bool = False, vat_slip: float = 0.0, incl: bool = True
+) -> Cells:
+    """One sheet, no Summary: the bill, "Total", "VAT 18%" (=F7*0.18, or =F7*E8 with the rate
+    typed in E8) and "Total incl. VAT"."""
+    cells, total = _bill(factor, close="Total")
+    sub = len(_LINES) + 2
+    vat = total * 0.18 + vat_slip
+    cells[(sub + 1, 2)] = "VAT 18%"
+    if vat_cell:
+        cells[(sub + 1, 5)] = 0.18
+    formula = f"=F{sub}*E{sub + 1}" if vat_cell else f"=F{sub}*0.18"
+    cells[(sub + 1, 6)] = Fx(formula + (f"+{vat_slip:g}" if vat_slip else ""), vat)
+    if incl:
+        cells[(sub + 2, 2)] = "Total incl. VAT"
+        cells[(sub + 2, 6)] = Fx(f"=F{sub}+F{sub + 1}", total + vat)
+    return cells
+
+
+def _schedules(
+    tmp_path: Path, **kw: object
+) -> tuple[BoqWorkbook, list[BidComparison], dict[str, BoqWorkbook]]:
+    slip = kw.pop("vat_slip", 0.0)
+    books = {}
+    for name, factor in (("t", None), ("A", 1.0), ("B", 0.9)):
+        cells = _schedule(factor, vat_slip=slip if name == "A" else 0.0, **kw)  # type: ignore[arg-type]
+        books[name] = read_boq(_save(tmp_path / f"{name}.xlsx", {_SHEET: cells}), name=name)
+    t = books.pop("t")
+    return t, compare_all(t, list(books.values())), books
+
+
+@pytest.mark.parametrize("vat_cell", [False, True])
+def test_a_single_sheet_schedule_is_ranked_on_its_own_closing_rows(
+    tmp_path: Path, vat_cell: bool
+) -> None:
+    t, (a, b), _ = _schedules(tmp_path, vat_cell=vat_cell)
+    assert len(t.sheets[_SHEET].leaf_lines) == len(_LINES)  # VAT is never a position
+    assert a.evaluated_cost == pytest.approx(_COST)
+    assert a.markup_factor == pytest.approx(1.18)
+    assert a.common_scope_total == pytest.approx(_COST * 1.18)
+    assert b.common_scope_total == pytest.approx(_COST * 0.9 * 1.18)
+    assert (a.colour, b.colour) == ("red", "green")
+    for comp in (a, b):
+        assert not {"BOQ.NOT_RANKED", "BOQ.RECONCILE", "BOQ.FILLED_BLANK"} & set(_rules(comp))
+
+
+def test_a_vat_row_under_the_bill_off_its_rate_is_reported(tmp_path: Path) -> None:
+    _, (a, b), _ = _schedules(tmp_path, vat_slip=50.0)
+    [gap] = [f for f in a.findings if f.rule_id == "BOQ.RECONCILE"]
+    assert "row 8 (VAT 18%)" in gap.message_en and "row 7 x 0.18" in gap.message_en
+    assert gap.actual == "4,370.90" and gap.expected == "4,320.90"
+    assert "BOQ.RECONCILE" not in _rules(b)
+
+
+def test_a_workbook_with_no_summary_and_no_total_incl_vat_says_why_it_is_not_ranked(
+    tmp_path: Path,
+) -> None:
+    """Said where the bid is ranked or not (the skip note, the merged workbook's "Why"), never
+    "no total incl. VAT on its Summary sheet" of a workbook that has none."""
+    from procurement_agent.api.checks import _no_basis_note
+    from procurement_agent.checks.boq import _explain
+
+    _, (a, b), _ = _schedules(tmp_path, incl=False)
+    for comp in (a, b):
+        assert comp.markup_factor is None and comp.totals_from is None
+        skip = _no_basis_note(comp)
+        assert skip is not None and "no Summary sheet" in skip.reason_en
+        assert "on its Summary sheet" not in skip.reason_en
+        assert "no Summary sheet" in _explain(comp)
+    assert (a.colour, b.colour) == (None, None)
+
+
+def test_a_single_sheet_schedule_states_its_totals_under_the_bill(tmp_path: Path) -> None:
+    from procurement_agent.api.checks import _no_basis_note
+
+    _, (a, _b), _ = _schedules(tmp_path)
+    assert a.totals_from == "bill"
+    assert _no_basis_note(a) is None
+
+
+def test_a_workbook_with_several_priced_sheets_and_no_summary_is_not_ranked_on_one(
+    tmp_path: Path,
+) -> None:
+    """Only a single-sheet schedule states its totals under its bill: with two priced sheets the
+    totals of one are not the bid's."""
+    books = {}
+    for name, factor in (("t", None), ("A", 1.0)):
+        sheets = {_SHEET: _schedule(factor), "2. MORE": _bill(factor)[0]}
+        books[name] = read_boq(_save(tmp_path / f"{name}.xlsx", sheets), name=name)
+    assert books["A"].summary_rows == [] and books["A"].summary_in_bill is None
+    (a,) = compare_all(books["t"], [books["A"]])
+    assert a.markup_factor is None and a.totals_from is None

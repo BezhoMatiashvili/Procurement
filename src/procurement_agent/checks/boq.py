@@ -683,6 +683,9 @@ class BoqWorkbook:
     #: the Summary's header - its description or its TOTAL column - was not recognised, so no
     #: row of it was read (said so by ``BOQ.NOT_RANKED``, never "no row states ...")
     summary_header_unread: bool = False
+    #: a single-sheet price schedule with no Summary sheet: the sheet whose own closing rows
+    #: (Total, VAT, Total incl. VAT) are read as the Summary chain (``_summary_from_bill``)
+    summary_in_bill: str | None = None
     #: sheets that look priced (the Summary links to them, a SUB-TOTAL row, half a BOQ header)
     #: but whose columns could not be recognised - never skipped silently
     unreadable_sheets: list[str] = field(default_factory=list)
@@ -1316,7 +1319,36 @@ def _read_boq(values: Workbook, formulas: Workbook, *, name: str) -> BoqWorkbook
         if closing is not None:
             sheet.subtotal, sheet.subtotal_row = closing.amount, closing.row
         book.sheets[sheet_name] = sheet
+    if summary_sheet is None and len(book.sheets) == 1:
+        _summary_from_bill(book, next(iter(book.sheets.values())))
     return book
+
+
+def _summary_from_bill(book: BoqWorkbook, sheet: BoqSheet) -> None:
+    """A single-sheet price schedule with no Summary sheet - the ordinary goods or simplified
+    form - states its totals under the bill: "Total", "VAT 18%", "Total incl. VAT". Those rows
+    are its Summary chain, the sheet's closing total playing TOTAL COST (GOLD_SPEC 5). Such a
+    bid was evaluated and never ranked, with no word why. Taken only where a row below the
+    closing total says it is the total incl. VAT; otherwise the bid states no total
+    (``BOQ.NOT_RANKED``)."""
+    if sheet.subtotal_row is None:
+        return
+    rows = [
+        SummaryRow(
+            row=ln.row,
+            item=ln.item_no,
+            label=normalize_spaces(ln.description).strip(),
+            value=ln.amount,
+            label_rate=_rate_in_label(ln.description),
+        )
+        for ln in sheet.lines
+        if ln.row >= sheet.subtotal_row and ln.kind != "position"
+    ]
+    if not any(_plays("incl", r.label) for r in rows[1:]):
+        return
+    book.summary_rows = rows
+    book.summary = _summary_mapping(rows)
+    book.summary_in_bill = sheet.name
 
 
 def _is_number_row(ws: object, row: int) -> bool:
@@ -1795,7 +1827,12 @@ def summary_roles(book: BoqWorkbook) -> dict[str, SummaryRow]:
     roles: dict[str, SummaryRow] = {}
     costs = [r for r in rows if _plays("cost", r.label)]
     start = 0
-    if costs:
+    if book.summary_in_bill is not None and rows:
+        # the chain under a single-sheet schedule: its closing total is the cost, whatever
+        # it is labelled ("Total", "სულ")
+        roles["cost"] = rows[0]
+        start = 1
+    elif costs:
         after = next(
             (
                 r
@@ -1939,6 +1976,9 @@ class BidComparison:
     common_scope_positions: int = 0
     #: "red" (highest common-scope total), "green" (lowest) or None; set by ``compare_all``
     colour: str | None = None
+    #: where the bidder's stated totals were read: "summary" (its Summary sheet), "bill" (the
+    #: closing rows of a single-sheet schedule) or None (no Summary at all)
+    totals_from: str | None = None
     #: stated total incl. VAT minus evaluated total, broken down (incl. VAT, each term x markup):
     #: quantities, added_lines, priced_headings, added_sheets, summary, other
     difference: dict[str, float] = field(default_factory=dict)
@@ -2324,7 +2364,13 @@ def compare_bid(template: BoqWorkbook, bid: BoqWorkbook) -> BidComparison:
                 out.findings.extend(_arithmetic_findings(b_line, ()))
 
     _evaluate(out, bid)
-    if bid.summary_sheet is not None and out.markup_factor is None:
+    if bid.summary_sheet is not None:
+        out.totals_from = "summary"
+    elif bid.summary_in_bill is not None:
+        out.totals_from = "bill"
+    # a bid missing the template's Summary is said by BOQ.SHEET_REMOVED (``_summary_missing``);
+    # with no Summary anywhere, the skip note and the merged workbook say why (``_explain``)
+    if out.markup_factor is None and out.totals_from is not None:
         out.findings.append(_not_ranked(out, bid))
     out.findings.extend(reconcile_summary(bid))
     _list_findings(out)
@@ -3120,7 +3166,7 @@ def reconcile_summary(book: BoqWorkbook) -> list[Finding]:
                         total,
                     )
                 )
-    _reconcile_chain(rows, roles, out)
+    _reconcile_chain(rows, roles, out, in_bill=book.summary_in_bill is not None)
     return out
 
 
@@ -3167,8 +3213,10 @@ def _top_level_sections(rows: list[SummaryRow], cost: SummaryRow) -> list[Summar
 
 
 def _reconcile_chain(
-    rows: list[SummaryRow], roles: dict[str, SummaryRow], out: list[Finding]
+    rows: list[SummaryRow], roles: dict[str, SummaryRow], out: list[Finding], *, in_bill: bool
 ) -> None:
+    """``in_bill``: the chain under a single-sheet schedule, whose closing total is before VAT
+    - the total VAT is added to when no row says excl. VAT."""
     cost, overheads, profit = roles.get("cost"), roles.get("overheads"), roles.get("profit")
     excl, vat, incl = roles.get("excl"), roles.get("vat"), roles.get("incl")
 
@@ -3205,7 +3253,7 @@ def _reconcile_chain(
                     want,
                 )
             )
-    if excl is None and cost is not None and _EXCL_VAT.search(cost.label):
+    if excl is None and cost is not None and (in_bill or _EXCL_VAT.search(cost.label)):
         # "Total cost, excl. VAT" straight on to VAT: the cost is the total VAT is added to
         excl = cost
     rated(vat, excl)
@@ -3665,6 +3713,8 @@ def _write_totals_block(ws: object, row: int, comps: list[BidComparison]) -> int
 def _explain(comp: BidComparison) -> str:
     if not comp.evaluable:
         return "not evaluated: the workbook could not be read"
+    if comp.markup_factor is None and comp.totals_from is None:
+        return "no total: no Summary sheet, and no total incl. VAT under the bill"
     if comp.markup_factor is None:
         return "no total: the Summary states no TOTAL COST or no total incl. VAT"
     names = {
