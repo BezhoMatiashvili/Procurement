@@ -12,6 +12,7 @@ from procurement_agent.extraction.rules import (
     find_amounts,
     find_durations,
     find_percentages,
+    run_rules,
 )
 from procurement_agent.extraction.schemas import FactType, Provenance
 from procurement_agent.ingestion.chunker import Chunk
@@ -318,3 +319,57 @@ class TestContractPriceIsTheTotal:
             650.0: FactType.price,
             410.0: FactType.price,
         }
+
+
+# --- EXTRACTION-R4-02: a price table with the currency in its column header ----------------------
+
+UNIT_TABLE = (
+    "1, დასახელება = გეოდეზიური აგეგმვა. 1, რაოდენობა = 1. 1, ერთეულის ფასი (ლარი) = 2 500. "
+    "1, ჯამი (ლარი) = 2 500. 2, დასახელება = ტოპოგრაფიული გეგმა. 2, რაოდენობა = 1. "
+    "2, ერთეულის ფასი (ლარი) = 1 300. 2, ჯამი (ლარი) = 1 300. , დასახელება = სულ. "
+    ", რაოდენობა = . , ერთეულის ფასი (ლარი) = . , ჯამი (ლარი) = 3 800"
+)
+LUMP_TABLE = (
+    "1, დასახელება = გეოდეზიური აგეგმვა. 1, ღირებულება (ლარი) = 2 500. 2, დასახელება = "
+    "ტოპოგრაფიული გეგმა. 2, ღირებულება (ლარი) = 1 300. , დასახელება = სულ. , ღირებულება (ლარი) "
+    "= 3 800"
+)
+
+
+def _rule_money(text: str) -> list[tuple[float, FactType, str | None]]:
+    return [
+        (float(h.normalized), h.type, h.currency)  # type: ignore[arg-type]
+        for h in run_rules(text)
+        if h.type in (FactType.amount, FactType.price, FactType.total_amount)
+    ]
+
+
+class TestCurrencyInTheColumnHeader:
+    def test_a_unit_price_table(self) -> None:
+        assert _rule_money(UNIT_TABLE) == [
+            (2500.0, FactType.price, "GEL"),
+            (2500.0, FactType.amount, "GEL"),
+            (1300.0, FactType.price, "GEL"),
+            (1300.0, FactType.amount, "GEL"),
+            (3800.0, FactType.total_amount, "GEL"),
+        ]
+        facts = _extract(HEAD + "3. ღირებულება განისაზღვრება ცხრილით:\n" + UNIT_TABLE + "\n")
+        assert facts[FactType.total_amount] == ["3800.0"]
+        assert sorted(facts[FactType.price]) == ["1300.0", "2500.0"]
+
+    def test_a_lump_sum_table(self) -> None:
+        assert _rule_money(LUMP_TABLE) == [
+            (2500.0, FactType.amount, "GEL"),
+            (1300.0, FactType.amount, "GEL"),
+            (3800.0, FactType.total_amount, "GEL"),
+        ]
+
+    def test_near_miss_no_currency_in_the_header_or_a_rate_column_or_prose(self) -> None:
+        assert _rule_money("1, ღირებულება = 2 500. , დასახელება = სულ. , ღირებულება = 3 800") == []
+        assert _rule_money("1, დოლარის კურსი (ლარი) = 2.70. 1, რაოდენობა = 5.") == []
+        assert _rule_money("1, ფორმულარის ნომერი = 2 500.") == []
+        assert _rule_money("თანხა აშშ დოლარს 2026 წლის 5 მარტს.") == []
+
+    def test_a_cell_with_its_own_currency_is_read_once(self) -> None:
+        text = "1, ჯამი (ლარი) = 2 500 ლარი. , დასახელება = სულ. , ჯამი (ლარი) = 3 800 ლარი"
+        assert [v for v, *_ in _rule_money(text)] == [2500.0, 3800.0]

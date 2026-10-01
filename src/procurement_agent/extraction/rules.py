@@ -679,6 +679,79 @@ def restatement(text: str, start: int) -> tuple[int, int] | None:
 restating_bracket = restatement
 
 
+def _money_type(text: str, span: tuple[int, int]) -> FactType | None:
+    """What a money figure at ``span`` is: the total, a price, a penalty, or None (an
+    ``amount``). The nearest keyword says, then the table and the sentence around it: a line of
+    a price table, the contract's price named as its whole value, a share of the value, the
+    price restated on another tax basis, a part of the price its own clause names."""
+    ft = _classify(text, *span, (FactType.total_amount, FactType.penalty, FactType.price))
+    if ft == FactType.total_amount and _is_line_total(text, span[0]):
+        ft = None
+    if ft == FactType.price and is_contract_price(text, *span):
+        ft = FactType.total_amount  # "ხელშეკრულების ფასი", "the total price"
+    if ft in (FactType.total_amount, FactType.price) and (
+        _is_share(text, span[0])
+        or restatement(text, span[0]) is not None
+        or _named_in_own_clause(text, span[0])
+    ):
+        # a guarantee, an advance or the VAT, as a share of the value; the price again on
+        # another tax basis; an advance or a monthly fee its clause names beside the total
+        ft = None
+    return ft
+
+
+#: A currency a table's column header names, as a word of its own: "ღირებულება (ლარი)", "ჯამი,
+#: ლარი", "თანხა ლარში", "Amount (USD)". Not "ლარ" inside another word ("ფორმულარი").
+_HEADER_CURRENCY = re.compile(
+    r"(?<![ა-ჰA-Za-z])(?:ლარ(?:ი|ის|ში)?|(?:აშშ\s+)?დოლარ[ა-ჰ]*|ევრო|GEL|USD|EUR|GBP|lari"
+    r"|dollars?|euros?)(?![ა-ჰA-Za-z])|₾|\$|€|£",
+    re.IGNORECASE,
+)
+#: A column of exchange rates, not of money: "დოლარის კურსი", "Rate (GEL)".
+_RATE_COLUMN = re.compile(r"კურს|(?<![a-z])rate(?![a-z])", re.IGNORECASE)
+#: A cell's value that is a figure alone, ended by the cell's stop, a space or the line's end.
+_CELL_FIGURE = re.compile(rf"\s*({_NUM_RE})(?![\d.,]\d)(?=\.?(?:\s|$))")
+
+
+def find_header_amounts(text: str) -> list[RuleHit]:
+    """The money of a price table whose column header names the currency and whose cells hold
+    the figures alone: "1, ერთეულის ფასი (ლარი) = 4 000. ... , დასახელება = სულ. , ჯამი (ლარი) =
+    6 000" (Docling's "<row>, <column> = <cell>"). ``find_amounts`` needs a currency beside the
+    figure, so such a table had no money at all; its cells are typed as a table's are: the row
+    a total word names is the total, a line's total an ``amount``, a unit price a ``price``.
+    A currency word before a figure in prose stays no currency ("დოლარს 2026"): only a cell
+    under its column's header is read so. The act check reads these cells by its own reader
+    (``checks.amounts.header_money``), which ``find_amounts`` does not feed."""
+    hits: list[RuleHit] = []
+    for cell in _TABLE_CELL.finditer(text):
+        header = cell.group(2)
+        named = _HEADER_CURRENCY.search(header)
+        if named is None or _RATE_COLUMN.search(header):
+            continue
+        figure = _CELL_FIGURE.match(text, cell.end())
+        if figure is None:
+            continue
+        value = parse_number(figure.group(1))
+        cur = _norm_currency(named.group(0))
+        if value is None or cur is None:
+            continue
+        span = figure.span(1)
+        ft = _money_type(text, span)
+        hits.append(
+            RuleHit(
+                type=ft or FactType.amount,
+                value=f"{value:,.2f} {cur}",
+                raw_text=figure.group(1),
+                start=span[0],
+                end=span[1],
+                normalized=value,
+                currency=cur,
+                confidence=0.7 if ft else 0.5,
+            )
+        )
+    return hits
+
+
 # --- the contract's price ------------------------------------------------------------------------
 
 #: The word for a price, its last letters any case ending: "ფასი", "ფასს", "price".
@@ -768,22 +841,9 @@ def find_amounts(text: str) -> list[RuleHit]:
             if pat is _AMOUNT_AFTER and cur == "GEL":
                 value, tetri_end = _with_tetri(text, number, span[1], value)
                 span = (span[0], tetri_end)
-            ft = _classify(text, *span, (FactType.total_amount, FactType.penalty, FactType.price))
+            ft = _money_type(text, span)
             if ft is None and m.group(cur_group) == _LARI_ABBREVIATION:
                 continue  # "20 ლ." with no word about money: litres as likely as lari
-            if ft == FactType.total_amount and _is_line_total(text, span[0]):
-                ft = None
-            if ft == FactType.price and is_contract_price(text, *span):
-                ft = FactType.total_amount  # "ხელშეკრულების ფასი", "the total price"
-            if ft in (FactType.total_amount, FactType.price) and (
-                _is_share(text, span[0])
-                or restatement(text, span[0]) is not None
-                or _named_in_own_clause(text, span[0])
-            ):
-                # a guarantee, an advance or the VAT, as a share of the value; the price again
-                # on another tax basis; an advance or a monthly fee its clause names beside
-                # the total
-                ft = None
             seen.add(span)
             hits.append(
                 RuleHit(
@@ -1945,8 +2005,14 @@ def find_cadastral_codes(text: str) -> list[RuleHit]:
 
 def run_rules(text: str) -> list[RuleHit]:
     """All deterministic extractors over one piece of text, sorted by position."""
+    money = find_amounts(text)
+    money += [
+        h
+        for h in find_header_amounts(text)
+        if not any(_overlaps((h.start, h.end), (m.start, m.end)) for m in money)
+    ]
     hits = [
-        *find_amounts(text),
+        *money,
         *find_dates(text),
         *find_id_codes(text),
         *find_percentages(text),
