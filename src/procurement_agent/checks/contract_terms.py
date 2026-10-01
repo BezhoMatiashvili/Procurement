@@ -144,7 +144,7 @@ def _hits_between(hits: list[RuleHit], starts: list[int], a: int, b: int) -> lis
 # --- the role an amount plays -------------------------------------------------------------------
 
 AmountRole = Literal[
-    "price", "advance", "remainder", "penalty", "guarantee", "tax", "equivalent"
+    "price", "advance", "remainder", "penalty", "guarantee", "tax", "equivalent", "running"
 ]  # fmt: skip
 
 #: VAT's abbreviation, however it is dotted: "დღგ", "დ.ღ.გ.", "დ.ღ.გ". Every pattern that reads
@@ -232,6 +232,42 @@ _TAX_AFTER = re.compile(
 )
 
 
+#: A running figure of the contract, which is no fee of the act (red team R4, AOA-R4-08): the
+#: service done to date ("დღემდე შესრულებული ... ღირებულება"), the contract's balance
+#: ("ხელშეკრულების დარჩენილი ღირებულება", "ხელშეკრულების ნაშთი") and what was paid before ("წინა
+#: აქტებით ანაზღაურებულია", "უკვე გადახდილი"). Each names its figure in the words before it, in
+#: the figure's own clause. A total word alone - "სულ", "ჯამი", "ჯამური ღირებულება" - is no
+#: marker: it states the fee or the contract's total; "სულ ანაზღაურებულია" (paid in all) is one,
+#: "სულ ასანაზღაურებელია" (to be paid in all) is the fee. Nor is "დარჩენილი თანხა" without the
+#: contract named (the fee's second part after an advance), nor "-დან დღემდე", a period that
+#: ends today.
+_RUNNING = re.compile(
+    r"(?<![ა-ჰ])(?:"
+    r"(?<!დან )დღემდე|ამ\s+დრომდე|კუმულაციურ[ა-ჰ]*|ზრდადი\s+ჯამ[ა-ჰ]*"
+    r"|წინა\s+(?:აქტ|პერიოდ)[ა-ჰ]*|უკვე\s+(?:გადახდილ|ანაზღაურებულ|შესრულებულ)[ა-ჰ]*"
+    r"|(?:ადრე|სულ)\s+(?:გადახდილ|ანაზღაურებულ)[ა-ჰ]*"
+    r"|ხელშეკრულებ(?:ის|ით)\s+(?:დარჩენილ|ნაშთ|აუთვისებელ)[ა-ჰ]*"
+    r")(?![ა-ჰ])"
+    r"|(?<![a-z])(?:to\s+date|cumulative|so\s+far|previously\s+paid|already\s+paid"
+    r"|remaining\s+contract|contract\s+balance)(?![a-z])",
+    re.IGNORECASE,
+)
+#: How far back from a figure its running-figure words may stand.
+_RUNNING_REACH = 120
+#: Roles a running figure's words never override: what names the figure itself.
+_RUNNING_YIELDS_TO: frozenset[AmountRole | None] = frozenset(
+    {"advance", "penalty", "guarantee", "tax", "equivalent"}
+)
+
+
+def _names_a_running_figure(text: str, lo: int, start: int) -> bool:
+    """Whether the words before the figure at ``start``, in its clause (``lo`` on: its sentence,
+    or the end of the amount before it) and on this side of a ";", name it a running figure of
+    the contract (``_RUNNING``)."""
+    lo = max(lo, start - _RUNNING_REACH, text.rfind(";", lo, start) + 1)
+    return _RUNNING.search(text, lo, start) is not None
+
+
 @dataclass(frozen=True, slots=True)
 class RoledAmount:
     """One amount and the role its sentence gives it; None when the sentence names none."""
@@ -267,15 +303,18 @@ def amount_roles(text: str, *, sentences: list[tuple[int, int]] | None = None) -
     weighing), read inside the amount's sentence only, so a clause about the advance cannot
     lend its word to the price in the next one. A tax amount is the exception: only a tax named
     right before or right after the figure makes it one (``_TAX_BEFORE``, ``_TAX_AFTER``).
-    Penalties are kept and named.
+    Penalties are kept and named. A figure its clause names as a running figure of the
+    contract - done to date, the balance left, paid before (``_RUNNING``) - is "running".
     """
     spans = sentence_spans(text) if sentences is None else sentences
     out: list[RoledAmount] = []
+    previous_end = 0
     for money in money_hits(text, penalties=True):
         start, end = money.span
         i = _sentence_index(spans, start)
         a, b = spans[i] if i is not None else (start, end)
         b = max(b, end)
+        clause_from, previous_end = max(a, previous_end), end
         role: AmountRole | None
         opened = text.rfind("(", max(0, start - 40), start)
         if (
@@ -288,6 +327,8 @@ def amount_roles(text: str, *, sentences: list[tuple[int, int]] | None = None) -
             role = "tax"
         else:
             role = nearest_keyword_group(text[a:b], start - a, end - a, _ROLE_KEYWORDS)
+        if role not in _RUNNING_YIELDS_TO and _names_a_running_figure(text, clause_from, start):
+            role = "running"
         out.append(RoledAmount(money=money, role=role))
     return out
 

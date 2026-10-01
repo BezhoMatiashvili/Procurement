@@ -269,9 +269,10 @@ _ROLE_NAME: dict[AmountRole, tuple[str, str]] = {
     "guarantee": ("საგარანტიო თანხას", "the guarantee"),
     "tax": ("გადასახადის თანხას", "the tax amount"),
 }
-#: Act amounts that are neither the fee nor a part of it.
+#: Act amounts that are neither the fee nor a part of it. A running figure of the contract -
+#: done to date, the balance left, paid before - is none (red team R4, AOA-R4-08).
 _NOT_THE_FEE: frozenset[AmountRole | None] = frozenset(
-    {"penalty", "guarantee", "tax", "equivalent"}
+    {"penalty", "guarantee", "tax", "equivalent", "running"}
 )
 
 _NO_CONTRACT = "this rule compares the act against its contract, and none was supplied"
@@ -1304,7 +1305,9 @@ class AoaChecker:
         contract = self.contract.amounts()
         prices = [r.money for r in contract if r.role == "price"]
         if not prices:  # nothing is called a price: take what is plainly not something else
-            prices = [r.money for r in contract if r.role not in ("advance", "penalty", "tax")]
+            prices = [
+                r.money for r in contract if r.role not in ("advance", "penalty", "tax", "running")
+            ]
         return prices
 
     def _net_parts(self) -> list[RoledAmount]:
@@ -2889,6 +2892,20 @@ class AoaChecker:
                 "no price found in the contract to compare against",
             )
             return
+        running = [r.money for r in self.aoa.amounts() if r.role == "running"]
+        if running:
+            # the work done to date, the contract's balance or what was paid before: no fee of
+            # this act, and nothing the contract's price can confirm (red team R4, AOA-R4-08)
+            shown = ", ".join(m.raw for m in running[:5])
+            self._skip(
+                "AOA.FEE",
+                f"აქტში მითითებული თანხები ({shown}) ხელშეკრულების მიმდინარე მაჩვენებლებია "
+                "(დღემდე შესრულებული, დარჩენილი ან უკვე გადახდილი) და არა ამ აქტის საფასური: "
+                "ხელშეკრულების ღირებულებას არ შედარდა",
+                f"the act's amounts {shown} are running figures of the contract (done to date, "
+                "the balance left or paid before), not this act's fee: they were not compared "
+                "with the contract's price",
+            )
         if table_lines:
             shown = ", ".join(m.raw for m in table_lines[:5])
             self._skip(

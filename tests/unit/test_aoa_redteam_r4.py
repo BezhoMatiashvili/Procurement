@@ -173,3 +173,69 @@ class TestActDateMarkedOnlyWhereTheActIsDated:
         assert whole_word_spans(text, "30.04.2026") == [(0, 10), (42, 52)]
         assert whole_word_spans("ივნისიდან და ივნის", "ივნის") == [(13, 18)]
         assert whole_word_spans("ტექსტი", " ") == []
+
+
+# --- AOA-R4-08: work to date, the contract's balance and what was paid before are no fee ---------
+
+_FEE_LINE = "საფასური შეადგენს 100 (ასი) ლარს გადასახადების ჩათვლით."
+
+
+def _with_figure(sentence: str) -> str:
+    assert _FEE_LINE in ACT
+    return ACT.replace(_FEE_LINE, f"{_FEE_LINE} {sentence}")
+
+
+def _roles(text: str) -> list[tuple[float, str | None]]:
+    from procurement_agent.checks.contract_terms import amount_roles
+
+    return [(r.money.value, r.role) for r in amount_roles(text)]
+
+
+class TestRunningFiguresAreNoFee:
+    _RUNNING = (
+        "ხელშეკრულების ფარგლებში დღემდე შესრულებული მომსახურების ჯამური ღირებულება შეადგენს "
+        "300 (სამასი) ლარს.",
+        "ხელშეკრულების დარჩენილი ღირებულება შეადგენს 500 (ხუთასი) ლარს.",
+        "წინა აქტებით სულ ანაზღაურებულია 200 (ორასი) ლარი.",
+        "ხელშეკრულების ნაშთი შეადგენს 700 ლარს.",
+        "უკვე გადახდილი თანხა შეადგენს 200 ლარს.",
+        "სულ ანაზღაურებულია 200 (ორასი) ლარი.",
+    )
+
+    def test_each_leaves_the_act_clean_with_a_note(self) -> None:
+        for sentence in self._RUNNING:
+            report = _check(_with_figure(sentence))
+            assert _substantive(report) == [], sentence
+            assert any(s.rule_id == "AOA.FEE" for s in report.skipped), sentence
+
+    def test_the_figure_reads_as_running(self) -> None:
+        for sentence in self._RUNNING:
+            assert _roles(sentence)[-1][1] == "running", sentence
+
+    def test_the_fee_itself_is_still_compared(self) -> None:
+        act = _with_figure(self._RUNNING[1]).replace("100 (ასი) ლარს გადასახადების", "110 ლარს გ")
+        assert [f.quote for f in _of(_check(act), "AOA.FEE")] == ["110 ლარს"]
+
+    def test_the_fee_after_a_running_figure_in_one_sentence_is_the_fee(self) -> None:
+        """Near miss: the words before the figure before it do not reach the fee."""
+        text = "დღემდე შესრულებულის ღირებულება 300 ლარი, ხოლო ამ აქტით - 100 ლარი."
+        assert _roles(text) == [(300.0, "running"), (100.0, "price")]
+
+    def test_total_words_and_the_fee_s_remainder_keep_their_role(self) -> None:
+        """Near misses: a total word alone, the contract's total, the remainder of the fee after
+        an advance, an advance said to be paid, and a period that ends today."""
+        assert _roles("სულ: 150 ლარი.")[-1][1] in (None, "price")
+        assert _roles("სულ ასანაზღაურებელია: 150 ლარი.")[-1][1] in (None, "price")
+        assert _roles("ხელშეკრულების ჯამური ღირებულება შეადგენს 150 ლარს.") == [
+            (150.0, "price")
+        ]
+        assert _roles("ავანსის შემდეგ დარჩენილი თანხა 70 ლარი.")[-1][1] == "remainder"
+        assert _roles("ღირებულების დარჩენილი ნაწილი 70 ლარი გადაიხდება.")[-1][1] == "remainder"
+        assert _roles("ავანსი უკვე გადახდილია 30 ლარი.") == [(30.0, "advance")]
+        assert _roles("01.06.2026-დან დღემდე შესრულებული მომსახურების საფასური 100 ლარი.")[-1][
+            1
+        ] in (None, "price")
+
+    def test_a_total_word_alone_is_still_a_wrong_fee(self) -> None:
+        act = _with_figure("სულ: 150 ლარი.")
+        assert [f.quote for f in _of(_check(act), "AOA.FEE")] == ["150 ლარი"]
