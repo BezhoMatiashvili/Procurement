@@ -81,6 +81,7 @@ from procurement_agent.extraction.rules import (
     _KA_MONTHS,
     VAT_RATE_NOTE,
     RuleHit,
+    date_role,
     run_rules,
 )
 from procurement_agent.extraction.schemas import FactType
@@ -1412,7 +1413,11 @@ _DATE_TAIL = re.compile(
 def _postposition(written: str, tail: re.Match[str] | None) -> str:
     """What a date's postposition says of it: "from" (-დან), "until" (-მდე, ჩათვლით) or nothing
     (a case ending). "2026 წლის 31 დეკემბრამდე" is fused into the month's name, "31.12.2026-მდე"
-    written after the figures; the two are one date until one day."""
+    written after the figures; the two are one date until one day. A year written after the
+    date is its own and says nothing of the role ("30 ნოემბრის ჩათვლით, 2026 წ.", ``date_role``)."""
+    role = date_role(written)
+    if role is not None:
+        return role
     post = (tail.group("post") or "") if tail else ""
     for word in re.findall(r"[ა-ჰ]+", written):
         if any(word.startswith(stem) for stem in _KA_MONTH_STEMS):

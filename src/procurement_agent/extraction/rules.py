@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Hashable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
+from typing import Literal
 
 from procurement_agent.extraction.georgian import month_typo
 from procurement_agent.extraction.normalize import (
@@ -471,7 +472,12 @@ def find_amounts(text: str) -> list[RuleHit]:
 _YEAR_WORD = r"წ(?:\.|(?:ელი|ელს|ლის|ლისა)(?:ვე)?(?![ა-ჰ])|(?![ა-ჰ]))"
 #: ... and the same without the bare letter, which alone is too little to make "26" a year.
 _YEAR_WORD_SPELLED = r"წ(?:\.|(?:ელი|ელს|ლის|ლისა)(?:ვე)?(?![ა-ჰ]))"
-_DATE_NUMERIC = re.compile(r"(?<!\d)(\d{1,2})[./-](\d{1,2})[./-](\d{4})(?!\d)")
+#: A numeric date, with the word for year when one follows it ("05.07.2026 წ.", "05.07.2026
+#: წელს"): the word is part of the date, so the act's date is quoted whole and its correction
+#: keeps the word, as for a two-digit year.
+_DATE_NUMERIC = re.compile(
+    rf"(?<!\d)(\d{{1,2}})[./-](\d{{1,2}})[./-](\d{{4}})(?!\d)(?:\s*{_YEAR_WORD})?"
+)
 #: A two-digit year, only where the word for "year" says it is one: "12.05.26 წ.". The word is
 #: part of the date, so a correction written like it keeps it ("30.06.26 წ.").
 _DATE_NUMERIC_SHORT_YEAR = re.compile(
@@ -489,11 +495,17 @@ _DATE_KA_YMD = re.compile(
     rf"(?<!\d)(?P<y>\d{{4}})[.,\s]*წ(?:ლის|\.)?\s*{_KA_DAY}\.?\s*(?P<m>{_KA_MONTH_FUZZY})",
     re.IGNORECASE,
 )
+#: A day and a month, then the year: "30 ივნისი, 2026 წ.", also with the end's "up to and
+#: including" between them ("30 ნოემბრის ჩათვლით, 2026 წ."), which is part of the date.
 _DATE_KA_DMY = re.compile(
-    rf"(?<!\d){_KA_DAY}\.?\s*(?P<m>{_KA_MONTH_FUZZY}),?\s*(?P<y>\d{{4}})(?!\d)"
-    rf"(?:\s*{_YEAR_WORD})?",
+    rf"(?<!\d){_KA_DAY}\.?\s*(?P<m>{_KA_MONTH_FUZZY})(?P<incl>\s+ჩათვლით)?,?\s*"
+    rf"(?P<y>\d{{4}})(?!\d)(?:\s*{_YEAR_WORD})?",
     re.IGNORECASE,
 )
+#: A year written after a date and a postposition, and the word that makes it a year:
+#: "30 ნოემბრამდე, 2026 წ." ends on 30 November 2026.
+_TRAILING_YEAR = re.compile(rf"[\s,]*\d{{4}}(?:\s*{_YEAR_WORD})?\s*$")
+_UNTIL_END = re.compile(r"(?:მდე|ჩათვლით)$")
 _DATE_EN_DMY = re.compile(
     rf"(?<!\d)(\d{{1,2}})(?:st|nd|rd|th)?\s+({_EN_MONTH_RE})\.?,?\s+(\d{{4}})", re.IGNORECASE
 )
@@ -509,22 +521,26 @@ _KA_DAY_MONTH_AFTER = re.compile(
     rf"\s*(\d{{1,2}})\s+({_KA_MONTH_FUZZY})(?![ა-ჰ])(?!\s*,?\s*\d{{4}})"
 )
 _KA_DAYS_OF_MONTH = re.compile(
-    rf"(?<!\d)(\d{{4}})[.,\s]*წ(?:ლის|\.)?\s*(\d{{1,2}})\s*(?:-\s*დან|დან|[-\u2013])\s*"
-    rf"(\d{{1,2}})\s+({_KA_MONTH_FUZZY})"
+    rf"(?<!\d)(?P<y>\d{{4}})[.,\s]*წ(?:ლის|\.)?\s*(?P<a>\d{{1,2}})\s*(?P<sep>-\s*დან|დან|[-\u2013])"
+    rf"\s*(?P<b>\d{{1,2}})\s+(?P<m>{_KA_MONTH_FUZZY})"
 )
 _KA_RANGE_YEAR_AFTER = re.compile(
     rf"(?<![\d.])(\d{{1,2}})\s+({_KA_MONTH_FUZZY}დან)\s+(\d{{1,2}})\s+({_KA_MONTH_FUZZY})"
     rf"(?:\s+ჩათვლით)?\s*,?\s*(\d{{4}})\s*წ"
 )
 
+#: A date of a range: where it stands, its day, its words, and where the date that closes the
+#: range stands (None for a range's last day, or a date that closes nothing).
+_RangeDate = tuple[tuple[int, int], date, str, tuple[int, int] | None]
+
 
 def _range_ends_without_year(
     text: str, found: dict[tuple[int, int], tuple[date, str, str | None]]
-) -> list[tuple[tuple[int, int], date, str]]:
+) -> list[_RangeDate]:
     """The dates of a Georgian period that take their year - or month and year - from the other
     end or from the year written after the period. Unread, "2026 წლის 1 მაისიდან 31 მაისის
     ჩათვლით" was a period of one day, and the other forms no period at all."""
-    out: list[tuple[tuple[int, int], date, str]] = []
+    out: list[_RangeDate] = []
 
     def month_day(y: int, mo_word: str, d: int) -> date | None:
         mo = _month_ka(mo_word)
@@ -540,50 +556,89 @@ def _range_ends_without_year(
         if dt is not None and dt < first:  # "20 დეკემბრიდან 10 იანვრამდე": the next year's
             dt = month_day(first.year + 1, m.group(2), int(m.group(1)))
         if dt is not None:
-            out.append(((m.start(1), m.end()), dt, m.group(0).strip()))
+            out.append(((m.start(1), m.end()), dt, m.group(0).strip(), None))
     for m in _KA_DAYS_OF_MONTH.finditer(text):
-        a = month_day(int(m.group(1)), m.group(4), int(m.group(2)))
-        b = month_day(int(m.group(1)), m.group(4), int(m.group(3)))
+        a = month_day(int(m.group("y")), m.group("m"), int(m.group("a")))
+        b = month_day(int(m.group("y")), m.group("m"), int(m.group("b")))
         if a is not None and b is not None:
-            out.append(((m.start(), m.start(3)), a, text[m.start() : m.start(3)].strip()))
-            out.append(((m.start(3), m.end()), b, text[m.start(3) : m.end()]))
+            # "2026 წლის 1-დან": the first day keeps its "from"; "2026 წლის 1-31 მაისი": the
+            # dash stands between the two days, as it does between two dates
+            stop = m.end("sep") if m.group("sep").endswith("დან") else m.end("a")
+            last = (m.start("b"), m.end())
+            out.append(((m.start(), stop), a, text[m.start() : stop].strip(), last))
+            out.append((last, b, text[last[0] : last[1]], None))
     for m in _KA_RANGE_YEAR_AFTER.finditer(text):
         a = month_day(int(m.group(5)), m.group(2), int(m.group(1)))
         b = month_day(int(m.group(5)), m.group(4), int(m.group(3)))
         if a is not None and b is not None:
-            out.append(((m.start(1), m.end(2)), a, text[m.start(1) : m.end(2)]))
-            out.append(((m.start(3), m.end(4)), b, text[m.start(3) : m.end(4)]))
+            out.append(((m.start(1), m.end(2)), a, text[m.start(1) : m.end(2)], None))
+            out.append(((m.start(3), m.end(4)), b, text[m.start(3) : m.end(4)], None))
     return out
 
 
 #: A day and a dash right before a date that opens with its own day: "1-15 ივნისი, 2026 წ.",
 #: "01-15.06.2026", "1 - 15 June 2026". Nothing that makes the number something else stands
-#: before it: a digit, a stop, a slash, a dash or a letter ("1.5-15", "N12-15", "01.06-15.06").
+#: before it: a digit, a stop, a slash, a dash or a letter ("1.5-15", "N12-15").
 _DAY_RANGE_FIRST = re.compile(r"(?<![\w./\-\u2013])(\d{1,2})\s?[-\u2013]\s?$")
+#: A day and a month and a dash right before a date that opens with its own day, the year
+#: written once for both: "01.06-30.06.2026", "1 ივნისი - 30 ივნისი, 2026 წ.". The month in
+#: figures has two digits, as the date after it writes its own ("1.2-3.04.2026" reads as a
+#: clause or a version number), and nothing stands before the day that makes it part of another
+#: number: a digit (also one word before), a stop, a slash, a dash or a letter.
+_DAY_MONTH_RANGE_FIRST = re.compile(
+    r"(?<![\w./\-\u2013])(?<!\d\s)(?P<d>\d{1,2})(?:(?P<sep>[./])(?P<mo>\d{2})|\s+(?P<m>[ა-ჰ]{3,14}))"
+    r"\s*[-\u2013]\s*$"
+)
+#: A numeric date whose month has two digits: "30.06.2026", "30/06/2026 წ.".
+_TWO_DIGIT_MONTH = re.compile(r"\d{1,2}(?P<sep>[./])\d{2}(?P=sep)\d{4}")
 #: A number marker before the day makes it a number: "N 3-15 ივნისი".
 _NUMBER_BEFORE = re.compile(r"(?:№|#|(?<![A-Za-zა-ჰ])N)\s*$")
 _LEADING_DAY = re.compile(r"\d{1,2}(?!\d)")
+_REACH_BEFORE = 24
 
 
-def _day_range_firsts(
+def _range_firsts(
     text: str, found: dict[tuple[int, int], tuple[date, str, str | None]]
-) -> list[tuple[tuple[int, int], date, str]]:
-    """The first day of a range written as two days before one month and year - "1-15 ივნისი,
-    2026 წ.", "01-15.06.2026" - in that date's month and year. Unread, the period was its last
-    day alone. Its span runs up to the last day's, so the two quote the period as written."""
-    out: list[tuple[tuple[int, int], date, str]] = []
-    for (start, _end), (last, raw, _note) in list(found.items()):
+) -> list[_RangeDate]:
+    """The first day of a range written before a date that states the month and the year for
+    both ends, in that year: two days before one month and year - "1-15 ივნისი, 2026 წ.",
+    "01-15.06.2026" - in that date's month too, and a day and a month before it -
+    "01.06-30.06.2026", "1 ივნისი - 30 ივნისი, 2026 წ." - in their own month. Unread, the
+    period was its last day alone. The first day's span ends before the dash, which stands
+    between the two dates as it does in "01.06.2026 - 30.06.2026": every reader of a range reads
+    both forms as one."""
+    out: list[_RangeDate] = []
+    for (start, end), (last, raw, _note) in list(found.items()):
         lead = _LEADING_DAY.match(raw)
         if lead is None or int(lead.group(0)) != last.day:
             continue  # the date does not open with its own day (ISO, "June 15, 2026", „15“)
+        window = max(0, start - _REACH_BEFORE)
         m = _DAY_RANGE_FIRST.search(text, max(0, start - 8), start)
-        if m is None or _NUMBER_BEFORE.search(text, max(0, m.start() - 4), m.start(1)):
+        if m is not None:
+            if _NUMBER_BEFORE.search(text, max(0, m.start() - 4), m.start(1)):
+                continue
+            first_day = int(m.group(1))
+            if 1 <= first_day < last.day:
+                span = (m.start(1), m.end(1))
+                out.append((span, last.replace(day=first_day), m.group(1), (start, end)))
             continue
-        first_day = int(m.group(1))
-        if not 1 <= first_day < last.day:
+        m = _DAY_MONTH_RANGE_FIRST.search(text, window, start)
+        if m is None or _NUMBER_BEFORE.search(text, max(0, m.start() - 4), m.start("d")):
             continue
-        first = last.replace(day=first_day)
-        out.append(((m.start(1), start), first, text[m.start(1) : start].strip()))
+        if m.group("mo") is not None:
+            numeric = _TWO_DIGIT_MONTH.match(raw)
+            if numeric is None or numeric.group("sep") != m.group("sep"):
+                continue
+            month: int | None = int(m.group("mo"))
+        else:
+            if not _GEORGIAN_LETTER.search(raw):
+                continue  # a Georgian day and month before an English or numeric date
+            month = _month_ka(m.group("m"))
+        first = _safe_date(last.year, month, int(m.group("d"))) if month else None
+        if first is None or first >= last:
+            continue
+        span = (m.start("d"), m.end("mo") if m.group("mo") is not None else m.end("m"))
+        out.append((span, first, text[span[0] : span[1]], (start, end)))
     return out
 
 
@@ -643,6 +698,29 @@ def _month_en(s: str) -> int | None:
     return _EN_MONTHS.get(s.lower()[:3])
 
 
+def _opens_a_date(text: str, at: int) -> bool:
+    """Whether a Georgian date written year first starts at ``at``: "2027 წლის 1 იანვარი"."""
+    m = _DATE_KA_YMD.match(text, at)
+    return m is not None and _month_ka(m.group("m")) is not None
+
+
+DateRole = Literal["from", "until"]
+
+
+def date_role(raw: str) -> DateRole | None:
+    """Whether a date as written is a range's first day ("from") or its last ("until"), by the
+    postposition on its own words: "1 მარტიდან", "30 ნოემბრამდე", "30 ნოემბრის ჩათვლით". A year
+    written after it belongs to the date and says nothing of its role: "30 ნოემბრამდე, 2026 წ."
+    is an end, as "2026 წლის 30 ნოემბრამდე" is. None when the date's words carry no mark (it
+    may stand after them: "01.03.2026-დან")."""
+    head = _TRAILING_YEAR.sub("", raw.strip())
+    if _UNTIL_END.search(head):
+        return "until"
+    if head.endswith("დან"):
+        return "from"
+    return None
+
+
 def find_dates(text: str) -> list[RuleHit]:
     found: dict[tuple[int, int], tuple[date, str, str | None]] = {}
 
@@ -656,6 +734,8 @@ def find_dates(text: str) -> list[RuleHit]:
 
     for pattern in (_DATE_KA_YMD, _DATE_KA_DMY):
         for m in pattern.finditer(text):
+            if pattern is _DATE_KA_DMY and m.group("incl") and _opens_a_date(text, m.start("y")):
+                continue  # "30 ნოემბრის ჩათვლით, 2027 წლის 1 იანვრიდან": the year is the next's
             mo = _month_ka(m.group("m"))
             dt = _safe_date(int(m.group("y")), mo, int(m.group("d"))) if mo else None
             add(m, dt, m.group("m"))
@@ -671,10 +751,13 @@ def find_dates(text: str) -> list[RuleHit]:
         add(m, _safe_date(int(m.group(3)), int(m.group(2)), int(m.group(1))))
     for m in _DATE_NUMERIC_SHORT_YEAR.finditer(text):
         add(m, _safe_date(2000 + int(m.group(3)), int(m.group(2)), int(m.group(1))))
-    for span, dt, raw in _range_ends_without_year(text, found):
-        found.setdefault(span, (dt, raw, None))
-    for span, dt, raw in _day_range_firsts(text, found):
-        found.setdefault(span, (dt, raw, None))
+    closes: dict[tuple[int, int], tuple[int, int]] = {}
+    for reader in (_range_ends_without_year, _range_firsts):
+        for span, dt, raw, last in reader(text, found):
+            if span not in found:
+                found[span] = (dt, raw, None)
+                if last is not None:
+                    closes[span] = last
 
     hits: list[RuleHit] = []
     last_end = -1
@@ -710,7 +793,24 @@ def find_dates(text: str) -> list[RuleHit]:
                 note=note,
             )
         )
-    return hits
+    return _one_type_per_range(hits, closes)
+
+
+def _one_type_per_range(
+    hits: list[RuleHit], closes: dict[tuple[int, int], tuple[int, int]]
+) -> list[RuleHit]:
+    """A range's first day typed as the date that closes it. Each is typed by the keyword
+    nearest to it, and a first day typed apart from its last ("01" a delivery deadline,
+    "30.06.2026" an execution period) was no range to the readers that join two dates of one
+    type."""
+    at = {(h.start, h.end): h for h in hits}
+    out: list[RuleHit] = []
+    for h in hits:
+        last = at.get(closes.get((h.start, h.end), (-1, -1)))
+        if last is not None and last.type is not h.type:
+            h = replace(h, type=last.type, confidence=last.confidence)
+        out.append(h)
+    return out
 
 
 # --- identification codes ----------------------------------------------------------------------

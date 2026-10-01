@@ -40,6 +40,8 @@ from procurement_agent.checks.contract_terms import (
 )
 from procurement_agent.extraction.normalize import normalize_spaces
 from procurement_agent.extraction.rules import (
+    _NUMBER_MARKER,
+    _REFERENCE,
     RuleHit,
     _month_ka,
     find_dates,
@@ -88,15 +90,23 @@ _UNIT_CODES = {"day": "D", "week": "W", "month": "M", "year": "Y"}
 #: How a range reads: an en dash with a space either side, built from its code point.
 _DASH = f" {chr(0x2013)} "
 _Q = "\u201e\u201c\u201d\"'"
+#: A contract's number as a reference writes it: "N 27/2026", "№27/2026", "№ ZK-11"
+#: (``rules._NUMBER_MARKER`` and ``rules._REFERENCE``, the contract-number reader's own).
+_CONTRACT_NUMBER = rf"(?:{_NUMBER_MARKER})\s*{_REFERENCE}"
 #: An act names the contract it closes by its date: "მხარეებმა 01.09.2026 გააფორმეს
-#: ხელშეკრულება" - the date, then the contract signed - ...
+#: ხელშეკრულება", "03.03.2026 №27/2026 ხელშეკრულების" - the date, then the contract signed - ...
 _CONTRACT_SIGNED_AFTER = re.compile(
-    rf"[\s,]*(?:გააფორმეს|გაფორმებული|დადებული|დადეს)?[\s{_Q}]*(?:N\s*\S+\s*)?ხელშეკრულებ"
+    rf"[\s,]*(?:გააფორმეს|გაფორმებული|დადებული|დადეს)?[\s{_Q}]*"
+    rf"(?:{_CONTRACT_NUMBER}\s*|N\s*\S+\s*)?ხელშეკრულებ"
 )
 #: ... or the contract, then its signing: "ხელშეკრულება გაფორმდა 2026 წლის 1 მარტს",
-#: "ხელშეკრულების თარიღი: 01.03.2026".
+#: "ხელშეკრულების თარიღი: 01.03.2026", "N 27/2026 ხელშეკრულება, დადებული 2026 წლის 3 მარტს",
+#: "ხელშეკრულება № 27, გაფორმებული ...", "ხელშეკრულების (თარიღი: 03.03.2026)". The signing
+#: words stand right after the contract and its number: "ხელშეკრულების შესაბამისად, 2026 წლის
+#: 10 ივნისს ..." dates something else.
 _CONTRACT_DATED_BEFORE = re.compile(
-    rf"ხელშეკრულებ[ა-ჰ]*[{_Q}]*\s+(?:გაფორმდა|დაიდო|(?:გაფორმების\s+)?თარიღი)[\s:,-]*$"
+    rf"ხელშეკრულებ[ა-ჰ]*[{_Q}]*(?:\s*{_CONTRACT_NUMBER})?[\s,]*\(?\s*"
+    r"(?:გაფორმდა|დაიდო|დადებული|გაფორმებული|(?:გაფორმების\s+)?თარიღი)[\s:,-]*$"
 )
 
 

@@ -51,8 +51,13 @@ letters upper-cased. Nothing else - no stemming, no substring match, no case-end
 Dates are read as Georgian documents write them: a day in quotes (`„30“ ივნისი, 2026 წ.`,
 both quotes required), an ordinal first day (`2026 წლის 1-ლი მაისი`), and a two-digit year
 only where the word for year follows it (`12.05.26 წ.` is 2026-05-12). The word for year is
-part of the date and is read whole (`5 ივლისს, 2026 წელს`, never `… 2026 წ`). A day range before
-one month and year (`1-15 ივნისი, 2026 წ.`, `01-15.06.2026`) is one period, first day to last. An
+part of the date and is read whole (`5 ივლისს, 2026 წელს`, `05.07.2026 წ.`, never `… 2026 წ`),
+and a date's postposition is on its month whether the year comes before or after it (`30
+ნოემბრამდე, 2026 წ.` and `30 ნოემბრის ჩათვლით, 2026 წ.` are an end). A day range before
+one month and year (`1-15 ივნისი, 2026 წ.`, `01-15.06.2026`) is one period, first day to last,
+and so is a day and month before a full date, the year written once for both (`01.06-30.06.2026`,
+`1 ივნისი - 30 ივნისი, 2026 წ.`); a month in figures written with one digit (`1.2-3.04.2026`)
+is no such day and month. An
 unlabelled date is the document's own (`contract_date`, or `act_date` for an act) only when it
 stands in the preamble, before the first party or the first numbered clause; a date in a clause
 is not, and with neither boundary no date is promoted. Parties the title names
