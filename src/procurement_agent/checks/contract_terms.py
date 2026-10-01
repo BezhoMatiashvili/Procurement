@@ -421,10 +421,20 @@ _KA_MONEY = r"(?:თანხ|ფას|ღირებულებ|საფა
 #: currency word ("100 ლარს ჩათვლით დღგ-ს"). After any other word it closes a date ("30 აპრილის
 #: ჩათვლით დღგ-ს გადამხდელის …"). One lookbehind per width: Python's must each be fixed.
 _AFTER_NO_WORD_OR_MONEY = r"(?:(?<![ა-ჰ] )|(?<=ლარ[ა-ჰ] )|(?<=ლარ[ა-ჰ]{2} )|(?<=ევრო )|(?<=ევროს ))"
+#: What a tax phrase's verb reaches over to its tax: up to eight words, a list of costs joined by
+#: commas, "და" and "ასევე" among them ("მოიცავს ტრანსპორტირების, მონტაჟის ხარჯებს და დღგ-ს"),
+#: never a turn of the sentence (", ხოლო", ", მაგრამ", ", თუმცა", ", ოღონდ"), an exception
+#: ("გარდა"), a negation or a relative clause: "მოიცავს ტრანსპორტირებას, ხოლო დღგ ემატება"
+#: includes no tax. Nor does a tax the words after it add on top ("... და დღგ ემატება ფასს").
+_KA_REACH = (
+    r"(?:,?\s+(?!(?:ხოლო|მაგრამ|თუმცა|ოღონდ|გარდა|არ|რომელ[ა-ჰ]*|რომლ[ა-ჰ]*)(?![ა-ჰ]))"
+    rf"{_KA_WORD}){{0,8}}?,?\s+"
+)
+_KA_ADDED_AFTER = r"(?!\s+(?:დამატებით|(?:და)?(?:ემატება|ერიცხება))(?![ა-ჰ]))"
 #: The amount includes the tax: "გადასახადების ჩათვლით", "დღგ-ს გათვალისწინებით", "მოიცავს
 #: გადასახადებს", "თანხა შეიცავს დღგ-ს", "მათ შორის დღგ-ს", "ითვალისწინებს გადასახადებს",
 #: "თანხაში შედის დღგ", "დღგ შედის ღირებულებაში", ", ჩათვლით დღგ", "including all taxes", "VAT
-#: included", "gross fee". Up to four words may stand between "მოიცავს" and the tax: "მოიცავს
+#: included", "gross fee". Words may stand between "მოიცავს" and the tax (``_KA_REACH``): "მოიცავს
 #: საქართველოს კანონმდებლობით გათვალისწინებულ ყველა გადასახადს" is the contracts' boilerplate.
 #: "ჩათვლით" before the tax counts only where no word stands before it: after one, it closes a
 #: date ("30 აპრილის ჩათვლით დღგ-ს გადამხდელის ...").
@@ -434,7 +444,7 @@ _INCLUSION = re.compile(
             rf"{_KA_TAX_RUN}\s+{_KA_INCLUDING}",
             # not "ძალაში შედის" (enters into force)
             rf"(?<!არ )(?:მოიცავს|შეიცავს|ითვალისწინებს|(?<!ძალაში )შედის|მათ\s+შორის)"
-            rf"(?:\s+{_KA_WORD}){{0,4}}?\s+{_KA_TAX}(?!\s+{_KA_EXCLUDING})",
+            rf"{_KA_REACH}{_KA_TAX}(?!\s+{_KA_EXCLUDING}){_KA_ADDED_AFTER}",
             # "დღგ შედის ღირებულებაში", and the adjective: "დღგ-იანი ღირებულება"
             rf"{_KA_TAX}\s+შედის",
             rf"(?<![ა-ჰ])(?:{_KA_VAT}|გადასახად[ა-ჰ]*?)-?იან(?:ი|მა|ს|ის|ით|ად)?(?![ა-ჰ])",
@@ -457,7 +467,7 @@ _EXCLUSION = re.compile(
     "|".join(
         (
             rf"{_KA_TAX_RUN}\s+{_KA_EXCLUDING}",
-            rf"არ\s+(?:მოიცავს|შეიცავს|ითვალისწინებს|შედის)(?:\s+{_KA_WORD}){{0,4}}?\s+{_KA_TAX}",
+            rf"არ\s+(?:მოიცავს|შეიცავს|ითვალისწინებს|შედის){_KA_REACH}{_KA_TAX}",
             rf"{_KA_TAX}\s+არ\s+შედის",
             # "+ დღგ", and with its rate: "+ 18% დღგ"; "plus 18% VAT"
             rf"(?:\+|(?<![a-z])plus(?![a-z]))\s*(?:\d{{1,2}}(?:[.,]\d{{1,2}})?\s*%\s*)?"

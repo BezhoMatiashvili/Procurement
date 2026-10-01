@@ -35,7 +35,7 @@ from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -88,6 +88,9 @@ from procurement_agent.extraction.rules import (
 from procurement_agent.extraction.schemas import FactType
 from procurement_agent.extraction.spellcheck import classify_difference
 from procurement_agent.ingestion.segmenter import Segment, document_text, key_of
+
+if TYPE_CHECKING:  # contract_terms imports compare_llm, which imports this module
+    from procurement_agent.checks.contract_terms import TaxPhrase
 
 ChangeKind = Literal["added", "removed", "changed", "moved"]
 Materiality = Literal["critical", "substantive", "cosmetic"]
@@ -373,6 +376,8 @@ class _Hit:
     unit: str | None
     currency: str | None
     source: str
+    #: the finding's label when the type's own does not say what the value is: "Monthly fee"
+    label: tuple[str, str] | None = None
 
 
 def _bank_key(value: str) -> str:
@@ -538,7 +543,19 @@ _DAY_BASIS["calendar"] = "calendar"
 def _canonical(hit: _Hit) -> _Hit:
     """A payment term in the form ``docs/GOLD_SPEC.md`` fixes: its length and the days it
     counts, "P5D working". Both terms of "7 working days" → "7 calendar days" read "P7D", and
-    the one thing that changed was compared away."""
+    the one thing that changed was compared away.
+
+    A contract number in the form the spec gives it, its Latin letters upper case (section 1
+    folds them so): "sp-2026/318" retyped from "SP-2026/318" is the same number, and was a
+    critical change of it."""
+    if hit.type is FactType.contract_number:
+        return replace(
+            hit,
+            value=_latin_upper(hit.value),
+            normalized=_latin_upper(hit.normalized)
+            if isinstance(hit.normalized, str)
+            else hit.normalized,
+        )
     if hit.type is not FactType.payment_terms or not isinstance(hit.normalized, str):
         return hit
     if not _ISO_COUNT.match(hit.normalized) or " " in hit.normalized:
@@ -546,9 +563,13 @@ def _canonical(hit: _Hit) -> _Hit:
     basis = _basis(hit)
     if basis is None:
         return hit
-    return _Hit(
-        hit.type, hit.value, f"{hit.normalized} {basis}", hit.unit, hit.currency, hit.source
-    )
+    return replace(hit, normalized=f"{hit.normalized} {basis}")
+
+
+def _latin_upper(text: str) -> str:
+    """``text`` with its Latin letters upper case and every other letter as written: Python's
+    ``upper`` would turn Georgian letters into their capital (Mtavruli) forms."""
+    return re.sub(r"[a-z]+", lambda m: m.group(0).upper(), text)
 
 
 def _basis(hit: _Hit) -> str | None:
@@ -715,7 +736,10 @@ def _rule_hits(text: str) -> list[_Hit]:
             ft = _payment_if_said(text, r, _total_if_said(text, r))
             unit = _VAT_RATE if r.note == VAT_RATE_NOTE else r.unit
             normalized = _advance_if_said(text, r, ft)
-            out.append(_Hit(ft, r.value, normalized, unit, r.currency, "rules"))
+            label = _fee_per_period(text, r, ft)
+            if label is not None:
+                ft = FactType.price
+            out.append(_Hit(ft, r.value, normalized, unit, r.currency, "rules", label))
             i += 1
             continue
         j, ft = end
@@ -746,6 +770,62 @@ def _total_if_said(text: str, hit: RuleHit) -> FactType:
     if _TOTAL_WORDS.search(before) and not _UNIT_WORDS.search(before):
         return FactType.total_amount
     return hit.type
+
+
+#: A fee its words say is paid per period: "ყოველთვიური მომსახურების ღირებულება", "დღიური
+#: საფასური", "the monthly service fee" - the period's adjective, then the price's noun within two
+#: words. Not the adverb: a total "გადაიხდება ყოველთვიურად" (paid monthly) is still the total.
+_PERIODIC_FEE = re.compile(
+    r"(?<![ა-ჰ])(?:ყოველ)?(?P<ka>თვიურ|წლიურ|კვარტალურ|დღიურ|კვირეულ)(?:ი|ის|ს|მა|ით)?\s+"
+    r"(?:[ა-ჰ]+\s+){0,2}?(?:ღირებულ|ფას|საფასურ|გასამრჯელ|ანაზღაურებ|თანხ)"
+    r"|(?<![a-z])(?P<en>monthly|annual|yearly|quarterly|weekly|daily|hourly)\s+(?:[a-z]+\s+){0,2}?"
+    r"(?:fees?|prices?|rates?|payments?|charges?|costs?|remuneration)(?![a-z])",
+    re.IGNORECASE,
+)
+#: ... or a fee the words right after it say is per period: "1 000 ლარი თვეში", "GEL 1,000 per
+#: month".
+_PER_PERIOD_AFTER = re.compile(
+    r"\s*(?:(?P<ka>თვეში|წელიწადში|კვარტალში|დღეში|კვირაში)(?![ა-ჰ])"
+    r"|(?:per|a|an|each)\s+(?:calendar\s+)?(?P<en>month|year|annum|quarter|day|week|hour)(?![a-z]))",
+    re.IGNORECASE,
+)
+_MONTHLY = re.compile(r"თვ|month", re.IGNORECASE)
+_MONTHLY_FEE_LABEL = ("Monthly fee", "ყოველთვიური საფასური")
+#: Money a fee per period may be read from: a price, a total, or an amount the rules split off
+#: beside the total ("ყოველთვიური ღირებულება 3 000 ლარი, ხოლო საერთო ...").
+_FEE_TYPES = frozenset({FactType.price, FactType.total_amount, FactType.amount})
+
+
+def _fee_per_period(text: str, hit: RuleHit, ft: FactType) -> tuple[str, str] | None:
+    """The label of a fee its own clause states per month or per other period, or None.
+
+    A service contract states its total, then the monthly fee in a clause of its own ("2.2.
+    ყოველთვიური მომსახურების ღირებულება შეადგენს 1 000 ლარს"): the rules read that clause's
+    figure as a second total, so a fee raised was "Total amount" changed, and against another
+    contract the fee was paired with its total. Such a fee is a price, labelled "Monthly fee"
+    (or "Unit price" per another period), never a total (docs/GOLD_SPEC.md section 4, round 4).
+    Read in the clause the figure stands in, past the sentence's turns (``rules._AMOUNT_TURN``),
+    so a total beside it keeps its own clause; a clause that names an advance or a guarantee is
+    no fee."""
+    if ft not in _FEE_TYPES:
+        return None
+    # imported here as the rules' own: one reading of a sentence's turns and of a part of a price
+    from procurement_agent.extraction.rules import _AMOUNT_TURN, _PART_OF_PRICE
+
+    starts = [m.end() for m in _CLAUSE_START.finditer(text, 0, hit.start)]
+    lo = starts[-1] if starts else 0
+    turns = [m.end() for m in _AMOUNT_TURN.finditer(text, lo, hit.start)]
+    own = text[turns[-1] if turns else lo : hit.start]
+    if _PART_OF_PRICE.search(own):
+        return None
+    before = _PERIODIC_FEE.search(own)
+    if before is not None and _TOTAL_WORDS.search(own, before.end()):
+        return None  # "ყოველთვიური ... გათვალისწინებით, საერთო ღირებულება": the total, named nearer
+    period = before or _PER_PERIOD_AFTER.match(text, hit.end)
+    if period is None:
+        return None
+    word = period.group("ka") or period.group("en") or ""
+    return _MONTHLY_FEE_LABEL if _MONTHLY.match(word) else LABELS[FactType.price]
 
 
 #: A sentence about paying: "საფასური გადაიხდება", "ანგარიშსწორება მოხდება", "payable within".
@@ -1031,7 +1111,7 @@ def _delta(a: _Hit | None, b: _Hit | None) -> ValueDelta | None:
         # tax wording, whose change CMP.VAT reports. A rate changed (18% -> 20%) is reported.
         return None
     ft = hit.type
-    en, ka = LABELS.get(ft, (ft.value, ft.value))
+    en, ka = hit.label or LABELS.get(ft, (ft.value, ft.value))
     rule = _RULE_FOR_TYPE.get(ft, _DEFAULT_RULE)
     severity: Severity = "error" if ft in CRITICAL_TYPES else "warning"
 
@@ -1517,13 +1597,24 @@ def _postposition(written: str, tail: re.Match[str] | None) -> str:
 
 def _span_key(text: str, hit: RuleHit) -> str:
     """A value's key for the masked text: everything a finding compares it by - its number or
-    code, its unit, currency and the days it counts - and nothing of how it is written."""
+    code, its unit, currency and the days it counts - and nothing of how it is written.
+
+    A count of days is of calendar days unless it says working days, as ``_same_value`` compares
+    them: "20 კალენდარული დღის ვადაში" and "20 დღეში" are one deadline. A payment term keeps
+    the days it names in its value (``_canonical``), so there the difference is still reported."""
     one = _canonical(_Hit(hit.type, hit.value, hit.normalized, hit.unit, hit.currency, "rules"))
     if hit.type in _BANK:
         return f"bank {_bank_key(hit.value)}"
     number = as_number(hit.value, hit.normalized) if hit.type in _NUMERIC else None
     value = f"{number:g}" if number is not None else str(one.normalized or one.value)
-    return f"{value} {hit.unit or ''} {hit.currency or ''} {_basis(one) or ''}"
+    basis = _basis(one) if _basis(one) != "calendar" else None
+    return f"{value} {hit.unit or ''} {hit.currency or ''} {basis or ''}"
+
+
+#: The types that hold a length of time, and the word for the term a count may stand before:
+#: "20 დღის ვადაში" (within a term of 20 days) is "20 დღეში" (within 20 days), one deadline.
+_TERMS = _DURATIONS | {FactType.payment_terms}
+_TERM_WORD = re.compile(r"\s+ვად(?:ა|აში|ით|ის|აზე|ას|ისა)(?![ა-ჰ])")
 
 
 def _value_spans(text: str) -> list[_Span]:
@@ -1557,12 +1648,13 @@ def _value_spans(text: str) -> list[_Span]:
             end = tail.end() if tail else r.end
             spans.append(_Span(r.start, end, f"date {r.normalized} {post}"))
         else:
-            spans.append(_Span(r.start, r.end, _span_key(shown, r)))
+            term = _TERM_WORD.match(shown, r.end) if r.type in _TERMS else None
+            spans.append(_Span(r.start, term.end() if term else r.end, _span_key(shown, r)))
             if r.type is FactType.penalty:
                 stop = _CLAUSE_START.search(shown, r.end)
                 per = _PER_PERIOD.search(shown, r.end, stop.start() if stop else len(shown))
                 if per is not None:
-                    spans.append(_Span(per.start(), per.end(), "per"))
+                    spans.extend(_Span(a, b, "per") for a, b in _per_period_words(per))
         i += 1
     spans = [
         _Span(_written_at(edits, s.start, end=False), _written_at(edits, s.end, end=True), s.key)
@@ -1573,7 +1665,9 @@ def _value_spans(text: str) -> list[_Span]:
         (hit,) = _quantity_hits(m.group(0)) or (None,)
         if hit is not None:
             spans.append(_Span(m.start(), m.end(), f"quantity {hit.normalized}"))
-    spans.extend(_Span(*p.span, f"vat {p.kind}") for p in tax_phrases(text))
+    spans.extend(
+        _Span(a, b, f"vat {p.kind}") for p in tax_phrases(text) for a, b in _tax_wording(p)
+    )
     spans.extend(_figures_with_words(text))
     spans.extend(
         _Span(p.span[0], p.span[1], f"party {normalize_name(p.name)}")
@@ -1587,6 +1681,51 @@ def _value_spans(text: str) -> list[_Span]:
             continue  # inside a value already masked
         out.append(span)
     return out
+
+
+#: The verb a tax phrase opens with, when it names what the price holds or adds before the tax:
+#: "მოიცავს", "არ შეიცავს", "მათ შორის", "ემატება".
+_TAX_VERB = re.compile(
+    r"(?:არ\s+)?(?:მოიცავს|შეიცავს|ითვალისწინებს|შედის|მათ\s+შორის)(?![ა-ჰ])"
+    r"|(?:და)?(?:ემატება|ერიცხება)(?![ა-ჰ])"
+)
+
+
+def _tax_wording(phrase: TaxPhrase) -> list[tuple[int, int]]:
+    """The words of a tax phrase its value says: the verb and the tax, not what stands between.
+
+    "ფასი მოიცავს ტრანსპორტირების ხარჯებს და დღგ-ს" includes VAT, and what else the price
+    covers is no part of that: masked whole, "transport" changed to "installation" or "all
+    costs" was no finding at all. The costs stay the line's own words, compared as text."""
+    # imported here: contract_terms imports compare_llm, which imports this module
+    from procurement_agent.checks.contract_terms import _KA_TAX
+
+    verb = _TAX_VERB.match(phrase.text)
+    tax = re.compile(_KA_TAX, re.IGNORECASE).search(phrase.text, verb.end()) if verb else None
+    if verb is None or tax is None or not _LETTER.search(phrase.text, verb.end(), tax.start()):
+        return [phrase.span]
+    start = phrase.span[0]
+    return [(start, start + verb.end()), (start + tax.start(), phrase.span[1])]
+
+
+#: The word a penalty's period opens with: "ყოველ", "per", "each", "for every".
+_PER_WORD = re.compile(r"(?:for\s+)?\w+", re.IGNORECASE)
+
+
+def _per_period_words(per: re.Match[str]) -> list[tuple[int, int]]:
+    """The words of a penalty's "per day" (``rules._PER_PERIOD``) its value says: "ყოველ" and
+    the period's noun, whose case ending ``_whole_words`` takes with it.
+
+    The reader reaches over up to two words between them, and over a day's basis in English;
+    masked whole, those words were never compared: "ყოველ ვადაგადაცილებულ დღეზე" → "ყოველ
+    ვადაგადაცილებულ სამუშაო დღეზე" (per working day) or "ყოველ მეათე ... დღეზე" (per tenth
+    day) was no finding at all. The value is "per day" only; the words it skips over stay the
+    line's own, compared as text. A one-word period ("დღიური") is all value."""
+    unit = next((g for g in range(1, (per.re.groups or 0) + 1) if per.group(g)), None)
+    word = _PER_WORD.match(per.string, per.start())
+    if unit is None or word is None or per.start(unit) <= word.end():
+        return [(per.start(), per.end())]
+    return [(per.start(), word.end()), (per.start(unit), per.end(unit))]
 
 
 #: A figure with its words in brackets after it, "8 450 (რვა ათას ოთხას ორმოცდაათი)", or its
@@ -1640,12 +1779,16 @@ def _figures_with_words(text: str) -> list[_Span]:
     out: list[_Span] = []
     for m in _FIGURE_THEN_WORDS.finditer(text):
         if _spelled_as(m.group(2), m.group(1)):
-            out.append(_Span(m.start(), m.end(), f"number {parse_number(m.group(1)):g}"))
+            out.append(_Span(m.start(), m.end(), f"{_NUMBER_KEY}{parse_number(m.group(1)):g}"))
     for m in _WORDS_THEN_FIGURE.finditer(text):
         start = _words_before(text, m.start(), m.group(1))
         if start is not None:
-            out.append(_Span(start, m.end(), f"number {parse_number(m.group(1)):g}"))
+            out.append(_Span(start, m.end(), f"{_NUMBER_KEY}{parse_number(m.group(1)):g}"))
     return out
+
+
+#: The key of a figure written with its words.
+_NUMBER_KEY = "number "
 
 
 def _with_own_words(text: str, span: _Span) -> _Span:
@@ -1671,7 +1814,19 @@ def _whole_words(text: str, span: _Span) -> _Span:
     if start < end and _LETTER.match(text, end - 1):
         while end < len(text) and _LETTER.match(text, end):
             end += 1
+    ending = _HYPHENATED_ENDING.match(text, end) if start < end else None
+    if ending is not None:
+        end = ending.end()
     return span if (start, end) == (span.start, span.end) else _Span(start, end, span.key)
+
+
+#: A case ending written after a value with a hyphen: "5%-ის", "10%-ს", "30%-იან", "N 7-ით",
+#: "„ნიმუში“-სთვის". Only an ending of the declension, written straight on: "5% - ჯარიმა" is a
+#: dash and a word of the line's own, and "-მდე" (up to) and "-დან" (from) say something of the
+#: value - a date keys them (``_DATE_TAIL``), "5%-ით" is not "5%-დან".
+_HYPHENATED_ENDING = re.compile(
+    r"-(?:იან(?:ი|მა|ს|ის|ით|ად|ში|ზე)?|ის(?:ა|თვის)?|სთვის|ს|ით|ად|ზე|ში|თვის)(?![ა-ჰ])"
+)
 
 
 def _masked_values(text: str, *, keyed: bool) -> tuple[str, list[_Span]]:
@@ -1684,7 +1839,7 @@ def _masked_values(text: str, *, keyed: bool) -> tuple[str, list[_Span]]:
     pos = 0
     for span in spans:
         out.append(folded[pos : span.start])
-        out.append(f" §{span.key}§ " if keyed else " § ")
+        out.append(f" {_keyed(folded, span)} " if keyed else " § ")
         pos = span.end
     out.append(folded[pos:])
     years = {m.group(0) for s in spans for m in re.finditer(r"\d{4}(?=-\d\d-\d\d)", s.key)}
@@ -1692,6 +1847,49 @@ def _masked_values(text: str, *, keyed: bool) -> tuple[str, list[_Span]]:
     # is theirs
     rest = _YEAR_OF_DATES.sub(lambda m: "" if m.group(1) in years else m.group(0), "".join(out))
     return rest, spans
+
+
+#: A figure in a value's text: the one a figure written with its words states.
+_A_FIGURE = re.compile(FIGURE)
+
+
+def _keyed(text: str, span: _Span) -> str:
+    """What a value cut out of ``text`` is replaced by when two texts' values are compared: its
+    key. A figure written with its words (``_figures_with_words``) is its figure as written,
+    the words dropped: "2 (ორი) ეგზემპლარად" and "2 ეგზემპლარად" say one thing, and the bare
+    figure, which no reader types, is left as written on the other side."""
+    if span.key.startswith(_NUMBER_KEY):
+        figure = _A_FIGURE.search(text, span.start, span.end)
+        if figure is not None:
+            return figure.group(0)
+    return f"§{span.key}§"
+
+
+def _words_restyled(d: ValueDelta, left: str, right: str) -> bool:
+    """Whether a number's words dropped from beside their figure, or added beside it, are all
+    the line changed of that number: the figure is there on both sides, as it was.
+
+    "10 (ათი) სამუშაო დღის" → "10 სამუშაო დღის" is the same term written another way; reported
+    as its words removed, it was a critical "Period in words" error for a value that did not
+    change (docs/GOLD_SPEC.md section 4: a figure's own words are no words of the line's own).
+    Only words that are their figure's own on their side, and only when both sides write the
+    same figures: words dropped with a figure that changed or went are still reported."""
+    if d.rule_id != "CMP.AMOUNT_WORDS" or d.kind == "changed":
+        return False
+    shown = _SHOWN_FIGURE.search((d.left if d.kind == "removed" else d.right) or "")
+    if shown is None:
+        return False
+    side = left if d.kind == "removed" else right
+    own = f"{_NUMBER_KEY}{float(shown.group(1)):g}"
+    if not any(s.key == own for s in _figures_with_words(normalize_confusables(side))):
+        return False
+    return _figures_of(left) == _figures_of(right)
+
+
+def _figures_of(text: str) -> Counter[float]:
+    """The figures ``text`` writes, each once per time it writes it."""
+    numbers = (parse_number(m.group(0)) for m in _A_FIGURE.finditer(normalize_confusables(text)))
+    return Counter(n for n in numbers if n is not None)
 
 
 _WORD_NUMBER_LABELS: dict[str, tuple[str, str]] = {
@@ -3207,9 +3405,15 @@ def _classify(
     words = [
         d
         for d, read in _word_number_changes(a.text, b.text, ca, cb)
-        if not _restated(read, values + bare) and not _still_spelled(d, a.text, b.text)
+        if not _restated(read, values + bare)
+        and not _still_spelled(d, a.text, b.text)
+        and not _words_restyled(d, a.text, b.text)
     ]
     numerals = numeral_word_deltas(a.text, b.text)
+    if None not in counted and quantity is None and not (words or numerals or hidden):
+        # the row's quantity as it was, its unit or figure written another way: "კვ.მ" / "მ2",
+        # "ცალი" / "ც." (docs/GOLD_SPEC.md section 4: the same values written another way)
+        return "changed", "cosmetic", [], ["CMP.FORMATTING"], inline
     values = [d for d in values if not _told_in_words(d, numerals)]
     deltas = values + words + numerals + spelling_deltas(a.text, b.text) + bare
     if deltas:
