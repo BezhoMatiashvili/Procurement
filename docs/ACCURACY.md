@@ -420,6 +420,44 @@ correct acts, where the rules read less than the act wrote (`tests/unit/test_aoa
 Round-2 AOA-R2-17 (the customer's own account in its signature block, against a contract that
 states only the contractor's) is left as it is by design.
 
+### Red team, round 3: parties, signatories and the Word text (2026-10-01)
+
+Fixed in the shared readers (`extraction/anchors.py`, `normalize.py`, the Word conversion), each
+with a unit test and a near miss (`tests/unit/test_redteam_r3_parties.py`,
+`test_redteam_r3_ingestion.py`):
+
+* **A code of the wrong length is a code to compare (AOA-R3-01).** Behind an ID label a run of
+  7 to 13 digits, or groups of three split by one space, hyphen or dot, is the code the act
+  states; a digit dropped or doubled left the contractor's code unread and the rule silent.
+  The correction is the contract code within two digit slips (an edit distance that counts a
+  dropped or doubled digit), in the act's grouping (`987-654-312` → `987-654-321`; a round-2
+  test now expects the grouped `987 654 321`), or none. Two readers share the label: the code
+  facts keep 9 or 11 digits (`normalize.ID_CODE_RE`, GOLD_SPEC 2), the party reader and the act
+  check also read a slip's length (`ID_CODE_WRITTEN_RE`). Left open, as the verifier asked: a
+  party whose code the act leaves out is not reported.
+* **`ინდივიდუალური მეწარმე` is `ი/მ` (AOA-R3-04).** The long forms are one table
+  (`_SPELLED_OUT_FORMS`) the legal-form pattern is built from, so a form read is always written
+  short.
+* **A functional director is not the head (AOA-R3-05).** A `დირექტორი` narrowed by a named
+  function adjective (`ფინანსური`, `კომერციული`, `ტექნიკური`, `საოპერაციო`, …) co-signs beside
+  the head and is not compared. The adjectives are listed, not guessed from an ending: a
+  surname ends in `-ური` or `სა-…-ო` too, and in a flattened act it stands right before the next
+  title.
+* **A patronymic is no part of the name (AOA-R3-06).** `<first name> <father's name>ის ძე|ასული
+  <surname>` is read as the first name and the surname; a finding quotes the whole name and
+  keeps the patronymic in its correction.
+* **Formatting inside a word is no break (AOA-R3-13).** Docling split a Word paragraph at each
+  bold, italic, underline or hyperlink run and stripped the pieces, so `3 4` + `50` read as two
+  figures and `ბარამ` + `იძე` as a misspelled name. The Word backend keeps one text per
+  paragraph (`docling_service.WholeParagraphWordBackend`); the conversion fingerprint changed,
+  so cached parses are made again.
+
+Measured after the fixes: the three strict gold sets unchanged at 100%/100%, and
+`scripts/mutate_aoa.py --seed 103 --per-class 6` the same as before them, class by class: every
+error class detected except one `prose_typo` mutation (83%; one `prose_slip` correction is off
+too), both in the spelling reader these fixes do not touch, and 0% false positives on the
+harmless classes.
+
 ## LLM configuration, and why
 
 Three settings were established by reading what the model actually receives:
@@ -715,6 +753,22 @@ Measured after the fixes: the three strict gold sets unchanged at 100%/100%, and
 `scripts/mutate_aoa.py --seed 79 --per-class 6` detected every error class with 0% false
 positives on the harmless ones.
 
+Round 3 (2026-10-01), in the readers every module shares (`tests/unit/test_redteam_r3_numbers.py`,
+`test_redteam_r3_ingestion.py`):
+
+* **A headerless two-column table is written row by row (EXTRACTION-R3-02, -03).** Docling
+  promotes such a table's first row to the column header and writes its value into every other
+  row as a column name, so each key-terms row carried the first row's figures (a false penalty
+  `30%`, the advance's deadline for the balance), and a title row with no figure in its second
+  cell was dropped. When the first row is data - a digit in either cell, or a label with no
+  second cell - the chunker's table serializer writes the table as `label: value;` lines, each
+  cell once. This replaces round 1's restore of the lost first line (EXTRACTION-12).
+* **Every space groups thousands (EXTRACTION-R3-11).** One figure pattern
+  (`normalize.FIGURE`) serves the extraction rules and the act check: a thin space, a narrow
+  no-break space, a figure space or an apostrophe between the groups is one figure, never its
+  last group (`36 000` was a total of 0); a figure never starts right after a digit and one of
+  these separators.
+
 ### Red team, round 1: what the comparison now reads (2026-09-30)
 
 Defects a red team found and a verifier reproduced, each with a unit test on invented
@@ -990,10 +1044,12 @@ Policy questions round 2 left open, with the recommended answer:
   lead-in; a spreadsheet, or a table holding the list, has none, and the rule says it did not run.
 * The registry rules run only against a snapshot the client exports (`cli load-registry`); with
   no snapshot they are reported as skipped, never as passed.
-* Docling promotes the first row of a table with no header row to the column header, and its
-  serializer drops that row's label. For a two-column table whose first row's value holds a
-  figure (a key-terms table: `ხელშეკრულების ღირებულება | 48 000 ლარი`), the chunker writes the
-  row back as `label: value` before the table. A table of three or more columns with no header
-  row still loses its first row's first cell; the segmenter (document comparison) is unchanged.
+* Docling promotes the first row of a table with no header row to the column header. A
+  two-column table whose first row is data - a digit in either cell, or a label alone (a
+  title) - is written row by row as `label: value;` (red team R3). A first row of two cells
+  with no digit (`მიმწოდებელი | შპს „…“`) cannot be told from a real header (`პირობა |
+  მნიშვნელობა`) and is still written as one, its value repeated into every row as a column
+  name; a table of three or more columns with no header row still loses its first row's first
+  cell; the segmenter (document comparison) is unchanged.
 * A prose typo inside a service line or the subject clause also leaves a scope review note
   (see "Prose spelling"); the scope rules should compare the corrected word.

@@ -340,6 +340,29 @@ def stems_match(a: str, b: str) -> bool:
 
 # --- numbers ------------------------------------------------------------------------------------
 
+#: Besides "," and ".", what separates a figure's thousands: every space Word, a locale or a scan
+#: puts there - the no-break space, the thin space (U+2009), the narrow no-break space (U+202F),
+#: the figure space (U+2007) ... - and the apostrophe, straight or typographic ("36'000",
+#: "36’000"). One set for every reader of a figure (red team R3, EXTRACTION-R3-11): a reader that
+#: knew only two of them read "36 000" with a thin space as its last group, a total of 0.
+_GROUP_APOSTROPHES = "'\u2019"
+#: a regex class of the spaces that group a figure's digits
+FIGURE_SPACE = f"[ {_SPACES}]"
+#: one separator between two groups of a figure, as a regex class
+FIGURE_SEPARATOR = f"[ {_SPACES}{_GROUP_APOSTROPHES},.]"
+#: the separators only these readers know: after a digit and one of them, a figure goes on
+_NEW_SEPARATORS = _SPACES.replace("\u00a0", "") + _GROUP_APOSTROPHES
+#: A figure as documents write it: digits grouped in threes by a space of any kind, an
+#: apostrophe, a dot or a comma, and an optional decimal part - "2 400", "2.400,50", "36'000",
+#: "100". A group is exactly three digits after one separator, so an item number in front
+#: ("საფასური: 1. 100 (ასი)") is not read into it. A figure never starts right after a digit and
+#: one of the separators the older readers did not know: "48'50" is no amount, never "50".
+FIGURE = (
+    rf"(?<!\d[{_NEW_SEPARATORS}])"
+    rf"(?:\d{{1,3}}(?:{FIGURE_SEPARATOR}\d{{3}})+(?:[.,]\d{{1,2}})?|\d+(?:[.,]\d{{1,2}})?)"
+)
+_FIGURE_GROUPING = re.compile(f"[ ,.{_GROUP_APOSTROPHES}]")
+
 
 def parse_number(s: str) -> float | None:
     """Parse a human-written number, guessing the decimal separator.
@@ -370,13 +393,14 @@ def parse_number(s: str) -> float | None:
     # A thousands group is exactly three digits, so a separator followed by four or more can
     # only be the decimal point: '12.3450' and '1,234.5678' are not 123450 and 12345678.
     long_tail = re.fullmatch(r"(.*?)([.,])(\d{4,})", s)
-    if m and (len(m.group(1)) > 3 or not re.search(r"[ ,.]", m.group(1))):
+    if m and (len(m.group(1)) > 3 or not _FIGURE_GROUPING.search(m.group(1))):
         integer, frac = m.group(1), m.group(3)
     elif long_tail:
         integer, frac = long_tail.group(1), long_tail.group(3)
     else:
         integer, frac = s, ""
-    integer = re.sub(r"[ ,.]", "", integer)
+    # every group separator, the apostrophe included ("36'000"); spaces are one by now
+    integer = _FIGURE_GROUPING.sub("", integer)
     if not integer.isdigit():
         return None
     out = float(f"{integer}.{frac}" if frac else integer)
@@ -519,15 +543,43 @@ ID_LABEL = (
 )
 #: between the label and the code: a number sign ("ს/კ N 204567890", "№"), a colon or a dash
 _ID_SEPARATOR = r"(?:\s*(?:N|№|#)(?![A-Za-z]))?\s*[:\-]?\s*"
-#: the code: 9 digits (a company) or 11 (a person), compact or a company's printed in threes
-_ID_VALUE = r"(\d{9}|\d{11}|\d{3} \d{3} \d{3})(?!\d)"
+#: The code: 9 digits (a company) or 11 (a person), compact or a company's printed in threes by
+#: one separator throughout - a space, a hyphen or a dot ("406 444 789", "406-444-789"): the
+#: same code (GOLD_SPEC 2 party_id_code).
+_ID_VALUE = r"(\d{9}|\d{11}|\d{3}(?P<id_sep>[ .\-])\d{3}(?P=id_sep)\d{3})(?!\d)"
 #: An identification code behind its label; group 1 is the code as written (``id_code_digits``).
+#: The code facts are read with it: a value is 9 or 11 digits.
 ID_CODE_RE = re.compile(ID_LABEL + _ID_SEPARATOR + _ID_VALUE, re.IGNORECASE)
+#: What a slip makes of a code behind its label - a digit dropped or doubled, 7 to 13 digits,
+#: grouped or not - read as well: it is the code the document states, and the act check says
+#: what is wrong with its digits (red team R3, AOA-R3-01). Fewer digits, or more (an account's),
+#: are no code; a date's grouping ("12-34-56") neither.
+_ID_VALUE_WRITTEN = r"(\d{7,13}|\d{3}(?P<id_sep>[ .\-])\d{3}(?P=id_sep)\d{2,5})(?!\d)"
+#: ``ID_CODE_RE`` with the wrong lengths too, for the readers that compare a party's code.
+ID_CODE_WRITTEN_RE = re.compile(ID_LABEL + _ID_SEPARATOR + _ID_VALUE_WRITTEN, re.IGNORECASE)
 
 
 def id_code_digits(code: str) -> str:
     """A code as its digits alone: "406 444 789" is 406444789."""
     return re.sub(r"\D", "", code)
+
+
+def in_grouping(code: str, written: str) -> str:
+    """``code`` grouped as ``written`` groups its digits, so a correction is written as the
+    document writes the code it corrects: "987-654-312" is corrected to "987-654-321". Groups of
+    the sizes ``written`` has when the two are as long, of three otherwise; compact when
+    ``written`` is."""
+    separator = re.search(r"\D", written.strip())
+    if separator is None:
+        return code
+    sizes = [len(g) for g in re.split(r"\D+", written.strip()) if g]
+    if sum(sizes) != len(code):
+        sizes = [3] * (len(code) // 3) + ([len(code) % 3] if len(code) % 3 else [])
+    groups, at = [], 0
+    for size in sizes:
+        groups.append(code[at : at + size])
+        at += size
+    return separator.group(0).join(groups)
 
 
 # --- IBAN ---------------------------------------------------------------------------------------

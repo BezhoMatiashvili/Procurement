@@ -261,9 +261,10 @@ class TestGroupedIdCodeQuote:
     def test_the_finding_quotes_the_grouped_code(self) -> None:
         act = ACT.replace("კოდი: 987654321", "კოდი: 987 654 312")
         [finding] = _of(_check(act), "AOA.ID_CODES")
+        # the correction in the act's grouping, as the quote (red team R3, AOA-R3-01)
         assert (finding.actual, finding.expected, finding.quote) == (
             "987654312",
-            "987654321",
+            "987 654 321",
             "987 654 312",
         )
 

@@ -100,7 +100,15 @@ from procurement_agent.checks.fx_invoice import (
     plan_invoice,
     price_terms,
 )
-from procurement_agent.extraction.anchors import AnchorHit, Party, find_anchors, find_parties
+from procurement_agent.extraction.anchors import (
+    PATRONYMIC,
+    AnchorHit,
+    Party,
+    find_anchors,
+    find_parties,
+    split_patronymic,
+    with_patronymic,
+)
 from procurement_agent.extraction.georgian import (
     CASES,
     GEORGIAN,
@@ -119,13 +127,14 @@ from procurement_agent.extraction.georgian import (
 )
 from procurement_agent.extraction.georgian import words as georgian_words
 from procurement_agent.extraction.normalize import (
-    ID_CODE_RE,
+    ID_CODE_WRITTEN_RE,
     amounts_equal,
     edit_distance,
     fold_comma_quotes_mapped,
     fold_look_alikes,
     iban_is_valid,
     id_code_digits,
+    in_grouping,
     keep_initial,
     name_stem,
     names_match,
@@ -462,8 +471,9 @@ _CONTRACT_WORD = re.compile(r"ხელშეკრულებ|contract", re.IG
 _ACT_WORD = re.compile(r"აქტ|\bact\b", re.IGNORECASE)
 
 
-#: every label the party reader knows, read by the one shared pattern (red team R2, AOA-R2-01)
-_ID_LABELLED = ID_CODE_RE
+#: every label the party reader knows, read by the one shared pattern (red team R2, AOA-R2-01),
+#: a slip's wrong length included (R3, AOA-R3-01)
+_ID_LABELLED = ID_CODE_WRITTEN_RE
 
 
 #: The share of an act's letters that must be Georgian for the rules to read it. A Georgian act
@@ -789,8 +799,10 @@ class AoaChecker:
                 and re.sub(r"\D", "", self.aoa.text[span[0] : span[1]]) == code
             ):
                 return span
-        grouped = r"[ \u00a0]?".join(code)
-        m = re.search(rf"(?<!\d)(?<!\d[ \u00a0]){grouped}(?!\d)(?![ \u00a0]\d)", self.aoa.text)
+        grouped = r"[ \u00a0.\-]?".join(code)
+        m = re.search(
+            rf"(?<!\d)(?<!\d[ \u00a0.\-]){grouped}(?!\d)(?![ \u00a0.\-]\d)", self.aoa.text
+        )
         return m.span() if m is not None else None
 
     def _account_span(self, iban: str) -> tuple[int, int] | None:
@@ -1857,6 +1869,18 @@ class AoaChecker:
             if all(_near_word(w, p) for (w, _, _), p in zip(window, parts, strict=True)):
                 span = (window[0][1], window[-1][2])
                 forms.setdefault(self.aoa.as_written(*span), []).append(span)
+            elif len(parts) == 2 and i + 3 < len(found):
+                # a patronymic between the first name and the surname (red team R3, AOA-R3-06):
+                # the form is the name as written, patronymic and all
+                first, surname = window[0], found[i + 3]
+                between = self.aoa.text[first[2] : surname[1]]
+                if (
+                    PATRONYMIC.fullmatch(between.strip())
+                    and _near_word(first[0], parts[0])
+                    and _near_word(surname[0], parts[1])
+                ):
+                    span = (first[1], surname[2])
+                    forms.setdefault(self.aoa.as_written(*span), []).append(span)
         return list(forms.items())
 
     def _owner_at(self, pos: int) -> Party | None:
@@ -1932,15 +1956,26 @@ class AoaChecker:
                         f"could be read, so the act's code {code} was not compared",
                     )
                     continue
+                closest: str | None
                 closest = min(sorted(c_ids), key=lambda c: (_digit_distance(code, c), c))
+                if len(closest) != len(code) and _digit_distance(code, closest) > 2:
+                    closest = None  # a digit or two dropped or doubled, or no correction
+                span = self._code_span(code)
+                written = self.aoa.as_written(*span) if span else code
+                # a code of the wrong length says so (red team R3, AOA-R3-01)
+                ka_len = en_len = ""
+                if len(code) not in (9, 11):
+                    ka_len = f" ({len(code)} ციფრი; კოდი 9- ან 11-ნიშნაა)"
+                    en_len = f" ({len(code)} digits; a code has 9 or 11)"
                 self._add(
                     "AOA.ID_CODES",
                     "error",
-                    f"საიდენტიფიკაციო კოდი ხელშეკრულებაში არ არის: {code}",
-                    f"identification code not in the contract: {code}",
-                    expected=closest,
+                    f"საიდენტიფიკაციო კოდი ხელშეკრულებაში არ არის: {code}{ka_len}",
+                    f"identification code not in the contract: {code}{en_len}",
+                    # in the act's grouping: "987-654-312" is corrected to "987-654-321"
+                    expected=in_grouping(closest, written) if closest else None,
                     actual=code,
-                    span=self._code_span(code),
+                    span=span,
                 )
 
         if not self.contract.parties:
@@ -2011,7 +2046,9 @@ class AoaChecker:
             if not forms:
                 found = self._find_span(d)
                 forms = [(d, [found] if found else [])]
-            for form, spans in forms:
+            for written, spans in forms:
+                # a patronymic is no part of the name compared, and is kept in a correction
+                form, patronymic = split_patronymic(written)
                 # an inflection of the contract's name, and nothing else, is the same name
                 if any(_same_person(form, cd) for cd in theirs):
                     continue
@@ -2036,15 +2073,17 @@ class AoaChecker:
                 hint_en = " (looks like a misspelling)" if typo else ""
                 # the correction in the act's own grammar, form by form
                 expected = keep_initial(form, in_case_of(form, guess[0])) if guess else None
+                if expected is not None:
+                    expected = with_patronymic(expected, patronymic)
                 self._add(
                     "AOA.DIRECTOR",
                     "error",
-                    f"ხელმომწერი არ ემთხვევა ხელშეკრულებას: „{form}“, უნდა იყოს "
+                    f"ხელმომწერი არ ემთხვევა ხელშეკრულებას: „{written}“, უნდა იყოს "
                     f"„{expected}“{hint_ka}",
-                    f"signatory does not match the contract: '{form}', expected "
+                    f"signatory does not match the contract: '{written}', expected "
                     f"'{expected}'{hint_en}",
                     expected=expected,
-                    actual=form,
+                    actual=written,
                     span=span,
                     places=places,
                 )
@@ -3626,9 +3665,10 @@ def _closest(
 
 
 def _digit_distance(a: str, b: str) -> int:
-    """How many digits apart two codes of one length are; a length change counts as far."""
+    """How many digits apart two codes are: digits changed for codes of one length, and for
+    two lengths the digits dropped, doubled or changed (red team R3, AOA-R3-01)."""
     if len(a) != len(b):
-        return len(a) + len(b)
+        return edit_distance(a, b, cap=len(a) + len(b))
     return sum(x != y for x, y in zip(a, b, strict=True))
 
 

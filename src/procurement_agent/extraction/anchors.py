@@ -22,6 +22,7 @@ from procurement_agent.extraction.normalize import (
     FUNCTION_WORDS,
     IBAN_CURRENCY_SUFFIXES,
     ID_CODE_RE,
+    ID_CODE_WRITTEN_RE,
     ID_LABEL,
     QUOTE_CHARS,
     bic_has_country,
@@ -44,17 +45,20 @@ _QUOTED = rf"[{_Q}]([^{_Q}]{{2,90}}?)[{_Q}]"
 
 # Georgian legal forms. "ი/მ" and "ინდ. მეწარმე" matter because the client's tax-wording rules
 # branch on whether the contractor is a company, an individual entrepreneur or a person.
-# A company's form is also written out in full, in any case: "შეზღუდული პასუხისმგებლობის
-# საზოგადოება „…“" is "შპს „…“", and a party name carries the abbreviation (``_legal_form``).
+# A form is also written out in full, in any case: "შეზღუდული პასუხისმგებლობის საზოგადოება
+# „…“" is "შპს „…“", "ინდივიდუალური მეწარმე" and "ინდ. მეწარმე" are "ი/მ", and a party name
+# carries the abbreviation (``_legal_form``). This table is the one list of the long forms: a
+# form the readers accept is always written short (red team R3, AOA-R3-04).
+_ENTREPRENEUR = r"ინდ(?:\.|ივიდუალური)?\s*მეწარმ"
 _SPELLED_OUT_FORMS: tuple[tuple[str, str], ...] = (
     (r"შეზღუდული\s+პასუხისმგებლობის\s+საზოგადოებ[აისმ]{0,2}", "შპს"),
     (r"სააქციო\s+საზოგადოებ[აისმ]{0,2}", "სს"),
     (r"არასამეწარმეო\s*\(?\s*არაკომერციული\s*\)?\s*იურიდიული\s+პირ[ისმა]{0,2}", "ააიპ"),
     (r"საჯარო\s+სამართლის\s+იურიდიული\s+პირ[ისმა]{0,2}", "სსიპ"),
+    (rf"{_ENTREPRENEUR}[ეის]*", "ი/მ"),
 )
 _LEGAL_FORM = (
-    "|".join(pattern for pattern, _ in _SPELLED_OUT_FORMS)
-    + r"|შპს|სს|ააიპ|სსიპ|ი\s*/\s*მ|ინდ(?:\.|ივიდუალური)?\s*მეწარმ[ეის]*"
+    "|".join(pattern for pattern, _ in _SPELLED_OUT_FORMS) + r"|შპს|სს|ააიპ|სსიპ|ი\s*/\s*მ"
 )
 
 _PARTY_NAME = re.compile(rf"(?<![ა-ჰ])({_LEGAL_FORM})\s*{_QUOTED}")
@@ -71,13 +75,16 @@ def _legal_form(written: str) -> str:
 #: An individual entrepreneur or a natural person is named, not quoted: "ი/მ ირაკლი სულაძე",
 #: "ფ/პ ანა ბერიძე" - a first name and a surname after the abbreviation.
 _PERSON_PARTY = re.compile(
-    r"(?<![ა-ჰ])(ი\s*/\s*მ|ფ\s*/\s*პ|ინდ(?:\.|ივიდუალური)?\s*მეწარმე)\s+"
+    rf"(?<![ა-ჰ])(ი\s*/\s*მ|ფ\s*/\s*პ|{_ENTREPRENEUR}ე)\s+"
     r"([ა-ჰ]{2,20}\s+[ა-ჰ]{2,25})(?![ა-ჰ])"
 )
 # The code behind any of its labels (``normalize.ID_LABEL``: "ს/კ", "ს.კ.", "საიდ. კოდი", "ID",
 # ...), compact or a company's nine digits printed in threes ("406 444 789"); its value is the
-# digits alone. The rules and the act check read codes with the same pattern.
+# digits alone. The rules and the act check read codes with the same pattern. A party's code
+# is read as written, a slip's wrong length included, for the act check to compare
+# (``ID_CODE_WRITTEN_RE``, red team R3, AOA-R3-01); a code fact is 9 or 11 digits.
 _ID_CODE = ID_CODE_RE
+_PARTY_CODE = ID_CODE_WRITTEN_RE
 _code_digits = id_code_digits
 
 
@@ -158,8 +165,13 @@ _ADDRESS = re.compile(
 )
 #: "ბატონი", "ქალბატონ", "ბ-ნ", "ქ-ნი": a courtesy title before a name, not part of it
 _HONORIFIC = r"(?:(?:ქალ)?ბატონ(?:ი|ის|მა)?\s+|[ბქ]\s?-\s?ნ(?:ი|ის|მა)?\.?\s*)?"
-#: a first name and a surname (and a third word the reader may cut), or an initial and a surname
-_PERSON = r"[ა-ჰ]\.\s?[ა-ჰ]{2,25}(?![ა-ჰ])|[ა-ჰ]{2,20}(?:\s+[ა-ჰ]{2,25}){1,2}"
+#: a first name and a surname (and words after them the reader may cut: a patronymic between
+#: the two, see ``PATRONYMIC``), or an initial and a surname
+_PERSON = r"[ა-ჰ]\.\s?[ა-ჰ]{2,25}(?![ა-ჰ])|[ა-ჰ]{2,20}(?:\s+[ა-ჰ]{2,25}){1,3}"
+#: A patronymic between a first name and a surname: the father's name in the genitive and "ძე"
+#: (son) or "ასული" (daughter) - "ნოდარ გიორგის ძე ბარამიძე". No part of the name compared:
+#: ``party_director`` is the first name and the surname (red team R3, AOA-R3-06).
+PATRONYMIC = re.compile(r"[ა-ჰ]{2,20}ს\s+(?:ძე|ძის|ძემ|ასული|ასულის|ასულმა)")
 # "დირექტორი ნინო კაპანაძე", "დირექტორი: დავით მელაძე", "დირექტორი: დ. მელაძე",
 # "წარმოდგენილი გენერალური დირექტორის, დავით მელაძის სახით"
 # The label must end its word ("დირექტორთან შეთანხმებით" is "in agreement with the director",
@@ -179,6 +191,18 @@ _DIRECTOR = re.compile(
     rf"(?:(?:გენერალური|აღმასრულებელი)\s+)?(?:დირექტორ(?:ი|ის|მა)?|{_OTHER_HEAD})(?![ა-ჰ])"
     r"\s*(?P<sep>[:,]?)\s*"
     rf"{_HONORIFIC}(?!მოადგილ|მოვალეობ|შემსრულებ)(?P<name>{_PERSON})"
+)
+#: A head's title narrowed by a function is not the party's head (red team R3, AOA-R3-05): a
+#: financial, commercial, technical or operations director ("ფინანსური დირექტორი", "საოპერაციო
+#: დირექტორი") co-signs beside the head. The adjectives are named, not guessed from an ending: a
+#: surname ends in "-ური" too ("ჩიტაური"), and in an act flattened to one line a signatory's
+#: surname stands right before the next head's title; so does one in "სა-...-ო" ("სანტორო"),
+#: which is why the "სა-...-ო" adjectives are named as well. "გენერალური" and "აღმასრულებელი"
+#: name the head (``_DIRECTOR``).
+_FUNCTION_BEFORE_TITLE = re.compile(
+    r"(?<![ა-ჰ])(?:(?:ფინანსურ|კომერციულ|ტექნიკურ|იურიდიულ|ადმინისტრაციულ|ოპერაციულ|რეგიონულ"
+    r"|სტრატეგიულ)(?:ი|მა)?|სა(?:ოპერაციო|ფინანსო|ინჟინრო|მშენებლო|წარმოო|მეცნიერო|სწავლო"
+    r"|მედიცინო|ინვესტიციო|რეკლამო|ინფორმაციო|ვაჭრო|მარკეტინგო|ლოგისტიკო))\s+$"
 )
 #: The head's title in the genitive, as a deputy's title names it: "დირექტორის მოადგილე".
 _HEAD_GENITIVE = (
@@ -212,8 +236,7 @@ _OWN_BODY_GENITIVES = frozenset(
 # გელაშვილი": a signatory acting under a power of attorney, not the party's director
 _PROXY = re.compile(
     r"(?:მინდობილობით(?:\s+მოქმედი\s+პირ(?:ი|ის|მა)?)?|რწმუნებულ(?:ი|ის|მა))(?![ა-ჰ])"
-    rf"\s*(?P<sep>[:,]?)\s*{_HONORIFIC}"
-    r"(?P<name>[ა-ჰ]\.\s?[ა-ჰ]{2,25}|[ა-ჰ]{2,20}\s+[ა-ჰ]{2,25})(?![ა-ჰ])"
+    rf"\s*(?P<sep>[:,]?)\s*{_HONORIFIC}(?P<name>{_PERSON})"
 )
 _PROJECT_WORD = r"პრო[ეა]{1,3}ქტ[ა-ჰ]*"
 # "პროექტ „ზღვის რეზიდენსი“", after a dash or a colon: "პროექტის - „ზღვის რეზიდენსი“", and
@@ -524,11 +547,14 @@ def _read_signatory(window: str, m: re.Match[str]) -> tuple[str, int, bool] | No
     or None when the words after it are no name - "ან მის მიერ" ("or by him")."""
     words: list[re.Match[str]] = []
     for w in _NAME_WORD.finditer(m.group("name")):
-        if w.group(0) in _NOT_A_NAME or len(words) == 2:
+        if w.group(0) in _NOT_A_NAME or len(words) == 4:
             break
         words.append(w)
     if len(words) < 2:
         return None
+    between = m.group("name")[words[1].start() : words[2].end()] if len(words) > 3 else ""
+    if len(words) > 3 and PATRONYMIC.fullmatch(between):
+        del words[1:3]  # the patronymic: the name is its first name and its surname
     first, last = words[0].group(0), words[1].group(0)
     if {first, last} & (FUNCTION_WORDS | _NOT_A_NAME) or last.endswith("."):
         return None
@@ -759,12 +785,12 @@ def find_parties(text: str, *, split_conflicts: bool = False) -> list[Party]:
         # brings an identification code with it, so require one before believing the name.
         after = window[len(m.group(0)) : len(m.group(0)) + 60]
         looks_like_bank = "ბანკ" in before[-25:] or "ბანკ" in m.group(2) or "ბანკის კოდი" in after
-        party.is_bank = looks_like_bank and not _ID_CODE.search(window[: len(m.group(0)) + 80])
+        party.is_bank = looks_like_bank and not _PARTY_CODE.search(window[: len(m.group(0)) + 80])
         gm = _GRID_BEFORE.search(text[max(0, start - 100) : start])
         if gm and (column := _column(gm.group("h"))):
             headed[id(party)] = column
 
-        if mm := _ID_CODE.search(window):
+        if mm := _PARTY_CODE.search(window):
             party.id_code = _code_digits(mm.group(1))
             party.id_span = (start + mm.start(1), start + mm.end(1))
         if mm := _ADDRESS.search(window):
@@ -788,12 +814,19 @@ def find_parties(text: str, *, split_conflicts: bool = False) -> list[Party]:
             (_DEPUTY, "deputy"),
         )
         for label, kind in kinds:
-            for dm in label.finditer(window):
+            at = 0
+            # the next label is looked for right after the name read, never after the words the
+            # pattern took beyond it: they may be the next signatory's title
+            while (dm := label.search(window, at)) is not None:
+                at = dm.end()
                 if label is not _PROXY and _another_body_s(window, dm):
+                    continue
+                if label is _DIRECTOR and _FUNCTION_BEFORE_TITLE.search(window, 0, dm.start()):
                     continue
                 if (read := _read_signatory(window, dm)) is None:
                     continue
                 name, name_end, confirmed = read
+                at = name_end
                 owner = _grid_owner(text, start + name_end, party, parties, headed)
                 signatories.append(
                     _Signatory(owner, name, start + dm.start("name"), confirmed, kind)
@@ -1038,15 +1071,13 @@ def find_anchors(text: str) -> list[AnchorHit]:
         for director, how in [(d, "signatory") for d in party.directors] + [
             (p, "signatory under a power of attorney") for p in party.proxies
         ]:
-            index = text.find(director)
-            if index < 0:
-                index = 0
+            start, end = _name_written(text, director)
             emit(
                 FactType.party_director,
                 director,
-                text[index : index + len(director)] or director,
-                index,
-                index + len(director),
+                text[start:end] or director,
+                start,
+                end,
                 note=f"{how} for {party.name}" if party.name else None,
             )
 
@@ -1063,6 +1094,40 @@ def find_anchors(text: str) -> list[AnchorHit]:
             seen.add(k)
             out.append(h)
     return out
+
+
+def _name_written(text: str, name: str) -> tuple[int, int]:
+    """Where ``text`` writes the person ``name``: as it is, or with a patronymic between its
+    first name and its surname ("ნოდარ გიორგის ძე ბარამიძე" for "ნოდარ ბარამიძე"); the start of
+    the text, as before, when neither is found."""
+    index = text.find(name)
+    if index >= 0:
+        return index, index + len(name)
+    first, _, last = name.partition(" ")
+    if last:
+        m = re.search(
+            rf"(?<![ა-ჰ]){re.escape(first)}\s+{PATRONYMIC.pattern}\s+{re.escape(last)}(?![ა-ჰ])",
+            text,
+        )
+        if m is not None:
+            return m.span()
+    return 0, len(name)
+
+
+def split_patronymic(name: str) -> tuple[str, str | None]:
+    """``name`` as its first name and its surname, and the patronymic written between them, or
+    None: "დავით გიორგის ძე მელაძე" is ("დავით მელაძე", "გიორგის ძე"). The act check compares
+    the two words and writes a correction with the patronymic kept (red team R3, AOA-R3-06)."""
+    words = name.split()
+    if len(words) == 4 and PATRONYMIC.fullmatch(f"{words[1]} {words[2]}"):
+        return f"{words[0]} {words[3]}", f"{words[1]} {words[2]}"
+    return name, None
+
+
+def with_patronymic(name: str, patronymic: str | None) -> str:
+    """``name`` (a first name and a surname) with ``patronymic`` put back between the two."""
+    first, _, rest = name.partition(" ")
+    return f"{first} {patronymic} {rest}" if patronymic and rest else name
 
 
 def directors_of(text: str) -> list[str]:

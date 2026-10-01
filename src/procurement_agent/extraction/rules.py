@@ -15,6 +15,8 @@ from datetime import date
 
 from procurement_agent.extraction.georgian import month_typo
 from procurement_agent.extraction.normalize import (
+    FIGURE,
+    FIGURE_SPACE,
     IBAN_CURRENCY_SUFFIXES,
     ID_CODE_RE,
     amounts_equal,
@@ -77,7 +79,8 @@ _CURRENCY_NAMES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("GBP", re.compile(r"£|gbp|სტერლინგ|sterling", re.IGNORECASE)),
     ("GEL", re.compile(r"₾|gel|ლარ|lari|ლ\.", re.IGNORECASE)),
 )
-_NUM_RE = r"\d{1,3}(?:[ \u00a0,.]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?"
+#: a figure, read by the one pattern every reader shares (``normalize.FIGURE``)
+_NUM_RE = FIGURE
 
 # context windows (chars) used to classify generic hits
 _CTX = 80
@@ -294,7 +297,8 @@ _AMOUNT_CUR_INSIDE = re.compile(
 # after a quantity keyword it is far more likely a count followed by a price ("რაოდენობა 5
 # 100 ლარი") than one amount of 5 100, so only the group next to the currency is the amount.
 # With a decimal part ("1 234 567,89") the grouping is unambiguous and is kept whole.
-_SPACE_GROUPED = re.compile(r"\d{1,3}(?:[ \u00a0]\d{3})+")
+_SPACE_GROUPED = re.compile(rf"\d{{1,3}}(?:{FIGURE_SPACE}\d{{3}})+")
+_GROUP_SPACE = re.compile(FIGURE_SPACE)
 _QUANTITY_BEFORE = re.compile(r"(?:რაოდენობ[ა-ჰ]*|quantity|qty)\.?\s*$", re.IGNORECASE)
 
 
@@ -422,7 +426,7 @@ def find_amounts(text: str) -> list[RuleHit]:
                 and _SPACE_GROUPED.fullmatch(number)
                 and _QUANTITY_BEFORE.search(text[max(0, span[0] - 30) : span[0]])
             ):
-                cut = max(number.rfind(" "), number.rfind("\u00a0")) + 1
+                cut = max(g.end() for g in _GROUP_SPACE.finditer(number))
                 number = number[cut:]
                 span = (m.start(num_group) + cut, span[1])
             value = parse_number(number)
