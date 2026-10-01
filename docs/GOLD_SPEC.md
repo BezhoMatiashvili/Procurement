@@ -200,6 +200,54 @@ How the rules read money, terms and names (red-team round 3):
   (`N 27/2026 ხელშეკრულების საფუძველზე`, `№27/2026 ხელშეკრულებით`); the number sign stays
   required, and before any other word (`N 5 პუნქტის`, `N 14 აქტის`) it is no contract number.
 
+How the rules read money, terms and lines (red-team round 4):
+
+* **Label lines (policy).** A `label: value` line with no full stop of its own - a short label
+  of words, a colon and a value on the same line, opened by a bullet or not (`საგარანტიო ვადა:
+  12 თვე`, `- ანგარიშსწორების პირობები: ... 7 სამუშაო დღის ვადაში`) - ends at its line break:
+  it is a sentence of its own. A value that runs on (it ends with a comma, a dash, an open
+  bracket or `და`) and an inline run (`შეადგენს` / `100` / `(ასი) ლარს`) stay one sentence, and
+  a line break elsewhere is still no sentence end.
+* **The contract's price (policy).** The contract's overall figure is `total_amount` even when
+  its label is a price, when nothing makes it a price per unit: a total word (`საერთო ფასი`,
+  `the total price`) or the contract or what it buys (`ხელშეკრულების ფასი`, `the Contract
+  price`, `the price of the Goods`) names it. A price per unit (`ერთეულის ფასი`, `GEL 450 per
+  chair`, `1 ცალზე`), a bare `ფასი:` and a price table's cell stay `price`.
+* **Money.** A figure that restates the price on another tax basis is an `amount`, and its tax
+  wording is not the price's `vat_status`, in a bracket (round 3), past a turn of the price's
+  sentence (`36 000 ლარს დღგ-ს ჩათვლით, საიდანაც ღირებულება დღგ-ს გარეშე შეადგენს 30 508.47
+  ლარს`, `; მათ შორის: დღგ-ს გარეშე - ...`) or in the next sentence stating the other basis; a
+  net figure stated alone stays the price. A breakdown - the net figure, the tax labelled as such
+  (`დღგ - 915.25 ლარი`, `დღგ (18%): 915.25 ლარი`, `VAT: GEL 180`), then the figure a total word
+  names (`სულ 6 000 ლარი`, `სულ დღგ-ს ჩათვლით: 6 000.00 ლარი`) - has one `total_amount`, the
+  one the total word names; the other two are `amount`. A tax label qualified by the price's
+  basis (`Price including VAT: 118 GEL`, `ღირებულება + დღგ: 1 180 ლარი`) is the price's. A
+  figure alone in a price table's cell whose column header names the currency (`ჯამი (ლარი)`,
+  `ღირებულება (ლარი)`) is money in it, typed as a table's cells are; a currency word before a
+  figure in prose stays no currency.
+* **Durations.** The unit hyphenated to its count is the count's (`20-დღიან ვადაში`,
+  `12-თვიანი`), the days counted are read in every case and abbreviated with their stop
+  (`20 კალენდარულ დღეში`, `15 სამ. დღის`, `კალ. დღის`), and a count written in words only is
+  its figure (`თხუთმეტი სამუშაო დღის` is `P15D working`, in the act check too); an ordinal
+  (`20-ე დღეს`, `მე-20 დღეს`, `მეორე დღეს`) is no count, and `სამ` with no stop is the numeral
+  three. A count the warranty only frames (`საგარანტიო ვადის განმავლობაში გამოვლენილ ნაკლს ...
+  10 დღის ვადაში`, `საგარანტიო ვადის დასრულებიდან 15 დღეში`, `during the warranty period`) or
+  that the guarantee money sets (`საგარანტიო თანხა`, `საგარანტიო უზრუნველყოფა`, `საბანკო
+  გარანტია`) is no `warranty_period`.
+* **Percentages and penalties.** A rate's words may stand between the figure and the sign
+  (`5 (ხუთი)%-ის`, `0.1 (ნული მთელი ერთი) %-ის`) as before the word. A penalty's period is never
+  read across `, ხოლო` / `, whereas` either: in `0.2% ყოველ დღეზე, ხოლო ... ჯარიმა 10%` the fine
+  counts per nothing.
+* **Payment terms.** `prepayment` names the advance, and so does an advance word after the
+  verb that pays the share (`ღირებულების 30% გადაიხდება ავანსის სახით`, `ავანსად`, `shall be
+  paid as an advance`); `დარჩენილი 75% გადაიხდება ავანსის გამოქვითვით` is the balance. A
+  staged payment written as a list is one payment clause: after a lead-in ending in a colon,
+  an item opening with the advance or the balance (`4.2.1. ავანსი - ...`), and after a
+  semicolon an item opening with the balance (`ბ) დარჩენილი თანხა - ...`, `4.2.2. დარჩენილი 70%
+  - ...`), so the balance's deadline is the term's; a sibling clause (`4.3. ...`) is none.
+* **Contract numbers.** Latin letters are upper case whatever the document's case (`sp-2026/318`
+  is `SP-2026/318`); Georgian letters stay as written.
+
 `vat_status` meanings: `incl` = the price includes VAT/taxes; `excl` = VAT is added on top;
 `none` = no VAT applies / exempt; `net` = a net amount, taxes withheld or not mentioned by rule
 (natural person, foreign organisation).
