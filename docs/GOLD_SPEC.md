@@ -398,6 +398,30 @@ Red team round 2 (compare) settled these cases:
 * Between a contract and its act, two parties' directors, codes or names that both differ are
   listed as the values removed and added (warnings). Nothing pairs them by role yet.
 
+Red team round 3 (compare) settled these cases:
+
+* A value's words are its own in every form the readers accept, and no value ends inside a
+  word: a penalty's period in any case (`დღეზე` -> `კვირაზე` is one `CMP.PERCENT`), a figure's
+  words in brackets after it (a table cell `8 450 (...)` -> `8 950 (...)` is one `CMP.AMOUNT`),
+  a rate's words before its figure (`ნული მთელი ორი (0.2) პროცენტის` is `0.2%`, formatting), and a
+  party's legal form on either side of the quoted name (`„ნიმუში“ შპს` is `შპს „ნიმუში“`).
+* A count of time written only in words (`თხუთმეტი სამუშაო დღის`) is its figure: restating
+  `15 (თხუთმეტი)` so is formatting, and changing it so is the term's change (`P15D working` ->
+  `P20D working`). A count written in words on both sides that changed stays `CMP.AMOUNT_WORDS`
+  ("Period in words"), one finding.
+* A cell of a table laid out one party per column is read as its column's party's, and a short
+  signature line as the party named on the line above it: a director replaced there is
+  `CMP.PARTY` "Director / signatory", before and after.
+* A figure in a price table's total row (the row a total word names: `სულ`, `ჯამი`, `Total`)
+  under a column of money is `CMP.AMOUNT` "Total amount"; a line total stays "Number".
+* A day range before one month and year (`01-31.05.2026`, `1-31 მაისი, 2026 წ.`) is one period.
+* A line whose one change is a letter slipped (typed wrong, dropped or added) in one word of four
+  letters or more that is no value, month or number word is read as meant: no value changes
+  with it, and the line is `CMP.TEXT_CHANGED` (or `CMP.SPELLING`).
+* A version pair stays two versions however many consecutive lines were edited: a block too
+  large to score pairwise is paired in order, and only lines with nothing alike are a removal
+  and an addition.
+
 ## 5. BOQ gold (per set, JSON) and the evaluation policy
 
 `samples/gold_boq/<set>.json`:

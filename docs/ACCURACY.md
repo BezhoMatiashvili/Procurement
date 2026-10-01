@@ -790,11 +790,14 @@ signature, so every all-numeric row of the same shape shares a key. `SequenceMat
 duplicates, but within a run of such rows the alignment is effectively positional — inserting
 one numeric row mid-block shifts the rest. Inserting a row that carries *any* text does not.
 
-**A very large replace block is reported wholesale.** Scoring every left segment against every
-right segment is quadratic, so past `_PAIR_BUDGET` (2500 candidate pairs) a block becomes an
-all-removed plus an all-added rather than a set of line edits. The act-vs-contract pair is
-59 × 68 = 4012 and lands there — which is the other reason that report leads with the field
-differences: they are the only layer still carrying an answer. Lines that differ only in their
+**A very large replace block is paired in order.** Scoring every left segment against every
+right segment is quadratic, so past `_PAIR_BUDGET` (2500 candidate pairs) a block is paired in
+order instead (`_pair_in_order`): each line looks for its counterpart among the next eight on
+the other side, and a line that finds none is a removal or an addition. Until red team round 3
+such a block became an all-removed plus an all-added, and one word inserted into each of 51
+consecutive clauses turned two versions of one contract "unrelated", with every change dropped
+(COMPARE-R3-05). The act-vs-contract pair is 59 × 68 = 4012 and lands there; its lines have
+little in common, so it still leads with the field differences. Lines that differ only in their
 clause number ("5.3." → "6.3.", the same text after it, once on each side) are paired first,
 before the budget applies: an article inserted near the top of a 70-clause contract renumbered
 every clause after it, made one block too big to pair, and the two versions scored 0.12 —
@@ -951,6 +954,36 @@ text.
 * **Left as it is.** English party names, directors and addresses are still only "text changed"
   (COMPARE-R2-12). This follows the English-scope decision recorded under "An act not in
   Georgian".
+
+### Red team, round 3: a value's words, wherever and however they are written (2026-10-01)
+
+The tests are in `tests/unit/test_compare_redteam3.py`, on invented text, each with a near miss.
+
+* **No mask stops inside a word, and a value's own words are masked with it.** The round-2
+  masks left a penalty period's case ending behind ("per day" → "per week" was also a text
+  change); they now end at a word's end. A figure's words in brackets after it, a rate's words
+  before its figure (decimals included: `ნული მთელი ორი (0.2)`), and a company's legal form on
+  either side of its quoted name are part of the value, so restating them is formatting.
+* **A count of time written only in words is read as its figure** (`_with_figures`, one reader
+  for the line values and the masks). A term restated so is no change, and changed so is the
+  term's change. A count in words on both sides that changed is still reported once, as its
+  words; a figure's words "removed" while the line still writes them are not reported.
+* **A requisites table is read by its columns.** A cell of a table with two party names side by
+  side is read under its column's party, and a short signature line under the party-name line
+  above it, so a director replaced there is a party change. A total row's figure under a money
+  column is the total amount.
+* **A day range before one month and year is one period** on the compare side (`_range_end`),
+  whatever the date reader makes of its first day.
+* **A slipped letter is a spelling change.** A line whose one change is one letter in one word
+  (four letters or more, no value, month or number word) is read as meant, on the line and in
+  the document-wide pass: `გადასახადების` typed `გძდასახადების` no longer turned "VAT included"
+  into "none". Found by `scripts/mutate_aoa.py`, not the red team.
+* **Left open.** An address restyled (`N17` → `№17`, `ქ.` → `ქუჩა`) is still a party change
+  (COMPARE-R3-10, a spec gap: `party_address` is compared as written), and a contract date
+  moved still moves a validity that runs from signing, two findings (COMPARE-R3-11, by the
+  round-1 decision). A validity end written with its year after the postposition (`30
+  ნოემბრამდე, 2026 წ.`) is read by `checks/document_facts` (COMPARE-R3-02); the compare side
+  keeps the date's "until" once the date reader reads it.
 
 ### The findings list is a list, not a dump
 

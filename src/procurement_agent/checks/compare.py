@@ -51,6 +51,7 @@ from procurement_agent.extraction.anchors import (
     bic_is_well_formed,
     find_anchors,
     find_parties,
+    party_column,
     plain_party_wording,
 )
 from procurement_agent.extraction.georgian import (
@@ -207,7 +208,7 @@ DEFAULT_MIN_SIMILARITY = 0.35
 #: A replace block is re-paired by similarity; below this two segments are unrelated and become
 #: a removal plus an addition rather than a rewrite.
 _PAIR_FLOOR = 0.5
-#: Re-pairing is quadratic. Past this many candidate pairs, fall back to positional pairing.
+#: Re-pairing is quadratic. Past this many candidate pairs, pair in order (``_pair_in_order``).
 _PAIR_BUDGET = 2500
 
 
@@ -412,7 +413,7 @@ def hits_of(text: str, *, reference: str = "") -> list[_Hit]:
     another alphabet inside a Georgian word is read past (``_as_meant``); ``reference``, the
     text this one is compared with, says which word it was meant to be.
     """
-    text = _as_meant(normalize_confusables(text), reference)
+    text = _with_figures(_as_meant(normalize_confusables(text), reference))[0]
     out: list[_Hit] = []
     seen: set[tuple[FactType, str]] = set()
 
@@ -620,6 +621,73 @@ def _as_meant(text: str, reference: str = "") -> str:
     return "".join(out)
 
 
+#: The unit a count of time is in, right after the count: "სამუშაო დღის", "თვის", "წლის".
+_TIME_UNIT = re.compile(
+    r"\s+(?:(?:სამუშაო|კალენდარულ[ა-ჰ]*|საბანკო)\s+)?(?:დღ|თვ[ეი]|წ[ელ]|კვირ)", re.IGNORECASE
+)
+#: A unit of time right after a word: where a count written in words may end.
+_AFTER_A_WORD_UNIT = re.compile(r"(?<=[ა-ჰ])" + _TIME_UNIT.pattern, re.IGNORECASE)
+#: Where a count's figure was shown before its words: (start, end) in the text as written, and
+#: (start, end) in the text with the figure shown.
+_Edit = tuple[int, int, int, int]
+
+
+def _with_figures(text: str) -> tuple[str, list[_Edit]]:
+    """``text`` with each count of time written only in words shown with its figure, as a
+    contract writes a count both ways: "თხუთმეტი სამუშაო დღის" is read as "15 (თხუთმეტი)
+    სამუშაო დღის" - the same term (docs/GOLD_SPEC.md section 2: a count written in words is
+    the same duration as its figure). Returns the shown text and where it differs.
+
+    The rules read a count from its figure only. A term restated in words only - "15
+    (თხუთმეტი) სამუშაო დღის" → "თხუთმეტი სამუშაო დღის" - was then the payment term removed,
+    and a real change so written ("ოცი სამუშაო დღის") the term removed rather than changed.
+    Only a whole number right before a unit of time, outside brackets: an ordinal ("მეორე
+    დღეს") is no count, and words in brackets are a figure's own.
+    """
+    edits: list[_Edit] = []
+    out: list[str] = []
+    pos = shift = 0
+    for unit in _AFTER_A_WORD_UNIT.finditer(text):
+        run = _WORDS_BEFORE.search(text, max(pos, unit.start() - 120), unit.start())
+        if run is None:
+            continue
+        read: tuple[int, int] | None = None
+        for word in re.finditer(r"[ა-ჰ]+", run.group(1)):  # the longest run that is a number
+            value = parse_number_words(run.group(1)[word.start() :])
+            if value is not None and value == int(value) and value > 0:
+                read = run.start(1) + word.start(), int(value)
+                break
+        if read is None:
+            continue
+        start, value = read
+        end = unit.start()
+        if _in_brackets(text, start) or text[:start].rstrip().endswith(tuple("0123456789")):
+            continue
+        shown = f"{value} ({text[start:end]})"
+        out.append(text[pos:start])
+        out.append(shown)
+        edits.append((start, end, start + shift, start + shift + len(shown)))
+        shift += len(shown) - (end - start)
+        pos = end
+    if not edits:
+        return text, []
+    out.append(text[pos:])
+    return "".join(out), edits
+
+
+def _written_at(edits: list[_Edit], pos: int, *, end: bool) -> int:
+    """Where ``pos`` of the text ``_with_figures`` showed stands in the text as written: a
+    position inside a shown count is its words' start, or their end for a span's end."""
+    shift = 0
+    for start, stop, shown_start, shown_stop in edits:
+        if pos <= shown_start:
+            return pos - shift
+        if pos <= shown_stop:
+            return stop if end or pos == shown_stop else start
+        shift = shown_stop - stop
+    return pos - shift
+
+
 #: A period as ``docs/GOLD_SPEC.md`` writes it, "start/end"; ".." for an end not stated.
 _ISO_RANGE = re.compile(r"^(?:\d{4}-\d{2}-\d{2}|\.\.)/(?:\d{4}-\d{2}-\d{2}|\.\.)$")
 #: What stands between the two dates of one period: "1 მარტიდან 31 მარტის ჩათვლით" (the
@@ -745,8 +813,13 @@ def _range_end(text: str, rules: list[RuleHit], i: int) -> tuple[int, FactType] 
     else:
         return None
     gap = text[first.end : second.start]
-    marked = _RANGE_GAP.fullmatch(gap) is not None or (
-        text[first.start : first.end].rstrip().endswith("დან") and _RANGE_AFTER_FROM.fullmatch(gap)
+    written = text[first.start : first.end].rstrip()
+    marked = (
+        _RANGE_GAP.fullmatch(gap) is not None
+        or (written.endswith("დან") and _RANGE_AFTER_FROM.fullmatch(gap) is not None)
+        # a day range before one month and year, "01-31.05.2026", "1-31 მაისი, 2026 წ.": the
+        # rules read its first day with the dash, the last day with the month
+        or (written.endswith("-") and not gap.strip())
     )
     if marked and ft not in _PERIOD_TYPES:
         # two dates written as a range are a period whatever word names it ("გაწეულია
@@ -1431,12 +1504,13 @@ def _postposition(written: str, tail: re.Match[str] | None) -> str:
     if role is not None:
         return role
     post = (tail.group("post") or "") if tail else ""
-    for word in re.findall(r"[ა-ჰ]+", written):
+    words = re.findall(r"[ა-ჰ]+", written)
+    for word in words:
         if any(word.startswith(stem) for stem in _KA_MONTH_STEMS):
             post = word
     if post.endswith("დან"):
         return "from"
-    if post.endswith("მდე") or (tail is not None and tail.group("incl")):
+    if post.endswith("მდე") or (tail is not None and tail.group("incl")) or "ჩათვლით" in words:
         return "until"
     return ""
 
@@ -1461,44 +1535,143 @@ def _value_spans(text: str) -> list[_Span]:
     from procurement_agent.checks.contract_terms import tax_phrases
     from procurement_agent.extraction.rules import _PER_PERIOD
 
+    # the rules read a count written only in words with its figure shown (``_with_figures``);
+    # where they read it is mapped back onto ``text``
+    shown, edits = _with_figures(text)
     spans: list[_Span] = []
-    rules = run_rules(text)
+    rules = run_rules(shown)
     i = 0
     while i < len(rules):
         r = rules[i]
-        closing = _range_end(text, rules, i)
+        closing = _range_end(shown, rules, i)
         if closing is not None:
             second = rules[closing[0]]
-            tail = _DATE_TAIL.match(text, second.end)
+            tail = _DATE_TAIL.match(shown, second.end)
             end = tail.end() if tail else second.end
             spans.append(_Span(r.start, end, f"period {r.normalized}/{second.normalized}"))
             i = closing[0] + 1
             continue
         if _ISO_DATE.match(str(r.normalized)):
-            tail = _DATE_TAIL.match(text, r.end)
-            post = _postposition(text[r.start : r.end], tail)
+            tail = _DATE_TAIL.match(shown, r.end)
+            post = _postposition(shown[r.start : r.end], tail)
             end = tail.end() if tail else r.end
             spans.append(_Span(r.start, end, f"date {r.normalized} {post}"))
         else:
-            spans.append(_Span(r.start, r.end, _span_key(text, r)))
+            spans.append(_Span(r.start, r.end, _span_key(shown, r)))
             if r.type is FactType.penalty:
-                stop = _CLAUSE_START.search(text, r.end)
-                per = _PER_PERIOD.search(text, r.end, stop.start() if stop else len(text))
+                stop = _CLAUSE_START.search(shown, r.end)
+                per = _PER_PERIOD.search(shown, r.end, stop.start() if stop else len(shown))
                 if per is not None:
                     spans.append(_Span(per.start(), per.end(), "per"))
         i += 1
+    spans = [
+        _Span(_written_at(edits, s.start, end=False), _written_at(edits, s.end, end=True), s.key)
+        for s in spans
+    ]
     spans.extend(_Span(a, b, f"period {span}") for a, b, span in _month_periods(text))
     for m in _QUANTITY.finditer(text):
         (hit,) = _quantity_hits(m.group(0)) or (None,)
         if hit is not None:
             spans.append(_Span(m.start(), m.end(), f"quantity {hit.normalized}"))
     spans.extend(_Span(*p.span, f"vat {p.kind}") for p in tax_phrases(text))
+    spans.extend(_figures_with_words(text))
+    spans.extend(
+        _Span(p.span[0], p.span[1], f"party {normalize_name(p.name)}")
+        for p in find_parties(text)
+        if p.span is not None and p.name
+    )
+    spans = [_with_own_words(text, s) for s in spans]
     out: list[_Span] = []
-    for span in sorted(spans, key=lambda s: (s.start, -s.end)):
+    for span in sorted((_whole_words(text, s) for s in spans), key=lambda s: (s.start, -s.end)):
         if out and span.start < out[-1].end:
             continue  # inside a value already masked
         out.append(span)
     return out
+
+
+#: A figure with its words in brackets after it, "8 450 (რვა ათას ოთხას ორმოცდაათი)", or its
+#: words with the figure in brackets after them, "ნული მთელი ორი (0.2)".
+_FIGURE_THEN_WORDS = re.compile(rf"(?<![\d.,])({FIGURE})\s*\(([^()\d]{{2,80}})\)")
+_WORDS_THEN_FIGURE = re.compile(rf"\(\s*({FIGURE})\s*%?\s*\)")
+#: The words right before a bracket: up to eight, the number's words among them.
+_WORDS_BEFORE = re.compile(r"(?<![ა-ჰ])((?:[ა-ჰ]+\s+){0,7}[ა-ჰ]+)\s*$")
+
+
+#: A decimal written out: "ნული მთელი ორი" (0.2), "ერთი მთელი ოცდახუთი მეასედი" (1.25).
+_DECIMAL_WORDS = re.compile(r"(.+?)\s+მთელი\s+(.+?)(?:\s+მე(?:ათ|ას|ათას)ედი)?")
+
+
+def _spelled_as(words: str, figure: str) -> bool:
+    """Whether ``words`` are ``figure`` written out, a decimal's words among them."""
+    value = parse_number(figure)
+    if value is None:
+        return False
+    decimal = _DECIMAL_WORDS.fullmatch(words.strip())
+    if decimal is not None:
+        whole, fraction = (parse_number_words(p) for p in decimal.groups())
+        digits = re.split(r"[.,]", figure.strip())
+        return (
+            whole is not None
+            and fraction is not None
+            and len(digits) == 2
+            and whole == int(digits[0])
+            and fraction == int(digits[1])
+        )
+    said = read_words(words)[1]
+    return said is not None and amounts_equal(said, value)
+
+
+def _words_before(text: str, at: int, figure: str) -> int | None:
+    """Where the words that write out ``figure`` begin, when they end right before ``at``."""
+    m = _WORDS_BEFORE.search(text[max(0, at - 120) : at])
+    if m is None:
+        return None
+    base = max(0, at - 120) + m.start(1)
+    words = list(re.finditer(r"[ა-ჰ]+", m.group(1)))
+    for k in range(len(words)):  # the longest run of words that is the number
+        if _spelled_as(m.group(1)[words[k].start() :], figure):
+            return base + words[k].start()
+    return None
+
+
+def _figures_with_words(text: str) -> list[_Span]:
+    """Every figure written with its own words, figure first or words first, as one value: the
+    figure's words are no words of the line's own (docs/GOLD_SPEC.md section 4, round 2)."""
+    out: list[_Span] = []
+    for m in _FIGURE_THEN_WORDS.finditer(text):
+        if _spelled_as(m.group(2), m.group(1)):
+            out.append(_Span(m.start(), m.end(), f"number {parse_number(m.group(1)):g}"))
+    for m in _WORDS_THEN_FIGURE.finditer(text):
+        start = _words_before(text, m.start(), m.group(1))
+        if start is not None:
+            out.append(_Span(start, m.end(), f"number {parse_number(m.group(1)):g}"))
+    return out
+
+
+def _with_own_words(text: str, span: _Span) -> _Span:
+    """``span`` with the words its figure is written out in: a rate "(0.2) პროცენტის" read by
+    the rules keeps "ნული მთელი ორი" before it, the same rate written another way."""
+    m = _WORDS_THEN_FIGURE.match(text, span.start)
+    if m is None:
+        return span
+    start = _words_before(text, span.start, m.group(1))
+    return span if start is None else _Span(start, span.end, span.key)
+
+
+def _whole_words(text: str, span: _Span) -> _Span:
+    """``span`` widened to the words it begins and ends in: no mask stops inside a word.
+
+    A reader's match may end at a word's stem - a penalty's "per week" is read from "კვირ" of
+    "კვირაზე" - and the case ending left outside the mask was a word of its own: "per day" →
+    "per week" was the penalty's change and, as "ეზე" had become "აზე", a text change too."""
+    start, end = span.start, span.end
+    if start < end and _LETTER.match(text, start):
+        while start > 0 and _LETTER.match(text, start - 1):
+            start -= 1
+    if start < end and _LETTER.match(text, end - 1):
+        while end < len(text) and _LETTER.match(text, end):
+            end += 1
+    return span if (start, end) == (span.start, span.end) else _Span(start, end, span.key)
 
 
 def _masked_values(text: str, *, keyed: bool) -> tuple[str, list[_Span]]:
@@ -1546,12 +1719,16 @@ class _Context:
     its table column ("ღირებულება (ლარი)"), or at the start of the paragraph after it ("ლარს").
 
     A cell of a quantity column ("რაოდენობა") or a unit column ("ერთეული") also knows its row's
-    other half: ``quantity`` and ``unit`` are the texts of the row's quantity and unit cells."""
+    other half: ``quantity`` and ``unit`` are the texts of the row's quantity and unit cells.
+    ``total`` says a total word names the cell's row ("სულ"); ``party`` is the party-name cell
+    of its column in a table laid out one party per column."""
 
     header: str = ""
     following: str = ""
     quantity: str = ""
     unit: str = ""
+    total: bool = False
+    party: str = ""
 
 
 _NO_CONTEXT = _Context()
@@ -1566,28 +1743,87 @@ _UNIT_HEADER = re.compile(
 )
 
 
+#: A cell that names its row a total: "სულ", "ჯამი", "სულ ჯამი:", "Total", "Grand total" - not a
+#: sub-total, which totals a part.
+_TOTAL_CELL = re.compile(
+    r"\s*(?:სულ(?:\s+ჯამ[ა-ჰ]*)?|ჯამ[ა-ჰ]*|საერთო\s+ჯამ[ა-ჰ]*|(?:grand\s+)?total)\s*:?\s*",
+    re.IGNORECASE,
+)
+#: A column header of money: its currency, or a word for a price, a sum or a value.
+_MONEY_HEADER = re.compile(
+    r"ლარ|თეთრ|დოლარ|ევრო|₾|\$|€|(?<![a-z])(?:gel|usd|eur)(?![a-z])|ღირებულ|ფას|ჯამ|თანხ"
+    r"|(?<![a-z])(?:amount|price|cost|total|sum|value)(?![a-z])",
+    re.IGNORECASE,
+)
+
+
+#: A requisites line: short, one field. A clause is no line of a signature block.
+_REQUISITE_LINE = 80
+#: How many lines of a signature block a party's name heads.
+_BLOCK_LINES = 3
+
+
+def _signed_under(segments: Sequence[Segment], k: int) -> str | None:
+    """The party-name line a short line of a signature block stands under ("შპს „ა“", then
+    "ს/კ ...", then "დირექტორი: ..."), when the line names no party of its own."""
+    if len(segments[k].text) > _REQUISITE_LINE or party_column(segments[k].text) is not None:
+        return None
+    for back in range(k - 1, max(-1, k - 1 - _BLOCK_LINES), -1):
+        line = segments[back]
+        if line.table is not None or len(line.text) > _REQUISITE_LINE:
+            return None
+        column = party_column(line.text)
+        if column is not None:
+            return line.text if column[0] == "name" else None
+    return None
+
+
 def _contexts(segments: Sequence[Segment]) -> dict[int, _Context]:
-    """Each segment's context (``_Context``), keyed by ``id``: a table cell's column header and
-    its row's quantity and unit, another segment's next paragraph."""
+    """Each segment's context (``_Context``), keyed by ``id``: a table cell's column header, its
+    row's quantity and unit, whether a total word names its row, and whose column it is in a
+    table of one party per column; another segment's next paragraph."""
     rows: dict[tuple[int | None, int | None], dict[str, str]] = {}
+    totals: set[tuple[int | None, int | None]] = set()
+    parties: dict[tuple[int | None, int | None], str] = {}
     for segment in segments:
+        if segment.table_row is None:
+            continue
         header = segment.column or ""
         for role, pattern in (("quantity", _QUANTITY_HEADER), ("unit", _UNIT_HEADER)):
-            if segment.table_row is not None and pattern.search(header):
+            if pattern.search(header):
                 rows.setdefault((segment.table, segment.table_row), {}).setdefault(
                     role, segment.text
                 )
+        if _TOTAL_CELL.fullmatch(segment.text):
+            totals.add((segment.table, segment.table_row))
+        column = party_column(segment.text)
+        if column is not None and column[0] == "name":
+            parties.setdefault((segment.table, segment.table_col), segment.text)
+    # one party per column: two parties named side by side in the one table
+    by_table = Counter(table for table, _col in parties)
     out: dict[int, _Context] = {}
     for k, segment in enumerate(segments):
+        context = _NO_CONTEXT
         if segment.column is not None:
             row = rows.get((segment.table, segment.table_row), {})
-            out[id(segment)] = _Context(
+            context = _Context(
                 header=segment.column,
                 quantity=row.get("quantity", ""),
                 unit=row.get("unit", ""),
             )
         elif k + 1 < len(segments) and segments[k + 1].table is None:
-            out[id(segment)] = _Context(following=segments[k + 1].text[:_AFTER])
+            context = _Context(following=segments[k + 1].text[:_AFTER])
+        if segment.table_row is not None:
+            party = parties.get((segment.table, segment.table_col), "")
+            context = replace(
+                context,
+                total=(segment.table, segment.table_row) in totals,
+                party=party if by_table[segment.table] >= 2 and party != segment.text else "",
+            )
+        elif (heading := _signed_under(segments, k)) is not None:
+            context = replace(context, party=heading)
+        if context != _NO_CONTEXT:
+            out[id(segment)] = context
     return out
 
 
@@ -2249,9 +2485,7 @@ def _pair_replace(left: Sequence[Segment], right: Sequence[Segment]) -> list[_Pa
         paired.extend(_pair_gap(left[i0:], right[j0:]))
         return paired
     if len(left) * len(right) > _PAIR_BUDGET:
-        # Too big to score pairwise, and a block this large is a wholesale replacement rather
-        # than a set of line edits. Say that, instead of inventing line-to-line correspondences.
-        return [(a, None, None) for a in left] + [(None, b, None) for b in right]
+        return _pair_in_order(left, right)
 
     scored: list[tuple[float, int, int]] = []
     for i, a in enumerate(left):
@@ -2277,6 +2511,62 @@ def _pair_replace(left: Sequence[Segment], right: Sequence[Segment]) -> list[_Pa
         (a, right[matched[i]] if i in matched else None, None) for i, a in enumerate(left)
     ]
     out.extend((None, b, None) for j, b in enumerate(right) if j not in taken)
+    return out
+
+
+#: How far ahead of the next unpaired line, on either side, ``_pair_in_order`` looks for its
+#: counterpart: lines inserted or deleted between two edited ones.
+_PAIR_REACH = 8
+
+
+def _alike(a: str, b: str) -> bool:
+    m = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    return (
+        m.real_quick_ratio() >= _PAIR_FLOOR
+        and m.quick_ratio() >= _PAIR_FLOOR
+        and m.ratio() >= _PAIR_FLOOR
+    )
+
+
+def _pair_in_order(left: Sequence[Segment], right: Sequence[Segment]) -> list[_Pair]:
+    """A block too large to score every line against every other, paired in order.
+
+    Each unpaired line on the left looks for its counterpart among the next few on the right,
+    nearest first, and the other way round; lines no counterpart is found for within reach
+    are a removal and an addition. Linear in the block's length.
+
+    A block this large used to be reported whole, as removed and added. A global edit - one
+    word inserted into each of 51 consecutive clauses - made such a block, and the two
+    versions then read as unrelated: every change in it was dropped, and a new penalty added
+    elsewhere was only a warning. A block whose lines really have nothing in common still comes
+    out removed and added, as nothing in it pairs.
+    """
+    lk = [key_of(a.text) for a in left]
+    rk = [key_of(b.text) for b in right]
+    out: list[_Pair] = []
+    i = j = 0
+    while i < len(left) and j < len(right):
+        found: tuple[int, int] | None = None
+        for reach in range(2 * _PAIR_REACH + 1):
+            for di in range(max(0, reach - _PAIR_REACH), min(reach, _PAIR_REACH) + 1):
+                ii, jj = i + di, j + reach - di
+                if ii < len(left) and jj < len(right) and _alike(lk[ii], rk[jj]):
+                    found = ii, jj
+                    break
+            if found is not None:
+                break
+        if found is None:
+            out.append((left[i], None, None))
+            out.append((None, right[j], None))
+            i, j = i + 1, j + 1
+            continue
+        ii, jj = found
+        out.extend((a, None, None) for a in left[i:ii])
+        out.extend((None, b, None) for b in right[j:jj])
+        out.append((left[ii], right[jj], None))
+        i, j = ii + 1, jj + 1
+    out.extend((a, None, None) for a in left[i:])
+    out.extend((None, b, None) for b in right[j:])
     return out
 
 
@@ -2891,33 +3181,36 @@ def _classify(
         return "changed", "cosmetic", [], ["CMP.FORMATTING"], inline
 
     hidden = hidden_character_rules(a.text, b.text)
-    values = deltas_between(a.text, b.text)
+    values = (
+        []  # a letter slipped: the words say what they said (``_slip_only``)
+        if _slip_only(a.text, b.text)
+        else deltas_between(_in_its_column(a.text, ca), _in_its_column(b.text, cb))
+    )
     counted = _cell_quantity(a.text, ca), _cell_quantity(b.text, cb)
     quantity = _delta(*counted) if None not in counted else None
     # a quantity column's figure, or its row's unit, is the row's quantity - not a bare number
     bare = (
         [quantity]
         if quantity is not None
-        else bare_number_delta(
-            a.text,
-            b.text,
-            critical=a.kind != "sheet_cell",
-            left_number=a.number,
-            right_number=b.number,
-        )
+        else [
+            _as_total(d, ca, cb)
+            for d in bare_number_delta(
+                a.text,
+                b.text,
+                critical=a.kind != "sheet_cell",
+                left_number=a.number,
+                right_number=b.number,
+            )
+        ]
     )
     words = [
         d
         for d, read in _word_number_changes(a.text, b.text, ca, cb)
-        if not _restated(read, values + bare)
+        if not _restated(read, values + bare) and not _still_spelled(d, a.text, b.text)
     ]
-    deltas = (
-        values
-        + words
-        + numeral_word_deltas(a.text, b.text)
-        + spelling_deltas(a.text, b.text)
-        + bare
-    )
+    numerals = numeral_word_deltas(a.text, b.text)
+    values = [d for d in values if not _told_in_words(d, numerals)]
+    deltas = values + words + numerals + spelling_deltas(a.text, b.text) + bare
     if deltas:
         mat = "critical" if any(d.is_critical for d in deltas) else "substantive"
         return "changed", mat, deltas, sorted({d.rule_id for d in deltas} | set(hidden)), inline
@@ -2929,6 +3222,153 @@ def _classify(
     ):
         return "changed", "cosmetic", [], ["CMP.FORMATTING"], inline
     return "changed", "substantive", [], sorted({*hidden, "CMP.TEXT_CHANGED"}), inline
+
+
+def _one_letter_apart(a: str, b: str) -> bool:
+    """Whether ``b`` is ``a`` with one letter typed wrong, dropped or added."""
+    if a == b or abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        return sum(x != y for x, y in zip(a, b, strict=True)) == 1
+    short, long_ = (a, b) if len(a) < len(b) else (b, a)
+    k = next((i for i, (x, y) in enumerate(zip(short, long_, strict=False)) if x != y), len(short))
+    return short[k:] == long_[k + 1 :]
+
+
+#: The shortest word a one-letter slip is read past in: a short word one letter from another is
+#: as likely another word ("ის" / "ეს").
+_SLIP_MIN_LETTERS = 4
+
+
+def _slip_only(left: str, right: str) -> bool:
+    """Whether the one change between two lines is a letter slipped in one word - typed wrong,
+    dropped or doubled - in a word that carries no written value.
+
+    Such a line changed nothing it says. Read literally, the slip still flipped a value read
+    from the wording around the word: "გადასახადების ჩათვლით" (taxes included) typed
+    "გძდასახადების ჩათვლით" no longer read as including VAT, and the one letter was a VAT
+    change "incl → none" beside the text change. A word that is itself a value, or part of one,
+    is left alone: a month one letter from another ("ივნისი" / "ივლისი") is another date, a
+    number's word another number, a surname one letter off another person.
+    """
+    lt, rt = _TOKEN.findall(left), _TOKEN.findall(right)
+    ops = [
+        op
+        for op in difflib.SequenceMatcher(None, lt, rt, autojunk=False).get_opcodes()
+        if op[0] != "equal"
+    ]
+    if len(ops) != 1 or ops[0][0] != "replace":
+        return False
+    _tag, i1, i2, j1, j2 = ops[0]
+    if i2 - i1 != 1 or j2 - j1 != 1:
+        return False
+    a, b = lt[i1], rt[j1]
+    if not (re.fullmatch(r"[ა-ჰ]+", a) and re.fullmatch(r"[ა-ჰ]+", b)):
+        return False
+    if min(len(a), len(b)) < _SLIP_MIN_LETTERS or not _one_letter_apart(a, b):
+        return False
+    from procurement_agent.extraction.rules import _month_ka  # rules' own month reader
+
+    for word in (a, b):
+        if _month_ka(word) is not None or month_typo(word) is not None:
+            return False
+        if parse_number_words(word) is not None:
+            return False
+    stems = {name_stem(a), name_stem(b)}
+    for text in (left, right):
+        for hit in hits_of(text):
+            if hit.type in _WRITTEN_TYPES and stems & set(_stem_words(hit.value)):
+                return False
+    return True
+
+
+def _as_meant_by(pairs: list[_Pair], segments: list[Segment]) -> str:
+    """The text of ``segments`` with each line whose one change is a slip of a letter
+    (``_slip_only``) read as the line it is paired with: what the document means, for the
+    document-wide reading of its values."""
+    meant = {
+        id(b): a.text
+        for a, b, _group in pairs
+        if a is not None and b is not None and a.text != b.text and _slip_only(a.text, b.text)
+    }
+    return "\n".join(meant.get(id(s), s.text) for s in segments)
+
+
+def _still_spelled(d: ValueDelta, left: str, right: str) -> bool:
+    """Whether a number's words removed from its brackets, or added in them, are still written
+    on the other side of the line, outside brackets: "15 (თხუთმეტი) სამუშაო დღის" restated as
+    "თხუთმეტი სამუშაო დღის" keeps the words it was said to lose."""
+    if d.rule_id != "CMP.AMOUNT_WORDS" or d.kind == "changed":
+        return False
+    shown = _SHOWN_FIGURE.search((d.left if d.kind == "removed" else d.right) or "")
+    if shown is None:
+        return False
+    other = right if d.kind == "removed" else left
+    return any(amounts_equal(v, float(shown.group(1))) for v in _counts_in_words(other))
+
+
+def _counts_in_words(text: str) -> list[float]:
+    """The numbers ``text`` writes only in words, outside brackets."""
+    found = georgian_words(text)
+    out: list[float] = []
+    i = 0
+    while i < len(found):
+        j = i
+        while j < len(found) and parse_number_words(found[j][0]) is not None:
+            j += 1
+        if j == i:
+            i += 1
+            continue
+        if not _in_brackets(text, found[i][1]):
+            value = parse_number_words(" ".join(w for w, _, _ in found[i:j]))
+            if value is not None:
+                out.append(float(value))
+        i = j
+    return out
+
+
+def _told_in_words(d: ValueDelta, numerals: list[ValueDelta]) -> bool:
+    """Whether a term's change is a count written only in words that changed, which
+    ``numeral_word_deltas`` reports as its words: "ხუთი სამუშაო დღის" → "ოცდაათი სამუშაო დღის"
+    is one change, the period in words, not that and the payment term besides."""
+    if d.kind != "changed" or d.rule_id not in ("CMP.DURATION", "CMP.PAYMENT"):
+        return False
+    before, after = _figure(d.left), _figure(d.right)
+    if before is None or after is None:
+        return False
+    for w in numerals:
+        if w.rule_id != "CMP.AMOUNT_WORDS" or w.type is not FactType.duration:
+            continue
+        a, b = _SHOWN_FIGURE.search(w.left or ""), _SHOWN_FIGURE.search(w.right or "")
+        if (
+            a is not None
+            and b is not None
+            and amounts_equal(float(a.group(1)), before)
+            and amounts_equal(float(b.group(1)), after)
+        ):
+            return True
+    return False
+
+
+def _in_its_column(text: str, context: _Context) -> str:
+    """A cell of a table laid out one party per column, read under its party's name.
+
+    "დირექტორი: ნიკა ლომთაძე" alone names no party, so no director was read from it: the
+    contractor's director replaced in the requisites table was only "text changed", while the
+    same edit to the name cell above it was a party change (docs/GOLD_SPEC.md section 2, round
+    2: such a table is read column by column, each cell its party's)."""
+    return f"{context.party}\n{text}" if context.party else text
+
+
+def _as_total(d: ValueDelta, left: _Context, right: _Context) -> ValueDelta:
+    """A bare figure of a price table's total row - the row a total word names, under a column
+    of money - is the document's total amount, labelled so (docs/GOLD_SPEC.md section 2)."""
+    if not (left.total and right.total) or not _MONEY_HEADER.search(right.header):
+        return d
+    if _UNIT_WORDS.search(right.header):
+        return d  # the unit price column: no total
+    en, ka = LABELS[FactType.total_amount]
+    return d.model_copy(update={"type": FactType.total_amount, "label_en": en, "label_ka": ka})
 
 
 def _build(
@@ -3616,7 +4056,7 @@ def _findings_of(
         )
 
     for d in field_deltas:
-        if superfluous(d):
+        if superfluous(d) or _told_in_words(d, all_deltas):
             continue
         ka, en = _delta_message(d)
         add(d.rule_id, _one_sided(d), ka, en, expected=d.left, actual=d.right, key=dedup_key(d))
@@ -4111,7 +4551,7 @@ def compare(
         # a workbook states no term, period or penalty clause to read as a whole
         field_deltas = deltas_between(left_text, right_text, types=FIELD_TYPES)
     else:
-        field_deltas, notes = document_deltas(left_text, right_text)
+        field_deltas, notes = document_deltas(left_text, _as_meant_by(pairs, right))
         skipped.extend(notes)
         hunks = _named_dates(hunks, field_deltas)
         roles = _sides_reassigned(left_text, right_text)
