@@ -169,9 +169,60 @@ class RuleHit:
 
 
 # Newlines are NOT boundaries: Docling emits inline runs ("შეადგენს\n100\n(ასი) ლარს") and
-# table cells on separate lines; the nearest-keyword rule keeps neighbouring rows apart.
+# table cells on separate lines; the nearest-keyword rule keeps neighbouring rows apart. The one
+# exception is a label line (``label_line_spans``).
 _SENTENCE_BOUNDARY = re.compile(r"[.;!?]")
 _KW_CACHE: dict[str, re.Pattern[str]] = {}
+
+#: A "label: value" line: a short label of words (no figure, quote or comma), a colon, and a
+#: value on the same line, opened by a bullet or not - "მომსახურების შესრულების ვადა:
+#: 10.03.2026 - 31.07.2026", "- საგარანტიო ვადა: 12 თვე".
+_LABEL_LINE = re.compile(
+    r"^[ \t]*(?:[-–—•][ \t]*)?[ა-ჰA-Za-z][ა-ჰA-Za-z /()\-]{0,58}?[ \t]*:[ \t]*"
+    r"(?P<value>\S[^\n]*?)[ \t]*$",
+    re.MULTILINE,
+)
+#: A value that goes on in the next line: it ends with a comma, a dash, an open bracket or
+#: "და" / "and".
+_VALUE_GOES_ON = re.compile(r"(?:[,(\-–—]|(?<![ა-ჰA-Za-z])(?:და|and))$", re.IGNORECASE)
+
+
+def label_line_spans(text: str) -> list[tuple[int, int]]:
+    """Every "label: value" line with no full stop of its own, as (start, end): a sentence by
+    itself (docs/GOLD_SPEC.md section 2, red team R4). Terms written as such lines - one Word
+    paragraph each - were read as one sentence, so a payment deadline on one line took the
+    warranty's keyword on the next. A line whose value runs on (``_VALUE_GOES_ON``) is none,
+    nor a line ending with its own stop, nor an inline run ("შეადგენს\\n100\\n(ასი) ლარს")."""
+    return [
+        (m.start(), m.end())
+        for m in _LABEL_LINE.finditer(text)
+        if not _VALUE_GOES_ON.search(m.group("value")) and m.group("value")[-1] not in ".;!?"
+    ]
+
+
+def close_label_lines(text: str) -> str:
+    """``text`` with a full stop after each label line's value (``label_line_spans``), for a
+    reader that splits sentences at stops only."""
+    out: list[str] = []
+    pos = 0
+    for _, end in label_line_spans(text):
+        out += [text[pos:end], "."]
+        pos = end
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def _label_line_bounds(text: str, a: int, b: int) -> list[int]:
+    """The line breaks in ``text[a:b]`` that end or begin a label line."""
+    bounds: list[int] = []
+    for p in (i for i in range(a, b) if text[i] == "\n"):
+        line_start = text.rfind("\n", 0, p) + 1
+        nxt = text.find("\n", p + 1)
+        before = text[line_start:p]
+        after = text[p + 1 : len(text) if nxt < 0 else nxt]
+        if label_line_spans(before) or label_line_spans(after):
+            bounds.append(p)
+    return bounds
 
 
 _GEORGIAN_LETTER = re.compile(r"[\u10a0-\u10ff]")
@@ -210,15 +261,23 @@ def nearest_keyword_group[K: Hashable](
     Shared by the fact classifier below and by the checks that give an amount its role in a
     contract (price, advance, penalty ...), so both weigh the same evidence the same way.
     """
-    pre = text[max(0, start - _CTX) : start].lower()
-    post = text[end : min(len(text), end + _CTX)].lower()
-    # keep only the sentence fragment adjacent to the hit
+    lo, hi = max(0, start - _CTX), min(len(text), end + _CTX)
+    pre = text[lo:start].lower()
+    post = text[end:hi].lower()
+    # keep only the sentence fragment adjacent to the hit; a label line is a sentence of its own
     cut = list(_SENTENCE_BOUNDARY.finditer(pre))
     if cut:
         pre = pre[cut[-1].end() :]
     m = _SENTENCE_BOUNDARY.search(post)
     if m:
         post = post[: m.start()]
+    if "\n" in pre or "\n" in post:
+        lines_before = _label_line_bounds(text, start - len(pre), start)
+        if lines_before:
+            pre = pre[lines_before[-1] + 1 - (start - len(pre)) :]
+        lines_after = _label_line_bounds(text, end, end + len(post))
+        if lines_after:
+            post = post[: lines_after[0] - end]
 
     best: tuple[int, int, K] | None = None
     for group, keywords in groups.items():

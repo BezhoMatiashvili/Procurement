@@ -8,10 +8,12 @@ from procurement_agent.checks.document_facts import document_facts
 from procurement_agent.config import Settings
 from procurement_agent.extraction.pipeline import run_extraction
 from procurement_agent.extraction.rules import (
+    close_label_lines,
     continues_payment,
     find_amounts,
     find_durations,
     find_percentages,
+    label_line_spans,
     run_rules,
 )
 from procurement_agent.extraction.schemas import FactType, Provenance
@@ -373,3 +375,43 @@ class TestCurrencyInTheColumnHeader:
     def test_a_cell_with_its_own_currency_is_read_once(self) -> None:
         text = "1, ჯამი (ლარი) = 2 500 ლარი. , დასახელება = სულ. , ჯამი (ლარი) = 3 800 ლარი"
         assert [v for v, *_ in _rule_money(text)] == [2500.0, 3800.0]
+
+
+# --- EXTRACTION-R4-12 (policy): a "label: value" line is a sentence of its own -------------------
+
+TERMS = [
+    "მომსახურების შესრულების ვადა: 02.03.2026 - 30.09.2026",
+    "ანგარიშსწორების პირობები: მიღება-ჩაბარების აქტის გაფორმებიდან 9 სამუშაო დღის ვადაში",
+    "საგარანტიო ვადა: 18 თვე",
+]
+
+
+class TestLabelLines:
+    def test_lines_without_a_stop_are_sentences(self) -> None:
+        for lines in (TERMS, [f"- {line}" for line in TERMS]):
+            text = (
+                HEAD
+                + "1.1. ხელშეკრულების საგანია საინჟინრო მომსახურება.\n4. ძირითადი პირობები:\n"
+                + "\n".join(lines)
+                + "\n"
+            )
+            facts = _extract(text)
+            assert facts[FactType.execution_period] == ["2026-03-02/2026-09-30"], lines
+            assert facts[FactType.payment_terms] == ["P9D working"], lines
+            assert facts[FactType.warranty_period] == ["P18M"], lines
+            assert _conflicts(text) == [], lines
+
+    def test_near_miss_a_value_that_runs_on_or_an_inline_run_is_no_line(self) -> None:
+        assert label_line_spans("ღირებულება:\n100 ლარი") == []
+        assert label_line_spans("ანგარიშსწორება: აქტის გაფორმებიდან,\n7 დღეში") == []
+        assert label_line_spans("ღირებულება შეადგენს\n100\n(ასი) ლარს.") == []
+        assert label_line_spans("4.1. ვადა: 12 თვე") == []
+        assert label_line_spans("საგარანტიო ვადა: 12 თვე.") == []
+        assert close_label_lines("ვადა: 12 თვე\nშემდეგი") == "ვადა: 12 თვე.\nშემდეგი"
+
+    def test_a_figure_whose_words_run_onto_the_next_line_is_still_one_amount(self) -> None:
+        """The line rule bounds where a keyword is looked for; what the patterns match is
+        unchanged."""
+        assert _rule_money("ღირებულება: 100\n(ასი) ლარი") == [
+            (100.0, FactType.total_amount, "GEL")
+        ]

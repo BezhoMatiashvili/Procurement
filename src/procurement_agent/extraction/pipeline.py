@@ -17,7 +17,7 @@ from procurement_agent.extraction.llm_extractor import run_llm_extraction
 from procurement_agent.extraction.merger import anchor_hits_to_facts, merge, rule_hits_to_facts
 from procurement_agent.extraction.normalize import normalize_confusables
 from procurement_agent.extraction.prompts import PROMPT_VERSION
-from procurement_agent.extraction.rules import RuleHit, run_rules
+from procurement_agent.extraction.rules import RuleHit, close_label_lines, run_rules
 from procurement_agent.extraction.schemas import (
     DEFAULT_TARGETS,
     ExtractedFact,
@@ -152,7 +152,9 @@ def document_level_facts(chunks: Sequence[Chunk], warnings: list[str]) -> list[E
     if not chunks:
         return []
     try:
-        found = document_facts(chunks_text(chunks))
+        # a "label: value" line is a sentence of its own (rules.label_line_spans): the readers
+        # split sentences at their stops, and the document's text flattens its line breaks
+        found = document_facts(close_label_lines(chunks_text(chunks)))
     except Exception as e:  # one reader failing must not cost the rest of the extraction
         warnings.append(f"document-level readers failed: {type(e).__name__}")
         return []
@@ -176,10 +178,19 @@ def document_level_facts(chunks: Sequence[Chunk], warnings: list[str]) -> list[E
 
 
 def _chunk_holding(chunks: Sequence[Chunk], words: str) -> Chunk | None:
+    """The chunk whose text holds ``words``; also without a stop ``close_label_lines`` added at
+    the end of a label line."""
     needle = normalize_confusables(words)[:60]
     if not needle:
         return None
-    return next((c for c in chunks if needle in normalize_confusables(c.body or c.text)), None)
+    for candidate in dict.fromkeys((needle, needle.rstrip("."))):
+        found = next(
+            (c for c in chunks if candidate and candidate in normalize_confusables(c.body or c.text)),
+            None,
+        )
+        if found is not None:
+            return found
+    return None
 
 
 #: Unclassified leftovers a document-level fact accounts for: the "5 working days" duration is
