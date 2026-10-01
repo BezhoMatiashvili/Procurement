@@ -718,10 +718,25 @@ def item_number(item: str) -> float | None:
 LUMP_SUM = {"LS", "LUMPSUM", "LUMP-SUM"}
 
 
+#: GOLD_SPEC 5, round 5 (the lead's decision): the usual Georgian spellings of one unit, after
+#: spaces and dots are squeezed out - the man-hour however its words are joined, the piece
+#: (შტ, ც, ცალი), the kilowatt, the month (მთვ) and the metre (გრ.მ)
+UNIT_SYNONYMS = {
+    **dict.fromkeys(("კაც/სთ", "კაცსთ", "კაც-სთ", "MAN-HOUR", "MANHOUR", "M-H"), "MAN-HOUR"),
+    **dict.fromkeys(("შტ", "ც", "ცალ", "ცალი"), "PCS"),
+    **dict.fromkeys(("KW", "კვტ"), "KW"),
+    **dict.fromkeys(("MONTH", "თვე", "მთვ"), "MONTH"),
+    **dict.fromkeys(("M", "გრმ"), "M"),
+}
+
+
 def unit_key(unit: str) -> str:
-    """A unit as compared here: folded (GOLD_SPEC 1), and the lump sum's names as one."""
+    """A unit as compared here: folded (GOLD_SPEC 1), the lump sum's names as one, and the
+    round-5 synonyms."""
     squeezed = re.sub(r"[\s.]", "", fold(unit))
-    return "LS" if squeezed in LUMP_SUM else fold(unit)
+    if squeezed in LUMP_SUM:
+        return "LS"
+    return UNIT_SYNONYMS.get(squeezed, fold(unit))
 
 
 # ------------------------------------------------------------------------------- bid check

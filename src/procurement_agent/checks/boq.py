@@ -308,7 +308,7 @@ _UNIT_ALIASES: dict[str, str] = {
     ),
     **dict.fromkeys(
         (
-            *("lm", "rm", "lnm", "linm", "runm", "გრძმ", "მგრძ", "m", "მ", "მეტრი"),
+            *("lm", "rm", "lnm", "linm", "runm", "გრძმ", "მგრძ", "გრმ", "m", "მ", "მეტრი"),
             *("metre", "metres", "meter", "meters"),
             *("runningmetre", "runningmetres", "runningmeter", "runningmeters"),
             *("linearmetre", "linearmetres", "linearmeter", "linearmeters", "გრძივიმეტრი"),
@@ -332,7 +332,7 @@ _UNIT_ALIASES: dict[str, str] = {
         ("kg", "kgs", "კგ", "kilogram", "kilograms", "kilogramme", "kilogrammes", "კილოგრამი"),
         "kg",
     ),
-    **dict.fromkeys(("month", "months", "mo", "mon", "mth", "თვე", "თვ"), "month"),
+    **dict.fromkeys(("month", "months", "mo", "mon", "mth", "თვე", "თვ", "მთვ"), "month"),
     **dict.fromkeys(("week", "weeks", "wk", "wks", "კვირა"), "week"),
     **dict.fromkeys(("day", "days", "დღე", "დღ"), "day"),
     **dict.fromkeys(("set", "sets", "kit", "kits", "კომპლ", "კომპლექტი", "კომპ"), "set"),
@@ -355,7 +355,30 @@ _UNIT_ALIASES: dict[str, str] = {
         ),
         "pcs",
     ),
+    # the Russian "шт." typed on a Georgian keyboard is a piece too
+    "შტ": "pcs",
     **dict.fromkeys(("hr", "hrs", "h", "hour", "hours", "სთ", "საათი"), "hr"),
+    # a person's hour, day and a machine's hour, however the two words are joined ("კაც/სთ",
+    # "კაც.სთ", "კაც-სთ"): units of their own, never the hour or the day
+    **dict.fromkeys(
+        (
+            *("კაც/სთ", "კაცსთ", "კაც-სთ", "კაც/საათი", "კაცსაათი", "კაც-საათი"),
+            *("manhour", "manhours", "man-hour", "man-hours", "m-h", "manhr", "manhrs"),
+        ),
+        "man-hour",
+    ),
+    **dict.fromkeys(
+        ("კაც/დღე", "კაცდღე", "კაც-დღე", "manday", "mandays", "man-day", "man-days"), "man-day"
+    ),
+    **dict.fromkeys(
+        (
+            *("მანქ/სთ", "მანქსთ", "მანქ-სთ", "მან/სთ", "მანსთ", "მან-სთ"),
+            *("machinehour", "machinehours", "machine-hour", "machine-hours"),
+        ),
+        "machine-hour",
+    ),
+    **dict.fromkeys(("kw", "კვტ", "kilowatt", "kilowatts"), "kw"),
+    **dict.fromkeys(("kwh", "კვტსთ", "კვტ/სთ", "კვტ-სთ"), "kwh"),
     # a lump sum by its names - one unit, never a count, a set or a litre
     **dict.fromkeys(("ls", "lumpsum", "lump-sum", "lumpsums"), "ls"),
 }

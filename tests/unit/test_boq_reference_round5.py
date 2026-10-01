@@ -195,3 +195,26 @@ def test_only_a_closing_dot_is_folded_from_an_item_number(
     t_item: str, b_item: str, same: bool
 ) -> None:
     assert _match(t_item, b_item) is same
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ("კაც/სთ", "კაც.სთ"),
+        ("კაც/სთ", "კაც-სთ"),
+        ("შტ", "ც"),
+        ("შტ.", "ცალი"),
+        ("kW", "კვტ"),
+        ("month", "მთვ"),
+        ("m", "გრ.მ"),
+    ],
+)
+def test_the_usual_georgian_unit_spellings_are_one_unit(a: str, b: str) -> None:
+    assert ref.unit_key(a) == ref.unit_key(b)
+
+
+@pytest.mark.parametrize(
+    ("a", "b"), [("კაც/სთ", "სთ"), ("კვტ", "კვტ/სთ"), ("შტ", "LS"), ("მთვ", "დღე")]
+)
+def test_units_the_georgian_spellings_do_not_merge(a: str, b: str) -> None:
+    assert ref.unit_key(a) != ref.unit_key(b)

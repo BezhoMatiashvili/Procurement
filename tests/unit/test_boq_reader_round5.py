@@ -26,6 +26,7 @@ from procurement_agent.checks.boq import (
     _plays,
     _position_groups,
     compare_all,
+    norm_unit,
     read_boq,
     reconcile_summary,
     template_findings,
@@ -641,3 +642,46 @@ def test_a_fraction_left_of_the_summary_total_under_another_header_is_no_rate(
     path = _save(tmp_path / "A.xlsx", {"SUMMARY": summary, _SHEET: bill})
     rows = read_boq(path, name="A").summary_rows
     assert all(r.rate is None for r in rows)
+
+
+# --- R5-18 (the lead's policy): the usual Georgian unit spellings are one unit -----------------
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ("კაც/სთ", "კაც.სთ"),
+        ("კაც/სთ", "კაც-სთ"),
+        ("კაც/სთ", "კაც სთ"),
+        ("კაც/სთ", "man-hours"),
+        ("კაც/დღე", "კაც-დღე"),
+        ("მანქ/სთ", "მანქ.სთ"),
+        ("შტ", "ც"),
+        ("შტ.", "ცალი"),
+        ("შტ", "pcs"),
+        ("kW", "კვტ"),
+        ("kWh", "კვტ/სთ"),
+        ("month", "მთვ"),
+        ("m", "გრ.მ"),
+        ("გრ. მ.", "მ"),
+    ],
+)
+def test_the_usual_georgian_unit_spellings_are_one_unit(a: str, b: str) -> None:
+    assert norm_unit(a) == norm_unit(b)
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ("კაც/სთ", "სთ"),  # a person's hour is not an hour of time
+        ("კაც/სთ", "hr"),
+        ("კაც/სთ", "კაც/დღე"),
+        ("კაც/სთ", "მანქ/სთ"),  # nor a machine's
+        ("კვტ", "კვტ/სთ"),  # a kilowatt is not a kilowatt-hour
+        ("შტ", "კომპლ."),  # a piece is not a set
+        ("შტ", "LS"),
+        ("მთვ", "დღე"),
+    ],
+)
+def test_units_the_georgian_spellings_do_not_merge(a: str, b: str) -> None:
+    assert norm_unit(a) != norm_unit(b)
