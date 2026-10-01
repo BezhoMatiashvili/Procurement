@@ -436,10 +436,12 @@ Red team round 4 (compare) settled these cases:
   line's words, and what the price covers changed is `CMP.TEXT_CHANGED`.
 * A VAT inclusion's verb reaches its tax across a list of costs joined by commas, `და` and
   `ასევე` (`მოიცავს ტრანსპორტირების, მონტაჟის ხარჯებს და დღგ-ს` is `incl`; up to eight words),
-  never across `, ხოლო`, `გარდა`, a negation or a relative clause. A cost added to the list is
-  `CMP.TEXT_CHANGED` only.
+  never across a turn (`, ხოლო`, `, მაგრამ`, `, თუმცა`, `, ოღონდ`), `გარდა`, a negation or a
+  relative clause, and never to a tax the next words add on top (`... და დღგ ემატება ფასს` is
+  `excl`). A cost added to the list is `CMP.TEXT_CHANGED` only.
 * A case ending hyphenated to a value is the value's (`5%-ის`, `10%-ს`, `30%-იან`): `0.1%-ის` /
-  `0.1 პროცენტის` is formatting. A word after a spaced dash (`5% - ...`) is not.
+  `0.1 პროცენტის` is formatting. A word after a spaced dash (`5% - ...`) is not, nor a
+  postposition (`5%-დან`, `10%-მდე`): `5%-ით` -> `5%-დან` is `CMP.TEXT_CHANGED`.
 * A count of days is of calendar days unless it names working days, and `ვადაში` after a count
   is the term's own word: `20 კალენდარული დღის ვადაში`, `20 დღის ვადაში`, `20 დღეში` and `20-დღიან
   ვადაში` are one delivery deadline, formatting. A payment term keeps the days it names (`P10D

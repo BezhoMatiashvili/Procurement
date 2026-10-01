@@ -818,7 +818,10 @@ def _fee_per_period(text: str, hit: RuleHit, ft: FactType) -> tuple[str, str] | 
     own = text[turns[-1] if turns else lo : hit.start]
     if _PART_OF_PRICE.search(own):
         return None
-    period = _PERIODIC_FEE.search(own) or _PER_PERIOD_AFTER.match(text, hit.end)
+    before = _PERIODIC_FEE.search(own)
+    if before is not None and _TOTAL_WORDS.search(own, before.end()):
+        return None  # "ყოველთვიური ... გათვალისწინებით, საერთო ღირებულება": the total, named nearer
+    period = before or _PER_PERIOD_AFTER.match(text, hit.end)
     if period is None:
         return None
     word = period.group("ka") or period.group("en") or ""
@@ -1819,10 +1822,10 @@ def _whole_words(text: str, span: _Span) -> _Span:
 
 #: A case ending written after a value with a hyphen: "5%-ის", "10%-ს", "30%-იან", "N 7-ით",
 #: "„ნიმუში“-სთვის". Only an ending of the declension, written straight on: "5% - ჯარიმა" is a
-#: dash and a word of the line's own.
+#: dash and a word of the line's own, and "-მდე" (up to) and "-დან" (from) say something of the
+#: value - a date keys them (``_DATE_TAIL``), "5%-ით" is not "5%-დან".
 _HYPHENATED_ENDING = re.compile(
-    r"-(?:იან(?:ი|მა|ს|ის|ით|ად|ში|ზე)?|ის(?:ა|თვის)?|სთვის|ს|ით|ად|ზე|ში|ამდე|მდე|იდან|დან"
-    r"|თვის)(?![ა-ჰ])"
+    r"-(?:იან(?:ი|მა|ს|ის|ით|ად|ში|ზე)?|ის(?:ა|თვის)?|სთვის|ს|ით|ად|ზე|ში|თვის)(?![ა-ჰ])"
 )
 
 

@@ -428,3 +428,30 @@ def test_an_advance_paid_monthly_is_no_monthly_fee() -> None:
     left = ["1.1. ყოველთვიური ავანსის თანხა შეადგენს 500 ლარს."]
     [(_rule, label, *_)] = labelled(run(left, edit(left, "500", "600")))
     assert label != "Monthly fee"
+
+
+def test_a_total_named_nearer_the_figure_than_a_monthly_word_stays_the_total() -> None:
+    left = [
+        "1.1. ყოველთვიური მომსახურების ღირებულების გათვალისწინებით, ხელშეკრულების საერთო "
+        "ღირებულება შეადგენს 12 000 ლარს."
+    ]
+    [(_rule, label, *_)] = labelled(run(left, edit(left, "12 000", "13 000")))
+    assert label == "Total amount"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "ფასი მოიცავს ტრანსპორტირების, მონტაჟის ხარჯებს, მაგრამ დღგ ემატება ფასს.",
+        "ფასი მოიცავს ტრანსპორტირების, მონტაჟის ხარჯებს, თუმცა დღგ ემატება ფასს.",
+        "ფასი მოიცავს ტრანსპორტირების ხარჯებს და დღგ ემატება ფასს.",
+    ],
+)
+def test_a_tax_added_after_a_list_of_costs_is_no_inclusion(line: str) -> None:
+    assert [h.value for h in hits_of(line) if h.type is FactType.vat_status] == ["excl"]
+
+
+def test_a_postposition_hyphenated_to_a_rate_is_no_case_ending() -> None:
+    left = ["5.1. ფასდაკლება შეადგენს 5%-ით."]
+    right = ["5.1. ფასდაკლება შეადგენს 5%-დან."]
+    assert rules(run(left, right)) == ["CMP.TEXT_CHANGED"]

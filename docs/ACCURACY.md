@@ -997,9 +997,12 @@ The tests are in `tests/unit/test_compare_redteam4.py`, on invented text, each w
   tax phrase's verb and its tax (`_tax_wording`). The words between are the line's own, and a
   change in them is "text changed".
 * **The VAT inclusion reads across a list of costs** (R4-09). `contract_terms._KA_REACH` lets the
-  verb reach its tax over up to eight words joined by commas, `და` and `ასევე`, never past `,
-  ხოლო`, `გარდა`, a negation or a relative clause. One reader: the act check and the extraction
-  read the same wording the same way. Adding a cost to the list was a critical "VAT removed".
+  verb reach its tax over up to eight words joined by commas, `და` and `ასევე`, never past a
+  turn (`, ხოლო`, `, მაგრამ`, `, თუმცა`, `, ოღონდ`), `გარდა`, a negation or a relative clause,
+  and never to a tax the next words add on top (`... და დღგ ემატება`). One reader: the act check
+  and the extraction read the same wording the same way. Adding a cost to the list was a
+  critical "VAT removed". Known limit: a comma followed by a new subject and verb (`..., შემსყიდველი
+  იხდის დღგ-ს`) is not told from a list, and still reads as the price including the tax.
 * **A figure's words follow their figure** (R4-06). Words dropped from beside a figure, or added
   beside it, while both versions write the same figures, are formatting (`_words_restyled`);
   before, "10 (ათი) სამუშაო დღის" → "10 სამუშაო დღის" was a critical "Period in words removed"
@@ -1020,6 +1023,13 @@ The tests are in `tests/unit/test_compare_redteam4.py`, on invented text, each w
   rules. The comparison's side is in place and was checked against those readers widened in a
   scratch copy: every pair gives the expected result. The tests for those pairs skip until the
   reader reads the form, then hold the comparison to it.
+* **Left as policy.** A fee per period changes the comparison's label only: the extraction still
+  types a monthly fee in a clause of its own as `total_amount` (its strict gold is unchanged).
+
+Measured after the fixes: the three strict gold sets unchanged at 100%/100%;
+`scripts/mutate_aoa.py --seed 157 --per-class 6` compares every class at 100% (`cmp`), and its
+two misses outside the comparison - `script_letter` 17% false positives (an extra `AOA.PERIOD`)
+and `prose_typo` 83% corrections - are the same row for row at `4138994`, before these fixes.
 
 ### The findings list is a list, not a dump
 
