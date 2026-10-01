@@ -42,6 +42,7 @@ from procurement_agent.checks.contract_terms import (
 )
 from procurement_agent.extraction.normalize import normalize_spaces
 from procurement_agent.extraction.rules import (
+    _AMOUNT_TURN,
     find_dates,
     find_percentages,
     is_advance_deadline,
@@ -286,7 +287,7 @@ def _vat_status(view: DocumentView) -> DocumentFact | None:
         and not (p.kind == "net" and (_within(p.span, worded) or is_net_measure(text, p.span[1])))
     ]
     stated = [p for p in phrases if not is_hypothetical(text, p.span[0])]
-    found = _status_of(stated, fees, sentences) or _status_of(phrases, fees, sentences)
+    found = _status_of(text, stated, fees, sentences) or _status_of(text, phrases, fees, sentences)
     if found is not None:
         return found
     # the tax listed among the price's parts: "..., მათ შორის: დღგ-ს გარეშე - ..., დღგ - ..."
@@ -309,7 +310,10 @@ def _within(span: tuple[int, int], others: list[tuple[int, int]]) -> bool:
 
 
 def _status_of(
-    phrases: list[TaxPhrase], fees: list[RoledAmount], sentences: list[tuple[int, int]]
+    text: str,
+    phrases: list[TaxPhrase],
+    fees: list[RoledAmount],
+    sentences: list[tuple[int, int]],
 ) -> DocumentFact | None:
     """The VAT status the wording around the fees states, by kind: net, exempt, exclusion,
     inclusion; the wording anywhere when none is near a fee.
@@ -326,7 +330,12 @@ def _status_of(
         near.extend(p for p in phrases if a <= p.span[0] < b)
         sentence = sentence_at(sentences, fee.money.span[0])
         if sentence is not None:
+            # the fee's own clause: its sentence cut at the turns around the fee (", ხოლო
+            # ავანსი დღგ-ს გარეშე ..." is the advance's wording)
             lo, hi = max(a, sentence[0]), min(b, sentence[1])
+            turns = [m.start() for m in _AMOUNT_TURN.finditer(text, lo, hi)]
+            lo = max([t for t in turns if t < fee.money.span[0]], default=lo)
+            hi = min([t for t in turns if t >= fee.money.span[1]], default=hi)
             own.extend(p for p in phrases if lo <= p.span[0] < hi and p.kind in statuses)
     chosen = own or near or [p for p in phrases if p.kind in statuses]
     for kind, status in (

@@ -1042,9 +1042,20 @@ _MONEY_NOUN = re.compile(
 #: A count of one before the priced item: "ერთი სკამის", "1 (ერთი) ცალი", "თითო", "one chair",
 #: "each" - the price of one item is a price per unit (red team R5, COMPARE-R5-09). The figure's
 #: own words are no count: brackets are left out before this is read.
+#: A unit of time after a count of one: "ერთი წლის მომსახურება" is a period's price, no item's.
+_TIME_UNIT = r"(?:წლ|წელ|თვ|კვირ|დღ|საათ)"
 _ONE_ITEM = re.compile(
-    r"(?<![ა-ჰ\d.,])(?:ერთი|თითო)(?![ა-ჰ])|(?<![\d.,])1(?![\d.,)])\s+[ა-ჰ]"
-    r"|(?<![a-z])(?:one|each|a\s+single)\s+[a-z]",
+    r"(?:(?<![ა-ჰ\d.,])(?:ერთი|თითო)(?![ა-ჰ])|(?<![\d.,])1(?![\d.,)]))\s+(?!"
+    + _TIME_UNIT
+    + r")[ა-ჰ]"
+    r"|(?<![a-z])(?:one|a\s+single)\s+(?!(?:year|month|week|day|hour)s?(?![a-z]))[a-z]",
+    re.IGNORECASE,
+)
+#: A price per unit as its label says so, on the total's path: "ერთეულის", "თითო", "ცალის",
+#: "1 ც.", "unit", "each". Not English "per", which is "as per Annex 1" as often.
+_PER_UNIT_LABEL = re.compile(
+    r"ერთეულ|თითო|ცალ(?:ის|ზე)|(?<![a-z])(?:unit|each|apiece)(?![a-z])"
+    r"|/\s*(?:ც|მ|კგ|ტ|pcs?|m|kg|t)(?![a-zა-ჰ])",
     re.IGNORECASE,
 )
 _BRACKETED = re.compile(r"\([^()]*\)")
@@ -1075,7 +1086,7 @@ def _priced_per_unit(text: str, start: int) -> bool:
     noun = nouns[-1]
     lead = _BRACKETED.sub(" ", text[clause : noun.start()]).split()[-_LABEL_WORDS:]
     label = " ".join(lead) + " " + _BRACKETED.sub(" ", text[noun.start() : start])
-    return _PER_UNIT.search(label) is not None or _ONE_ITEM.search(label) is not None
+    return _PER_UNIT_LABEL.search(label) is not None or _ONE_ITEM.search(label) is not None
 
 
 #: A part of the price or a security its own clause names, right before the figure: "გადაიხდის
@@ -1729,8 +1740,12 @@ _SHARE_TURN = re.compile(
     r"[,;\u2013\u2014]\s*(?:ხოლო|მაგრამ|თუმცა|whereas|but|however)(?![ა-ჰa-z])", re.IGNORECASE
 )
 #: A negation between the advance word and the rate: "ავანსი არ გაიცემა, ... 100%-ით" pays no
-#: advance.
-_NEGATED = re.compile(r"(?<![ა-ჰ])(?:არ|არა)(?![ა-ჰ])|(?<![a-z])(?:not|no)(?![a-z])", re.IGNORECASE)
+#: advance. Not a comparison: "no later than", "not less than", "არა უგვიანეს", "არა ნაკლებ".
+_NEGATED = re.compile(
+    r"(?<![ა-ჰ])(?:არ|არა)(?![ა-ჰ])(?!\s+(?:უგვიანეს|ნაკლებ|უმეტეს|მეტ)[ა-ჰ]*)"
+    r"|(?<![a-z])(?:not|no)(?![a-z])(?!\s+(?:later|earlier|less|more|fewer)(?![a-z]))",
+    re.IGNORECASE,
+)
 
 
 #: A word about paying the fee, built from the verb roots rather than from finished word forms,

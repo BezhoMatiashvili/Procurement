@@ -196,6 +196,13 @@ class TestVatStatusIsThePrices:
         text = HEAD + self.PRICE + "4.2. ერთეულის ფასები დღგ-ს გარეშე მოცემულია დანართ N2-ში."
         assert _extract(text)[FactType.vat_status] == ["incl"]
 
+    def test_an_advance_s_basis_past_a_turn_of_the_price_s_sentence(self) -> None:
+        text = HEAD + (
+            "4.1. ღირებულება შეადგენს 2 360 ლარს დღგ-ს ჩათვლით, ხოლო ავანსი დღგ-ს გარეშე შეადგენს "
+            "600 ლარს."
+        )
+        assert _extract(text)[FactType.vat_status] == ["incl"]
+
     def test_near_miss_the_next_sentence_decides_when_the_price_s_says_nothing(self) -> None:
         text = HEAD + "4.1. ღირებულება შეადგენს 2 000 ლარს. 4.2. ფასს დაემატება დღგ."
         assert _extract(text)[FactType.vat_status] == ["excl"]

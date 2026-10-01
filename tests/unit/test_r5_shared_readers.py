@@ -300,6 +300,12 @@ class TestAdvanceClause:
         }
         assert (FactType.total_amount, "36000.0") in hits
 
+    def test_near_miss_a_comparison_is_no_negation(self) -> None:
+        said = (
+            "The advance shall be paid no later than 5 days after signing and is 30% of the price."
+        )
+        assert [h.normalized for h in find_percentages(said)] == ["advance 30%"]
+
     def test_near_miss_no_advance_and_a_guarantee_s_share(self) -> None:
         said = (
             "4.2. ავანსი არ გაიცემა, ანგარიშსწორება მოხდება ღირებულების 100%-ით მიწოდების შემდეგ."
@@ -349,3 +355,12 @@ class TestPriceOfOneItem:
             assert types == [FactType.total_amount], clause
         # "სამუშაო დღე" is a working day, no work's price
         assert [h.type for h in find_percentages("გადახდა 5 სამუშაო დღეში 30%-ით")] != []
+
+    def test_near_miss_a_period_s_price_and_as_per(self) -> None:
+        # a count of one before a unit of time prices a period, and "as per" is no unit
+        for clause in (
+            "4.1. ერთი წლის მომსახურების ღირებულება შეადგენს 12 000 ლარს.",
+            "4.1. 1 თვის მომსახურების ღირებულება შეადგენს 1 000 ლარს.",
+            "The total value of the Contract as per Annex 1 is GEL 36,000.",
+        ):
+            assert [h.type for h in find_amounts(clause)] == [FactType.total_amount], clause
