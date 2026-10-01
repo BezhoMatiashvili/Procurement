@@ -91,9 +91,7 @@ class TestCopiedIntoTheSignatureOnly:
             assert _annotated(tmp_path, _SIGNATURE_ONLY, findings, text=text) == [
                 "ნინო კაპანაძე"
             ], text
-        assert _commented_lines(tmp_path, _SIGNATURE_ONLY, findings) == [
-            "დირექტორი: ნინო კაპანაძე"
-        ]
+        assert _commented_lines(tmp_path, _SIGNATURE_ONLY, findings) == ["დირექტორი: ნინო კაპანაძე"]
 
     def test_a_copy_in_the_contractor_s_preamble_alone_is_still_reported(self) -> None:
         """Near miss: the genitive copied into the contractor's preamble stands in the
@@ -226,9 +224,7 @@ class TestRunningFiguresAreNoFee:
         an advance, an advance said to be paid, and a period that ends today."""
         assert _roles("სულ: 150 ლარი.")[-1][1] in (None, "price")
         assert _roles("სულ ასანაზღაურებელია: 150 ლარი.")[-1][1] in (None, "price")
-        assert _roles("ხელშეკრულების ჯამური ღირებულება შეადგენს 150 ლარს.") == [
-            (150.0, "price")
-        ]
+        assert _roles("ხელშეკრულების ჯამური ღირებულება შეადგენს 150 ლარს.") == [(150.0, "price")]
         assert _roles("ავანსის შემდეგ დარჩენილი თანხა 70 ლარი.")[-1][1] == "remainder"
         assert _roles("ღირებულების დარჩენილი ნაწილი 70 ლარი გადაიხდება.")[-1][1] == "remainder"
         assert _roles("ავანსი უკვე გადახდილია 30 ლარი.") == [(30.0, "advance")]
