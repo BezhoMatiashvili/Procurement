@@ -33,6 +33,7 @@ from procurement_agent.extraction.normalize import (
     iban_is_valid,
     iban_length,
     id_code_digits,
+    is_blank,
     legal_form_abbreviation,
     name_stem,
     names_match,
@@ -165,18 +166,52 @@ _REPRESENTED_BY = (
     r"(?:დირექტორ|რექტორ|პრეზიდენტ|ხელმძღვანელ|მმართველ)(?:ი|ის|მა)?(?![ა-ჰ])"
     r"\s*[:,]?\s*(?:[ა-ჰ]\.\s?)?[ა-ჰ]{2,20}\s+[ა-ჰ]{2,25}(?![ა-ჰ.]))"
 )
+#: The parts an address itself is made of: a block, a flat, a floor, an entrance, a room. A
+#: colon after one ("კორპუსი: 3, ბინა: 12") is the address's own, not the next label's.
+_ADDRESS_PART = (
+    r"(?:კორპ(?:უს(?:ი|ის))?|ბინა|ბინის|სართ(?:ული)?|სადარბაზო|ოთახი|ოფისი|ბლოკი|შენობა"
+    r"|სექტორი|კვარტალი|მიკრორაიონი|ქუჩა|გამზ(?:ირი)?|ჩიხი|შესახვევი|სახლი)\.?"
+)
+#: Another field's label on the same line after a comma (red team R5, EXTRACTION-R5-06): one to
+#: four words without a figure, then a colon - "სახაზინო კოდი:", "დღგ-ს გადამხდელის ნომერი:",
+#: "ვებგვერდი:", "ფაქტობრივი მისამართი:". The words of a part of the address ("ბინა: 12") are
+#: no label; a figure among them ("სართ. 4:") makes them the address's too.
+_NEXT_INLINE_LABEL = (
+    rf",\s*(?!{_ADDRESS_PART}\s*[:\uff1a])"
+    r"(?:[^\s\d,:;()\uff1a]+\s+){0,3}[^\s\d,:;()\uff1a]+\s*[:\uff1a]"
+)
+#: Another address after this one, its qualifier before its label: "..., ფაქტობრივი მისამართი:",
+#: "... საფოსტო მისამართი:" - the qualifier belongs to the next label, whatever the separator.
+_QUALIFIED_ADDRESS_LABEL = r"[\s,.]+[ა-ჰ]{3,}\.?\s+მისამართი\s*[:\uff1a]"
+#: A website after the address, labelled or not: "ვებგვერდი www...", "web: ...".
+_WEBSITE = r"[\s,]+(?:ვებ-?(?:გვერდი|საიტი)|საიტი|web(?:site|page)?|www\.)"
 _ADDRESS = re.compile(
     rf"{_ADDRESS_LABEL}\s*([^;()]{{4,140}}?)\s*"
     rf"(?=[;()]|{_NEXT_LINE_FIELD}|[\s,]+{_CONTACT_LABEL}\s*[.:\uff1a]|"
     rf"[\s,]+{_REQUISITE_LABEL}|{_CELL_BOUNDARY}|{_NEXT_PARTY}|{_REPRESENTED_BY}|"
-    rf"[\s,]+{_ADDRESS_LABEL}|\s*$)",
+    rf"[\s,]+{_ADDRESS_LABEL}|{_QUALIFIED_ADDRESS_LABEL}|{_NEXT_INLINE_LABEL}|{_WEBSITE}|\s*$)",
     re.IGNORECASE,
 )
 #: "ბატონი", "ქალბატონ", "ბ-ნ", "ქ-ნი": a courtesy title before a name, not part of it
 _HONORIFIC = r"(?:(?:ქალ)?ბატონ(?:ი|ის|მა)?\s+|[ბქ]\s?-\s?ნ(?:ი|ის|მა)?\.?\s*)?"
+#: What a hyphen joins to a name that is no second surname: a case ending or a postposition
+#: written after it ("-ს", "-მა", "-ის", "-სთვის", "-თან"), a title ("-დირექტორი", "-მოადგილე")
+#: or a side ("-შემსრულებელი").
+_NOT_A_SECOND_SURNAME = (
+    r"(?:(?:ი?ს(?:ა|თვის|გან|კენ|ადმი)?|ი?თვის|მა|ით|ად|ში|ზე|თან|დან|მდე|ვით)(?![ა-ჰ])"
+    r"|დირექტორ|რექტორ|პრეზიდენტ|ხელმძღვანელ|მმართველ|თავმჯდომარ|მოადგილ|მინდობილ"
+    r"|წარმომადგენ|შემკვეთ|დამკვეთ|შემსრულებ|მიმწოდებ|მყიდველ|გამყიდველ|ხელმოწერ)"
+)
+#: One word of a person's name: a hyphenated double surname is one word, "გელაშვილი-ბერიძე",
+#: "ხურციძე-ლომაიას" (red team R5, EXTRACTION-R5-12) - a second part of three letters or more
+#: that is no ending, title or side (``_NOT_A_SECOND_SURNAME``).
+_NAME_PART = rf"(?:-(?!{_NOT_A_SECOND_SURNAME})[ა-ჰ]{{3,25}})?"
 #: a first name and a surname (and words after them the reader may cut: a patronymic between
 #: the two, see ``PATRONYMIC``), or an initial and a surname
-_PERSON = r"[ა-ჰ]\.\s?[ა-ჰ]{2,25}(?![ა-ჰ])|[ა-ჰ]{2,20}(?:\s+[ა-ჰ]{2,25}){1,3}"
+_PERSON = (
+    rf"[ა-ჰ]\.\s?[ა-ჰ]{{2,25}}{_NAME_PART}(?![ა-ჰ])"
+    rf"|[ა-ჰ]{{2,20}}(?:\s+[ა-ჰ]{{2,25}}{_NAME_PART}){{1,3}}"
+)
 #: A patronymic between a first name and a surname: the father's name in the genitive and "ძე"
 #: (son) or "ასული" (daughter) - "ნოდარ გიორგის ძე ბარამიძე". No part of the name compared:
 #: ``party_director`` is the first name and the surname (red team R3, AOA-R3-06).
@@ -220,8 +255,9 @@ _HEAD_NOMINATIVE = (
 #: ფინანსური დირექტორი") is no head's title here: the title must follow the dash or bracket.
 _NAME_BEFORE_TITLE = re.compile(
     rf"(?:^|(?<=[\n;:{_Q}]))[ \t]*{_HONORIFIC}"
-    r"(?P<name>[ა-ჰ]\.\s?[ა-ჰ]{2,25}|[ა-ჰ]{2,20}(?:[ \t]+[ა-ჰ]{2,20}ს[ \t]+(?:ძე|ასული))?"
-    r"[ \t]+[ა-ჰ]{2,25})"
+    rf"(?P<name>[ა-ჰ]\.\s?[ა-ჰ]{{2,25}}{_NAME_PART}"
+    r"|[ა-ჰ]{2,20}(?:[ \t]+[ა-ჰ]{2,20}ს[ \t]+(?:ძე|ასული))?"
+    rf"[ \t]+[ა-ჰ]{{2,25}}{_NAME_PART})"
     rf"[ \t]*(?:[-\u2013\u2014][ \t]*{_HEAD_NOMINATIVE}|\([ \t]*{_HEAD_NOMINATIVE}[ \t]*\))"
     rf"(?=[ \t]*(?:$|\n|[;{_Q}_/]))",
     re.MULTILINE,
@@ -517,7 +553,7 @@ _CASE_ENDINGS = ("ისა", "ის", "ით", "მა", "ს", "მ")
 _NAME_ENDS = re.compile(rf"[ \t]*(?:$|\n|[{_Q}_/])")
 #: The name is the preamble's "..., X Y-ის სახით" ("in the person of X Y").
 _IN_THE_PERSON_OF = re.compile(r"\s*სახით(?![ა-ჰ])")
-_NAME_WORD = re.compile(r"[ა-ჰ]\.|[ა-ჰ]+")
+_NAME_WORD = re.compile(rf"[ა-ჰ]\.|[ა-ჰ]+{_NAME_PART}")
 
 
 def _surname_shaped(word: str) -> bool:
@@ -1059,7 +1095,8 @@ def find_anchors(text: str) -> list[AnchorHit]:
         note: str | None = None,
     ) -> None:
         value = _clean(value)
-        if value:
+        # a draft's fill-in line ("მისამართი: ______") is a blank, no value (red team R5)
+        if value and not is_blank(value):
             hits.append(
                 AnchorHit(
                     type=ft,
