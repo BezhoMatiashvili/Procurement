@@ -738,6 +738,28 @@ def is_tax_amount(text: str, start: int) -> bool:
     return label is not None and _TAX_QUALIFIED.search(before, 0, label.start()) is None
 
 
+def tax_in_breakdown(text: str, start: int) -> tuple[int, int] | None:
+    """The span of the tax the price at ``start`` lists among its parts, past a turn of its
+    sentence: "36 000 ლარს, მათ შორის: დღგ-ს გარეშე - 30 508.47 ლარი, დღგ - 5 491.53 ლარი" holds
+    the VAT, so the price includes it (red team R5, EXTRACTION-R5-17) - whatever other part, the
+    net figure among them, the list names before it. None when no part is the tax labelled as
+    such (``is_tax_amount``); "..., რასაც დაემატება დღგ - ..." adds the tax and is no part."""
+    money = _money_at(text, start)
+    if money is None:
+        return None
+    stop = _SENTENCE_END.search(text, money.end())
+    end = stop.start() if stop else len(text)
+    turn = _AMOUNT_TURN.search(text, money.end(), end)
+    if turn is None or text[money.end() : turn.start()].strip(" ,;:\u2013\u2014-"):
+        return None  # the list's turn must follow the price itself
+    pos = turn.end()
+    while (part := _next_money(text, pos, end)) is not None:
+        if is_tax_amount(text, part.start()):
+            return turn.start(), part.end()
+        pos = part.end()
+    return None
+
+
 def _money_at(text: str, start: int) -> re.Match[str] | None:
     return _AMOUNT_AFTER.match(text, start) or _AMOUNT_BEFORE.match(text, start)
 
@@ -1784,6 +1806,28 @@ def payment_terms_value(deadline: str | None = None, advance: float | None = Non
     return " ".join(parts) or None
 
 
+#: Which days a deadline counts, by the qualifier a duration hit's value names ("10 working
+#: days"): business and banking days are working days (``contract_terms`` reads them so).
+_DAY_KINDS = {
+    "working": "working",
+    "business": "working",
+    "banking": "working",
+    "calendar": "calendar",
+}
+
+
+def payment_deadline_of(hit: RuleHit) -> str | None:
+    """A duration hit as a payment deadline in its canonical form, the days it counts read from
+    the hit itself: "10 (ათი) სამუშაო დღე" is "P10D working" in every case its words take (red
+    team R5, EXTRACTION-R5-08: the bare "P10D" contradicted its own quote). None for no
+    duration."""
+    if not isinstance(hit.normalized, str) or not re.fullmatch(r"P\d+[DWMY]", hit.normalized):
+        return None
+    words = hit.value.split()
+    kind = _DAY_KINDS.get(words[1].lower()) if len(words) == 3 else None
+    return f"{hit.normalized} {kind}" if kind else hit.normalized
+
+
 #: What a payment term is (``docs/GOLD_SPEC.md``): a duration, the days it counts, and the
 #: advance's share - each part optional, never a bare number.
 PAYMENT_TERMS_FORM = re.compile(
@@ -2257,6 +2301,16 @@ _CONTRACT_NO_BEFORE = re.compile(
     rf"{_NUMBER_MARKER}\s*({_REFERENCE})\s+(?:{_CONTRACT_WORD_AFTER})(?![A-Za-z])",
     re.IGNORECASE,
 )
+#: The number behind a label, a colon or a dash after the sign or the word for "number": "ხელშეკრ
+#: ულების №: 45/2026", "ხელშეკრულების ნომერი: 45/2026", "Contract No.: 45/2026", "Contract
+#: number - 45/2026", and a key-terms table's row, which reads as such a line (red team R5,
+#: EXTRACTION-R5-07). Only after the contract's own word: "აქტის №: 12" and "ინვოისის ნომერი: 7"
+#: number other documents, and whether those are contract numbers is not decided (R3-16).
+_CONTRACT_NO_LABEL = re.compile(
+    rf"(?<![A-Za-zა-ჰ])(?:{_CONTRACT_WORD_AFTER})(?![A-Za-z])\s*"
+    rf"(?:{_NUMBER_MARKER}|ნომერი|number)\s*[:\-\u2013\u2014]\s*({_REFERENCE})",
+    re.IGNORECASE,
+)
 
 
 _LATIN_LOWER = re.compile(r"[a-z]+")
@@ -2272,11 +2326,12 @@ def _upper_latin(reference: str) -> str:
 def find_contract_numbers(text: str) -> list[RuleHit]:
     hits: list[RuleHit] = []
     matches = list(_CONTRACT_NO.finditer(text))
-    matches += [
-        m
-        for m in _CONTRACT_NO_BEFORE.finditer(text)
-        if not any(_overlaps(m.span(1), other.span(1)) for other in matches)
-    ]
+    for pattern in (_CONTRACT_NO_BEFORE, _CONTRACT_NO_LABEL):
+        matches += [
+            m
+            for m in pattern.finditer(text)
+            if not any(_overlaps(m.span(1), other.span(1)) for other in matches)
+        ]
     for m in matches:
         number = _upper_latin(_SPACED_SLASH.sub("/", m.group(1)))
         if len(number) < 2 or not any(ch.isdigit() for ch in number):
