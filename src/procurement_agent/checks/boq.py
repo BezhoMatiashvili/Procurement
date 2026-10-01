@@ -1157,9 +1157,9 @@ def _sums_other_rows(formula: str, row: int, wf: object = None) -> bool:
     return bool(rows) and set(rows) != {row}
 
 
-#: A quantity times a rate, "=O23*G23": a position's amount, whatever rows it points at. One
-#: that points at another row ("=O23*G19") is the bidder's arithmetic gone wrong - reported by
-#: BOQ.ARITHMETIC - never a subtotal, which adds rows up.
+#: A quantity times a rate, "=O23*G23": a position's amount, whatever rows it points at, on a
+#: row with a quantity or a unit. One that points at another row ("=O23*G19") is the bidder's
+#: arithmetic gone wrong - reported by BOQ.ARITHMETIC - never a subtotal, which adds rows up.
 _PRODUCT_OF_CELLS = re.compile(r"=\s*\$?[A-Z]{1,3}\$?\d+\s*\*\s*\$?[A-Z]{1,3}\$?\d+\s*")
 #: A formula shaped like a sum: "=SUM(G13:G19)", "=G13+G14". Whose rows it adds decides whether
 #: the row is a parent (``_sums_other_rows``).
@@ -1187,7 +1187,12 @@ def _line_kind(
     if column:
         formula = _formula_text(wf.cell(row, column))  # type: ignore[attr-defined]
         if formula is not None:
-            if _own_row_formula(formula, row) or _PRODUCT_OF_CELLS.fullmatch(formula):
+            # a product over another row is the position's slip only on a row with a measure;
+            # with neither quantity nor unit, "=F7*E8" multiplies the sub-total by a rate - a
+            # contingency or VAT row, which counted as a position put the tax into the cost
+            if _own_row_formula(formula, row) or (
+                has_measure and _PRODUCT_OF_CELLS.fullmatch(formula)
+            ):
                 return "position"
             if not _formula_rows(formula) and not re.search(r"[A-Za-z_!]", formula[1:]):
                 # "=1200*1.5": a number typed as a formula, read like a typed number
@@ -1293,7 +1298,9 @@ def _read_boq(values: Workbook, formulas: Workbook, *, name: str) -> BoqWorkbook
             else:
                 book.helper_sheets.append(sheet_name)
             continue
-        sheet = _read_sheet(book, ws, wf, sheet_name, cols, header_row)
+        sheet = _read_sheet(
+            book, ws, wf, sheet_name, cols, header_row, linked_rows.get(sheet_name, set())
+        )
         closing = _closing_line(sheet, linked_rows.get(sheet_name, set()))
         if closing is not None:
             sheet.subtotal, sheet.subtotal_row = closing.amount, closing.row
@@ -1382,8 +1389,52 @@ def _unread_price_columns(
     return tuple(out)
 
 
+def _sum_row_label(
+    ws: object, wf: object, row: int, cols: dict[str, int], linked: set[int]
+) -> tuple[str, int] | None:
+    """A row with nothing in the Description column read as the sum row it may be: (its label,
+    the label's column), else None.
+
+    A closing total is often labelled across the item and description columns (merged from A),
+    or in the Unit or Rate column. Skipped for its empty Description cell, it was never read:
+    the sheet had no closing total, and a bidder's SUM range one row short went unreported. Only
+    a row whose amount adds other rows ("=SUM(F2:F6)", "=F7+F8") with no quantity or unit of its
+    own is taken, labelled by its first text cell - or with no label at all where the Summary
+    links to it. A note typed beside the bill is not."""
+    column = cols.get("amount")
+    if not column:
+        return None
+    formula = _formula_text(wf.cell(row, column))  # type: ignore[attr-defined]
+    if formula is None or not _SUM_OF_ROWS.search(formula) or _own_row_formula(formula, row):
+        return None
+    label_col = next(
+        (
+            c
+            for c in range(1, _HEADER_SCAN_COLS + 1)
+            if c != column
+            and isinstance(v := ws.cell(row, c).value, str)  # type: ignore[attr-defined]
+            and _has_letter(v)
+        ),
+        0,
+    )
+    for key in ("qty", "unit"):
+        c = cols.get(key)
+        if c and c != label_col and ws.cell(row, c).value not in (None, ""):  # type: ignore[attr-defined]
+            return None
+    if not label_col:
+        return ("", 0) if row in linked else None
+    text = normalize_spaces(str(ws.cell(row, label_col).value)).strip()  # type: ignore[attr-defined]
+    return text, label_col
+
+
 def _read_sheet(
-    book: BoqWorkbook, ws: object, wf: object, sheet_name: str, cols: dict[str, int], header: int
+    book: BoqWorkbook,
+    ws: object,
+    wf: object,
+    sheet_name: str,
+    cols: dict[str, int],
+    header: int,
+    linked: set[int] | None = None,
 ) -> BoqSheet:
     sheet = BoqSheet(name=sheet_name, columns=cols, header_row=header)
     sheet.unread_price_columns = _unread_price_columns(ws, cols, header)
@@ -1393,9 +1444,16 @@ def _read_sheet(
     for r in range(header + 1, ws.max_row + 1):  # type: ignore[attr-defined]
         desc = ws.cell(r, cols["desc"]).value  # type: ignore[attr-defined]
         description = str(desc).strip() if desc is not None else ""
-        if not description or _is_number_row(ws, r) or _repeated_header(ws, r, cols):
+        # the column a sum row's label was read from when the Description cell is empty
+        label_col = 0
+        if _is_number_row(ws, r) or _repeated_header(ws, r, cols):
             continue
-        if not _has_letter(description) and (
+        if not description:
+            found = _sum_row_label(ws, wf, r, cols, linked or set())
+            if found is None:
+                continue
+            description, label_col = found
+        elif not _has_letter(description) and (
             # a bare number is a column number, never a description
             parse_number(description) is not None or not _numbered_line(ws, wf, r, cols, item_cols)
         ):
@@ -1418,22 +1476,26 @@ def _read_sheet(
                 formula_keys.append(key)
                 if raw is None:
                     book.uncached_cells += 1
-            if key not in read_two_way and _is_text_in_number_cell(raw):
+            if key not in read_two_way and _is_text_in_number_cell(raw) and cols[key] != label_col:
                 non_numeric.append((key, normalize_spaces(str(raw)).strip()[:40]))
             # the cell's type, not its text: a *string* cell reading "=5" is typed-in text
             if key in _TOTAL_KEYS and val(key) not in (None, 0) and not is_formula:
                 hardcoded.append(key)
 
-        unit_raw = ws.cell(r, cols["unit"]).value if cols.get("unit") else None  # type: ignore[attr-defined]
+        unit_col = cols.get("unit")
+        unit_raw = ws.cell(r, unit_col).value if unit_col and unit_col != label_col else None  # type: ignore[attr-defined]
         unit = str(unit_raw).strip() if unit_raw not in (None, "") else None
         unit = unit or None
         qty_raw = ws.cell(r, cols["qty"]).value  # type: ignore[attr-defined]
         has_measure = qty_raw not in (None, "") or unit is not None
+        item_no = _item_no(ws, r, item_cols)
+        if label_col and not _ITEM_NO.match(item_no):
+            item_no = ""  # the label merged over the item column is no item number
         sheet.lines.append(
             BoqLine(
                 sheet=sheet_name,
                 row=r,
-                item_no=_item_no(ws, r, item_cols),
+                item_no=item_no,
                 description=description,
                 unit=unit,
                 quantity=val("qty"),
@@ -1463,13 +1525,16 @@ def _closing_line(sheet: BoqSheet, linked_rows: set[int]) -> BoqLine | None:
     and the sheet is closed by role as above: the last section's sub-total held against every
     position of the sheet was a false gap on each faithful bid. Their grand total is the row the
     Summary links to, else the last total after them; with none, the last sub-total still is.
+    So is a single SUB-TOTAL that positions follow: it closes one section, not the sheet.
     """
     subtotals = [
         ln for ln in sheet.lines if _SUBTOTAL.match(ln.description) and ln.quantity is None
     ]
-    if len(subtotals) == 1:
-        return subtotals[0]
     last = max((ln.row for ln in sheet.lines if ln.kind == "position"), default=0)
+    if len(subtotals) == 1 and subtotals[0].row > last:
+        # one SUB-TOTAL closes the sheet only below every position: followed by positions, it
+        # is a section's own, and the grand total after them closes the sheet
+        return subtotals[0]
     after = [
         ln
         for ln in sheet.lines
