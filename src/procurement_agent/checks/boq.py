@@ -149,9 +149,25 @@ _DESC_LABEL = re.compile(
     r"^names?\s+of\s+(?:the\s+)?(?:works?|goods|items?|services?|supplies|materials)$|"
     r"^(?:სამუშაო(?:ებ)?ის|საქონლის|მომსახურების|მასალის)\s+(?:დასახელება|აღწერა)$"
 )
-#: A quantity column by rule: "Quantity", "Quantity of work(s)", the Georgian abbreviations
-#: "რაოდ." and "რ-ბა" (the dot is folded off with the label's end punctuation).
-_QTY_LABEL = re.compile(r"^(?:quantity|qty)(?:\s+of\s+(?:the\s+)?works?)?$|^რაოდ$|^რ-ბა$")
+#: A quantity column by rule: "Quantity", "Quantity of work(s)", and the Georgian რაოდენობა cut
+#: after its stem and given its ending back after a hyphen, the way estimates abbreviate it -
+#: "რაოდ.", "რაოდენ.", "რ-ბა", "რაოდ-ბა", "რაოდ-ობა" (the dot is folded off with the label's end
+#: punctuation). A bare "რ" names nothing.
+_QTY_LABEL = re.compile(
+    r"^(?:quantity|qty)(?:\s+of\s+(?:the\s+)?works?)?$|"
+    r"^(?:რაოდ(?:ენ)?(?:-(?:ნ?ობ|ბ)ა)?|რ-(?:ნ?ობ|ბ)ა)$"
+)
+#: A unit rate by rule: a unit word, then a price word - "ერთეულის ფასი", "ერთ. ფასი",
+#: "ერთ.ფასი", "ერთ. ღირებულება" (the dot after an abbreviation is spaced by ``_norm_label``).
+_RATE_LABEL = re.compile(r"^(?:ერთეულის|ერთ\.)\s*(?:ფასი|ფასები|ღირებულება)$")
+#: The line amount by rule: a money word with a total word before or after it - "სულ თანხა",
+#: "საერთო თანხა", "ღირებულება სულ", "ჯამური ფასი". A bare "ფასი" is bound by where it stands
+#: (``_bind_price``), a bare "ღირებულება" / "თანხა" is in the synonyms, and a unit word before
+#: the money word makes it the rate (``_RATE_LABEL``).
+_AMOUNT_LABEL = re.compile(
+    r"^(?:(?:სულ|საერთო|ჯამური|ჯამი)\s+(?:ღირებულება|თანხა|ფასი)|"
+    r"(?:ღირებულება|თანხა|ფასი)\s+(?:სულ|საერთო|ჯამური|ჯამში|ჯამი))$"
+)
 #: A bare "Price" / "ფასი": the unit price where a line amount is read after it, the line's
 #: price where none is - bound by where it stands (``_map_headers``), never by its label alone.
 _PRICE_LABELS = frozenset({"price", "prices", "ფასი"})
@@ -231,15 +247,20 @@ _LABEL_RATE = r"(?:\d{1,2}(?:[.,]\d+)?\s*%\s*)?"
 #: The Georgian "including" / "without" after the tax, in any case form and however dotted:
 #: "დღგ-ს ჩათვლით", "დღგ-ის ჩათვლით", "დ.ღ.გ.-ს ჩათვლით", "გადასახადის ჩათვლით".
 _KA_VAT = r"(?:დ\.?ღ\.?გ\.?(?:-?ის|-?ს)?|გადასახადის)\s*"
+#: The Georgian "with the tax", by grammar rather than phrase: the tax's name in the
+#: instrumental case, its ending attached or after a hyphen ("ჯამი დღგ-ით", "სულ დღგ-თ",
+#: "გადასახადით") - never "დღგ-თან" or any other word the name only begins.
+_KA_WITH_VAT = r"(?:დ\.?ღ\.?გ\.?-?ი?თ|გადასახადით)(?![ა-ჰ])"
 _INCL_VAT = re.compile(
     rf"\b(?:incl(?:\.|uding|usive)?|with)\s*(?:of\s+)?(?:the\s+)?{_LABEL_RATE}{_VAT_NAME}"
-    rf"|{_VAT_NAME}[\s-]+incl|{_KA_VAT}ჩათვლით",
+    rf"|{_VAT_NAME}[\s-]+incl|{_KA_VAT}(?:ჩათვლით|გათვალისწინებით|შეტანით)|{_KA_WITH_VAT}",
     re.IGNORECASE,
 )
-#: The total without the tax, however joined: "excl. VAT", "before VAT", "VAT-exclusive total".
+#: The total without the tax, however joined: "excl. VAT", "before VAT", "VAT-exclusive total",
+#: "დღგ-ს გარეშე", "დღგ-ს გამოკლებით" (the tax taken off).
 _EXCL_VAT = re.compile(
     rf"\b(?:excl(?:\.|uding|usive)?|without|before|net\s+of)\s*(?:of\s+)?(?:the\s+)?"
-    rf"{_LABEL_RATE}{_VAT_NAME}|{_VAT_NAME}[\s-]+excl|{_KA_VAT}გარეშე",
+    rf"{_LABEL_RATE}{_VAT_NAME}|{_VAT_NAME}[\s-]+excl|{_KA_VAT}(?:გარეშე|გამოკლებით|გამოკლებული)",
     re.IGNORECASE,
 )
 #: The VAT row: the tax's name opens the label, after an "Add", its rate or a word saying the
@@ -287,7 +308,7 @@ _UNIT_ALIASES: dict[str, str] = {
     ),
     **dict.fromkeys(
         (
-            *("lm", "rm", "lnm", "linm", "runm", "გრძმ", "მგრძ", "m", "მ", "მეტრი"),
+            *("lm", "rm", "lnm", "linm", "runm", "გრძმ", "მგრძ", "გრმ", "m", "მ", "მეტრი"),
             *("metre", "metres", "meter", "meters"),
             *("runningmetre", "runningmetres", "runningmeter", "runningmeters"),
             *("linearmetre", "linearmetres", "linearmeter", "linearmeters", "გრძივიმეტრი"),
@@ -311,7 +332,7 @@ _UNIT_ALIASES: dict[str, str] = {
         ("kg", "kgs", "კგ", "kilogram", "kilograms", "kilogramme", "kilogrammes", "კილოგრამი"),
         "kg",
     ),
-    **dict.fromkeys(("month", "months", "mo", "mon", "mth", "თვე", "თვ"), "month"),
+    **dict.fromkeys(("month", "months", "mo", "mon", "mth", "თვე", "თვ", "მთვ"), "month"),
     **dict.fromkeys(("week", "weeks", "wk", "wks", "კვირა"), "week"),
     **dict.fromkeys(("day", "days", "დღე", "დღ"), "day"),
     **dict.fromkeys(("set", "sets", "kit", "kits", "კომპლ", "კომპლექტი", "კომპ"), "set"),
@@ -334,7 +355,30 @@ _UNIT_ALIASES: dict[str, str] = {
         ),
         "pcs",
     ),
+    # the Russian "шт." typed on a Georgian keyboard is a piece too
+    "შტ": "pcs",
     **dict.fromkeys(("hr", "hrs", "h", "hour", "hours", "სთ", "საათი"), "hr"),
+    # a person's hour, day and a machine's hour, however the two words are joined ("კაც/სთ",
+    # "კაც.სთ", "კაც-სთ"): units of their own, never the hour or the day
+    **dict.fromkeys(
+        (
+            *("კაც/სთ", "კაცსთ", "კაც-სთ", "კაც/საათი", "კაცსაათი", "კაც-საათი"),
+            *("manhour", "manhours", "man-hour", "man-hours", "m-h", "manhr", "manhrs"),
+        ),
+        "man-hour",
+    ),
+    **dict.fromkeys(
+        ("კაც/დღე", "კაცდღე", "კაც-დღე", "manday", "mandays", "man-day", "man-days"), "man-day"
+    ),
+    **dict.fromkeys(
+        (
+            *("მანქ/სთ", "მანქსთ", "მანქ-სთ", "მან/სთ", "მანსთ", "მან-სთ"),
+            *("machinehour", "machinehours", "machine-hour", "machine-hours"),
+        ),
+        "machine-hour",
+    ),
+    **dict.fromkeys(("kw", "კვტ", "kilowatt", "kilowatts"), "kw"),
+    **dict.fromkeys(("kwh", "კვტსთ", "კვტ/სთ", "კვტ-სთ"), "kwh"),
     # a lump sum by its names - one unit, never a count, a set or a litre
     **dict.fromkeys(("ls", "lumpsum", "lump-sum", "lumpsums"), "ls"),
 }
@@ -359,8 +403,19 @@ def _norm_label(v: object) -> str:
     """A header label as compared: "Qty." and "Unit:" are "qty" and "unit", and "ღირებულება, აშშ
     დოლარი", "Amount in GEL" and "ღირებულება ლარში" are the amount whatever currency they name.
     """
-    label = normalize_spaces(str(v or "")).strip().lower().rstrip(":.").strip()
+    text = str(v or "")
+    # a word hyphenated across a line break is the word: "რაოდე-\nნობა" is "რაოდენობა"
+    text = _LINE_BREAK_HYPHEN.sub("", text)
+    label = normalize_spaces(text).strip().lower().rstrip(":.").strip()
+    # an abbreviation's dot spaced the one way: "ერთ.ფასი" is "ერთ. ფასი"
+    label = _ABBREVIATION_DOT.sub(". ", label)
     return _LABEL_CURRENCY.sub("", label).strip()
+
+
+#: A hyphen ending a line inside a word, the word going on on the next line.
+_LINE_BREAK_HYPHEN = re.compile(r"(?<=[^\W\d_])-[ \t]*\r?\n\s*(?=[^\W\d_])")
+#: A dot between two letters with no space after it - an abbreviation run into the next word.
+_ABBREVIATION_DOT = re.compile(r"(?<=[^\W\d_])\.(?=[^\W\d_])")
 
 
 #: Text a number reads from two ways: one separator and exactly three digits after it ("1.250",
@@ -572,6 +627,14 @@ def _fold_desc(text: str) -> str:
     return text.rstrip(" .;:,")
 
 
+def _item_key(item: str) -> str:
+    """An item number as positions are matched by: case folded and one closing dot off - "1."
+    is "1" and "1.1." is "1.1" (the dot is how some bills write every number), while "1.10"
+    stays apart from "1.1": only the dot is folded, never a digit."""
+    text = item.strip().lower()
+    return text[:-1].rstrip() if len(text) > 1 and text.endswith(".") else text
+
+
 @dataclass(frozen=True, slots=True)
 class BoqLine:
     sheet: str
@@ -604,6 +667,11 @@ class BoqLine:
     non_numeric: tuple[tuple[str, str], ...] = ()
     #: the item number was stored as a number ("1.10" typed into a General cell reads 1.1)
     numeric_item: bool = False
+    #: the rows of this sheet the amount cell's formula refers to (none for a typed amount)
+    amount_rows: tuple[int, ...] = ()
+    #: the amount cell is a plain sum of cells of this sheet (``=SUM(F2:F6)``, ``=F2+F3``) -
+    #: nothing scaled, nothing typed in
+    amount_is_sum: bool = False
 
     @property
     def key(self) -> str:
@@ -613,7 +681,7 @@ class BoqLine:
         change, reported as such - not a deleted line plus an unrelated new one.
         """
         desc = re.sub(r"\s+", " ", self.description).strip().lower()[:70]
-        return f"{self.item_no.strip().lower()}|{desc}"
+        return f"{_item_key(self.item_no)}|{desc}"
 
     @property
     def is_priced(self) -> bool:
@@ -684,7 +752,7 @@ class SummaryRow:
 
     @property
     def key(self) -> str:
-        return f"{self.item.strip().lower()}|{_fold_desc(self.label)}"
+        return f"{_item_key(self.item)}|{_fold_desc(self.label)}"
 
 
 @dataclass(slots=True)
@@ -710,6 +778,11 @@ class BoqWorkbook:
     unreadable_sheets: list[str] = field(default_factory=list)
     #: sheets with no BOQ columns that nothing in the Summary refers to (a calculation aid)
     helper_sheets: list[str] = field(default_factory=list)
+    #: hidden sheets laid out as a bill that the Summary does not link to (an earlier draft
+    #: kept in the template): not read as priced sections (GOLD_SPEC 5, round 5)
+    hidden_sheets: list[str] = field(default_factory=list)
+    #: those of them whose columns were read, with their lines
+    hidden_bills: dict[str, BoqSheet] = field(default_factory=dict)
     #: formula cells read, and how many of them carried no cached value
     formula_cells: int = 0
     uncached_cells: int = 0
@@ -745,6 +818,10 @@ def _one_label_key(value: object, *, price: bool) -> str | None:
         return "desc"
     if _QTY_LABEL.match(label):
         return "qty"
+    if _RATE_LABEL.match(label):
+        return "rate_total"
+    if _AMOUNT_LABEL.match(label):
+        return "amount"
     if _UNIT_LABEL.match(label) and not _MONEY_WORD.search(label):
         return "unit"
     if price and label in _PRICE_LABELS:
@@ -1202,6 +1279,13 @@ _PRODUCT_OF_CELLS = re.compile(r"=\s*\$?[A-Z]{1,3}\$?\d+\s*\*\s*\$?[A-Z]{1,3}\$?
 #: A formula shaped like a sum: "=SUM(G13:G19)", "=G13+G14". Whose rows it adds decides whether
 #: the row is a parent (``_sums_other_rows``).
 _SUM_OF_ROWS = re.compile(r"^=\s*(?:SUM\s*\(|\$?[A-Z]{1,3}\$?\d+\s*\+)", re.IGNORECASE)
+_REF = r"\$?[A-Z]{1,3}\$?\d+(?::\$?[A-Z]{1,3}\$?\d+)?"
+#: A formula that is nothing but a sum of cells of its own sheet: "=SUM(F2:F6)", "=F2+F3+F4",
+#: "=SUM(F2:F4,F6)" - nothing scaled ("=SUM(F2:F6)*1.18"), nothing typed in.
+_PLAIN_SUM = re.compile(
+    rf"=\s*\+?\s*(?:SUM\s*\(\s*{_REF}(?:\s*[,;]\s*{_REF})*\s*\)|{_REF}(?:\s*\+\s*{_REF})*)\s*",
+    re.IGNORECASE,
+)
 
 
 def _line_kind(
@@ -1339,11 +1423,20 @@ def _read_boq(values: Workbook, formulas: Workbook, *, name: str) -> BoqWorkbook
             continue
         ws, wf = values[sheet_name], formulas[sheet_name]
         cols, header_row = _map_headers(ws)
-        if "desc" not in cols or "qty" not in cols:
-            if sheet_name in linked or _looks_priced(ws):
+        readable = "desc" in cols and "qty" in cols
+        if not readable and sheet_name not in linked and not _looks_priced(ws):
+            book.helper_sheets.append(sheet_name)
+            continue
+        hidden = wf.sheet_state != "visible" and sheet_name not in linked
+        if hidden:
+            # a hidden sheet the Summary does not link to - an earlier draft of a bill, kept in
+            # the template - is no section of the tender (the lead's round-5 policy): said once,
+            # never "section left unpriced" on every bidder. Its lines are still read, so a
+            # bidder who prices it is shown (``compare_bid``)
+            book.hidden_sheets.append(sheet_name)
+        if not readable:
+            if not hidden:
                 book.unreadable_sheets.append(sheet_name)
-            else:
-                book.helper_sheets.append(sheet_name)
             continue
         sheet = _read_sheet(
             book, ws, wf, sheet_name, cols, header_row, linked_rows.get(sheet_name, set())
@@ -1351,6 +1444,11 @@ def _read_boq(values: Workbook, formulas: Workbook, *, name: str) -> BoqWorkbook
         closing = _closing_line(sheet, linked_rows.get(sheet_name, set()))
         if closing is not None:
             sheet.subtotal, sheet.subtotal_row = closing.amount, closing.row
+        if hidden:
+            # kept apart; a bid's hidden sheet that is a section of the template is still that
+            # section (``compare_bid``)
+            book.hidden_bills[sheet_name] = sheet
+            continue
         book.sheets[sheet_name] = sheet
     if summary_sheet is None and len(book.sheets) == 1:
         _summary_from_bill(book, next(iter(book.sheets.values())))
@@ -1377,11 +1475,23 @@ def _summary_from_bill(book: BoqWorkbook, sheet: BoqSheet) -> None:
         for ln in sheet.lines
         if ln.row >= sheet.subtotal_row and ln.kind != "position"
     ]
-    if not any(_plays("incl", r.label) for r in rows[1:]):
+    if not any(_plays("incl", r.label) for r in rows[1:]) and not _closed_incl_vat(rows):
         return
     book.summary_rows = rows
     book.summary = _summary_mapping(rows)
     book.summary_in_bill = sheet.name
+
+
+def _closed_incl_vat(rows: list[SummaryRow]) -> bool:
+    """A bill's closing rows that are its total incl. VAT alone: the closing total says it
+    includes the tax and no row after it plays any part of the chain - a VAT-inclusive price
+    list, ranked on that row as both TOTAL COST and the total incl. VAT (markup 1.0; the lead's
+    round-5 policy)."""
+    return (
+        bool(rows)
+        and _plays("incl", rows[0].label)
+        and not any(_plays(role, r.label) for r in rows[1:] for role in _CHAIN)
+    )
 
 
 def _is_number_row(ws: object, row: int) -> bool:
@@ -1567,6 +1677,7 @@ def _read_sheet(
         item_no, numeric_item = _item_cell(ws, r, item_cols)
         if label_col and not _ITEM_NO.match(item_no):
             item_no = ""  # the label merged over the item column is no item number
+        amount_formula = _formula_text(wf.cell(r, cols["amount"])) if cols.get("amount") else None  # type: ignore[attr-defined]
         sheet.lines.append(
             BoqLine(
                 sheet=sheet_name,
@@ -1584,6 +1695,8 @@ def _read_sheet(
                 kind=_line_kind(ws, wf, cols, r, description, has_measure),
                 non_numeric=tuple(non_numeric),
                 numeric_item=numeric_item,
+                amount_rows=tuple(_formula_rows(amount_formula)) if amount_formula else (),
+                amount_is_sum=bool(amount_formula and _PLAIN_SUM.fullmatch(amount_formula)),
             )
         )
     return sheet
@@ -1622,12 +1735,46 @@ def _closing_line(sheet: BoqSheet, linked_rows: set[int]) -> BoqLine | None:
         and not _INCL_VAT.search(ln.description)
     ]
     linked = [ln for ln in after if ln.row in linked_rows]
-    if linked:
-        return linked[-1]
     labelled = [ln for ln in after if _CLOSING.match(ln.description)]
-    if labelled:
-        return labelled[-1]
-    return subtotals[-1] if subtotals else None
+    closing = linked[-1] if linked else labelled[-1] if labelled else None
+    if closing is not None:
+        return _total_before_rates(after, closing) or closing
+    if subtotals:
+        return subtotals[-1]
+    return _incl_vat_closing(sheet, last)
+
+
+def _incl_vat_closing(sheet: BoqSheet, last: int) -> BoqLine | None:
+    """A price list whose only closing row is its total incl. VAT ("სულ ჯამი (დღგ-ს ჩათვლით)"),
+    the prices themselves including the tax: that row closes the sheet (the lead's round-5
+    policy) - where it plainly adds the rows above it and no VAT or other total row follows the
+    positions. A total incl. VAT computed from a pre-VAT sum (``=SUM(F2:F6)*1.18``) is not."""
+    below = [ln for ln in sheet.lines if ln.row > last and ln.kind != "position"]
+    totals = [ln for ln in below if ln.amount is not None or ln.amount_rows]
+    if len(totals) != 1 or not _INCL_VAT.search(totals[0].description):
+        return None
+    row = totals[0]
+    if row.quantity is not None or not row.amount_is_sum:
+        return None
+    return row if all(r < row.row for r in row.amount_rows) else None
+
+
+def _total_before_rates(after: list[BoqLine], closing: BoqLine) -> BoqLine | None:
+    """The bill's own total under a closing row that adds rates of it: "Total", "Contingency 5%"
+    (``=F7*E8``), "TOTAL CARRIED TO SUMMARY" (``=F7+F8``) - the positions are held against
+    "Total", whatever it is labelled, and the carried total closes the sheet only for the
+    Summary's link (the lead's round-5 policy). Chosen by how the rows are built, never by
+    whether the first one's range covers the positions: a range one row short is the slip the
+    reconciliation is there to report. None when the rows are not so built."""
+    first = after[0]
+    between = [ln for ln in after if first.row < ln.row < closing.row]
+    if closing is first or not between or not first.amount_rows:
+        return None
+    if any(set(ln.amount_rows) - {ln.row} != {first.row} for ln in between):
+        return None  # a row between that is not a rate of the total alone
+    built = set(closing.amount_rows) - {closing.row}
+    allowed = {first.row, *(ln.row for ln in between)}
+    return first if first.row in built and built <= allowed else None
 
 
 def _summary_columns(ws: object) -> tuple[int | None, int | None, int | None, int]:
@@ -1733,6 +1880,12 @@ def _read_summary_rows(book: BoqWorkbook, ws: object, wf: object) -> list[Summar
         book.summary_header_unread = True
         return out
     max_col = min(ws.max_column, _HEADER_SCAN_COLS)  # type: ignore[attr-defined]
+    # the column left of TOTAL is read for a typed rate only where its header says it holds one
+    # ("Description | % | Total"); the one right of it, as always, whatever its header
+    left = total_col - 1
+    rate_cols = [total_col + 1]
+    if left >= 1 and left not in (desc_col, item_col) and _rate_header(ws, left, header_row):
+        rate_cols.append(left)
     for r in range(header_row + 1, ws.max_row + 1):  # type: ignore[attr-defined]
         label = str(ws.cell(r, desc_col).value or "").strip()  # type: ignore[attr-defined]
         if not label or not _has_letter(label):
@@ -1742,10 +1895,10 @@ def _read_summary_rows(book: BoqWorkbook, ws: object, wf: object) -> list[Summar
             book.formula_cells += 1
             if raw is None:
                 book.uncached_cells += 1
-        rate = _num(ws.cell(r, total_col + 1).value)  # type: ignore[attr-defined]
-        rate_formula = _formula_text(wf.cell(r, total_col + 1))  # type: ignore[attr-defined]
-        if rate_formula is not None and _divides_own_total(rate_formula, r, total_col):
-            rate = None  # "=C4/$C$8": the row's share of a total, not its rate
+        rate = next(
+            (x for c in rate_cols if (x := _typed_rate(ws, wf, r, c, total_col)) is not None),
+            None,
+        )
         refs: list[tuple[str, int]] = []
         ranges: list[tuple[str, int, int]] = []
         for c in range(1, max_col + 1):
@@ -1770,7 +1923,7 @@ def _read_summary_rows(book: BoqWorkbook, ws: object, wf: object) -> list[Summar
                 item=str(item).strip() if item not in (None, "") else "",
                 label=clean,
                 value=_num(raw),
-                rate=rate if rate is not None and 0 < rate < 1 else None,
+                rate=rate,
                 refs=tuple(refs),
                 non_numeric=str(raw).strip()[:40] if _is_text_in_number_cell(raw) else None,
                 label_rate=_rate_in_label(clean),
@@ -1779,6 +1932,30 @@ def _read_summary_rows(book: BoqWorkbook, ws: object, wf: object) -> list[Summar
             )
         )
     return out
+
+
+#: A Summary column header saying the column holds rates: "%", "Rate", "Rate, %", "პროცენტი".
+_RATE_HEADER = re.compile(
+    r"^(?:\(?%\)?|%-ი|rate(?:\s*,?\s*\(?%\)?)?|%\s*rate|percent(?:age)?|პროცენტი?|განაკვეთი?)$"
+)
+
+
+def _rate_header(ws: object, col: int, header_row: int) -> bool:
+    """Whether the Summary's header rows label ``col`` as a rate column."""
+    return any(
+        _RATE_HEADER.match(_norm_label(ws.cell(r, col).value))  # type: ignore[attr-defined]
+        for r in range(max(1, header_row - 3), header_row + 1)
+    )
+
+
+def _typed_rate(ws: object, wf: object, row: int, col: int, total_col: int) -> float | None:
+    """The fraction typed in ``col`` of a Summary row (0 < r < 1), else None - never a cell
+    dividing the row's own total by another ("% of total", ``=C4/$C$8``), which is a share."""
+    rate = _num(ws.cell(row, col).value)  # type: ignore[attr-defined]
+    formula = _formula_text(wf.cell(row, col))  # type: ignore[attr-defined]
+    if formula is not None and _divides_own_total(formula, row, total_col):
+        return None
+    return rate if rate is not None and 0 < rate < 1 else None
 
 
 #: A Summary cell that is nothing but the sum of one range of another sheet:
@@ -1866,6 +2043,10 @@ def summary_roles(book: BoqWorkbook) -> dict[str, SummaryRow]:
         # it is labelled ("Total", "სულ")
         roles["cost"] = rows[0]
         start = 1
+        if _closed_incl_vat(rows):
+            # a VAT-inclusive price list closed by its total incl. VAT alone: that row is both
+            roles["incl"] = rows[0]
+            return roles
     elif costs:
         after = next(
             (
@@ -1927,6 +2108,9 @@ class LineDiff:
     #: the bidder's own amount on the line (what a filled-in blank position costs)
     amount: float | None = None
     item_no: str = ""
+    #: a filled-in blank line is priced only by its amount (or quantity x rate) with no text in
+    #: its number cells; a quantity alone is no price (GOLD_SPEC 5)
+    priced: bool = True
 
 
 @dataclass(slots=True)
@@ -2058,7 +2242,7 @@ def _pair_leftovers(
         if i in used_t or not t.item_no:
             continue
         for j, b in enumerate(added):
-            if j in used_b or b.item_no.strip().lower() != t.item_no.strip().lower():
+            if j in used_b or _item_key(b.item_no) != _item_key(t.item_no):
                 continue
             ratio = difflib.SequenceMatcher(
                 None, _fold_desc(t.description), _fold_desc(b.description), autojunk=False
@@ -2228,6 +2412,18 @@ def template_findings(template: BoqWorkbook) -> list[Finding]:
                 actual=s,
             )
         )
+    for s in template.hidden_sheets:
+        out.append(
+            _finding(
+                "BOQ.SHEET_SKIPPED",
+                "info",
+                f"დამალული გვერდი {s} Summary-ს არ უკავშირდება — სექციად არ ითვლება და "
+                "შეფასებაში არ მონაწილეობს",
+                f"hidden sheet {s} is not linked from the Summary - it is not a section of the "
+                "tender and is not evaluated",
+                actual=s,
+            )
+        )
     for name, sheet in template.sheets.items():
         if "unit" not in sheet.columns:
             # an unknown quantity label fails loudly (the sheet is unreadable); an unknown unit
@@ -2284,8 +2480,10 @@ def template_findings(template: BoqWorkbook) -> list[Finding]:
                         _finding(
                             "BOQ.NON_NUMERIC",
                             "warning",
-                            f"შაბლონი, {ka}: მოცულობის უჯრაში ტექსტია „{text}“",
-                            f"template, {en}: the quantity cell holds text '{text}'",
+                            f"შაბლონი, {ka}: მოცულობის უჯრაში ტექსტია „{text}“ — რიცხვად არ "
+                            "იკითხება; პოზიცია არცერთ კომპანიასთან არ ფასდება",
+                            f"template, {en}: the quantity cell holds text '{text}' - it reads "
+                            "as no number; the position is not evaluated for any bidder",
                             actual=text,
                         )
                     )
@@ -2367,6 +2565,31 @@ def compare_bid(template: BoqWorkbook, bid: BoqWorkbook) -> BidComparison:
         out.findings.append(_no_cached_values_finding(bid))
         return out
 
+    sections = {n: s for n, s in bid.hidden_bills.items() if n in template.sheets}
+    if sections:
+        # the policy concerns the template's hidden drafts: a bid that hides one of the
+        # template's sections (its Summary typed as values, or missing, links nothing) still
+        # returns that section - read as hidden, it was "unreadable" and left every bidder's
+        # common scope
+        bid = replace(
+            bid,
+            sheets={
+                n: bid.sheets.get(n) or sections[n]
+                for n in bid.sheet_order
+                if n in bid.sheets or n in sections
+            },
+            hidden_bills={n: s for n, s in bid.hidden_bills.items() if n not in sections},
+        )
+    if (
+        bid.summary_in_bill is not None
+        and _closed_incl_vat(bid.summary_rows)
+        and not (template.summary_in_bill is not None and _closed_incl_vat(template.summary_rows))
+    ):
+        # a bid that closes its bill on a total incl. VAT alone where the template's bill goes
+        # Total, VAT, Total incl. VAT: read at markup 1.0 it would be ranked on prices the
+        # template's chain says are before VAT - it states no total incl. VAT the way the
+        # template asks, and is not ranked
+        bid = replace(bid, summary_rows=[], summary={}, summary_in_bill=None)
     priced_template_sheets = set(template.sheets) | set(template.unreadable_sheets)
     out.added_sheets = [s for s in bid.sheet_order if s not in template.sheet_order]
     out.removed_sheets = [s for s in template.sheet_order if s not in bid.sheet_order]
@@ -2444,6 +2667,14 @@ def compare_bid(template: BoqWorkbook, bid: BoqWorkbook) -> BidComparison:
         if sheet_name not in template.sheets and sheet_name not in template.unreadable_sheets:
             for b_line in b_sheet.lines:
                 out.findings.extend(_arithmetic_findings(b_line, ()))
+    for sheet_name in template.hidden_sheets:
+        # the template's hidden draft, priced by the bidder (hidden or not): shown like a priced
+        # non-position, never evaluated
+        b_sheet = bid.sheets.get(sheet_name) or bid.hidden_bills.get(sheet_name)
+        if b_sheet is not None:
+            out.priced_headings.extend(
+                b for b in b_sheet.lines if b.kind == "position" and b.amount
+            )
 
     if bid.summary_in_bill is not None and template.summary_sheet is not None:
         # the template has a Summary and the bid dropped it: it states no totals and is not
@@ -2556,9 +2787,10 @@ def _rate_text_blocks(line: BoqLine) -> bool:
     return not line.rate_total and bool(keys & set(_RATE_KEYS))
 
 
-def _qty_reads_two_ways(line: BoqLine) -> bool:
-    """Whether the line's quantity is text such as "1.250" that its row could not settle."""
-    return any(key == "qty" and _two_readings(text) for key, text in line.non_numeric)
+def _qty_is_text(line: BoqLine) -> bool:
+    """Whether the line's quantity cell holds text that is read as no number - "2.4 t", "-", or
+    "1.250" that its row could not settle."""
+    return any(key == "qty" for key, _ in line.non_numeric)
 
 
 def _unit_rate(line: BoqLine, columns: dict[str, int]) -> float | None:
@@ -2650,13 +2882,21 @@ def _position_groups(lines: list[BoqLine]) -> dict[int, str]:
     it ("A8" and "8.1" both carry an amount formula); bidders price one or the other. Counted
     apart, every bidder "left unpriced" whichever they did not price, and both rows fell out of
     the common scope.
+
+    A row that is no position ends the group unless its own item number is numbered under the
+    section ("9.1" inside "A9"): a heading with no number, or numbered otherwise ("2.
+    EARTHWORKS", "2", "A11"), starts items that are not the section's, whatever their numbers
+    begin with. Grouped with "A2" across such a heading, an unpriced "2.3" was hidden and the
+    colours flipped.
     """
     groups: dict[int, str] = {}
     parent: tuple[str, str] | None = None
     for line in lines:
-        if line.kind != "position":
-            continue
         item = line.item_no.strip()
+        if line.kind != "position":
+            if parent is not None and not item.startswith(parent[1] + "."):
+                parent = None
+            continue
         if m := _SECTION_POSITION.match(item):
             parent = (item, m.group(1))
             groups[line.row] = item
@@ -2776,10 +3016,11 @@ def _compare_sheet(out: BidComparison, t_sheet: BoqSheet, b_sheet: BoqSheet) -> 
                 )
             )
             continue
-        if _qty_reads_two_ways(t):
-            # the template's own quantity reads 1.25 or 1,250 and its row cannot tell which: not
-            # evaluated for any bidder - never at a quantity a thousand times off, and never at
-            # the bidder's own amount as if the template had left it blank
+        if _qty_is_text(t):
+            # the template's own quantity is text - "2.4 t", or "1.250" that reads 1.25 or 1,250
+            # and whose row cannot tell which: not evaluated for any bidder, never at a quantity
+            # a thousand times off, and never at the bidder's own amount as if the template had
+            # left it blank (GOLD_SPEC 5: text is never read as nothing)
             out.positions.append(
                 PositionEval(
                     t.sheet, t.row, t.item_no, t.description, None, b.row, rate, 0.0, "non_numeric"
@@ -2795,24 +3036,35 @@ def _compare_sheet(out: BidComparison, t_sheet: BoqSheet, b_sheet: BoqSheet) -> 
                 cost, status = 0.0, "unpriced"
             if status != "priced":
                 out.unpriced_positions.append(t)
-        else:
+        elif b.amount or b.quantity:
+            # the bidder filled in the blank line: priced by its amount (or quantity x rate),
+            # never by a quantity alone, and never with text in a number cell - such a line is
+            # listed as filled in, costs nothing and stays out of the common scope
             amount = b.amount or ((b.quantity or 0.0) * rate if rate else 0.0)
-            cost = amount
-            if amount or b.quantity:
-                status = "filled_blank"
-                out.filled_blank.append(
-                    LineDiff(
-                        sheet=t.sheet,
-                        key=t.key,
-                        item_no=t.item_no,
-                        description=t.description,
-                        template_qty=t.quantity,
-                        bid_qty=b.quantity,
-                        row=b.row,
-                        amount=amount,
-                    )
+            if _rate_text_blocks(b):
+                cost, status, amount = 0.0, "non_numeric", b.amount or 0.0
+            elif amount:
+                cost, status = amount, "filled_blank"
+            else:
+                cost, status = 0.0, "unpriced"
+            if status != "filled_blank":
+                out.unpriced_positions.append(t)
+            out.filled_blank.append(
+                LineDiff(
+                    sheet=t.sheet,
+                    key=t.key,
+                    item_no=t.item_no,
+                    description=t.description,
+                    template_qty=t.quantity,
+                    bid_qty=b.quantity,
+                    row=b.row,
+                    amount=amount,
+                    priced=status == "filled_blank",
                 )
-            elif text_cols & {*_RATE_KEYS, "amount", "qty"}:
+            )
+        else:
+            cost = 0.0
+            if text_cols & {*_RATE_KEYS, "amount", "qty"}:
                 status = "non_numeric"
                 out.unfilled_positions.append(t)
             else:
@@ -2879,7 +3131,10 @@ def _evaluate(out: BidComparison, bid: BoqWorkbook) -> None:
         "quantities": quantities,
         "added_lines": sum(b.amount or 0.0 for b in out.added if b.kind == "position"),
         "optional_items": sum(b.amount or 0.0 for b in out.priced_optional),
-        "priced_headings": sum(b.amount or 0.0 for b in out.priced_headings),
+        # a hidden draft the bidder priced adds into neither the stated nor the sheets' total
+        "priced_headings": sum(
+            b.amount or 0.0 for b in out.priced_headings if b.sheet in bid.sheets
+        ),
         "added_sheets": sum(bid.sheets[s].total for s in out.added_sheets if s in bid.sheets),
         "summary": (out.stated_total_cost or 0.0) - bid.total,
     }
@@ -2912,6 +3167,22 @@ def _list_findings(out: BidComparison) -> None:
             )
         )
     for d in out.filled_blank:
+        if not d.priced:
+            out.findings.append(
+                _finding(
+                    "BOQ.FILLED_BLANK",
+                    "info",
+                    f"{d.sheet}, სტრიქონი {d.row}{_item(d)}: შაბლონში მოცულობა ცარიელია, შეავსო "
+                    f"{_qty(d.bid_qty)}, მაგრამ ფასი არ მიუთითა ({d.description[:50]}); "
+                    "შეფასებაში არ შედის",
+                    f"{d.sheet} row {d.row}{_item(d)}: the template leaves the quantity blank, "
+                    f"the bidder filled in {_qty(d.bid_qty)} but stated no price that can be "
+                    f"read ({d.description[:50]}); not priced, left out of the evaluation",
+                    expected=_qty(d.template_qty),
+                    actual=_qty(d.bid_qty),
+                )
+            )
+            continue
         out.findings.append(
             _finding(
                 "BOQ.FILLED_BLANK",
@@ -3302,21 +3573,41 @@ def _range_gap(book: BoqWorkbook, row: SummaryRow) -> Finding | None:
 
 #: The item of a top-level Summary section: "2", "2.", "C" - not a group under one ("A1").
 _TOP_LEVEL_ITEM = re.compile(r"^(?:(\d{1,3})|([A-Za-z]))\.?$")
+#: A Roman numeral from I to XXX, the Georgian estimate's chapter numbering ("I", "II", "IV.").
+_ROMAN_ITEM = re.compile(r"^(?=[IVX])X{0,3}(?:IX|IV|V?I{0,3})\.?$", re.IGNORECASE)
+
+
+def _section_style(item: str, roman: bool) -> str | None:
+    """How a Summary item numbers a top-level section: "digit", "roman" or "letter", else None."""
+    if roman and _ROMAN_ITEM.match(item):
+        return "roman"
+    m = _TOP_LEVEL_ITEM.match(item)
+    if m is None:
+        return None
+    return "digit" if m.group(1) else "letter"
 
 
 def _top_level_sections(rows: list[SummaryRow], cost: SummaryRow) -> list[SummaryRow]:
     """The sections TOTAL COST must add up: the valued rows above it numbered like a top-level
     section - all numbered the way the first one is ("0", "1", "2" in the client's Summary, "A",
-    "B", "C" in another's), so a lettered section's numbered sub-sections are not added twice."""
-    shaped = [
-        (r, bool(m.group(1)))
-        for r in rows
-        if r.row < cost.row and r.value is not None and (m := _TOP_LEVEL_ITEM.match(r.item))
-    ]
+    "B", "C" in another's, "I", "II", "III" in a Georgian estimate's), so a lettered section's
+    numbered sub-sections are not added twice.
+
+    I, V and X are letters as well as numerals, so the style is read from the sequence: where
+    the items above TOTAL COST include a Roman numeral of more than one character (II, IV) and
+    no letter that is not one, they are Roman, and every Roman item is a section. Read by its
+    first item alone, "I" was a letter, II and III were nothing, and every faithful bid got a
+    RECONCILE error on TOTAL COST."""
+    valued = [r for r in rows if r.row < cost.row and r.value is not None]
+    items = [r.item.strip() for r in valued]
+    roman = any(len(i.rstrip(".")) > 1 and _ROMAN_ITEM.match(i) for i in items) and not any(
+        _section_style(i, False) == "letter" and not _ROMAN_ITEM.match(i) for i in items
+    )
+    shaped = [(r, style) for r in valued if (style := _section_style(r.item.strip(), roman))]
     if not shaped:
         return []
-    digits = shaped[0][1]
-    return [r for r, is_digit in shaped if is_digit == digits]
+    first = shaped[0][1]
+    return [r for r, style in shaped if style == first]
 
 
 def _reconcile_chain(
@@ -3383,9 +3674,10 @@ def _reconcile_chain(
         base = _excl_parts(rows, cost, end)
     rated(vat, base)
     if incl is not None and incl.value is not None and base and base[0].value is not None:
-        want = sum(r.value or 0.0 for r in base) + (vat.value or 0.0 if vat is not None else 0.0)
+        added = [vat] if vat is not None else _rows_between(rows, base, incl)
+        want = sum(r.value or 0.0 for r in [*base, *added])
         if not _same_money(incl.value, want):
-            joined = " + ".join(str(r.row) for r in [*base, *([vat] if vat is not None else [])])
+            joined = " + ".join(str(r.row) for r in [*base, *added])
             out.append(
                 _summary_gap(
                     f"სტრიქონი {incl.row} ({incl.label[:30]}) ≠ სტრიქონები {joined}",
@@ -3394,6 +3686,27 @@ def _reconcile_chain(
                     want,
                 )
             )
+
+
+def _rows_between(
+    rows: list[SummaryRow], base: list[SummaryRow], incl: SummaryRow
+) -> list[SummaryRow]:
+    """With no row the chain reads as the VAT, what the total incl. VAT adds to its base: every
+    valued row between the base and it ("გადასახადი 18%", a tax named otherwise), a row
+    restating the running sum not added twice - as the total excl. VAT adds the rows between it
+    and TOTAL COST (``_excl_parts``). Held against the base alone, a faithful Summary whose tax
+    row the reader does not name was a false error."""
+    running = sum(r.value or 0.0 for r in base)
+    last = max(r.row for r in base)
+    out: list[SummaryRow] = []
+    for row in rows:
+        if not last < row.row < incl.row or row.value is None:
+            continue
+        if _same_money(row.value, running):
+            continue
+        out.append(row)
+        running += row.value
+    return out
 
 
 def _excl_parts(rows: list[SummaryRow], cost: SummaryRow, excl: SummaryRow) -> list[SummaryRow]:
@@ -3558,6 +3871,10 @@ _STATUS_TEXT = {
     "optional": "optional (placeholder for other items)",
     "optional_priced": "EXCLUDED: the bidder's own additional items",
 }
+#: The statuses that leave a position out of a bidder's analysis, every one listed in the
+#: merged Summary's "Excluded from the analysis" block - taken from the status texts, so a new
+#: excluded status cannot be left out of the block (a priced placeholder once was).
+_EXCLUDED_STATUSES = frozenset(s for s, text in _STATUS_TEXT.items() if text.startswith("EXCLUDED"))
 
 
 def _put(ws: object, row: int, col: int, value: object) -> None:
@@ -3896,17 +4213,9 @@ def _write_excluded_block(ws: object, row: int, comps: list[BidComparison]) -> i
             for b in comp.priced_headings
         )
         entries.extend(
-            (_STATUS_TEXT.get(p.status, p.status), p.sheet, p.row, p.item_no, p.description)
+            (_STATUS_TEXT[p.status], p.sheet, p.row, p.item_no, p.description)
             for p in comp.positions
-            if p.status
-            in (
-                "removed",
-                "unpriced",
-                "non_numeric",
-                "sheet_missing",
-                "sheet_unreadable",
-                "prices_not_read",
-            )
+            if p.status in _EXCLUDED_STATUSES
         )
         for kind, sheet, line_row, item, desc in entries:
             for col, value in enumerate((kind, comp.bidder, sheet, line_row, item, desc[:200]), 1):
