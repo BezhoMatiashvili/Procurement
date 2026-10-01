@@ -1250,7 +1250,103 @@ def find_dates(text: str) -> list[RuleHit]:
                 note=note,
             )
         )
-    return _one_type_per_range(hits, closes)
+    return _staged_deliveries(text, _until_fulfilment(text, _one_type_per_range(hits, closes)))
+
+
+#: An until-phrase whose noun is the work's: "... მოქმედებს ვალდებულებების სრულ შესრულებამდე",
+#: "... remain in force until the full performance of ...". Matched against the text before an
+#: English keyword.
+_UNTIL_THE_WORK_EN = re.compile(
+    r"(?<![a-z])until\s+(?:the\s+)?(?:(?:full|complete|due|proper)\s+)?$", re.IGNORECASE
+)
+_WORD_TAIL = re.compile(r"[ა-ჰa-z]*")
+
+
+def _until_fulfilment(text: str, hits: list[RuleHit]) -> list[RuleHit]:
+    """A date the validity clause sets is no performance date because the clause says the
+    contract lasts until the work is done (red team R5, EXTRACTION-R5-02). In "ხელშეკრულება
+    ძალაში შედის ხელმოწერისთანავე და მოქმედებს ვალდებულებების სრულ შესრულებამდე, მაგრამ
+    არაუგვიანეს 2026 წლის 31 დეკემბრამდე" the nearest keyword is "შესრულებ", inside the
+    until-phrase; the date is the validity's. Only where every performance keyword of the
+    sentence stands in such a phrase and the sentence is a validity clause
+    (``contract_terms._VALIDITY``): "შეასრულოს სამუშაოები ... 31 ივლისამდე, ხელშეკრულების
+    მოქმედების ვადაში" is still the work's."""
+    if not any(h.type is FactType.execution_period for h in hits):
+        return hits
+    # imported here: the terms reader imports this module
+    from procurement_agent.checks.contract_terms import _VALIDITY, sentence_at, sentence_spans
+
+    spans = sentence_spans(text)
+    out: list[RuleHit] = []
+    for h in hits:
+        span = sentence_at(spans, h.start) if h.type is FactType.execution_period else None
+        if (
+            span is not None
+            and _VALIDITY.search(text, *span) is not None
+            and _only_until_the_work(text, *span)
+        ):
+            h = replace(h, type=FactType.validity_period)
+        out.append(h)
+    return out
+
+
+def _only_until_the_work(text: str, a: int, b: int) -> bool:
+    """Whether every performance keyword in ``text[a:b]`` is the noun of an until-phrase: a word
+    in "-მდე" ("შესრულებამდე"), or "until the full performance"."""
+    sentence = text[a:b].lower()
+    found = False
+    for kw in KEYWORDS[FactType.execution_period]:
+        for m in keyword_pattern(kw).finditer(sentence):
+            tail = _WORD_TAIL.match(sentence, m.end())
+            word_end = tail.end() if tail is not None else m.end()
+            if sentence[m.start() : word_end].endswith("მდე"):
+                found = True
+            elif _UNTIL_THE_WORK_EN.search(sentence, max(0, m.start() - 40), m.start()):
+                found = True
+            else:
+                return False
+    return found
+
+
+#: An item of a staged delivery naming its batch or stage: "პირველი პარტია - არაუგვიანეს ...",
+#: "II ეტაპი: ...", "second batch: ...".
+_BATCH = re.compile(
+    r"(?<![ა-ჰ])(?:პარტი|ეტაპ)[ა-ჰ]*|(?<![a-z])(?:batch|stage|lot|consignment)(?:es|s)?(?![a-z])",
+    re.IGNORECASE,
+)
+#: How far before its date an item's batch word may stand.
+_BATCH_REACH = 80
+_SENTENCE_STOP = re.compile(r"[.!?](?=\s|$)")
+
+
+def _batch_item(text: str, start: int) -> bool:
+    """Whether the list item holding the date at ``start`` names a batch or a stage: the words
+    since the item began (a comma, a semicolon, a colon or a line break)."""
+    lo = max(text.rfind(c, 0, start) for c in ",;:\n") + 1
+    return _BATCH.search(text, max(lo, start - _BATCH_REACH), start) is not None
+
+
+def _staged_deliveries(text: str, hits: list[RuleHit]) -> list[RuleHit]:
+    """A staged delivery's batches each have a delivery deadline (policy, red team R5:
+    COMPARE-R5-11): "მიწოდება განხორციელდება ეტაპობრივად: პირველი პარტია - არაუგვიანეს 2026 წლის
+    15 მაისისა, მეორე პარტია - არაუგვიანეს 2026 წლის 15 ივნისისა". The delivery word types the
+    first batch's date; a later batch's, past the keyword's reach, is typed as the item before it
+    when both items name a batch in one sentence. A date in an item that names none - an
+    invoice's, a payment's - keeps its own type."""
+    out: list[RuleHit] = []
+    for h in hits:
+        before = out[-1] if out else None
+        if (
+            h.type is FactType.date
+            and before is not None
+            and before.type is FactType.delivery_deadline
+            and _SENTENCE_STOP.search(text, before.end, h.start) is None
+            and _batch_item(text, h.start)
+            and _batch_item(text, before.start)
+        ):
+            h = replace(h, type=FactType.delivery_deadline, confidence=before.confidence)
+        out.append(h)
+    return out
 
 
 def _one_type_per_range(
