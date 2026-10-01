@@ -100,7 +100,17 @@ KEYWORDS: dict[FactType, tuple[str, ...]] = {
         "completion",
         "perform",
     ),
-    FactType.payment_terms: ("გადახდ", "ანგარიშსწორებ", "payment", "invoice", "ავანს", "advance"),
+    # "prepayment" whole: a Latin keyword starts a word, so "payment" is not found inside it
+    FactType.payment_terms: (
+        "გადახდ",
+        "ანგარიშსწორებ",
+        "payment",
+        "invoice",
+        "ავანს",
+        "advance",
+        "prepayment",
+        "pre-payment",
+    ),
     FactType.validity_period: ("ძალაშ", "მოქმედებ", "valid", "validity", "expire"),
     FactType.penalty: ("პირგასამტეხლო", "ჯარიმ", "საურავ", "penalt", "liquidated damages"),
     FactType.total_amount: (
@@ -1027,6 +1037,15 @@ _REMAINDER_WORD = re.compile(
 _ADVANCE_AFTER = re.compile(
     r"(?:-?[ა-ჰ]+)?\s*(?:ავანს|(?:an?\s+)?(?:advance|prepayment)(?![a-z]))", re.IGNORECASE
 )
+#: ... or after the verb that pays it: "30% გადაიხდება ავანსის სახით", "30% ჩაირიცხება
+#: ავანსად", "30% shall be paid as an advance". Only as the advance ("სახით", "ად", "as"):
+#: "75% გადაიხდება ავანსის გამოქვითვით" is the balance, paid less the advance.
+_ADVANCE_AFTER_VERB = re.compile(
+    r"(?:-?[ა-ჰ]+)?\s+(?P<verb>[ა-ჰ]+)\s+(?:ავანსის\s+სახით|ავანსად)(?![ა-ჰ])"
+    r"|(?:\s+of\s+the\s+[a-z]+\s+(?:value|price|amount))?\s+(?:shall|will|is|are)\s+(?:be\s+)?"
+    r"(?P<en>paid|payable|transferred)\s+as\s+(?:an?\s+)?(?:advance|prepayment)(?![a-z])",
+    re.IGNORECASE,
+)
 #: A rate that ends right where a word begins: that word is the rate's ("30% advance, 70% ...").
 _RATE_ENDS = re.compile(r"(?:%|პროცენტ[ა-ჰ]*|per\s?cent)(?:-?[ა-ჰ]+)?\s*$", re.IGNORECASE)
 
@@ -1040,6 +1059,11 @@ def is_advance_share(text: str, start: int, end: int) -> bool:
     balance. The nearest keyword cannot tell: "payment" is nearer than "advance" in "advance
     payment of 30%"."""
     if _ADVANCE_AFTER.match(text, end):
+        return True
+    after_verb = _ADVANCE_AFTER_VERB.match(text, end)
+    if after_verb is not None and (
+        after_verb.group("en") or PAYMENT_WORDS.search(after_verb.group("verb"))
+    ):
         return True
     before = text[max(0, start - _CTX) : start]
     cut = list(_SENTENCE_BOUNDARY.finditer(before))
@@ -1077,10 +1101,30 @@ _BALANCE_OPENS = re.compile(
 )
 
 
+#: The marker of a list item: "ბ)", "2)", "4.2.2.", "- ".
+_LIST_MARKER = re.compile(r"(?:[ა-ჰa-z]\)|\d{1,2}\)|\d{1,2}(?:\.\d{1,2}){0,3}\.|[-–•])\s*")
+#: An advance opening a stage of a staged payment: "ავანსი - ...", "Advance: ...".
+_ADVANCE_OPENS = re.compile(
+    r"ავანს|წინასწარი?\s+(?:გადახდ|ანგარიშსწორებ)|(?:an?\s+)?(?:advance|prepayment)(?![a-z])",
+    re.IGNORECASE,
+)
+
+
 def continues_payment(text: str, previous_end: int, start: int) -> bool:
-    """Whether the sentence at ``start`` goes on with the balance of the paying sentence that
-    ends at ``previous_end``: only after a semicolon, and only when it opens with the balance."""
-    return text[previous_end - 1 : previous_end] == ";" and bool(_BALANCE_OPENS.match(text, start))
+    """Whether the sentence at ``start`` goes on with the payment of the paying sentence that
+    ends at ``previous_end``: after a semicolon, when it opens with the balance ("; the balance
+    within 10 working days", "; ბ) დარჩენილი თანხა - ...", "; 4.2.2. დარჩენილი 70% - ...");
+    after a colon that leads in a staged payment, when it opens with the advance or the
+    balance ("ეტაპობრივად: 4.2.1. ავანსი - ..."). A sibling clause ("; 4.3. შემსრულებელი
+    ...", ": 4.1. მიწოდება ...") goes on with nothing."""
+    stop = text[previous_end - 1 : previous_end]
+    if stop not in (";", ":"):
+        return False
+    marker = _LIST_MARKER.match(text, start)
+    at = marker.end() if marker else start
+    if _BALANCE_OPENS.match(text, at):
+        return True
+    return stop == ":" and _ADVANCE_OPENS.match(text, at) is not None
 
 
 #: Which payment a deadline is for: the advance's, or the balance's after it.
@@ -1266,14 +1310,18 @@ _PERIOD_BEFORE = 120
 def penalty_period(text: str, start: int, end: int) -> str | None:
     """The period ("day", "week", "month", "year") a rate at ``text[start:end]`` counts per,
     or None. Read after the rate first, then before it, never across the sentence's end nor
-    across another rate: in "0.1% ყოველ დღეზე, მაგრამ არაუმეტეს 10%-ისა" the day is 0.1%'s."""
+    across another rate: in "0.1% ყოველ დღეზე, მაგრამ არაუმეტეს 10%-ისა" the day is 0.1%'s.
+    Nor across a turn to another clause (", ხოლო", ", whereas"): in "0.2% ყოველ დღეზე, ხოლო ...
+    ჯარიმა 10%" the day stands after the 0.2% and is its own, so the fine counts per nothing."""
     after = text[end : end + _PERIOD_AFTER]
     stop = _SENTENCE_END.search(after)
     after = after[: stop.start()] if stop else after
+    turn = _CLAUSE_TURN.search(after)
+    after = after[: turn.start()] if turn else after
     other = _PCT.search(after)
     after = after[: other.start()] if other else after
     before = text[max(0, start - _PERIOD_BEFORE) : start]
-    cut = [*_SENTENCE_END.finditer(before), *_PCT.finditer(before)]
+    cut = [*_SENTENCE_END.finditer(before), *_PCT.finditer(before), *_CLAUSE_TURN.finditer(before)]
     before = before[max(c.end() for c in cut) :] if cut else before
     found = _PER_PERIOD.search(after)
     if found is None:
@@ -1384,10 +1432,31 @@ _COUNT_STARTS_FROM = re.compile(
 _CLAUSE_TURN = re.compile(r"[,\u2013\u2014-](?=\s*(?:ხოლო|whereas)(?![ა-ჰa-z]))", re.IGNORECASE)
 
 
+#: The warranty as a frame another count is set in, not the count's own subject: "საგარანტიო
+#: ვადის განმავლობაში გამოვლენილ ნაკლს აღმოფხვრის 10 დღის ვადაში" (a remedy within 10 days),
+#: "საგარანტიო ვადის დასრულებიდან 15 დღეში", "during / after the warranty period"; and the
+#: guarantee money, which is a security and no warranty ("საგარანტიო თანხა", "საგარანტიო
+#: უზრუნველყოფა", "საგარანტიო წერილი", "საბანკო გარანტია"). "საგარანტიო ვადა შეადგენს 12 თვეს",
+#: "საგარანტიო ვადა - 12 თვე" and "12-თვიანი გარანტია" name the warranty itself.
+_WARRANTY_FRAME = re.compile(
+    r"საგარანტიო\s+(?:ვადის|პერიოდის)\s+(?:განმავლობაში|მანძილზე|დასრულებ[ა-ჰ]*|გასვლ[ა-ჰ]*"
+    r"|ამოწურვ[ა-ჰ]*|ბოლომდე|შემდეგ|ფარგლებში)"
+    r"|საგარანტიო\s+(?:ვადაში|პერიოდში)"
+    r"|საგარანტიო\s+(?:თანხ|უზრუნველყოფ|წერილ|დეპოზიტ)[ა-ჰ]*|საბანკო\s+გარანტი[ა-ჰ]*"
+    r"|(?<![a-z])(?:during|within|after|throughout|upon\s+expiry\s+of|until\s+the\s+end\s+of"
+    r"|following)\s+the\s+(?:warranty|guarantee)\s+period(?![a-z])"
+    r"|(?<![a-z])(?:bank|performance|bid)\s+guarantee(?![a-z])",
+    re.IGNORECASE,
+)
+
+
 def _duration_context(text: str) -> str:
     """``text`` as a duration's type is read from it: the events counts start from blanked out,
-    and a turn to another clause made a sentence boundary. Every offset stays where it was."""
+    the warranty named only as a frame or as guarantee money blanked out too, and a turn to
+    another clause made a sentence boundary. Every offset stays where it was."""
     chars = list(text)
+    for m in _WARRANTY_FRAME.finditer(text):
+        chars[m.start() : m.end()] = " " * (m.end() - m.start())
     for m in _COUNT_STARTS_FROM.finditer(text):
         a, b = m.span("event") if m.group("event") else m.span()
         chars[a:b] = " " * (b - a)
