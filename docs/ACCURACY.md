@@ -600,7 +600,8 @@ in the act check's party matching, each with a unit test and a near miss
   stays "not found", with no correction.
 * **A draft's blank is no value (COMPARE-R5-07).** `მისამართი: ______` was read as the address,
   so filling it in was "changed" from underscores. A value with no letter and no digit
-  (`normalize.is_blank`) yields no fact; the act check's own party record is unchanged.
+  (`normalize.is_blank`) yields no fact, and so does a party name whose quotes after the legal
+  form hold only a blank (`შპს „______“`); the act check's own party record is unchanged.
 * **Where an address ends (EXTRACTION-R5-06).** The round-4 stop before `მისამართი:` left the
   next address's qualifier (`, ფაქტობრივი`) in this one, and a treasury code, a VAT payer's
   number or a website ran on into it. An address now also ends at a comma before one to four

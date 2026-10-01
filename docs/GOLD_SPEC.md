@@ -163,7 +163,8 @@ How the parties are read (red-team round 5):
 * **A blank is no value.** A draft's fill-in line - a value with no letter and no digit, only
   underscores, dots, ellipses, dashes and spaces (`მისამართი: ___________`) - is no
   `party_address`, `party_name`, `party_director` or `project_name`; a reader yields nothing for
-  it (`normalize.is_blank`), so a blank filled in is a value added (COMPARE-R5-07).
+  it (`normalize.is_blank`), nor is a legal form before a blank (`შპს „______“`) a party name,
+  so a blank filled in is a value added (COMPARE-R5-07).
 * **Where an address ends (continued).** Also at the next field's label on its line: a comma,
   one to four words with no figure, a colon (`, სახაზინო კოდი: …`, `, დღგ-ს გადამხდელის ნომერი:
   …`, `, ვებგვერდი: …`), and before another address's qualifier (`, ფაქტობრივი მისამართი:`,
