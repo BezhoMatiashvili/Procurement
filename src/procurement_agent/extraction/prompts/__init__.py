@@ -7,7 +7,7 @@ import re
 from procurement_agent.extraction.labels import PROMPT_DESCRIPTIONS
 from procurement_agent.extraction.schemas import FactType
 
-PROMPT_VERSION = "2026-09-23.1"
+PROMPT_VERSION = "2026-10-01.1"
 
 #: The act review's own version (``SYSTEM_AOA_REVIEW``). Its answers are stored and found again
 #: by a digest that includes this, so a change of wording asks the model again rather than

@@ -14,7 +14,7 @@ from dataclasses import dataclass, replace
 from datetime import date
 from typing import Literal
 
-from procurement_agent.extraction.georgian import month_typo
+from procurement_agent.extraction.georgian import month_typo, parse_number_words
 from procurement_agent.extraction.normalize import (
     FIGURE,
     FIGURE_SPACE,
@@ -100,7 +100,17 @@ KEYWORDS: dict[FactType, tuple[str, ...]] = {
         "completion",
         "perform",
     ),
-    FactType.payment_terms: ("გადახდ", "ანგარიშსწორებ", "payment", "invoice", "ავანს", "advance"),
+    # "prepayment" whole: a Latin keyword starts a word, so "payment" is not found inside it
+    FactType.payment_terms: (
+        "გადახდ",
+        "ანგარიშსწორებ",
+        "payment",
+        "invoice",
+        "ავანს",
+        "advance",
+        "prepayment",
+        "pre-payment",
+    ),
     FactType.validity_period: ("ძალაშ", "მოქმედებ", "valid", "validity", "expire"),
     FactType.penalty: ("პირგასამტეხლო", "ჯარიმ", "საურავ", "penalt", "liquidated damages"),
     FactType.total_amount: (
@@ -159,9 +169,60 @@ class RuleHit:
 
 
 # Newlines are NOT boundaries: Docling emits inline runs ("შეადგენს\n100\n(ასი) ლარს") and
-# table cells on separate lines; the nearest-keyword rule keeps neighbouring rows apart.
+# table cells on separate lines; the nearest-keyword rule keeps neighbouring rows apart. The one
+# exception is a label line (``label_line_spans``).
 _SENTENCE_BOUNDARY = re.compile(r"[.;!?]")
 _KW_CACHE: dict[str, re.Pattern[str]] = {}
+
+#: A "label: value" line: a short label of words (no figure, quote or comma), a colon, and a
+#: value on the same line, opened by a bullet or not - "მომსახურების შესრულების ვადა:
+#: 10.03.2026 - 31.07.2026", "- საგარანტიო ვადა: 12 თვე".
+_LABEL_LINE = re.compile(
+    r"^[ \t]*(?:[-\u2013\u2014•][ \t]*)?[ა-ჰA-Za-z][ა-ჰA-Za-z /()\-]{0,58}?[ \t]*:[ \t]*"
+    r"(?P<value>\S[^\n]*?)[ \t]*$",
+    re.MULTILINE,
+)
+#: A value that goes on in the next line: it ends with a comma, a dash, an open bracket or
+#: "და" / "and".
+_VALUE_GOES_ON = re.compile(r"(?:[,(\-\u2013\u2014]|(?<![ა-ჰA-Za-z])(?:და|and))$", re.IGNORECASE)
+
+
+def label_line_spans(text: str) -> list[tuple[int, int]]:
+    """Every "label: value" line with no full stop of its own, as (start, end): a sentence by
+    itself (docs/GOLD_SPEC.md section 2, red team R4). Terms written as such lines - one Word
+    paragraph each - were read as one sentence, so a payment deadline on one line took the
+    warranty's keyword on the next. A line whose value runs on (``_VALUE_GOES_ON``) is none,
+    nor a line ending with its own stop, nor an inline run ("შეადგენს\\n100\\n(ასი) ლარს")."""
+    return [
+        (m.start(), m.end())
+        for m in _LABEL_LINE.finditer(text)
+        if not _VALUE_GOES_ON.search(m.group("value")) and m.group("value")[-1] not in ".;!?"
+    ]
+
+
+def close_label_lines(text: str) -> str:
+    """``text`` with a full stop after each label line's value (``label_line_spans``), for a
+    reader that splits sentences at stops only."""
+    out: list[str] = []
+    pos = 0
+    for _, end in label_line_spans(text):
+        out += [text[pos:end], "."]
+        pos = end
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def _label_line_bounds(text: str, a: int, b: int) -> list[int]:
+    """The line breaks in ``text[a:b]`` that end or begin a label line."""
+    bounds: list[int] = []
+    for p in (i for i in range(a, b) if text[i] == "\n"):
+        line_start = text.rfind("\n", 0, p) + 1
+        nxt = text.find("\n", p + 1)
+        before = text[line_start:p]
+        after = text[p + 1 : len(text) if nxt < 0 else nxt]
+        if label_line_spans(before) or label_line_spans(after):
+            bounds.append(p)
+    return bounds
 
 
 _GEORGIAN_LETTER = re.compile(r"[\u10a0-\u10ff]")
@@ -200,15 +261,23 @@ def nearest_keyword_group[K: Hashable](
     Shared by the fact classifier below and by the checks that give an amount its role in a
     contract (price, advance, penalty ...), so both weigh the same evidence the same way.
     """
-    pre = text[max(0, start - _CTX) : start].lower()
-    post = text[end : min(len(text), end + _CTX)].lower()
-    # keep only the sentence fragment adjacent to the hit
+    lo, hi = max(0, start - _CTX), min(len(text), end + _CTX)
+    pre = text[lo:start].lower()
+    post = text[end:hi].lower()
+    # keep only the sentence fragment adjacent to the hit; a label line is a sentence of its own
     cut = list(_SENTENCE_BOUNDARY.finditer(pre))
     if cut:
         pre = pre[cut[-1].end() :]
     m = _SENTENCE_BOUNDARY.search(post)
     if m:
         post = post[: m.start()]
+    if "\n" in pre or "\n" in post:
+        lines_before = _label_line_bounds(text, start - len(pre), start)
+        if lines_before:
+            pre = pre[lines_before[-1] + 1 - (start - len(pre)) :]
+        lines_after = _label_line_bounds(text, end, end + len(post))
+        if lines_after:
+            post = post[: lines_after[0] - end]
 
     best: tuple[int, int, K] | None = None
     for group, keywords in groups.items():
@@ -411,7 +480,9 @@ def _is_share(text: str, start: int) -> bool:
     """Whether the amount at ``start`` restates a share of the value (a guarantee, an advance,
     the VAT inside the price) rather than stating the value. Its nearest keyword is the value's
     ("ღირებულების 5%-ის, 100 ლარის ოდენობით"), which names the base of the share, not the amount."""
-    return _SHARE_BEFORE.search(text, max(0, start - _SHARE_REACH), start) is not None
+    return _SHARE_BEFORE.search(
+        text, max(0, start - _SHARE_REACH), start
+    ) is not None or is_tax_amount(text, start)
 
 
 #: A tax named inside a bracket, before the figure there: "(დღგ-ს გარეშე 1 000 ლარი)", "(excl.
@@ -422,7 +493,7 @@ _BRACKET_REACH = 60
 _RESTATED_REACH = 60
 
 
-def restating_bracket(text: str, start: int) -> tuple[int, int] | None:
+def _restating_bracket(text: str, start: int) -> tuple[int, int] | None:
     """The bracket around the figure at ``start`` when it restates the money figure written right
     before it on another tax basis: "1 180 ლარს დღგ-ს ჩათვლით (დღგ-ს გარეშე 1 000 ლარი)", "GEL
     1,180 incl. VAT (excl. VAT GEL 1,000)". Its span, "(" to ")"; None otherwise.
@@ -507,6 +578,297 @@ def _named_in_own_clause(text: str, start: int) -> bool:
     )
 
 
+# --- a price restated on another tax basis -------------------------------------------------------
+
+#: A figure's tax basis: with the tax ("დღგ-ს ჩათვლით", "გადასახადების ჩათვლით", "including
+#: VAT") or without it ("დღგ-ს გარეშე", "excl. VAT", "net of VAT").
+_TAX_INCLUDED = re.compile(
+    r"(?:დ\.?ღ\.?გ\.?|გადასახად[ა-ჰ]*)(?:-?ის|-?ს)?\s+(?:\(\s*\d{1,2}(?:[.,]\d+)?\s*%\s*\)\s*)?"
+    r"ჩათვლით"
+    r"|(?<![a-z])(?:including|inclusive\s+of|incl\.?)\s+(?:\d{1,2}\s*%\s+)?(?:vat|tax(?:es)?)"
+    r"(?![a-z])|(?<![a-z])vat\s+(?:is\s+)?included(?![a-z])",
+    re.IGNORECASE,
+)
+_TAX_EXCLUDED = re.compile(
+    r"(?:დ\.?ღ\.?გ\.?|გადასახად[ა-ჰ]*)(?:-?ის|-?ს)?\s+(?:გარეშე|გამოკლებით)"
+    r"|(?<![a-z])(?:excluding|exclusive\s+of|excl\.?|net\s+of|before|without)\s+"
+    r"(?:vat|tax(?:es)?)(?![a-z])",
+    re.IGNORECASE,
+)
+#: The tax named as a figure's own label, right before it: "დღგ - 915.25 ლარი", "დღგ (18%):
+#: 915.25 ლარი", "დღგ-ს თანხა: ...", "VAT: GEL 180". Not the price's basis: "Price including
+#: VAT: 118 GEL" and "ფასი + დღგ: 1 180 ლარი" label the price (``_TAX_QUALIFIED``).
+_TAX_AMOUNT_LABEL = re.compile(
+    r"(?<![ა-ჰa-z])(?:დ\.?ღ\.?გ\.?|vat|value\s+added\s+tax)"
+    r"(?:(?:-?ის|-?ს)\s+(?:თანხა|ოდენობა)|\s+(?:თანხა|ოდენობა|amount))?"
+    r"(?:\s*\(\s*\d{1,2}(?:[.,]\d{1,2})?\s*%\s*\))?"
+    r"\s*[:=\u2013\u2014-]?\s*(?:(?:GEL|USD|EUR|GBP|₾|\$|€|£)\s*)?$",
+    re.IGNORECASE,
+)
+_TAX_QUALIFIED = re.compile(
+    r"(?<![a-z])(?:incl\.?|including|inclusive\s+of|excl\.?|excluding|exclusive\s+of|with|"
+    r"without|plus|net\s+of)\s*$|\+\s*$",
+    re.IGNORECASE,
+)
+_TAX_LABEL_REACH = 60
+
+
+def is_tax_amount(text: str, start: int) -> bool:
+    """Whether the money figure at ``start`` is the tax itself, labelled by the tax's name right
+    before it: "დღგ - 915.25 ლარი", "დღგ (18%): 915.25 ლარი" (docs/GOLD_SPEC.md section 2: the tax
+    the price holds is an ``amount``, never ``total_amount`` or ``price``)."""
+    before = text[max(0, start - _TAX_LABEL_REACH) : start]
+    label = _TAX_AMOUNT_LABEL.search(before)
+    return label is not None and _TAX_QUALIFIED.search(before, 0, label.start()) is None
+
+
+def _money_at(text: str, start: int) -> re.Match[str] | None:
+    return _AMOUNT_AFTER.match(text, start) or _AMOUNT_BEFORE.match(text, start)
+
+
+def _next_money(text: str, pos: int, stop: int) -> re.Match[str] | None:
+    found = [m for p in (_AMOUNT_AFTER, _AMOUNT_BEFORE) if (m := p.search(text, pos, stop))]
+    return min(found, key=lambda m: m.start()) if found else None
+
+
+def _has_money(text: str, a: int, b: int) -> bool:
+    return _next_money(text, a, b) is not None
+
+
+def _sentence_start(text: str, pos: int) -> int:
+    lo = max(0, pos - _CLAUSE_REACH)
+    stops = list(_SENTENCE_END.finditer(text, lo, pos))
+    return stops[-1].end() if stops else lo
+
+
+def _basis(text: str, a: int, b: int) -> tuple[str, re.Match[str]] | None:
+    """The last tax basis stated in ``text[a:b]``: ("incl" or "excl", its match)."""
+    found = [
+        (kind, m)
+        for kind, pat in (("incl", _TAX_INCLUDED), ("excl", _TAX_EXCLUDED))
+        for m in pat.finditer(text, a, b)
+    ]
+    return max(found, key=lambda f: f[1].start()) if found else None
+
+
+#: A total word naming the figure after it: "სულ 6 000 ლარი", "სულ დღგ-ს ჩათვლით: 6 000 ლარი",
+#: "ჯამი: ...", "Total: ...".
+_TOTAL_LABEL = re.compile(
+    r"(?<![ა-ჰa-z])(?:სულ|ჯამ[ა-ჰ]*|(?:grand\s+)?total)(?![ა-ჰa-z])[^.;\n\d]{0,40}$", re.IGNORECASE
+)
+#: A clause number opening a sentence: a new clause, never the price's own.
+_OPENS_CLAUSE = re.compile(r"\s*\d{1,2}(?:\.\d{1,2})+\.?\s")
+_BREAKDOWN_REACH = 200
+
+
+def _breakdown_part(text: str, start: int, end: int) -> bool:
+    """Whether the figure at ``text[start:end]`` opens a breakdown of the price: the VAT
+    labelled as such follows it, then the figure a total word names - "5 084.75 ლარი, დღგ -
+    915.25 ლარი, სულ 6 000 ლარი", also on lines of their own. The total is the one the total
+    word names; the figure before the tax is the price without it."""
+    tax = _next_money(text, end, end + _BREAKDOWN_REACH)
+    if tax is None or not is_tax_amount(text, tax.start()):
+        return False
+    total = _next_money(text, tax.end(), tax.end() + _BREAKDOWN_REACH)
+    return total is not None and _TOTAL_LABEL.search(text, tax.end(), total.start()) is not None
+
+
+def restatement(text: str, start: int) -> tuple[int, int] | None:
+    """The words that make the money figure at ``start`` the price restated on another tax
+    basis, not a second price; their span, or None. The figure is then an ``amount``, and the
+    tax wording inside the span is about it, not about the price (``document_facts`` reads the
+    VAT status so, and the money typing reads the figure so: the two cannot disagree).
+
+    * a bracket after the price: "1 180 ლარს დღგ-ს ჩათვლით (დღგ-ს გარეშე 1 000 ლარი)";
+    * a clause past a turn of the price's sentence that names a tax basis: "36 000 ლარს დღგ-ს
+      ჩათვლით, საიდანაც ღირებულება დღგ-ს გარეშე შეადგენს 30 508.47 ლარს", ", მათ შორის: დღგ-ს
+      გარეშე - 30 508.47 ლარი";
+    * the next sentence, stating the other basis of the price before it: "... 36 000 ლარს
+      დღგ-ს ჩათვლით. ღირებულება დღგ-ს გარეშე შეადგენს 30 508.47 ლარს.";
+    * the figure before the tax in a breakdown that a total closes (``_breakdown_part``).
+
+    A net figure stated alone ("ღირებულება დღგ-ს გარეშე შეადგენს 30 000 ლარს") is the price, and
+    so is a total its own clause names past a turn ("ავანსი 5 000 ლარი, ხოლო საერთო ღირებულება
+    დღგ-ს ჩათვლით 36 000 ლარი")."""
+    bracket = _restating_bracket(text, start)
+    if bracket is not None:
+        return bracket
+    money = _money_at(text, start)
+    if money is None:
+        return None
+    end = money.end()
+    sentence = _sentence_start(text, start)
+    # a turn may be the semicolon that ends the price's sentence: "6 000 ლარს; მათ შორის: ..."
+    turn = next(reversed(list(_AMOUNT_TURN.finditer(text, max(0, sentence - 1), start))), None)
+    if turn is not None:
+        own = text[turn.start() : start]
+        basis = _basis(text, turn.start(), start)
+        priced = _sentence_start(text, turn.start())
+        if (
+            basis is not None
+            and not _TOTAL_NAMED.search(own)
+            and not _PERIODIC.search(own)
+            and _has_money(text, priced, turn.start())
+            and not _PART_OF_PRICE.search(text, priced, turn.start())
+        ):
+            return basis[1].start(), end
+    basis = _basis(text, sentence, start)
+    if (
+        basis is not None
+        and turn is None
+        and sentence > 0
+        and not _OPENS_CLAUSE.match(text, sentence)
+        and not _has_money(text, sentence, start)
+    ):
+        previous = _sentence_start(text, sentence - 1)
+        before = _basis(text, previous, sentence)
+        if (
+            before is not None
+            and before[0] != basis[0]
+            and _has_money(text, previous, sentence)
+            and not _TOTAL_NAMED.search(text, sentence, start)
+        ):
+            return basis[1].start(), end
+    if _breakdown_part(text, start, end):
+        return (basis[1].start() if basis is not None else start), end
+    return None
+
+
+#: The name ``document_facts`` reads the restatement by; the bracket was its first form.
+restating_bracket = restatement
+
+
+def _money_type(text: str, span: tuple[int, int]) -> FactType | None:
+    """What a money figure at ``span`` is: the total, a price, a penalty, or None (an
+    ``amount``). The nearest keyword says, then the table and the sentence around it: a line of
+    a price table, the contract's price named as its whole value, a share of the value, the
+    price restated on another tax basis, a part of the price its own clause names."""
+    ft = _classify(text, *span, (FactType.total_amount, FactType.penalty, FactType.price))
+    if ft == FactType.total_amount and _is_line_total(text, span[0]):
+        ft = None
+    if ft == FactType.price and is_contract_price(text, *span):
+        ft = FactType.total_amount  # "ხელშეკრულების ფასი", "the total price"
+    if ft in (FactType.total_amount, FactType.price) and (
+        _is_share(text, span[0])
+        or restatement(text, span[0]) is not None
+        or _named_in_own_clause(text, span[0])
+    ):
+        # a guarantee, an advance or the VAT, as a share of the value; the price again on
+        # another tax basis; an advance or a monthly fee its clause names beside the total
+        ft = None
+    return ft
+
+
+#: A currency a table's column header names, as a word of its own: "ღირებულება (ლარი)", "ჯამი,
+#: ლარი", "თანხა ლარში", "Amount (USD)". Not "ლარ" inside another word ("ფორმულარი").
+_HEADER_CURRENCY = re.compile(
+    r"(?<![ა-ჰA-Za-z])(?:ლარ(?:ი|ის|ში)?|(?:აშშ\s+)?დოლარ[ა-ჰ]*|ევრო|GEL|USD|EUR|GBP|lari"
+    r"|dollars?|euros?)(?![ა-ჰA-Za-z])|₾|\$|€|£",
+    re.IGNORECASE,
+)
+#: A column of exchange rates, not of money: "დოლარის კურსი", "Rate (GEL)".
+_RATE_COLUMN = re.compile(r"კურს|(?<![a-z])rate(?![a-z])", re.IGNORECASE)
+#: A cell's value that is a figure alone, ended by the cell's stop, a space or the line's end.
+_CELL_FIGURE = re.compile(rf"\s*({_NUM_RE})(?![\d.,]\d)(?=\.?(?:\s|$))")
+
+
+def find_header_amounts(text: str) -> list[RuleHit]:
+    """The money of a price table whose column header names the currency and whose cells hold
+    the figures alone: "1, ერთეულის ფასი (ლარი) = 4 000. ... , დასახელება = სულ. , ჯამი (ლარი) =
+    6 000" (Docling's "<row>, <column> = <cell>"). ``find_amounts`` needs a currency beside the
+    figure, so such a table had no money at all; its cells are typed as a table's are: the row
+    a total word names is the total, a line's total an ``amount``, a unit price a ``price``.
+    A currency word before a figure in prose stays no currency ("დოლარს 2026"): only a cell
+    under its column's header is read so. The act check reads these cells by its own reader
+    (``checks.amounts.header_money``), which ``find_amounts`` does not feed."""
+    hits: list[RuleHit] = []
+    for cell in _TABLE_CELL.finditer(text):
+        header = cell.group(2)
+        named = _HEADER_CURRENCY.search(header)
+        if named is None or _RATE_COLUMN.search(header):
+            continue
+        figure = _CELL_FIGURE.match(text, cell.end())
+        if figure is None:
+            continue
+        value = parse_number(figure.group(1))
+        cur = _norm_currency(named.group(0))
+        if value is None or cur is None:
+            continue
+        span = figure.span(1)
+        ft = _money_type(text, span)
+        hits.append(
+            RuleHit(
+                type=ft or FactType.amount,
+                value=f"{value:,.2f} {cur}",
+                raw_text=figure.group(1),
+                start=span[0],
+                end=span[1],
+                normalized=value,
+                currency=cur,
+                confidence=0.7 if ft else 0.5,
+            )
+        )
+    return hits
+
+
+# --- the contract's price ------------------------------------------------------------------------
+
+#: The word for a price, its last letters any case ending: "ფასი", "ფასს", "price".
+_PRICE_WORD = re.compile(r"(?<![ა-ჰ])ფას(?!ურ)[ა-ჰ]*|(?<![a-z])price(?![a-z])", re.IGNORECASE)
+#: What names a price the contract's whole value: a total word ("საერთო ფასი", "the total
+#: price"), or the contract or what it buys whose price it is ("ხელშეკრულების ფასი", "the
+#: Contract price", "the price of the Goods").
+_WHOLE_PRICE = re.compile(
+    r"საერთო|ჯამურ|სრულ|მთლიან|ხელშეკრულებ|შეთანხმებ|მომსახურებ|საქონ|სამუშაო|შესყიდვ"
+    r"|(?<![a-z])(?:total|overall|aggregate|contract|agreement|goods|services|works)(?![a-z])",
+    re.IGNORECASE,
+)
+#: A price per unit: "ერთეულის ფასი", "1 ცალის ფასი", "the unit price", "GEL 450 per chair",
+#: "თითო ცალზე".
+_PER_UNIT = re.compile(
+    r"ერთეულ|თითო|ცალ(?:ის|ზე)|(?:1|ერთი)\s+(?:ც|მ|კგ|ტ|ლ)|"
+    r"(?<![a-z])(?:unit|per|each|apiece|a\s+piece)(?![a-z])|/\s*(?:ც|მ|კგ|ტ|ლ|pcs?|m|kg|t)(?![a-zა-ჰ])",
+    re.IGNORECASE,
+)
+_PRICE_LABEL_WORDS = 3
+_PER_UNIT_AFTER = 30
+
+
+def is_contract_price(text: str, start: int, end: int) -> bool:
+    """Whether the money figure at ``text[start:end]``, labelled a price, is the contract's whole
+    value: a ``total_amount`` (docs/GOLD_SPEC.md section 2, red team R4). The price word before it
+    in its sentence is named the whole price - by a total word, or as the contract's or the
+    goods' price - and nothing says it is a price per unit: "ხელშეკრულების საერთო ფასი შეადგენს
+    36 000 ლარს", "The total Contract price is GEL 36,000" are the total; "ერთეულის ფასი",
+    "the unit price is GEL 450 per chair" stay a price, and so does a cell of a price table."""
+    if _table_cell_at(text, start):
+        return False
+    sentence = _sentence_start(text, start)
+    words = list(_PRICE_WORD.finditer(text, sentence, start))
+    if not words:
+        return False
+    word = words[-1]
+    between = text[word.end() : start]
+    if _next_money(text, word.end(), start) is not None:
+        return False  # another figure is that price's
+    lead = text[sentence : word.start()].split()[-_PRICE_LABEL_WORDS:]
+    label = " ".join(lead) + " " + text[word.start() : start]
+    after = text[end : end + _PER_UNIT_AFTER]
+    stop = _SENTENCE_END.search(after)
+    after = after[: stop.start()] if stop else after
+    if _PER_UNIT.search(label) or _PER_UNIT.search(after):
+        return False
+    named = " ".join(lead)
+    return _WHOLE_PRICE.search(named) is not None or _WHOLE_PRICE.search(between) is not None
+
+
+def _table_cell_at(text: str, start: int) -> bool:
+    """Whether the figure at ``start`` is a cell of a serialised table row ("<row>, <column> =
+    <cell>")."""
+    line_start = text.rfind("\n", 0, start) + 1
+    return any(c.end() <= start for c in _TABLE_CELL.finditer(text[line_start : start + 1]))
+
+
 def find_amounts(text: str) -> list[RuleHit]:
     hits: list[RuleHit] = []
     seen: set[tuple[int, int]] = set()
@@ -539,20 +901,9 @@ def find_amounts(text: str) -> list[RuleHit]:
             if pat is _AMOUNT_AFTER and cur == "GEL":
                 value, tetri_end = _with_tetri(text, number, span[1], value)
                 span = (span[0], tetri_end)
-            ft = _classify(text, *span, (FactType.total_amount, FactType.penalty, FactType.price))
+            ft = _money_type(text, span)
             if ft is None and m.group(cur_group) == _LARI_ABBREVIATION:
                 continue  # "20 ლ." with no word about money: litres as likely as lari
-            if ft == FactType.total_amount and _is_line_total(text, span[0]):
-                ft = None
-            if ft in (FactType.total_amount, FactType.price) and (
-                _is_share(text, span[0])
-                or restating_bracket(text, span[0]) is not None
-                or _named_in_own_clause(text, span[0])
-            ):
-                # a guarantee, an advance or the VAT, as a share of the value; the price again
-                # on another tax basis; an advance or a monthly fee its clause names beside
-                # the total
-                ft = None
             seen.add(span)
             hits.append(
                 RuleHit(
@@ -952,13 +1303,15 @@ def _bracketed_or_bare(figure: str, lookbehind: str) -> str:
 
 
 #: A percentage: the sign, or the word - "0.3 პროცენტის", "0.3 (ნული მთელი სამი) პროცენტი",
-#: "ნული მთელი სამი (0.3) პროცენტი", "0.2 percent", "0.2 per cent". Not the adjective
-#: "პროცენტული" ("10 პროცენტული პუნქტი").
+#: "ნული მთელი სამი (0.3) პროცენტი", "0.2 percent", "0.2 per cent"; the figure's words may
+#: stand before the sign as before the word ("5 (ხუთი)%-ის", "0.1 (ნული მთელი ერთი) %-ის").
+#: Not the adjective "პროცენტული" ("10 პროცენტული პუნქტი"), and not a bracket holding a
+#: figure ("5 (3.1)%").
 _PCT = re.compile(
     # "(18%)" is a rate in brackets: the bare figure may follow "(", and the bracketed one
     # wins where it can ("(0.2) პროცენტის")
     _bracketed_or_bare(r"\d{1,3}(?:[.,]\d{1,2})?", r"(?<![\d.,])")
-    + r"\s*(?:%|(?:\([^()\d]{1,60}\)\s*)?(?:პროცენტ(?!ულ)[ა-ჰ]*|per\s?cent(?![a-z])))",
+    + r"\s*(?:\([^()\d]{1,60}\)\s*)?(?:%|პროცენტ(?!ულ)[ა-ჰ]*|per\s?cent(?![a-z]))",
     re.IGNORECASE,
 )
 _PCT_NUMBER = re.compile(r"\d{1,3}(?:[.,]\d{1,2})?")
@@ -1025,6 +1378,15 @@ _REMAINDER_WORD = re.compile(
 _ADVANCE_AFTER = re.compile(
     r"(?:-?[ა-ჰ]+)?\s*(?:ავანს|(?:an?\s+)?(?:advance|prepayment)(?![a-z]))", re.IGNORECASE
 )
+#: ... or after the verb that pays it: "30% გადაიხდება ავანსის სახით", "30% ჩაირიცხება
+#: ავანსად", "30% shall be paid as an advance". Only as the advance ("სახით", "ად", "as"):
+#: "75% გადაიხდება ავანსის გამოქვითვით" is the balance, paid less the advance.
+_ADVANCE_AFTER_VERB = re.compile(
+    r"(?:-?[ა-ჰ]+)?\s+(?P<verb>[ა-ჰ]+)\s+(?:ავანსის\s+სახით|ავანსად)(?![ა-ჰ])"
+    r"|(?:\s+of\s+the\s+[a-z]+\s+(?:value|price|amount))?\s+(?:shall|will|is|are)\s+(?:be\s+)?"
+    r"(?P<en>paid|payable|transferred)\s+as\s+(?:an?\s+)?(?:advance|prepayment)(?![a-z])",
+    re.IGNORECASE,
+)
 #: A rate that ends right where a word begins: that word is the rate's ("30% advance, 70% ...").
 _RATE_ENDS = re.compile(r"(?:%|პროცენტ[ა-ჰ]*|per\s?cent)(?:-?[ა-ჰ]+)?\s*$", re.IGNORECASE)
 
@@ -1038,6 +1400,11 @@ def is_advance_share(text: str, start: int, end: int) -> bool:
     balance. The nearest keyword cannot tell: "payment" is nearer than "advance" in "advance
     payment of 30%"."""
     if _ADVANCE_AFTER.match(text, end):
+        return True
+    after_verb = _ADVANCE_AFTER_VERB.match(text, end)
+    if after_verb is not None and (
+        after_verb.group("en") or PAYMENT_WORDS.search(after_verb.group("verb"))
+    ):
         return True
     before = text[max(0, start - _CTX) : start]
     cut = list(_SENTENCE_BOUNDARY.finditer(before))
@@ -1075,10 +1442,30 @@ _BALANCE_OPENS = re.compile(
 )
 
 
+#: The marker of a list item: "ბ)", "2)", "4.2.2.", "- ".
+_LIST_MARKER = re.compile(r"(?:[ა-ჰa-z]\)|\d{1,2}\)|\d{1,2}(?:\.\d{1,2}){0,3}\.|[-\u2013•])\s*")
+#: An advance opening a stage of a staged payment: "ავანსი - ...", "Advance: ...".
+_ADVANCE_OPENS = re.compile(
+    r"ავანს|წინასწარი?\s+(?:გადახდ|ანგარიშსწორებ)|(?:an?\s+)?(?:advance|prepayment)(?![a-z])",
+    re.IGNORECASE,
+)
+
+
 def continues_payment(text: str, previous_end: int, start: int) -> bool:
-    """Whether the sentence at ``start`` goes on with the balance of the paying sentence that
-    ends at ``previous_end``: only after a semicolon, and only when it opens with the balance."""
-    return text[previous_end - 1 : previous_end] == ";" and bool(_BALANCE_OPENS.match(text, start))
+    """Whether the sentence at ``start`` goes on with the payment of the paying sentence that
+    ends at ``previous_end``: after a semicolon, when it opens with the balance ("; the balance
+    within 10 working days", "; ბ) დარჩენილი თანხა - ...", "; 4.2.2. დარჩენილი 70% - ...");
+    after a colon that leads in a staged payment, when it opens with the advance or the
+    balance ("ეტაპობრივად: 4.2.1. ავანსი - ..."). A sibling clause ("; 4.3. შემსრულებელი
+    ...", ": 4.1. მიწოდება ...") goes on with nothing."""
+    stop = text[previous_end - 1 : previous_end]
+    if stop not in (";", ":"):
+        return False
+    marker = _LIST_MARKER.match(text, start)
+    at = marker.end() if marker else start
+    if _BALANCE_OPENS.match(text, at):
+        return True
+    return stop == ":" and _ADVANCE_OPENS.match(text, at) is not None
 
 
 #: Which payment a deadline is for: the advance's, or the balance's after it.
@@ -1264,14 +1651,18 @@ _PERIOD_BEFORE = 120
 def penalty_period(text: str, start: int, end: int) -> str | None:
     """The period ("day", "week", "month", "year") a rate at ``text[start:end]`` counts per,
     or None. Read after the rate first, then before it, never across the sentence's end nor
-    across another rate: in "0.1% ყოველ დღეზე, მაგრამ არაუმეტეს 10%-ისა" the day is 0.1%'s."""
+    across another rate: in "0.1% ყოველ დღეზე, მაგრამ არაუმეტეს 10%-ისა" the day is 0.1%'s.
+    Nor across a turn to another clause (", ხოლო", ", whereas"): in "0.2% ყოველ დღეზე, ხოლო ...
+    ჯარიმა 10%" the day stands after the 0.2% and is its own, so the fine counts per nothing."""
     after = text[end : end + _PERIOD_AFTER]
     stop = _SENTENCE_END.search(after)
     after = after[: stop.start()] if stop else after
+    turn = _CLAUSE_TURN.search(after)
+    after = after[: turn.start()] if turn else after
     other = _PCT.search(after)
     after = after[: other.start()] if other else after
     before = text[max(0, start - _PERIOD_BEFORE) : start]
-    cut = [*_SENTENCE_END.finditer(before), *_PCT.finditer(before)]
+    cut = [*_SENTENCE_END.finditer(before), *_PCT.finditer(before), *_CLAUSE_TURN.finditer(before)]
     before = before[max(c.end() for c in cut) :] if cut else before
     found = _PER_PERIOD.search(after)
     if found is None:
@@ -1330,19 +1721,41 @@ def is_penalty_rate(text: str, start: int, end: int) -> bool:
 # (10) დღე" are both how contracts write it, as are "24 (twenty-four) months" and "ten (10)
 # days". Only a closed bracket: "1) დღის ..." is a list item, not one day.
 _COUNT = _bracketed_or_bare(r"\d{1,4}", r"(?<![\d(])")
+#: Which days a count counts, in every case the adjective takes ("კალენდარული", "კალენდარულ
+#: დღეში") and abbreviated with its stop ("სამ. დღის", "კალ. დღის"). Without the stop "სამ" is
+#: the numeral three ("სამ დღეში").
+_QUALIFIER_KA = r"კალენდარულ[ა-ჰ]*|სამუშაო|საბანკო|სამ\.|კალ\."
+#: The unit of time; "დღ(?!გ)": დღგ is VAT, and "18 დღგ-ს ჩათვლით" is not eighteen days.
+_UNIT_STEM_KA = r"(დღ(?!გ)|კვირ|თვ|წელ|წლ)[ა-ჰ]*"
 _DUR_KA = re.compile(
-    rf"{_COUNT}\s*(?:\(\s*[ა-ჰ ]+\s*\)\s*)?(კალენდარული|სამუშაო|საბანკო)?\s*"
-    # "დღ(?!გ)": დღგ is VAT, and "18 დღგ-ს ჩათვლით" is not eighteen days
-    r"(დღ(?!გ)|კვირ|თვ|წელ|წლ)[ა-ჰ]*",
+    # the count, then its unit as a word or as the adjective hyphenated to it: "20 დღე",
+    # "20-დღიან ვადაში", "12-თვიანი"; never an ordinal ("20-ე დღეს", "მე-20 დღეს")
+    rf"(?<!მე-){_COUNT}(?:-(?=დღ(?!გ)|კვირ|თვ|წლ)"
+    rf"|\s*(?:\(\s*[ა-ჰ ]+\s*\)\s*)?(?:({_QUALIFIER_KA})\s*)?){_UNIT_STEM_KA}",
     re.IGNORECASE,
 )
+#: A unit of time right after a word, with the days it counts: where a count written only in
+#: words ends ("თხუთმეტი სამუშაო დღის", "ათი სამ. დღის").
+_UNIT_AFTER_WORDS = re.compile(
+    rf"(?<=[ა-ჰ])\s+(?:({_QUALIFIER_KA})\s*)?{_UNIT_STEM_KA}", re.IGNORECASE
+)
+#: The words right before it, the count's among them: up to eight.
+_WORDS_BEFORE_UNIT = re.compile(r"(?<![ა-ჰ])((?:[ა-ჰ]+\s+){0,7}[ა-ჰ]+)$")
+_WORDS_REACH = 120
 _DUR_EN = re.compile(
     rf"{_COUNT}\s*(?:\([a-z\- ]+\)\s*)?(calendar|working|business|banking)?\s*"
     r"(day|week|month|year)s?\b",
     re.IGNORECASE,
 )
 _UNIT_KA = {"დღ": "day", "კვირ": "week", "თვ": "month", "წელ": "year", "წლ": "year"}
-_QUAL_KA = {"კალენდარული": "calendar", "სამუშაო": "working", "საბანკო": "banking"}
+
+
+def _qualifier_ka(word: str) -> str:
+    """Which days a Georgian qualifier counts, from its stem: "კალენდარულ(ი)" and "კალ." are
+    calendar days, "სამუშაო" and "სამ." working days, "საბანკო" banking days."""
+    if word.startswith("კალ"):
+        return "calendar"
+    return "banking" if word == "საბანკო" else "working"
 
 
 #: The event a count starts from, which is not what the count measures: "მიწოდებიდან 10 დღის
@@ -1360,10 +1773,31 @@ _COUNT_STARTS_FROM = re.compile(
 _CLAUSE_TURN = re.compile(r"[,\u2013\u2014-](?=\s*(?:ხოლო|whereas)(?![ა-ჰa-z]))", re.IGNORECASE)
 
 
+#: The warranty as a frame another count is set in, not the count's own subject: "საგარანტიო
+#: ვადის განმავლობაში გამოვლენილ ნაკლს აღმოფხვრის 10 დღის ვადაში" (a remedy within 10 days),
+#: "საგარანტიო ვადის დასრულებიდან 15 დღეში", "during / after the warranty period"; and the
+#: guarantee money, which is a security and no warranty ("საგარანტიო თანხა", "საგარანტიო
+#: უზრუნველყოფა", "საგარანტიო წერილი", "საბანკო გარანტია"). "საგარანტიო ვადა შეადგენს 12 თვეს",
+#: "საგარანტიო ვადა - 12 თვე" and "12-თვიანი გარანტია" name the warranty itself.
+_WARRANTY_FRAME = re.compile(
+    r"საგარანტიო\s+(?:ვადის|პერიოდის)\s+(?:განმავლობაში|მანძილზე|დასრულებ[ა-ჰ]*|გასვლ[ა-ჰ]*"
+    r"|ამოწურვ[ა-ჰ]*|ბოლომდე|შემდეგ|ფარგლებში)"
+    r"|საგარანტიო\s+(?:ვადაში|პერიოდში)"
+    r"|საგარანტიო\s+(?:თანხ|უზრუნველყოფ|წერილ|დეპოზიტ)[ა-ჰ]*|საბანკო\s+გარანტი[ა-ჰ]*"
+    r"|(?<![a-z])(?:during|within|after|throughout|upon\s+expiry\s+of|until\s+the\s+end\s+of"
+    r"|following)\s+the\s+(?:warranty|guarantee)\s+period(?![a-z])"
+    r"|(?<![a-z])(?:bank|performance|bid)\s+guarantee(?![a-z])",
+    re.IGNORECASE,
+)
+
+
 def _duration_context(text: str) -> str:
     """``text`` as a duration's type is read from it: the events counts start from blanked out,
-    and a turn to another clause made a sentence boundary. Every offset stays where it was."""
+    the warranty named only as a frame or as guarantee money blanked out too, and a turn to
+    another clause made a sentence boundary. Every offset stays where it was."""
     chars = list(text)
+    for m in _WARRANTY_FRAME.finditer(text):
+        chars[m.start() : m.end()] = " " * (m.end() - m.start())
     for m in _COUNT_STARTS_FROM.finditer(text):
         a, b = m.span("event") if m.group("event") else m.span()
         chars[a:b] = " " * (b - a)
@@ -1372,47 +1806,96 @@ def _duration_context(text: str) -> str:
     return "".join(chars)
 
 
+def _in_brackets(text: str, pos: int) -> bool:
+    opened = text.rfind("(", 0, pos)
+    return opened >= 0 and text.rfind(")", opened, pos) < 0
+
+
+def _counts_in_words(text: str, figures: list[tuple[int, int]]) -> list[tuple[int, int, int]]:
+    """Every count of time written only in words, as (start, count, where its unit begins):
+    "თხუთმეტი სამუშაო დღის" is 15 working days (docs/GOLD_SPEC.md section 2: a count written
+    in words is the same duration as its figure). The longest run of words right before the
+    unit that is a whole number; not words in brackets, which are a figure's own, nor words a
+    figure stands right before, nor a count its figure already reads (``figures``), nor an
+    ordinal ("მეორე დღეს"), which is no number."""
+    out: list[tuple[int, int, int]] = []
+    for unit in _UNIT_AFTER_WORDS.finditer(text):
+        run = _WORDS_BEFORE_UNIT.search(text, max(0, unit.start() - _WORDS_REACH), unit.start())
+        if run is None:
+            continue
+        found: tuple[int, int] | None = None
+        for word in re.finditer(r"[ა-ჰ]+", run.group(1)):  # the longest run that is a number
+            value = parse_number_words(run.group(1)[word.start() :])
+            if value is not None and value > 0:
+                found = run.start(1) + word.start(), value
+                break
+        if found is None:
+            continue
+        start, value = found
+        if (
+            _in_brackets(text, start)
+            or text[:start].rstrip().endswith(tuple("0123456789)"))
+            or any(_overlaps((start, unit.end()), f) for f in figures)
+        ):
+            continue
+        out.append((start, value, unit.start()))
+    return out
+
+
 def find_durations(text: str) -> list[RuleHit]:
     hits: list[RuleHit] = []
     context = _duration_context(text)
-    for pat, is_ka in ((_DUR_KA, True), (_DUR_EN, False)):
-        for m in pat.finditer(text):
+    # (match, Georgian, the count when written in words, where the count starts)
+    found: list[tuple[re.Match[str], bool, int | None, int]] = [
+        (m, is_ka, None, m.start())
+        for pat, is_ka in ((_DUR_KA, True), (_DUR_EN, False))
+        for m in pat.finditer(text)
+    ]
+    for words_start, words_count, at in _counts_in_words(text, [m.span() for m, *_ in found]):
+        unit_match = _UNIT_AFTER_WORDS.match(text, at)
+        if unit_match is not None:
+            found.append((unit_match, True, words_count, words_start))
+    for m, is_ka, count, start in found:
+        if count is None:
             n = int(m.group(1) or m.group(2))
             qual = m.group(3).lower() if m.group(3) else None
             unit = m.group(4).lower()
-            if is_ka and unit.startswith("წ") and n >= 1900:
-                continue  # "2026 წლის ..." is a date ("of the year 2026"), not a duration
-            if is_ka:
-                # group 3 is exactly one of the stems, so it is the key as it stands; slicing
-                # it to three letters turned "კვირ" into "კვი" and weeks into "2 კვირs"
-                unit = _UNIT_KA.get(unit, unit)
-                qual = _QUAL_KA.get(qual, qual) if qual else None
-            ft = _classify(
-                context,
-                m.start(),
-                m.end(),
-                (
-                    FactType.warranty_period,
-                    FactType.delivery_deadline,
-                    FactType.execution_period,
-                    FactType.payment_terms,
-                    FactType.validity_period,
-                ),
+        else:
+            n, qual, unit = count, m.group(1), m.group(2).lower()
+        end = m.end()
+        if is_ka and unit.startswith("წ") and n >= 1900:
+            continue  # "2026 წლის ..." is a date ("of the year 2026"), not a duration
+        if is_ka:
+            # the unit group is exactly one of the stems, so it is the key as it stands; slicing
+            # it to three letters turned "კვირ" into "კვი" and weeks into "2 კვირs"
+            unit = _UNIT_KA.get(unit, unit)
+            qual = _qualifier_ka(qual) if qual else None
+        ft = _classify(
+            context,
+            start,
+            end,
+            (
+                FactType.warranty_period,
+                FactType.delivery_deadline,
+                FactType.execution_period,
+                FactType.payment_terms,
+                FactType.validity_period,
+            ),
+        )
+        label = f"{n} {qual + ' ' if qual else ''}{unit}{'s' if n != 1 else ''}"
+        hits.append(
+            RuleHit(
+                type=ft or FactType.duration,
+                value=label,
+                raw_text=text[start:end],
+                start=start,
+                end=end,
+                normalized=f"P{n}{unit[0].upper()}" if unit != "week" else f"P{n}W",
+                unit=unit,
+                confidence=0.7 if ft else 0.45,
             )
-            label = f"{n} {qual + ' ' if qual else ''}{unit}{'s' if n != 1 else ''}"
-            hits.append(
-                RuleHit(
-                    type=ft or FactType.duration,
-                    value=label,
-                    raw_text=m.group(0),
-                    start=m.start(),
-                    end=m.end(),
-                    normalized=f"P{n}{unit[0].upper()}" if unit != "week" else f"P{n}W",
-                    unit=unit,
-                    confidence=0.7 if ft else 0.45,
-                )
-            )
-    return hits
+        )
+    return sorted(hits, key=lambda h: h.start)
 
 
 # --- contract numbers --------------------------------------------------------------------------
@@ -1463,6 +1946,16 @@ _CONTRACT_NO_BEFORE = re.compile(
 )
 
 
+_LATIN_LOWER = re.compile(r"[a-z]+")
+
+
+def _upper_latin(reference: str) -> str:
+    """A reference in its canonical case: Latin letters upper case ("sp-2026/318" is
+    "SP-2026/318"), Georgian letters as written - ``str.upper`` would turn them into Mtavruli
+    ("12/2026-ა" is no "12/2026-Ა")."""
+    return _LATIN_LOWER.sub(lambda m: m.group(0).upper(), reference)
+
+
 def find_contract_numbers(text: str) -> list[RuleHit]:
     hits: list[RuleHit] = []
     matches = list(_CONTRACT_NO.finditer(text))
@@ -1472,7 +1965,7 @@ def find_contract_numbers(text: str) -> list[RuleHit]:
         if not any(_overlaps(m.span(1), other.span(1)) for other in matches)
     ]
     for m in matches:
-        number = _SPACED_SLASH.sub("/", m.group(1))
+        number = _upper_latin(_SPACED_SLASH.sub("/", m.group(1)))
         if len(number) < 2 or not any(ch.isdigit() for ch in number):
             continue
         hits.append(
@@ -1572,8 +2065,14 @@ def find_cadastral_codes(text: str) -> list[RuleHit]:
 
 def run_rules(text: str) -> list[RuleHit]:
     """All deterministic extractors over one piece of text, sorted by position."""
+    money = find_amounts(text)
+    money += [
+        h
+        for h in find_header_amounts(text)
+        if not any(_overlaps((h.start, h.end), (m.start, m.end)) for m in money)
+    ]
     hits = [
-        *find_amounts(text),
+        *money,
         *find_dates(text),
         *find_id_codes(text),
         *find_percentages(text),
@@ -1647,7 +2146,7 @@ def normalize_fact_value(ft: FactType, value: str) -> str | float | None:
         return m.group(0) if m else None
     if ft == FactType.contract_number:
         m = _REFERENCE_TOKEN.fullmatch(_SPACED_SLASH.sub("/", _LEADING_MARKER.sub("", v)))
-        found = m.group(0) if m else ""
+        found = _upper_latin(m.group(0)) if m else ""
         return found if len(found) >= 2 and any(ch.isdigit() for ch in found) else None
     if ft in _MONEY_TYPES:
         hit = _only(find_amounts(v), v)

@@ -977,6 +977,53 @@ Measured after the fixes: the three strict gold sets unchanged at 100%/100%.
 positives on the harmless ones; the unchanged code at `ad72a3a` gives the same table, row for
 row, so the spelling miss predates these fixes and is outside them.
 
+### Extraction, red team round 4: lines, prices and the readers the checks share (2026-10-01)
+
+EXTRACTION-R4-01 to -05, -09, -10, -12, -13, COMPARE-R4-02, -03, -13 and AOA-R4-10, each with a
+unit test on invented text and a near miss beside every widened reading
+(`tests/unit/test_extraction_redteam_r4.py`, `tests/unit/test_redteam_r4_rules.py`); the readers
+are in `docs/GOLD_SPEC.md` section 2. What was decided, and where one reader now serves several:
+
+* **A label line is a sentence (policy, EXTRACTION-R4-12).** Round 1 made line breaks no
+  sentence end, for Docling's inline runs; since round 3 the Word backend keeps one text per
+  paragraph, so a `label: value` paragraph's end is a real break. One detector
+  (`rules.label_line_spans`) serves the keyword search, which stops at such a line, and the
+  whole-document readers, which get a stop after it (`pipeline.document_level_facts`); the
+  patterns themselves still match across a line break. The act check and the comparison flatten
+  line breaks as before: the policy is the extraction's.
+* **The contract's price is its total (policy, EXTRACTION-R4-13).** `rules.is_contract_price`;
+  the LLM prompt's descriptions of `price` and `total_amount` say the same, so the prompt version
+  moved. Round 2's test that read `The Contract price is GEL 2,000.00` as `price` now expects
+  `total_amount`; its point, that a share of it is an `amount`, stands.
+* **One restatement reader.** `rules.restatement` (which `document_facts` imports by its round-3
+  name `restating_bracket`) decides when a money figure restates the price on another tax basis
+  - bracket, turn, next sentence, breakdown - for the money typing and the VAT status alike.
+  `; მათ შორის: დღგ-ს გარეშე - X, დღგ - Y` no longer gives `excl`, but gives no status: the
+  inclusion wording reader (`contract_terms.tax_phrases`) reads none there.
+* **One typing for prose and tables.** `rules._money_type` types a figure in prose and in a
+  table cell whose header names the currency (`rules.find_header_amounts`, called from
+  `run_rules` only). The act check reads those cells by its own reader
+  (`amounts.header_money`), which `find_amounts` does not feed, so its fee is not read twice.
+* **One duration reader, words included.** `rules.find_durations` reads a count written in words
+  only; the act check's payment deadline gets it through `contract_terms.read_payment_terms`.
+  The comparison still shows the figure first (`compare._with_figures`), a second reader of the
+  same words; it now finds an already-read count and changes nothing, and is left for the
+  comparison's owner to fold into the rules' reader.
+* **Staged payments.** `rules.continues_payment` reads list items under a payment lead-in; the
+  act check's paying sentences use it too.
+
+Not fixed here, outside these readers: a rate's words added with the figure unchanged
+(`5%-ის` -> `5 (ხუთი)%-ის`) still gives a `Number in words` warning from the comparison's words
+reader, and a deadline's frame word changed with its value (`20 კალენდარული დღის ვადაში` ->
+`20-დღიან ვადაში`) a `CMP.TEXT_CHANGED` warning; both are the comparison's masking. A
+performance window written as a label line right after the preamble, before any numbered
+clause, starts at the signing (`contract_terms.read_term`).
+
+Measured after the fixes: the three strict gold sets unchanged at 100%/100%, and
+`scripts/mutate_aoa.py --seed 139 --per-class 6` gives the table of the unchanged code at
+`4138994` row for row: every error class detected at 100%, `party_name` and `prose_typo`
+corrections at 83% and `script_letter` 17% false positives, all three already there before.
+
 ### Red team, round 1: what the comparison now reads (2026-09-30)
 
 Defects a red team found and a verifier reproduced, each with a unit test on invented
