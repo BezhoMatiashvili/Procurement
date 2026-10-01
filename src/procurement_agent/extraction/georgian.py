@@ -930,6 +930,10 @@ class MixedWord:
     readings: tuple[str, ...] = ()
     #: the correction is a word the documents write, not only the stray letter dropped
     attested: bool = False
+    #: that word is not written as it stands: a Georgian letter guessed in the stray one's place,
+    #: or a form of a written word (one the case model may share with an unrelated word) - a
+    #: dictionary that knows one of ``readings`` settles it better
+    guessed: bool = False
 
 
 def mixed_script_words(text: str, *, vocabulary: frozenset[str] = frozenset()) -> list[MixedWord]:
@@ -960,8 +964,10 @@ def mixed_script_words(text: str, *, vocabulary: frozenset[str] = frozenset()) -
         in_place = sorted(v for v in vocabulary if slot.fullmatch(v))
         correction: str | None = stripped if len(stripped) >= 3 else None
         candidates = [c for c in dict.fromkeys((keyed, stripped)) if len(c) >= 3]
+        written = [c for c in candidates if c in vocabulary]
+        guessed = not written
         attested = (
-            [c for c in candidates if c in vocabulary]
+            written
             or (in_place if len(in_place) == 1 else [])
             or [c for c in candidates if any(same_word(c, v) for v in vocabulary)]
         )
@@ -983,6 +989,7 @@ def mixed_script_words(text: str, *, vocabulary: frozenset[str] = frozenset()) -
                 correction=correction,
                 readings=tuple(candidates),
                 attested=bool(attested),
+                guessed=guessed,
             )
         )
     return out

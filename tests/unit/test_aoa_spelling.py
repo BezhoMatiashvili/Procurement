@@ -758,3 +758,36 @@ def test_the_dockerfile_pins_the_same_files_as_the_fetch_script() -> None:
     pinned = {url: digest for digest, url in add.findall(dockerfile)}
     assert pinned == dict(fetch.FILES.values())
     assert set(fetch.FILES) == set(DICTIONARY_FILES)
+
+
+def test_a_word_the_dictionary_knows_with_the_stray_letter_dropped_beats_a_guessed_letter() -> None:
+    """A stray Cyrillic letter typed before a dative's ending: the documents write the word only
+    in the genitive, so a Georgian letter guessed in the stray one's place makes a written word,
+    and dropping the stray letter makes a word only the dictionary knows. One extra keystroke is
+    the likelier slip, and the dictionary settles it (mutation harness, seed 229)."""
+    act = ACT.replace(
+        "მომსახურების გაწევა.", "მომსახურების გაწევა. გადაეცა ნიმუშავეთкს, ნიმუშავეთის ასლი."
+    )
+    lexicon = Lexicon(words={"ნიმუშავეთს", "ნიმუშავეთის"}).reading(act, CONTRACT)
+    report = check_aoa(aoa_text=act, contract_text=CONTRACT, speller=lexicon)
+    found = [f.expected for f in report.findings if f.actual == "ნიმუშავეთкს"]
+    assert found == ["ნიმუშავეთს"]
+    # with no dictionary to settle it, the written word is the guess the rule makes
+    report = check_aoa(aoa_text=act, contract_text=CONTRACT, speller=None)
+    found = [f.expected for f in report.findings if f.actual == "ნიმუშავეთкს"]
+    assert found == ["ნიმუშავეთის"]
+
+
+def test_a_reading_written_only_in_another_form_is_settled_by_the_dictionary() -> None:
+    """A Latin "e" typed before a dative's ending: its key's letter reads a word that shares a
+    lemma with a form the documents write, the stray letter dropped reads the dative, which the
+    documents no longer write and the dictionary knows. A word in another form is no better
+    evidence than a guess, and the dictionary settles it (mutation harness, seed 233)."""
+    act = ACT.replace(
+        "მომსახურების გაწევა.",
+        "მომსახურების გაწევა. ეხება ნიმუშავეთeს და ნიმუშავეთიდან ნიმუშავეთზე გადასვლას.",
+    )
+    lexicon = Lexicon(words={"ნიმუშავეთს"}).reading(act, CONTRACT)
+    report = check_aoa(aoa_text=act, contract_text=CONTRACT, speller=lexicon)
+    found = [f.expected for f in report.findings if f.actual == "ნიმუშავეთeს"]
+    assert found == ["ნიმუშავეთს"]

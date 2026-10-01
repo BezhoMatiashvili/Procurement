@@ -83,9 +83,15 @@ class (25,650 cases in all; about one in two is distinct, a repeat being scored 
 | seed 223, 300 a class | 1 address missed, 1 month corrected into a form no date takes, 1 month read as another month, 2 stray letters in the signing verb hid the act's date | 0 in 4,200 | a phrase declines on its last word only; a month tie is decided by the whole word, or no month is read; a date's form wins a tie; the act's date is read past a stray letter |
 | seed 229, 150 a class, after those fixes | detection 100%, 1 stray letter corrected by a guessed letter (1 in 3,000) | 0 in 2,100 | a stray letter dropped beats a letter guessed in its place |
 
-Every failing case of the three runs passes on the final code; a targeted rerun of the classes
-touched (stray letter, month, address, party name: 300 cases each on seed 229 and on a fresh
-seed 233) is in the table below. Over the 15,000 planted mistakes the code as each run found it
+Every failing case of the three runs passes on the final code. A targeted rerun of the classes
+touched, 300 cases each: party name, address and month typos 100% on every measure with no
+false finding on seeds 229 and 233; the stray letter 100% on seeds 229 and 233 (after two more
+fixes it found: a dropped stray letter beats a guessed one, and a reading written only in
+another form is settled by the dictionary) and 299 of 300 corrections on a fresh seed 239. The
+one left is a true ambiguity: a Latin "i" in "ეგზემპლ-i-არად" is the "ი" key, and that reading,
+"ეგზემპლიარად", is how the contract spells the word, so the correction follows the contract
+where the harness, which only inserts letters, expected the letter dropped; the stray letter
+itself is reported and marked. Over the 15,000 planted mistakes the code as each run found it
 missed 2 and wrote 5 corrections in a wrong form; none of those remain.
 
 What stays below 100%:
@@ -149,7 +155,7 @@ report on every run.
 
 ### Tests
 
-4,104 unit and integration tests, 93.8% line coverage (`scripts/check.sh --offline`: ruff,
+4,106 unit and integration tests, 93.8% line coverage (`scripts/check.sh --offline`: ruff,
 format, mypy strict, bandit, pytest).
 
 ### The deployable image

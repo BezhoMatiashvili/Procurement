@@ -1930,7 +1930,9 @@ class AoaChecker:
             word = self.aoa.as_written(found.start, found.end)
             stray_ka, stray_en = _stray_letters(word)
             correction = found.correction
-            if speller is not None and not found.attested:
+            # a letter guessed in the stray one's place loses to a reading the dictionary knows:
+            # the stray letter dropped, or its key's letter (mutation harness, seed 229)
+            if speller is not None and (not found.attested or found.guessed):
                 known = [r for r in found.readings if spelled_right(r, speller)]
                 if len(known) == 1:
                     correction = known[0]
