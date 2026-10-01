@@ -56,6 +56,17 @@ from procurement_agent.extraction.schemas import FactType
 
 #: A document is an act when its title says so near the top.
 _ACT_TITLE = re.compile(r"მიღება\s*-?\s*ჩაბარების\s+აქტ|acceptance\s+(?:act|certificate)", re.I)
+#: ... and the act's other titles - of a handover ("მიღება-გადაცემის აქტი", "საქონლის მიღება -
+#: გადაცემის აქტი") and of the work done ("შესრულებული სამუშაოების აქტი N 3") - when they stand
+#: as a title: the act named in the nominative on a line of its own, no clause number before it
+#: and no full stop closing it (red team R5, EXTRACTION-R5-03). A contract names the same act in
+#: its clauses ("მიღება-გადაცემის აქტის გაფორმებიდან 10 დღეში", "1.1. მიღება-გადაცემის აქტი
+#: ფორმდება ...") and stays a contract.
+_ACT_FAMILY_TITLE = re.compile(
+    r"^(?!\d{1,2}(?:\.\d{1,2})*\.?\s)(?:\S+\s+){0,6}?"
+    r"(?:მიღება\s*-\s*გადაცემის|შესრულებული\s+(?:სამუშაოების|სამუშაოს|მომსახურების))\s+აქტი"
+    r"(?![ა-ჰ])[^\n]*(?<![.;:])$"
+)
 _TITLE_WINDOW = 300
 #: ... or below a letterhead - the issuer's name, addresses, telephone, bank - on a line of its
 #: own among the first lines, before the text begins: a numbered clause, or a contract's title.
@@ -91,12 +102,15 @@ class DocumentFact:
 
 def is_act(text: str) -> bool:
     """Whether the document is an acceptance act: its title near the top, or on a line of its
-    own below a letterhead, before the text begins."""
+    own below a letterhead, before the text begins; a handover's or a works act's title only on
+    a line of its own (``_ACT_FAMILY_TITLE``)."""
     if _ACT_TITLE.search(text[:_TITLE_WINDOW]) is not None:
         return True
     lines = [line.strip() for line in text.split("\n") if line.strip()]
     for line in lines[:_TITLE_LINES]:
-        if len(line) <= _TITLE_LINE_CHARS and _ACT_TITLE.search(line):
+        if len(line) <= _TITLE_LINE_CHARS and (
+            _ACT_TITLE.search(line) or _ACT_FAMILY_TITLE.match(line)
+        ):
             return True
         if _TEXT_BEGINS.search(line):
             return False
