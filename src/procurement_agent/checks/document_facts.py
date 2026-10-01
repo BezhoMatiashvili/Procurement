@@ -17,34 +17,30 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date
 
+# the period's words, re-exported where the comparison reads them (``compare``): one definition,
+# the period reader's own (``AoaChecker._period_hits``)
+from procurement_agent.checks.aoa import _MONTH_PERIOD as _MONTH_PERIOD
+from procurement_agent.checks.aoa import _SERVICE_WORDS as _SERVICE_WORDS
 from procurement_agent.checks.aoa import (
-    _ACT_DATED_BEFORE,
-    _ADVANCE_WORDS,
-    _CONTRACT_REFERENCE,
     AoaChecker,
     DocumentView,
+    contract_named_by,
 )
 from procurement_agent.checks.aoa_scope import _SUBJECT_MAX, _SUBJECT_START, subject_clause
 from procurement_agent.checks.contract_terms import (
     _FROM_SIGNING,
     _NOT_A_TERM,
     _PAYMENT,
-    _VALIDITY,
     RoledAmount,
     TaxPhrase,
-    _range_in,
     fee_scope,
     performance_clause,
     tax_phrases,
 )
 from procurement_agent.extraction.normalize import normalize_spaces
 from procurement_agent.extraction.rules import (
-    _NUMBER_MARKER,
-    _REFERENCE,
-    RuleHit,
-    _month_ka,
     find_dates,
     find_percentages,
     is_advance_deadline,
@@ -70,20 +66,6 @@ _TEXT_BEGINS = re.compile(
     r"|ხელშეკრულება(?![ა-ჰ])|(?<![a-z])(?:agreement|contract)(?![a-z])",
     re.I,
 )
-#: What an act says a service period of: the work done, rendered, carried out ("შესრულდა",
-#: "შესრულებულია", "გაწეულ იქნა", "განხორციელდა", "ჩატარდა"), or a period named as one.
-_SERVICE_WORDS = re.compile(
-    r"შესრულ|გაწე|გაიწ|განხორციელ|ჩატარ|პერიოდ|მომსახურებ|სამუშაო|მიწოდ|"
-    r"(?<![a-z])(?:perform|render|provid|period)",
-    re.I,
-)
-#: A range's end written without its year, the start's year understood: "2026 წლის 1 ივნისიდან
-#: 30 ივნისის ჩათვლით", "... 30 ივნისამდე".
-_YEARLESS_END = re.compile(
-    r"\s*[-\u2013\u2014]?\s*(?P<d>\d{1,2})\s*(?P<m>[ა-ჰ]{3,14})(?P<mark>\s*\(?\s*ჩათვლით)?"
-)
-#: A period stated as a month: "2026 წლის ივნისის თვეში", "2026 წ. ივნისის თვის განმავლობაში".
-_MONTH_PERIOD = re.compile(r"(?<!\d)(?P<y>\d{4})\s*წ(?:ლის|\.)?\s*(?P<m>[ა-ჰ]{3,14})\s+თვ[ეი]")
 #: A first day a performance clause writes and the date reader could not read: a number, then a
 #: word ending in "from" ("1-ლი ივნისიდან" before the reader knew ordinals).
 _UNREAD_START = re.compile(
@@ -92,25 +74,6 @@ _UNREAD_START = re.compile(
 _UNIT_CODES = {"day": "D", "week": "W", "month": "M", "year": "Y"}
 #: How a range reads: an en dash with a space either side, built from its code point.
 _DASH = f" {chr(0x2013)} "
-_Q = "\u201e\u201c\u201d\"'"
-#: A contract's number as a reference writes it: "N 27/2026", "№27/2026", "№ ZK-11"
-#: (``rules._NUMBER_MARKER`` and ``rules._REFERENCE``, the contract-number reader's own).
-_CONTRACT_NUMBER = rf"(?:{_NUMBER_MARKER})\s*{_REFERENCE}"
-#: An act names the contract it closes by its date: "მხარეებმა 01.09.2026 გააფორმეს
-#: ხელშეკრულება", "03.03.2026 №27/2026 ხელშეკრულების" - the date, then the contract signed - ...
-_CONTRACT_SIGNED_AFTER = re.compile(
-    rf"[\s,]*(?:გააფორმეს|გაფორმებული|დადებული|დადეს)?[\s{_Q}]*"
-    rf"(?:{_CONTRACT_NUMBER}\s*|N\s*\S+\s*)?ხელშეკრულებ"
-)
-#: ... or the contract, then its signing: "ხელშეკრულება გაფორმდა 2026 წლის 1 მარტს",
-#: "ხელშეკრულების თარიღი: 01.03.2026", "N 27/2026 ხელშეკრულება, დადებული 2026 წლის 3 მარტს",
-#: "ხელშეკრულება № 27, გაფორმებული ...", "ხელშეკრულების (თარიღი: 03.03.2026)". The signing
-#: words stand right after the contract and its number: "ხელშეკრულების შესაბამისად, 2026 წლის
-#: 10 ივნისს ..." dates something else.
-_CONTRACT_DATED_BEFORE = re.compile(
-    rf"ხელშეკრულებ[ა-ჰ]*[{_Q}]*(?:\s*{_CONTRACT_NUMBER})?[\s,]*\(?\s*"
-    r"(?:გაფორმდა|დაიდო|დადებული|გაფორმებული|(?:გაფორმების\s+)?თარიღი)[\s:,-]*$"
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,13 +120,11 @@ def document_facts(text: str) -> list[DocumentFact]:
         # date the chunk rules guessed a contract date from a keyword nearby - the act's own,
         # the period's, the advance's
         for h in find_dates(folded):
-            if _CONTRACT_SIGNED_AFTER.match(folded, h.end) or _CONTRACT_DATED_BEFORE.search(
-                folded, max(0, h.start - 60), h.start
-            ):
+            if contract_named_by(folded, h) is not None:
                 signed = date.fromisoformat(str(h.normalized))
                 out.append(_date_fact(FactType.contract_date, signed, h.raw_text))
                 break
-        period = _service_period(view, checker)
+        period = _service_period(checker)
         if period is not None:
             out.append(_range_fact(FactType.execution_period, *period))
     else:
@@ -208,110 +169,22 @@ def document_facts(text: str) -> list[DocumentFact]:
     return out
 
 
-def _service_period(view: DocumentView, checker: AoaChecker) -> tuple[date, date, str] | None:
-    """An act's service period: its first day, its last and the words stating it.
-
-    Read first where the acceptance check reads it (``AoaChecker._period_hits``, after
-    "შესრულდა" and the other words that open it). When that finds no range, the period is
-    known by its form instead of a verb: two dates of one sentence written as a range - "... 1
-    ივნისიდან ... 30 ივნისის ჩათვლით", "01.06.2026 - 30.06.2026" - that date neither the act
-    nor an advance and name no contract; failing that, a month named as one ("2026 წლის ივნისის
-    თვეში")."""
-    text = view.text
+def _service_period(checker: AoaChecker) -> tuple[date, date, str] | None:
+    """An act's service period: its first day, its last and the words stating it, read where
+    the acceptance check reads it (``AoaChecker._period_hits``) - after the words that open it,
+    or failing them by its form - so the two can never state different periods (red team R4)."""
     hits = checker._period_hits()
-    if len({d for d, _ in hits}) >= 2:
-        first = min(h.start for _, h in hits)
-        last = max(h.end for _, h in hits)
-        dates = [d for d, _ in sorted(hits, key=lambda p: p[1].start)]
-        # two dates are the period's start and end as written, even when a year typed wrong
-        # puts the end first: sorted, the period stated was one neither document states
-        if len(dates) == 2:
-            return dates[0], dates[1], text[first:last]
-        return min(dates), max(dates), text[first:last]
-    ranges = _ranges(view, checker)
-    if hits:
-        # one date read after the words that open the period: the range it starts, if any
-        at = hits[0][1].start
-        ranges = [r for r in ranges if r[3] <= at < r[4]]
-        if not ranges:
-            d, h = hits[0]
-            return d, d, h.raw_text
-    served = [r for r in ranges if _SERVICE_WORDS.search(r[2])]
-    chosen = served[:1] or (ranges if len(ranges) == 1 else [])
-    if chosen:
-        a, b, _, lo, hi = chosen[0]
-        return a, b, text[lo:hi]
-    return _month_period(view)
-
-
-def _ranges(view: DocumentView, checker: AoaChecker) -> list[tuple[date, date, str, int, int]]:
-    """Every range an act's sentences write, in document order: (first day, last day, the
-    sentence, where the range starts, where it ends)."""
-    text = view.text
-    act = checker._act_date()
-    hits = [
-        h
-        for h in find_dates(text)
-        if (act is None or h.start != act[1].start)
-        and not _ACT_DATED_BEFORE.search(text, max(0, h.start - 30), h.start)
-        and not _CONTRACT_REFERENCE.match(text, h.end)
-    ]
-    out: list[tuple[date, date, str, int, int]] = []
-    for a, b in view.sentences():
-        sentence = text[a:b]
-        if _ADVANCE_WORDS.search(sentence) or _VALIDITY.search(sentence):
-            continue
-        inside = [h for h in hits if a <= h.start < b]
-        if not inside:
-            continue
-        found = _range_in(text, (a, b), inside, takes_effect=False)
-        start, end, stop = found.start, found.end, inside[-1].end
-        if start is not None and end is None:
-            end, stop = _yearless_end(text, inside, start, b)
-        if start is not None and end is not None and start <= end:
-            out.append((start, end, sentence, inside[0].start, stop))
-    return out
-
-
-def _yearless_end(
-    text: str, inside: list[RuleHit], start: date, limit: int
-) -> tuple[date | None, int]:
-    """The last day of a range whose end is written without a year, right after its first day,
-    and where it ends."""
-    first = next(h for h in inside if h.normalized == start.isoformat())
-    m = _YEARLESS_END.match(text, first.end, limit)
-    if m is None:
-        return None, first.end
-    word = m.group("m")
-    month = _month_ka(word)
-    if month is None or not (m.group("mark") or word.endswith("მდე")):
-        return None, first.end
-    for year in (start.year, start.year + 1):
-        try:
-            end = date(year, month, int(m.group("d")))
-        except ValueError:
-            return None, first.end
-        if end >= start:
-            return end, m.end()
-    return None, first.end
-
-
-def _month_period(view: DocumentView) -> tuple[date, date, str] | None:
-    """A service period stated as a whole month: its first day to its last."""
-    text = view.text
-    for m in _MONTH_PERIOD.finditer(text):
-        month = _month_ka(m.group("m"))
-        if month is None:
-            continue
-        span = next(((a, b) for a, b in view.sentences() if a <= m.start() < b), None)
-        sentence = text[span[0] : span[1]] if span else ""
-        if not _SERVICE_WORDS.search(sentence) or _ADVANCE_WORDS.search(sentence):
-            continue
-        year = int(m.group("y"))
-        first = date(year, month, 1)
-        last = date(year + month // 12, month % 12 + 1, 1) - timedelta(days=1)
-        return first, last, m.group(0)
-    return None
+    if not hits:
+        return None
+    text = checker.aoa.text
+    first = min(h.start for _, h in hits)
+    last = max(h.end for _, h in hits)
+    dates = [d for d, _ in sorted(hits, key=lambda p: p[1].start)]
+    # two dates are the period's start and end as written, even when a year typed wrong puts
+    # the end first: sorted, the period stated was one neither document states
+    if len(dates) == 2:
+        return dates[0], dates[1], text[first:last]
+    return min(dates), max(dates), text[first:last]
 
 
 def _start_unread(view: DocumentView) -> bool:
