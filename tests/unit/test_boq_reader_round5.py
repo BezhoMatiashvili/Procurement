@@ -586,3 +586,58 @@ def test_the_excluded_block_lists_a_priced_placeholder(tmp_path: Path) -> None:
         ("P", "1.6"): "EXCLUDED: the bidder's own additional items",
         ("Q", "1.4"): "EXCLUDED: removed by the bidder",
     }
+
+
+# --- R5-11: a chain rate typed in the column left of the Summary's TOTAL -----------------------
+
+
+def _rate_left_summary(cost: float, rate_head: str, overheads: float) -> Cells:
+    """Item | Description | <rate_head> | Total: labels carry no rate, the rates are typed in
+    column C; the overheads stated as given."""
+    pr = cost * 0.05
+    excl = cost + overheads + pr
+    vat = excl * 0.18
+    cells: Cells = {(1, 1): "Item", (1, 2): "Description", (1, 3): rate_head, (1, 4): "Total"}
+    rows = (
+        ("1", "WORKS", None, Fx(f"='{_SHEET}'!F{len(_LINES) + 2}", cost)),
+        ("", "TOTAL COST", None, Fx("=D2", cost)),
+        ("", "Overheads", 0.10, overheads),
+        ("", "Profit", 0.05, Fx("=D3*C5", pr)),
+        ("", "TOTAL PRICE EXCL. VAT", None, Fx("=D3+D4+D5", excl)),
+        ("", "VAT", 0.18, Fx("=D6*C7", vat)),
+        ("", "TOTAL PRICE INCLUDING VAT", None, Fx("=D6+D7", excl + vat)),
+    )
+    for r, (item, label, rate, value) in enumerate(rows, 2):
+        cells.update({(r, 2): label, (r, 4): value})
+        if item:
+            cells[(r, 1)] = item
+        if rate is not None:
+            cells[(r, 3)] = rate
+    return cells
+
+
+@pytest.mark.parametrize("rate_head", ["%", "Rate", "Rate, %", "პროცენტი"])
+def test_a_rate_typed_left_of_the_summary_total_is_held(tmp_path: Path, rate_head: str) -> None:
+    bill, total = _bill(1.0)
+    books = [
+        read_boq(_save(tmp_path / f"{n}.xlsx", {"SUMMARY": s, _SHEET: bill}), name=n)
+        for n, s in (
+            ("A", _rate_left_summary(total, rate_head, total * 0.12)),
+            ("B", _rate_left_summary(total, rate_head, total * 0.10)),
+        )
+    ]
+    a, b = (reconcile_summary(book) for book in books)
+    [gap] = a
+    assert "row 4 (Overheads)" in gap.message_en and "x 0.1" in gap.message_en
+    assert b == []
+
+
+def test_a_fraction_left_of_the_summary_total_under_another_header_is_no_rate(
+    tmp_path: Path,
+) -> None:
+    # near miss: column C headed "Materials" holds an amount that happens to be below 1
+    bill, total = _bill(1.0)
+    summary = _rate_left_summary(total, "Materials", total * 0.12)
+    path = _save(tmp_path / "A.xlsx", {"SUMMARY": summary, _SHEET: bill})
+    rows = read_boq(path, name="A").summary_rows
+    assert all(r.rate is None for r in rows)

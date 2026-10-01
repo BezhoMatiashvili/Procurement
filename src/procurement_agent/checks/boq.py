@@ -1777,6 +1777,12 @@ def _read_summary_rows(book: BoqWorkbook, ws: object, wf: object) -> list[Summar
         book.summary_header_unread = True
         return out
     max_col = min(ws.max_column, _HEADER_SCAN_COLS)  # type: ignore[attr-defined]
+    # the column left of TOTAL is read for a typed rate only where its header says it holds one
+    # ("Description | % | Total"); the one right of it, as always, whatever its header
+    left = total_col - 1
+    rate_cols = [total_col + 1]
+    if left >= 1 and left not in (desc_col, item_col) and _rate_header(ws, left, header_row):
+        rate_cols.append(left)
     for r in range(header_row + 1, ws.max_row + 1):  # type: ignore[attr-defined]
         label = str(ws.cell(r, desc_col).value or "").strip()  # type: ignore[attr-defined]
         if not label or not _has_letter(label):
@@ -1786,10 +1792,10 @@ def _read_summary_rows(book: BoqWorkbook, ws: object, wf: object) -> list[Summar
             book.formula_cells += 1
             if raw is None:
                 book.uncached_cells += 1
-        rate = _num(ws.cell(r, total_col + 1).value)  # type: ignore[attr-defined]
-        rate_formula = _formula_text(wf.cell(r, total_col + 1))  # type: ignore[attr-defined]
-        if rate_formula is not None and _divides_own_total(rate_formula, r, total_col):
-            rate = None  # "=C4/$C$8": the row's share of a total, not its rate
+        rate = next(
+            (x for c in rate_cols if (x := _typed_rate(ws, wf, r, c, total_col)) is not None),
+            None,
+        )
         refs: list[tuple[str, int]] = []
         ranges: list[tuple[str, int, int]] = []
         for c in range(1, max_col + 1):
@@ -1814,7 +1820,7 @@ def _read_summary_rows(book: BoqWorkbook, ws: object, wf: object) -> list[Summar
                 item=str(item).strip() if item not in (None, "") else "",
                 label=clean,
                 value=_num(raw),
-                rate=rate if rate is not None and 0 < rate < 1 else None,
+                rate=rate,
                 refs=tuple(refs),
                 non_numeric=str(raw).strip()[:40] if _is_text_in_number_cell(raw) else None,
                 label_rate=_rate_in_label(clean),
@@ -1823,6 +1829,30 @@ def _read_summary_rows(book: BoqWorkbook, ws: object, wf: object) -> list[Summar
             )
         )
     return out
+
+
+#: A Summary column header saying the column holds rates: "%", "Rate", "Rate, %", "პროცენტი".
+_RATE_HEADER = re.compile(
+    r"^(?:\(?%\)?|%-ი|rate(?:\s*,?\s*\(?%\)?)?|%\s*rate|percent(?:age)?|პროცენტი?|განაკვეთი?)$"
+)
+
+
+def _rate_header(ws: object, col: int, header_row: int) -> bool:
+    """Whether the Summary's header rows label ``col`` as a rate column."""
+    return any(
+        _RATE_HEADER.match(_norm_label(ws.cell(r, col).value))  # type: ignore[attr-defined]
+        for r in range(max(1, header_row - 3), header_row + 1)
+    )
+
+
+def _typed_rate(ws: object, wf: object, row: int, col: int, total_col: int) -> float | None:
+    """The fraction typed in ``col`` of a Summary row (0 < r < 1), else None - never a cell
+    dividing the row's own total by another ("% of total", ``=C4/$C$8``), which is a share."""
+    rate = _num(ws.cell(row, col).value)  # type: ignore[attr-defined]
+    formula = _formula_text(wf.cell(row, col))  # type: ignore[attr-defined]
+    if formula is not None and _divides_own_total(formula, row, total_col):
+        return None
+    return rate if rate is not None and 0 < rate < 1 else None
 
 
 #: A Summary cell that is nothing but the sum of one range of another sheet:
