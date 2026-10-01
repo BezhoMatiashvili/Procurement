@@ -1687,10 +1687,17 @@ Policy questions round 2 left open, with the recommended answer:
   chain, and a restated total "after discount" replaces the part it restates - the discounted
   incl.-VAT total sets the markup, and VAT is held against the discounted excl.-VAT total. At
   the least, a discount below the total incl. VAT is a warning naming both totals.
+  **The minimum done 2026-10-01** (`BOQ.DISCOUNT`, warning, `tests/unit/test_boq_discount.py`):
+  the bid is still ranked before the discount, and says so; which total it offers stays the
+  client's call. A discount inside the chain was already part of it.
 * **A negative rate on a position (BOQ-R2-13).** It counts as a price today (non-zero r) and
   lowers the common-scope total with no finding. Recommended: a negative rate or amount on a
   template position is not a price for the work - `BOQ.NEGATIVE_RATE` (warning), the position
   out of the common scope, still shown in the full evaluated total and the breakdown.
+  **Done 2026-10-01** (`tests/unit/test_boq_negative_rate.py`), one step stricter: the position
+  (status `negative`) is left out of the full evaluated total too, as text in a number cell
+  is, so a negative rate can lower no total, and the bid is incomplete. A negative amount on a
+  line the template leaves blank is not covered.
 * **A partly priced section group (BOQ-R2-14, by design).** Pricing one item of a group prices
   the group, so its other items cost nothing in the common scope. Recommended if revisited: the
   section row and its items are alternatives, the items among themselves are not - the group
@@ -1757,13 +1764,17 @@ Policy questions round 3 left open, with the recommended answer:
   -> USD; ევრო/EUR/€ -> EUR), a header naming none taking the template's. A bid whose currency
   differs from the template's is `BOQ.CURRENCY` (warning, naming both) and is left out of the
   colours unless a rate for the day is supplied through the existing `fx` rate provider.
+  **Done 2026-10-01** (`boq._header_currencies`, `tests/unit/test_boq_currency.py`): the
+  warning, and the bid left out of the colours and the ranking with its reason; converting at
+  a rate for the day is not built, so such a bid is compared by hand.
 * **TOTAL COST by its usual names (BOQ-R3-12).** "Total construction cost" and "Total direct
   cost" are not read as TOTAL COST today, by the letter of GOLD_SPEC 5, and the bid is loudly
   unranked. Recommended: TOTAL COST goes by its usual names as overheads and profit do - "total"
   then at most one qualifier among construction / direct / works / civil works / project, then
   "cost(s)", word-bounded so "Indirect costs" (an overheads name) never plays it, plus
   "პირდაპირი ხარჯები სულ" and "სამშენებლო სამუშაოების ღირებულება" - with the role order kept
-  (the last such row before the chain goes on).
+  (the last such row before the chain goes on). **Done 2026-10-01** as recommended
+  (`boq._TOTAL_COST`, `tests/unit/test_boq_total_cost_names.py`).
 
 ### Red team, round 4 (BOQ-R4-01 to BOQ-R4-19)
 

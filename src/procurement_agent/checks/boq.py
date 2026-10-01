@@ -272,7 +272,14 @@ _VAT = re.compile(
     rf"{_LABEL_RATE}{_VAT_NAME}",
     re.IGNORECASE,
 )
-_TOTAL_COST = re.compile(r"\btotal\s+cost|ჯამური\s+ღირებულება", re.IGNORECASE)
+#: TOTAL COST by its usual names: "total", at most one qualifier, "cost(s)" - "Total
+#: construction cost", "Total direct cost" - and the Georgian "პირდაპირი ხარჯები სულ";
+#: "Indirect costs" is the overheads (red team R3, BOQ-R3-12: such a bid was left unranked).
+_TOTAL_COST = re.compile(
+    r"\btotal\s+(?:(?:construction|direct|works|civil\s+works|project)\s+)?cost"
+    r"|ჯამური\s+ღირებულება|პირდაპირი\s+ხარჯები\s+სულ|სამშენებლო\s+სამუშაოების\s+ღირებულება",
+    re.IGNORECASE,
+)
 #: Overheads and profit by their usual names, English and Georgian: "Indirect costs", "General
 #: expenses", "არაპირდაპირი ხარჯები"; "Margin", "Mark-up", "გეგმიური დაგროვება" (the planned
 #: accumulation of a Georgian estimate, i.e. the contractor's profit).
@@ -397,6 +404,30 @@ _CURRENCY = r"(?:აშშ\s+)?(?:დოლარ[ა-ჰ]*|ლარ[ა-ჰ]*|
 _LABEL_CURRENCY = re.compile(
     rf"\s*(?:[,(]\s*|\s+in\s+|\s+){_CURRENCY}\s*\)?\s*$|^\s*(?:\$|₾|€)\s*", re.IGNORECASE
 )
+
+
+#: A currency a price header names, by its code. "ლარ" only as a word of its own: "დოლარი" ends
+#: in it.
+_CURRENCY_CODES = (
+    ("USD", re.compile(r"(?<![ა-ჰ])დოლარ|\busd\b|\$", re.IGNORECASE)),
+    ("GEL", re.compile(r"(?<![ა-ჰ])ლარ|\bgel\b|₾", re.IGNORECASE)),
+    ("EUR", re.compile(r"(?<![ა-ჰ])ევრო|\beur\b|€", re.IGNORECASE)),
+)
+
+
+def _header_currencies(ws: object, cols: dict[str, int], header: int) -> tuple[str, ...]:
+    """The currencies the headers of a sheet's price columns name ("Rate in USD", "ღირებულება,
+    ლარი", a group label "Unit rates in USD" over the component rates), by code.
+
+    Only the price columns: a description header that mentions a currency says nothing of what
+    the bid is priced in (red team R3, BOQ-R3-03)."""
+    found: set[str] = set()
+    for c in {cols[k] for k in (*_RATE_KEYS, *_TOTAL_KEYS) if k in cols}:
+        for r in range(1, header + 1):
+            value = ws.cell(r, c).value  # type: ignore[attr-defined]
+            if isinstance(value, str):
+                found |= {code for code, pattern in _CURRENCY_CODES if pattern.search(value)}
+    return tuple(sorted(found))
 
 
 def _norm_label(v: object) -> str:
@@ -710,6 +741,8 @@ class BoqSheet:
     #: (column, its header text) of every column inside the price block that holds numbers but
     #: that this reader did not recognise ("Energy" over Rate | Amount beside the materials)
     unread_price_columns: tuple[tuple[int, str], ...] = ()
+    #: the currencies its price headers name, by code ("USD")
+    currencies: tuple[str, ...] = ()
 
     @property
     def leaf_lines(self) -> list[BoqLine]:
@@ -788,6 +821,11 @@ class BoqWorkbook:
     uncached_cells: int = 0
     #: why the file could not be read at all (``read_bid``); such a bid is reported, not compared
     read_error: str | None = None
+
+    @property
+    def currencies(self) -> tuple[str, ...]:
+        """The currencies its priced sheets' headers name, by code; empty when none names one."""
+        return tuple(sorted({c for sheet in self.sheets.values() for c in sheet.currencies}))
 
     @property
     def total(self) -> float:
@@ -1624,6 +1662,7 @@ def _read_sheet(
 ) -> BoqSheet:
     sheet = BoqSheet(name=sheet_name, columns=cols, header_row=header)
     sheet.unread_price_columns = _unread_price_columns(ws, cols, header)
+    sheet.currencies = _header_currencies(ws, cols, header)
     partial = bool(sheet.unread_price_columns)
     item_cols = _item_columns(cols)
 
@@ -2182,6 +2221,8 @@ class BidComparison:
     #: False when the bid (or the template) cannot be evaluated at all: saved without values
     evaluable: bool = True
     no_cached_values: bool = False
+    #: its price headers name another currency than the template's (``BOQ.CURRENCY``)
+    currency_differs: bool = False
     stated_total_cost: float | None = None
     stated_excl_vat: float | None = None
     stated_incl_vat: float | None = None
@@ -2209,7 +2250,8 @@ class BidComparison:
             or self.unreadable_sheets
             or self.unpriced_positions
             or any(
-                p.status in ("removed", "sheet_missing", "prices_not_read") for p in self.positions
+                p.status in ("removed", "sheet_missing", "prices_not_read", "negative")
+                for p in self.positions
             )
         )
 
@@ -2365,6 +2407,20 @@ def _where(line: BoqLine) -> tuple[str, str]:
     return (
         f"{line.sheet}, სტრიქონი {line.row}{item}",
         f"{line.sheet} row {line.row}{item}",
+    )
+
+
+def _negative_rate(t: BoqLine, b: BoqLine, rate: float) -> Finding:
+    """A template position the bidder priced below zero: no price for the work."""
+    ka, en = _where(b)
+    return _finding(
+        "BOQ.NEGATIVE_RATE",
+        "warning",
+        f"{ka}: ერთეულის ფასი უარყოფითია ({_money(rate)}) — ეს სამუშაოს ფასი არ არის; პოზიცია "
+        "შეფასებაში არ შედის",
+        f"{en}: the unit rate is negative ({_money(rate)}) - no price for the work; the "
+        "position is left out of the evaluation",
+        actual=_money(rate),
     )
 
 
@@ -2564,6 +2620,25 @@ def compare_bid(template: BoqWorkbook, bid: BoqWorkbook) -> BidComparison:
         out.no_cached_values = True
         out.findings.append(_no_cached_values_finding(bid))
         return out
+    theirs, ours = template.currencies, bid.currencies
+    if theirs and ours and theirs != ours:
+        # priced in another currency: its numbers are not the template's, and ranked bare they
+        # put lari beside dollars (red team R3, BOQ-R3-03). A header naming no currency takes
+        # the template's; with no rate for the day supplied, the bid is left out of the colours
+        out.currency_differs = True
+        t, b = ", ".join(theirs), ", ".join(ours)
+        out.findings.append(
+            _finding(
+                "BOQ.CURRENCY",
+                "warning",
+                f"{bid.name}: ფასები {b}-შია, შაბლონი კი {t}-ს ითხოვს — შეთავაზება ფერებით "
+                "რანჟირებაში არ მონაწილეობს; შეადარეთ ერთ ვალუტაზე გადაყვანის შემდეგ",
+                f"{bid.name}: prices are in {b} where the template asks for {t} - the bid is left "
+                "out of the colours; compare it once converted to one currency",
+                expected=t,
+                actual=b,
+            )
+        )
 
     sections = {n: s for n, s in bid.hidden_bills.items() if n in template.sheets}
     if sections:
@@ -3030,11 +3105,16 @@ def _compare_sheet(out: BidComparison, t_sheet: BoqSheet, b_sheet: BoqSheet) -> 
         if t.quantity:
             if _rate_text_blocks(b):
                 cost, status = 0.0, "non_numeric"
+            elif rate is not None and rate < 0:
+                # no price for the work: counted, it lowered the bidder's totals unsaid (red
+                # team R2, BOQ-R2-13)
+                cost, status = 0.0, "negative"
+                out.findings.append(_negative_rate(t, b, rate))
             elif rate:
                 cost, status = t.quantity * rate, "priced"
             else:
                 cost, status = 0.0, "unpriced"
-            if status != "priced":
+            if status not in ("priced", "negative"):
                 out.unpriced_positions.append(t)
         elif b.amount or b.quantity:
             # the bidder filled in the blank line: priced by its amount (or quantity x rate),
@@ -3545,6 +3625,49 @@ def reconcile_summary(book: BoqWorkbook) -> list[Finding]:
                     )
                 )
     _reconcile_chain(rows, roles, out, in_bill=book.summary_in_bill is not None)
+    out.extend(_discounts_after_total(rows, roles.get("incl")))
+    return out
+
+
+#: A discount row by its usual names; a total that names it ("Total after discount") is a total.
+_DISCOUNT = re.compile(r"discount|rebate|ფასდაკლ", re.IGNORECASE)
+_A_TOTAL = re.compile(r"^\s*(?:grand\s+)?(?:total|სულ|ჯამ)", re.IGNORECASE)
+
+
+def _discounts_after_total(rows: list[SummaryRow], incl: SummaryRow | None) -> list[Finding]:
+    """A discount stated below the total incl. VAT (red team R2, BOQ-R2-12).
+
+    The chain ends at the total incl. VAT, so the bid is ranked on it - before the discount.
+    Which total the bid offers is the client's call; the discount is said, with both totals,
+    never left silent. One inside the chain (before the total excl. VAT) is part of it."""
+    if incl is None or incl.value is None:
+        return []
+    out: list[Finding] = []
+    below = [r for r in rows if r.row > incl.row]
+    for i, row in enumerate(below):
+        if not _DISCOUNT.search(row.label) or not row.value:
+            continue
+        if _A_TOTAL.search(row.label) or _INCL_VAT.search(row.label):
+            continue
+        after = next((r for r in below[i + 1 :] if r.value and _INCL_VAT.search(r.label)), None)
+        then_ka = f", სტრიქონი {after.row} კი {_money(after.value or 0.0)}-ს" if after else ""
+        then_en = f", and row {after.row} states {_money(after.value or 0.0)}" if after else ""
+        out.append(
+            _finding(
+                "BOQ.DISCOUNT",
+                "warning",
+                f"Summary: სტრიქონი {row.row} ({row.label[:30]}) {_money(row.value)}-ს "
+                f"ფასდაკლებას იძლევა დღგ-ს ჩათვლით ჯამის ({_money(incl.value)}, სტრიქონი "
+                f"{incl.row}) შემდეგ{then_ka}; შეთავაზება ფასდაკლებამდე ჯამით რანჟირდება — "
+                "გადაამოწმეთ, რომელ ჯამს სთავაზობს",
+                f"Summary: row {row.row} ({row.label[:30]}) gives a discount of "
+                f"{_money(row.value)} below the total incl. VAT ({_money(incl.value)}, row "
+                f"{incl.row}){then_en}; the bid is ranked on the total before the discount - "
+                "check which total it offers",
+                expected=None,
+                actual=_money(row.value),
+            )
+        )
     return out
 
 
@@ -3746,7 +3869,7 @@ def compare_all(template: BoqWorkbook, bids: list[BoqWorkbook]) -> list[BidCompa
             p.in_common_scope = p.group_ref in common
             if p.in_common_scope:
                 comp.common_scope_cost += p.cost
-        if comp.markup_factor is not None:
+        if comp.markup_factor is not None and not comp.currency_differs:
             comp.common_scope_total = comp.common_scope_cost * comp.markup_factor
     _colour(comparisons)
     return comparisons
@@ -3863,6 +3986,7 @@ _STATUS_TEXT = {
     "unpriced": "EXCLUDED: not priced",
     "not_filled": "left blank (template qty blank)",
     "non_numeric": "EXCLUDED: text in a number cell",
+    "negative": "EXCLUDED: a negative rate",
     "removed": "EXCLUDED: removed by the bidder",
     "sheet_missing": "EXCLUDED: sheet missing",
     "sheet_unreadable": "EXCLUDED: sheet unreadable",

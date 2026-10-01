@@ -199,6 +199,8 @@ class Bid:
     overheads: float = 0.10
     profit: float = 0.05
     vat: float = 0.18
+    #: the currency the price headers name ("Rate in USD")
+    currency: str = "USD"
 
 
 def build_real_boq(
@@ -260,7 +262,7 @@ def _write_sheet(
             cache[(index, cell.coordinate)] = cached
 
     put(1, 1, "Example project")
-    put(2, 11, "rates in USD without VAT")
+    put(2, 11, f"rates in {spec.currency} without VAT")
     put(4, 1, "THE BILLS OF QUANTITIES")
     put(5, 1, sheet_name)
     quantity = spec.header_rename.get(sheet_name, "Quantity")
@@ -270,8 +272,8 @@ def _write_sheet(
         5: "CODE",
         7: quantity,
         8: "Unit",
-        9: "Unit rates in USD (excl. VAT)",
-        15: "Totals in USD (excl. VAT)",
+        9: f"Unit rates in {spec.currency} (excl. VAT)",
+        15: f"Totals in {spec.currency} (excl. VAT)",
         17: "Notes",
     }.items():
         put(6, col, title)
@@ -282,8 +284,8 @@ def _write_sheet(
         12: "Labour Sum",
         13: "Delivery",
         14: "Delivery Sum",
-        15: "Rate in USD",
-        16: "Amount in USD",
+        15: f"Rate in {spec.currency}",
+        16: f"Amount in {spec.currency}",
     }.items():
         put(7, col, title)
     for col in range(1, 18):

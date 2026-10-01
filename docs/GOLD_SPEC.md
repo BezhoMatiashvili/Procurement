@@ -841,6 +841,21 @@ Red team round 5 (compare) settled these cases:
 
 ## 5. BOQ gold (per set, JSON) and the evaluation policy
 
+* **Currency (2026-10-01).** The currency each price column's header names (a rate, an amount or
+  a component, and the group label over them: "Rate in USD", "ღირებულება, ლარი", "Unit rates in
+  USD") is read and folded to its code (ლარი/GEL/₾ -> GEL; დოლარი/USD/$ -> USD; ევრო/EUR/€ ->
+  EUR); another column's header is not read for it. A bid whose price headers name other
+  currencies than the template's is `BOQ.CURRENCY` (warning, expected the template's codes,
+  actual the bid's), has no common-scope total and is neither coloured nor ranked. A header
+  naming no currency takes the template's, and a template naming none holds no bid to one.
+* **A negative rate (2026-10-01).** A template position with a quantity whose unit rate is
+  below zero is `BOQ.NEGATIVE_RATE` (warning), status `negative`: no cost, out of the common
+  scope, and the bid is not complete.
+* **A discount below the total incl. VAT (2026-10-01).** A Summary row labelled as a discount
+  (discount, rebate, ფასდაკლება; a total naming one is a total) with a value, below the row
+  playing incl. VAT, is `BOQ.DISCOUNT` (warning, actual the discount); the bid is ranked on the
+  total incl. VAT before it.
+
 `samples/gold_boq/<set>.json`:
 
 ```json
@@ -1077,8 +1092,10 @@ Policy (client BOQ rules 2, 3, 5, 6 and the user's decision of 2026-09-28):
   ("% of total", `=C4/$C$8`) is a share, never a rate. A profit rate, read from the label or typed beside the total, holds on TOTAL COST or on
   TOTAL COST + overheads (the Georgian estimate's base). The stated total incl. VAT is the row labelled so; there
   is no fallback to another row. Each part of the chain (TOTAL COST, overheads, profit, excl.
-  VAT, VAT, incl. VAT) is played by one row and each row plays one part at most: TOTAL COST is
-  the last row labelled so before the chain goes on, and the rest are taken below it, top down,
+  VAT, VAT, incl. VAT) is played by one row and each row plays one part at most: TOTAL COST
+  ("Total cost", "Total construction / direct / works / civil works / project cost", "ჯამური
+  ღირებულება", "პირდაპირი ხარჯები სულ", "სამშენებლო სამუშაოების ღირებულება"; never "Indirect
+  costs", the overheads) is the last row labelled so before the chain goes on, and the rest are taken below it, top down,
   by the first row labelled for a part still open. A later "TOTAL COST INCL. OVERHEADS &
   PROFIT" or "Advance payment 20% of the price incl. VAT" plays no part. Overheads and profit
   go by their usual names too ("Indirect costs", "Margin", "გეგმიური დაგროვება",

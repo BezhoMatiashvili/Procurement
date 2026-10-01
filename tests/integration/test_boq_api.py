@@ -355,3 +355,25 @@ def test_an_unreadable_bid_is_reported_on_that_bidder_and_the_rest_are_compared(
     )
     assert r.status_code == 200, r.text
     assert "SUMMARY" in load_workbook(io.BytesIO(r.content)).sheetnames
+
+
+def test_a_bid_in_another_currency_is_not_ranked_and_says_why(client: TestClient) -> None:
+    """A bid whose price headers name lari where the template's name dollars is reported, kept
+    out of the colours and the ranking, and the reason it is not ranked is its currency."""
+    template = _upload(client, "T.xlsx", build_real_boq())
+    bids = [
+        _upload(client, "Company-1.xlsx", build_real_boq(Bid())),
+        _upload(client, "Company-2.xlsx", build_real_boq(Bid(factor=0.9))),
+        _upload(client, "Company-3.xlsx", build_real_boq(Bid(factor=0.5, currency="GEL"))),
+    ]
+    report = _check(client, template, bids)
+    by_name = {b["bidder"]: b for b in report["leaderboard"]}
+    assert by_name["Company-3"]["colour"] is None
+    assert by_name["Company-3"]["rank_basis"] is None
+    assert [b["bidder"] for b in report["leaderboard"]][-1] == "Company-3"
+    assert (by_name["Company-1"]["colour"], by_name["Company-2"]["colour"]) == ("red", "green")
+    notes = {s["reason_en"] for s in report["skipped"] if s["rule_id"] == "BOQ.TOTALS"}
+    assert notes == {
+        "Company-3: is priced in another currency than the template (see its findings), so it "
+        "is not ranked"
+    }

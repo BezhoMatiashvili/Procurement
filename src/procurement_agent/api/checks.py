@@ -685,6 +685,15 @@ def _no_basis_note(comp: BidComparison) -> SkipNote | None:
     if not comp.evaluable:
         ka = "ფაილი ვერ შეფასდა (იხ. დასკვნები), ამიტომ რანჟირებაში არ მონაწილეობს"
         en = "could not be evaluated (see its findings), so it is not ranked"
+    elif comp.currency_differs:
+        ka = (
+            "ფასები შაბლონისგან განსხვავებულ ვალუტაშია (იხ. დასკვნები), ამიტომ რანჟირებაში "
+            "არ მონაწილეობს"
+        )
+        en = (
+            "is priced in another currency than the template (see its findings), so it is not "
+            "ranked"
+        )
     elif comp.stated_incl_vat is None and comp.totals_from is None:
         ka = (
             "ფაილს Summary გვერდი არ აქვს და დღგ-ს ჩათვლით ჯამი არსად არის მითითებული, ამიტომ "
