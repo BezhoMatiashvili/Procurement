@@ -57,10 +57,6 @@ def fold(value: object) -> str:
 # ------------------------------------------------------------------------------ cell values
 
 
-#: text a number reads two ways: one separator and exactly three digits after it
-TWO_WAY_NUMBER = re.compile(r"[+-]?[1-9]\d{0,2}[.,]\d{3}")
-
-
 class Text(str):
     """Text found in a number cell: never read as 0."""
 
@@ -886,17 +882,23 @@ def check_bid(tpl: Book, bid: Book, placeholders: set[tuple[str, int]] | None = 
                     )
                 costs[key] = 0.0
                 continue
-            if isinstance(t.qty, Text) and TWO_WAY_NUMBER.fullmatch(t.qty.strip()):
-                # GOLD_SPEC 5: a template quantity reading two ways ("1.250": 1.25 or 1,250)
-                # is evaluated for no bidder - never a blank quantity the bidder fills in. This
-                # writer reads no text as a number, so it never settles one by its row.
+            if isinstance(t.qty, Text):
+                # GOLD_SPEC 5: a template quantity left as text - "2.4 t", or "1.250" reading
+                # 1.25 or 1,250 - is evaluated for no bidder, never a blank quantity the bidder
+                # fills in (round 5: any text, not only the two-way kind). This writer reads no
+                # text as a number, so it never settles a two-way one by its row.
                 costs[key] = 0.0
                 continue
             tq = t.qty if is_num(t.qty) else None
             blank_tpl = tq is None or abs(tq) < 1e-12
             if blank_tpl:
                 if nz(b.qty) or nz(b.amount):
+                    # round 5: priced only by a non-zero amount (or quantity x rate) with no
+                    # text in its quantity, rate or amount; else listed, unpriced and costing 0
+                    text = any(isinstance(x, Text) for x in (b.qty, b.amount, r))
                     amt = b.amount if is_num(b.amount) else 0.0
+                    if not text and not nz(amt) and nz(b.qty) and nz(r):
+                        amt = b.qty * r  # type: ignore[operator]
                     res["filled_blank"].append(
                         {
                             "sheet": sname,
@@ -905,9 +907,14 @@ def check_bid(tpl: Book, bid: Book, placeholders: set[tuple[str, int]] | None = 
                             "amount": r2(amt),
                         }
                     )
-                    costs[key] = amt  # type: ignore[assignment]
-                    if nz(amt) and not isinstance(r, Text):
+                    if nz(amt) and not text:
+                        costs[key] = amt  # type: ignore[assignment]
                         priced.append(key)
+                    else:
+                        costs[key] = 0.0
+                        res["unpriced_positions"].append(
+                            {"sheet": sname, "item": t.item, "row": t.row}
+                        )
                 else:
                     res["unfilled_positions"].append({"sheet": sname, "item": t.item})
                 continue
@@ -1243,8 +1250,12 @@ DECISIONS = [
     "A blank bid unit against a template unit is a unit change with bid_unit ''; a unit the bidder "
     "wrote where the template left it blank is listed under unit_filled, not as a change.",
     "A template quantity of blank or 0 makes the position 'filled_blank' when the bidder gives a "
-    "quantity or amount (cost = the bidder's amount), else 'unfilled_positions'; never a "
-    "quantity change.",
+    "quantity or amount, else 'unfilled_positions'; never a quantity change. Round 5: such a "
+    "line is priced (cost = the bidder's amount, else quantity x rate) only when that is "
+    "non-zero and no quantity, rate or amount cell holds text; otherwise it costs 0, is out of "
+    "the common scope and is listed under unpriced_positions as well.",
+    "Round 5: a template quantity holding any text ('2.4 t', a two-way '1.250') is evaluated "
+    "for no bidder (cost 0, out of the common scope), never a blank quantity to fill in.",
     "A bid quantity left blank where the template has one is a quantity change with bid_qty null.",
     'Placeholder rows (GOLD_SPEC 5) carry "placeholder": true - a row (any quantity) under an '
     "'any other / undescribed items' heading, or one whose own text invites extras ('other costs "

@@ -18,6 +18,7 @@ import pytest
 
 from procurement_agent.checks.boq import (
     BidComparison,
+    BoqWorkbook,
     _label_key,
     _plays,
     compare_all,
@@ -26,6 +27,7 @@ from procurement_agent.checks.boq import (
 )
 from tests.unit.test_boq_reader_round4 import (
     _COST,
+    _HEAD,
     _MARKUP,
     _SHEET,
     _bill,
@@ -208,3 +210,183 @@ def test_a_wrong_total_with_vat_after_an_unnamed_tax_row_is_still_reported(
     [gap] = [f for f in a.findings if f.rule_id == "BOQ.RECONCILE"]
     assert "row 8" in gap.message_en
     assert "BOQ.RECONCILE" not in _rules(b)
+
+
+# --- R5-01, R5-06, R5-07: a blank line filled in without a price, a quantity typed as text ---
+
+#: (item, description, unit, quantity, rate, amount) - a cell left None stays empty; a number
+#: amount is written as the row's own product with that cached value, text as it is typed
+_Line = tuple[str, str, str, object, object, object]
+
+
+def _cells(lines: tuple[_Line, ...], *, template: bool = False) -> tuple[Cells, float]:
+    cells: Cells = {(1, c): h for c, h in enumerate(_HEAD, 1)}
+    total = 0.0
+    for r, (item, desc, unit, qty, rate, amount) in enumerate(lines, 2):
+        cells.update({(r, 1): item, (r, 2): desc, (r, 3): unit})
+        for c, value in ((4, qty), (5, rate)):
+            if value is not None:
+                cells[(r, c)] = value
+        if template or isinstance(amount, float):
+            value = 0.0 if template else amount
+            cells[(r, 6)] = Fx(f"=D{r}*E{r}", value)
+            total += value  # type: ignore[operator]
+        elif amount is not None:
+            cells[(r, 6)] = amount
+    last = len(lines) + 1
+    cells[(last + 1, 2)] = "Sub-total"
+    cells[(last + 1, 6)] = Fx(f"=SUM(F2:F{last})", total)
+    return cells, total
+
+
+def _evaluate(
+    tmp_path: Path, template: tuple[_Line, ...], bids: dict[str, tuple[_Line, ...]]
+) -> tuple[BoqWorkbook, list[BidComparison]]:
+    books = []
+    for name, lines in {"T": template, **bids}.items():
+        bill, total = _cells(lines, template=name == "T")
+        closing = len(lines) + 2
+        path = _save(
+            tmp_path / f"{name}.xlsx", {"SUMMARY": _summary(total, closing=closing), _SHEET: bill}
+        )
+        books.append(read_boq(path, name=name))
+    return books[0], compare_all(books[0], books[1:])
+
+
+def _status(comp: BidComparison, item: str) -> tuple[str, float, bool]:
+    [p] = [p for p in comp.positions if p.item_no == item]
+    return p.status, p.cost, p.in_common_scope
+
+
+_DIG = ("1.1", "Trench excavation", "m3", 10.0, None, None)
+_SUPERVISION = ("1.2", "Site supervision, months as proposed", "month", None, None, None)
+
+
+def test_a_blank_line_filled_in_with_a_quantity_but_no_price_is_not_priced(tmp_path: Path) -> None:
+    _, (a, b) = _evaluate(
+        tmp_path,
+        (_DIG, _SUPERVISION),
+        {
+            "A": (
+                ("1.1", "Trench excavation", "m3", 10.0, 110.0, 1100.0),
+                (*_SUPERVISION[:3], 6.0, None, None),
+            ),
+            "B": (
+                ("1.1", "Trench excavation", "m3", 10.0, 100.0, 1000.0),
+                (*_SUPERVISION[:3], 6.0, 3000.0, 18000.0),
+            ),
+        },
+    )
+    assert _status(a, "1.2") == ("unpriced", 0.0, False)
+    assert _status(b, "1.2") == ("filled_blank", 18000.0, False)
+    assert a.common_scope_positions == 1
+    assert a.common_scope_cost == pytest.approx(1100.0)
+    assert b.common_scope_cost == pytest.approx(1000.0)
+    assert (a.colour, b.colour) == ("red", "green")
+    # listed as filled in, but said to carry no price - and the bid is not complete on it
+    [filled] = a.filled_blank
+    assert (filled.bid_qty, filled.amount, filled.priced) == (6.0, 0.0, False)
+    [note] = [f for f in a.findings if f.rule_id == "BOQ.FILLED_BLANK"]
+    assert "no price" in note.message_en and "own amount" not in note.message_en
+    assert [t.item_no for t in a.unpriced_positions] == ["1.2"]
+    assert not a.complete and b.complete
+
+
+def test_a_blank_line_filled_in_and_priced_is_evaluated_at_its_amount(tmp_path: Path) -> None:
+    # near miss: an amount, or a quantity and a rate, is a price
+    _, (a, b) = _evaluate(
+        tmp_path,
+        (_DIG, _SUPERVISION),
+        {
+            "A": (
+                ("1.1", "Trench excavation", "m3", 10.0, 110.0, 1100.0),
+                (*_SUPERVISION[:3], None, None, 9000.0),
+            ),
+            "B": (
+                ("1.1", "Trench excavation", "m3", 10.0, 100.0, 1000.0),
+                (*_SUPERVISION[:3], 6.0, 2500.0, None),
+            ),
+        },
+    )
+    assert _status(a, "1.2") == ("filled_blank", 9000.0, True)
+    assert _status(b, "1.2") == ("filled_blank", 15000.0, True)
+    assert a.complete and b.complete
+    assert all(d.priced for d in (*a.filled_blank, *b.filled_blank))
+
+
+_PLASTER = ("1.2", "Cement plaster to walls", "m2", None, None, None)
+
+
+def test_text_in_the_rate_or_amount_of_a_filled_in_blank_line_leaves_it_unpriced(
+    tmp_path: Path,
+) -> None:
+    dig = ("1.1", "Trench excavation", "m3", 10.0)
+    _, (a, b, c) = _evaluate(
+        tmp_path,
+        (_DIG, _PLASTER),
+        {
+            "A": ((*dig, 100.0, 1000.0), (*_PLASTER[:3], 420.0, "incl.", 4095.0)),
+            "B": ((*dig, 100.0, 1000.0), (*_PLASTER[:3], 420.0, 9.75, "n/a")),
+            "C": ((*dig, 95.0, 950.0), (*_PLASTER[:3], 420.0, 9.25, 3885.0)),
+        },
+    )
+    assert _status(a, "1.2") == ("non_numeric", 0.0, False)
+    assert _status(b, "1.2") == ("non_numeric", 0.0, False)
+    assert _status(c, "1.2") == ("filled_blank", 3885.0, False)
+    assert (a.evaluated_cost, b.evaluated_cost) == (pytest.approx(1000.0), pytest.approx(1000.0))
+    assert c.evaluated_cost == pytest.approx(950.0 + 3885.0)
+    assert a.common_scope_positions == 1
+    assert (a.colour, b.colour, c.colour) == ("red", "red", "green")
+    # the bidder's own typed amount is what is listed, never one rebuilt beside text
+    assert [(d.amount, d.priced) for d in a.filled_blank] == [(4095.0, False)]
+    assert [(d.amount, d.priced) for d in b.filled_blank] == [(0.0, False)]
+    for comp in (a, b):
+        assert "BOQ.NON_NUMERIC" in _rules(comp)
+        assert not comp.complete
+
+
+def test_a_template_quantity_typed_as_text_is_evaluated_for_no_bidder(tmp_path: Path) -> None:
+    rebar = ("1.2", "Reinforcement B500", "t")
+    t, (a, b) = _evaluate(
+        tmp_path,
+        (_DIG, (*rebar, "2.4 t", None, None)),
+        {
+            "A": (
+                ("1.1", "Trench excavation", "m3", 10.0, 110.0, 1100.0),
+                (*rebar, "2.4 t", None, 3480.0),
+            ),
+            "B": (
+                ("1.1", "Trench excavation", "m3", 10.0, 100.0, 1000.0),
+                (*rebar, 3.0, 1450.0, 4350.0),
+            ),
+        },
+    )
+    for comp in (a, b):
+        assert _status(comp, "1.2") == ("non_numeric", 0.0, False)
+        assert not comp.filled_blank and not comp.unpriced_positions
+    assert (a.evaluated_cost, b.evaluated_cost) == (pytest.approx(1100.0), pytest.approx(1000.0))
+    assert (a.colour, b.colour) == ("red", "green")
+    [note] = [f for f in template_findings(t) if f.rule_id == "BOQ.NON_NUMERIC"]
+    assert "not evaluated for any bidder" in note.message_en
+
+
+def test_a_template_quantity_typed_as_a_number_in_text_is_evaluated(tmp_path: Path) -> None:
+    # near miss: text that reads one way is the number
+    rebar = ("1.2", "Reinforcement B500", "t")
+    t, (a, b) = _evaluate(
+        tmp_path,
+        (_DIG, (*rebar, "2.5", None, None)),
+        {
+            "A": (
+                ("1.1", "Trench excavation", "m3", 10.0, 110.0, 1100.0),
+                (*rebar, "2.5", 1500.0, 3750.0),
+            ),
+            "B": (
+                ("1.1", "Trench excavation", "m3", 10.0, 100.0, 1000.0),
+                (*rebar, "2.5", 1400.0, 3500.0),
+            ),
+        },
+    )
+    assert _status(a, "1.2") == ("priced", 3750.0, True)
+    assert _status(b, "1.2") == ("priced", 3500.0, True)
+    assert "BOQ.NON_NUMERIC" not in [f.rule_id for f in template_findings(t)]

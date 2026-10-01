@@ -1963,6 +1963,9 @@ class LineDiff:
     #: the bidder's own amount on the line (what a filled-in blank position costs)
     amount: float | None = None
     item_no: str = ""
+    #: a filled-in blank line is priced only by its amount (or quantity x rate) with no text in
+    #: its number cells; a quantity alone is no price (GOLD_SPEC 5)
+    priced: bool = True
 
 
 @dataclass(slots=True)
@@ -2320,8 +2323,10 @@ def template_findings(template: BoqWorkbook) -> list[Finding]:
                         _finding(
                             "BOQ.NON_NUMERIC",
                             "warning",
-                            f"შაბლონი, {ka}: მოცულობის უჯრაში ტექსტია „{text}“",
-                            f"template, {en}: the quantity cell holds text '{text}'",
+                            f"შაბლონი, {ka}: მოცულობის უჯრაში ტექსტია „{text}“ — რიცხვად არ "
+                            "იკითხება; პოზიცია არცერთ კომპანიასთან არ ფასდება",
+                            f"template, {en}: the quantity cell holds text '{text}' - it reads "
+                            "as no number; the position is not evaluated for any bidder",
                             actual=text,
                         )
                     )
@@ -2592,9 +2597,10 @@ def _rate_text_blocks(line: BoqLine) -> bool:
     return not line.rate_total and bool(keys & set(_RATE_KEYS))
 
 
-def _qty_reads_two_ways(line: BoqLine) -> bool:
-    """Whether the line's quantity is text such as "1.250" that its row could not settle."""
-    return any(key == "qty" and _two_readings(text) for key, text in line.non_numeric)
+def _qty_is_text(line: BoqLine) -> bool:
+    """Whether the line's quantity cell holds text that is read as no number - "2.4 t", "-", or
+    "1.250" that its row could not settle."""
+    return any(key == "qty" for key, _ in line.non_numeric)
 
 
 def _unit_rate(line: BoqLine, columns: dict[str, int]) -> float | None:
@@ -2812,10 +2818,11 @@ def _compare_sheet(out: BidComparison, t_sheet: BoqSheet, b_sheet: BoqSheet) -> 
                 )
             )
             continue
-        if _qty_reads_two_ways(t):
-            # the template's own quantity reads 1.25 or 1,250 and its row cannot tell which: not
-            # evaluated for any bidder - never at a quantity a thousand times off, and never at
-            # the bidder's own amount as if the template had left it blank
+        if _qty_is_text(t):
+            # the template's own quantity is text - "2.4 t", or "1.250" that reads 1.25 or 1,250
+            # and whose row cannot tell which: not evaluated for any bidder, never at a quantity
+            # a thousand times off, and never at the bidder's own amount as if the template had
+            # left it blank (GOLD_SPEC 5: text is never read as nothing)
             out.positions.append(
                 PositionEval(
                     t.sheet, t.row, t.item_no, t.description, None, b.row, rate, 0.0, "non_numeric"
@@ -2831,24 +2838,35 @@ def _compare_sheet(out: BidComparison, t_sheet: BoqSheet, b_sheet: BoqSheet) -> 
                 cost, status = 0.0, "unpriced"
             if status != "priced":
                 out.unpriced_positions.append(t)
-        else:
+        elif b.amount or b.quantity:
+            # the bidder filled in the blank line: priced by its amount (or quantity x rate),
+            # never by a quantity alone, and never with text in a number cell - such a line is
+            # listed as filled in, costs nothing and stays out of the common scope
             amount = b.amount or ((b.quantity or 0.0) * rate if rate else 0.0)
-            cost = amount
-            if amount or b.quantity:
-                status = "filled_blank"
-                out.filled_blank.append(
-                    LineDiff(
-                        sheet=t.sheet,
-                        key=t.key,
-                        item_no=t.item_no,
-                        description=t.description,
-                        template_qty=t.quantity,
-                        bid_qty=b.quantity,
-                        row=b.row,
-                        amount=amount,
-                    )
+            if _rate_text_blocks(b):
+                cost, status, amount = 0.0, "non_numeric", b.amount or 0.0
+            elif amount:
+                cost, status = amount, "filled_blank"
+            else:
+                cost, status = 0.0, "unpriced"
+            if status != "filled_blank":
+                out.unpriced_positions.append(t)
+            out.filled_blank.append(
+                LineDiff(
+                    sheet=t.sheet,
+                    key=t.key,
+                    item_no=t.item_no,
+                    description=t.description,
+                    template_qty=t.quantity,
+                    bid_qty=b.quantity,
+                    row=b.row,
+                    amount=amount,
+                    priced=status == "filled_blank",
                 )
-            elif text_cols & {*_RATE_KEYS, "amount", "qty"}:
+            )
+        else:
+            cost = 0.0
+            if text_cols & {*_RATE_KEYS, "amount", "qty"}:
                 status = "non_numeric"
                 out.unfilled_positions.append(t)
             else:
@@ -2948,6 +2966,22 @@ def _list_findings(out: BidComparison) -> None:
             )
         )
     for d in out.filled_blank:
+        if not d.priced:
+            out.findings.append(
+                _finding(
+                    "BOQ.FILLED_BLANK",
+                    "info",
+                    f"{d.sheet}, სტრიქონი {d.row}{_item(d)}: შაბლონში მოცულობა ცარიელია, შეავსო "
+                    f"{_qty(d.bid_qty)}, მაგრამ ფასი არ მიუთითა ({d.description[:50]}); "
+                    "შეფასებაში არ შედის",
+                    f"{d.sheet} row {d.row}{_item(d)}: the template leaves the quantity blank, "
+                    f"the bidder filled in {_qty(d.bid_qty)} but stated no price that can be "
+                    f"read ({d.description[:50]}); not priced, left out of the evaluation",
+                    expected=_qty(d.template_qty),
+                    actual=_qty(d.bid_qty),
+                )
+            )
+            continue
         out.findings.append(
             _finding(
                 "BOQ.FILLED_BLANK",
