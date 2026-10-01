@@ -1072,14 +1072,15 @@ real number needs labelled paraphrases and substitutions, which this corpus does
 
 ## BOQ comparison
 
-Measured 2026-09-30, after the second red-team round on the BOQ reader:
+Measured 2026-10-01, after the third red-team round on the BOQ reader (`unit_filled` now
+scored, hence the higher counts):
 
 | harness | result |
 |---|---|
-| `scripts/evaluate_boq.py`, client set | 102/102 checks |
-| `scripts/evaluate_boq.py`, test set 2 | 102/102 checks |
-| `scripts/evaluate_boq.py`, test set 3 | 127/127 checks |
-| `scripts/mutate_boq.py --seed 3 --per-class 3` | 51 mutants, 17 classes, 100% pass, 0 false positives, 0 control false positives |
+| `scripts/evaluate_boq.py`, client set | 106/106 checks |
+| `scripts/evaluate_boq.py`, test set 2 | 106/106 checks |
+| `scripts/evaluate_boq.py`, test set 3 | 132/132 checks |
+| `scripts/mutate_boq.py --seed 19 --per-class 3` | 50 valid mutants (one `swap` set aside by the harness as invalid), 17 classes, 100% pass, 0 false positives, 0 control false positives |
 
 The red team's round-2 probes were each workbooks laid out otherwise than the client's
 template: a group header over rate and amount sub-columns, a quantity split per building, a
@@ -1167,6 +1168,65 @@ Policy questions round 2 left open, with the recommended answer:
   `BOQ.RECONCILE` errors. Recommended: where a sheet has several top-level sum rows (none summed
   by a later row) and no single closing total, the sheet's total is their sum, and a Summary row
   that adds several sheet rows is held against their sum.
+
+### Red team, round 3 (BOQ-R3-01 to BOQ-R3-12)
+
+The same harnesses after the fixes: `evaluate_boq.py` 106/106, 106/106 and 132/132 - four, four
+and five checks more than before, because `unit_filled` is now scored against the gold (the
+gold writer always recorded it; the module had no such list). `mutate_boq.py --seed 19
+--per-class 3`: 50 valid mutants, 17 classes, 100% pass, 0 false positives, 0 control false
+positives - the same table as before the fixes (one `swap` mutant set aside as invalid by the
+harness itself, before and after). On the gold sets the only change in any output is the new
+`BOQ.UNIT_FILLED` note on the bidders who wrote "Item" against the preliminaries' position 6.2,
+whose unit the template leaves blank: no column map, helper or unreadable sheet, total or colour
+moved. Each defect is a synthetic test in `tests/unit/test_boq_reader_round3.py`; the rules are
+in GOLD_SPEC 5.
+
+* **Cost components come from one list.** A machinery group (მანქანა-მექანიზმები, Plant,
+  Equipment) over Rate | Amount had its Rate bound as the unit rate: every line priced at the
+  machines' share alone, the colours flipped. Machinery is now a component beside materials,
+  labour and delivery, and every component key list is built from one tuple - a component named
+  in one list and not another was the defect. A label the reader does not know over Rate |
+  Amount beside a known component group is a component too, and never binds the rate or the
+  amount. A price column holding numbers that the reader did not recognise
+  (`BOQ.COLUMNS_NOT_READ`, info) stops the rate being held against the components it did read
+  - which was "total rate does not match" on every faithful line - and a line without a rate is
+  then priced at its amount over its quantity.
+* **A header pushed down by a bid-form block.** The 14-row window bounded both where the header
+  starts and how far it runs, so eight rows of bidder details cut it at its second row: the
+  prices were not read and the bidder was told every position was left unpriced. The window
+  (40 rows, as the gold writer's) now bounds only the start; the block and its column-number
+  row are followed where they fall, on the Summary too, whose TOTAL column is looked for in its
+  header's own rows only. Positions on a sheet whose prices are not read are `prices_not_read`,
+  never unpriced.
+* **Number text reads one way or not at all.** "1450.00." was read as 145,000 by stripping every
+  separator; a strict number grammar now decides, and anything else stays text
+  (`BOQ.NON_NUMERIC`). The grammar is in `boq._num`, not in the shared `parse_number`, so the
+  other modules are unchanged.
+* Units: plurals and full names (metres, kgs, nos, ltrs, kms, square/cubic/running metre, ცალ.,
+  ტონ., მ.გრძ.) fold with their measure. The Summary: "Total VAT" is the VAT row and
+  "VAT-inclusive total" the total incl. VAT. The line amount headed "Cost", "Sum", "თანხა",
+  "სულ ღირებულება" is read, and a sheet whose amount is not says so (`BOQ.AMOUNTS_NOT_READ`).
+  Money is rounded to the cent half up in one place (`boq.cents`), so bidders tied to the cent
+  share a colour in the module, the merged workbook and the API alike. A unit written where the
+  template left none is listed (`unit_filled`, `BOQ.UNIT_FILLED`), never a unit change.
+
+Policy questions round 3 left open, with the recommended answer:
+
+* **A bid priced in another currency (BOQ-R3-03).** Since R2-10 a rate or amount column is read
+  whatever currency it names, so a bid headed "Rate in GEL" against a template in USD is ranked
+  as if in dollars, silently. Recommended: keep the currency each rate and amount header names
+  (the part the label reader strips), folded to one code (ლარი/GEL/₾ -> GEL; აშშ დოლარი/USD/$
+  -> USD; ევრო/EUR/€ -> EUR), a header naming none taking the template's. A bid whose currency
+  differs from the template's is `BOQ.CURRENCY` (warning, naming both) and is left out of the
+  colours unless a rate for the day is supplied through the existing `fx` rate provider.
+* **TOTAL COST by its usual names (BOQ-R3-12).** "Total construction cost" and "Total direct
+  cost" are not read as TOTAL COST today, by the letter of GOLD_SPEC 5, and the bid is loudly
+  unranked. Recommended: TOTAL COST goes by its usual names as overheads and profit do - "total"
+  then at most one qualifier among construction / direct / works / civil works / project, then
+  "cost(s)", word-bounded so "Indirect costs" (an overheads name) never plays it, plus
+  "პირდაპირი ხარჯები სულ" and "სამშენებლო სამუშაოების ღირებულება" - with the role order kept
+  (the last such row before the chain goes on).
 
 ## Known gaps
 

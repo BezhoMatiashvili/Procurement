@@ -331,6 +331,13 @@ def evaluate(gold: dict, details: int) -> dict:
             ],
             prod_uc,
         )
+        uf_prod = getattr(c, "unit_filled", None)
+        sc.sets(
+            n,
+            "unit_filled",
+            [(x["sheet"], x["item"], fold(x["bid_unit"])) for x in g.get("unit_filled", [])],
+            None if uf_prod is None else [(ln.sheet, item_of(ln), fold(ln.unit)) for ln in uf_prod],
+        )
         sc.sets(
             n,
             "added",
