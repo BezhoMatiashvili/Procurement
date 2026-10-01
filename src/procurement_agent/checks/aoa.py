@@ -322,10 +322,14 @@ _ACT_DATE_LABEL = r"(?:გაფორმების|შედგენის|�
 #: word: "აქტი შედგება ორი გვერდისგან" is what it consists of. One alternation for every reader
 #: of the act's date (``_ACT_SIGNED``, ``_ACT_DATED_BEFORE``), red team R4 (AOA-R4-07). Only with
 #: a date in the same sentence (``AoaChecker._act_date``): "აქტი შედგენილია ორ ეგზემპლარად" dates
-#: nothing.
+#: nothing. An act in English says it the same way: "This Act was signed on 30 June 2026", "the
+#: Certificate is executed on ..." (red team R5, AOA-R5-11); "The Agreement was signed on ..."
+#: is the contract's, and "This Act is made in two copies" dates nothing.
 _ACT_VERB = (
     r"(?<![ა-ჰ])(?:აქტი[\s„“”\"']*(?:გაფორმდა|გაფორმებულია|შედგა|შედგენილია|ხელმოწერილია)"
-    r"|აქტს?[\s„“”\"']*ხელი\s+მოეწერა)(?![ა-ჰ])"
+    r"|აქტს?[\s„“”\"']*ხელი\s+მოეწერა"
+    r"|(?i:(?<![a-z])(?:act|certificate)\s+(?:was|is|has\s+been)\s+(?:signed|executed|drawn\s+up)"
+    r"(?:\s+(?:by\s+the\s+parties\s+)?on)?(?![a-z])))(?![ა-ჰ])"
 )
 #: Where a date may follow the words that date the act, further off than their sentence: the
 #: signing and the labels, never the verbs of drawing up.
@@ -1794,6 +1798,10 @@ class AoaChecker:
             )
             return
         if act is None:
+            # an act not in Georgian: its date's words were not read, nothing is missing from
+            # it (GOLD_SPEC 3, red team R5: AOA-R5-11)
+            if self._unread("AOA.ACT_DATE", "აქტის თარიღი", "the act's date"):
+                return
             self._add(
                 "AOA.ACT_DATE",
                 "warning",
