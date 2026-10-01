@@ -18,9 +18,11 @@ import pytest
 
 from procurement_agent.checks.boq import (
     BidComparison,
+    BoqLine,
     BoqWorkbook,
     _label_key,
     _plays,
+    _position_groups,
     compare_all,
     read_boq,
     template_findings,
@@ -215,7 +217,8 @@ def test_a_wrong_total_with_vat_after_an_unnamed_tax_row_is_still_reported(
 # --- R5-01, R5-06, R5-07: a blank line filled in without a price, a quantity typed as text ---
 
 #: (item, description, unit, quantity, rate, amount) - a cell left None stays empty; a number
-#: amount is written as the row's own product with that cached value, text as it is typed
+#: amount is written as the row's own product with that cached value, text as it is typed; a
+#: line with no unit is a heading, its description alone written
 _Line = tuple[str, str, str, object, object, object]
 
 
@@ -223,6 +226,9 @@ def _cells(lines: tuple[_Line, ...], *, template: bool = False) -> tuple[Cells, 
     cells: Cells = {(1, c): h for c, h in enumerate(_HEAD, 1)}
     total = 0.0
     for r, (item, desc, unit, qty, rate, amount) in enumerate(lines, 2):
+        if not unit:
+            cells.update({(r, 2): desc, **({(r, 1): item} if item else {})})
+            continue
         cells.update({(r, 1): item, (r, 2): desc, (r, 3): unit})
         for c, value in ((4, qty), (5, rate)):
             if value is not None:
@@ -390,3 +396,70 @@ def test_a_template_quantity_typed_as_a_number_in_text_is_evaluated(tmp_path: Pa
     assert _status(a, "1.2") == ("priced", 3750.0, True)
     assert _status(b, "1.2") == ("priced", 3500.0, True)
     assert "BOQ.NON_NUMERIC" not in [f.rule_id for f in template_findings(t)]
+
+
+# --- R5-02: a heading between ends a section group ---------------------------------------------
+
+
+def _line(row: int, item: str, desc: str, kind: str = "position") -> BoqLine:
+    return BoqLine(_SHEET, row, item, desc, "m3" if kind == "position" else None, 1.0, kind=kind)
+
+
+@pytest.mark.parametrize("heading_item", ["", "2", "B"])
+def test_a_heading_numbered_otherwise_ends_the_section_group(heading_item: str) -> None:
+    lines = [
+        _line(3, "A1", "Mobilisation"),
+        _line(4, "A2", "Insurance"),
+        _line(5, heading_item, "2. EARTHWORKS", "heading"),
+        _line(6, "2.1", "Excavation"),
+        _line(7, "2.2", "Backfilling"),
+    ]
+    groups = _position_groups(lines)
+    assert groups[4] == "A2"
+    assert (groups[6], groups[7]) == ("r6", "r7")
+
+
+def test_a_heading_numbered_under_the_section_keeps_the_group() -> None:
+    # near miss: the section's own inner heading ("9.1") and its items stay one group
+    lines = [
+        _line(3, "A9", "Temporary works"),
+        _line(4, "9.1", "Hoarding", "heading"),
+        _line(5, "9.1.1", "Hoarding panels"),
+        _line(6, "9.2", "Site office"),
+    ]
+    groups = _position_groups(lines)
+    assert [groups[r] for r in (3, 5, 6)] == ["A9", "A9", "A9"]
+
+
+def test_an_item_unpriced_under_its_own_heading_is_listed_and_out_of_the_common_scope(
+    tmp_path: Path,
+) -> None:
+    head = (
+        ("A1", "Mobilisation", "LS", 1.0),
+        ("A2", "Insurance", "LS", 1.0),
+    )
+    earth = (("2.1", "Excavation", "m3", 300.0), ("2.2", "Backfilling", "m3", 180.0))
+    last = ("2.3", "Disposal of surplus", "m3", 120.0)
+
+    def lines(rates: tuple[float, ...], unpriced_last: bool) -> tuple[_Line, ...]:
+        out: list[_Line] = []
+        for (item, desc, unit, qty), rate in zip((*head, *earth), rates, strict=True):
+            out.append((item, desc, unit, qty, rate, qty * rate))
+        out.insert(2, ("", "2. EARTHWORKS", "", None, None, None))
+        tail = (None, None) if unpriced_last else (15.0, last[3] * 15.0)
+        out.append((*last, *tail))
+        return tuple(out)
+
+    template = tuple((*x[:4], None, None) for x in lines((1, 1, 1, 1), True))
+    _, (x, y) = _evaluate(
+        tmp_path,
+        template,
+        {"X": lines((3500, 1200, 12.6, 9.975), True), "Y": lines((3500, 1200, 12.0, 9.5), False)},
+    )
+    assert [t.item_no for t in x.unpriced_positions] == ["2.3"]
+    assert not x.complete
+    assert _status(x, "2.3") == ("unpriced", 0.0, False)
+    assert x.common_scope_positions == 4
+    assert x.common_scope_cost == pytest.approx(3500 + 1200 + 300 * 12.6 + 180 * 9.975)
+    assert y.common_scope_cost == pytest.approx(3500 + 1200 + 300 * 12.0 + 180 * 9.5)
+    assert (x.colour, y.colour) == ("red", "green")

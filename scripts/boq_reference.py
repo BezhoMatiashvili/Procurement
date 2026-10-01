@@ -750,13 +750,18 @@ def expand_subtotal(ws_f, ws_v, col: int, formula: str, row: int, depth: int = 0
 
 def section_groups(sheet: Sheet) -> dict[int, str]:
     """GOLD_SPEC 5, section groups: a section row that is itself a position ("A8") and the
-    positions numbered under it ("8.1", "8.2") are one group; any other position is its own."""
+    positions numbered under it ("8.1", "8.2") are one group; any other position is its own.
+    Round 5: a row that is no position ends the group unless its own item number is numbered
+    under the section ("9.1" inside "A9") - a heading with no number, or numbered otherwise
+    ("2", "A11"), starts items that are not the section's."""
     groups: dict[int, str] = {}
     section: tuple[str, str] | None = None
     for r in sheet.rows:
-        if r.kind != "position":
-            continue
         item = (r.item or "").strip()
+        if r.kind != "position":
+            if section is not None and not item.startswith(section[1] + "."):
+                section = None
+            continue
         m = re.fullmatch(r"[A-Z](\d+)", item)
         if m:
             section = (item, m.group(1))

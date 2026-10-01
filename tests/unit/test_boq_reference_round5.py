@@ -134,3 +134,48 @@ def test_a_template_quantity_typed_as_text_is_evaluated_for_no_bidder(tmp_path: 
         assert g["position_costs"]["1. WORKS|4"] == 0.0
         assert not g["filled_blank"] and not g["unpriced_positions"]
     assert [x["item"] for x in gold["common_scope"]] == ["1.1"]
+
+
+def _sheet_of(rows: list[tuple[int, str, str]]) -> object:
+    """A reference sheet of (row, item, kind) rows."""
+    return ref.Sheet(
+        name="1. WORKS",
+        cols={},
+        header_row=1,
+        number_row=2,
+        subtotal_row=None,
+        subtotal_value=None,
+        subtotal_formula=None,
+        rows=[
+            ref.Row(row=r, item=item, desc="text", qty=1.0, qty_formula=None, unit="", kind=kind)
+            for r, item, kind in rows
+        ],
+    )
+
+
+@pytest.mark.parametrize("heading_item", ["", "2", "B"])
+def test_a_heading_numbered_otherwise_ends_the_section_group(heading_item: str) -> None:
+    sheet = _sheet_of(
+        [
+            (3, "A1", "position"),
+            (4, "A2", "position"),
+            (5, heading_item, "heading"),
+            (6, "2.1", "position"),
+            (7, "2.2", "position"),
+        ]
+    )
+    groups = ref.section_groups(sheet)
+    assert (groups[4], groups[6], groups[7]) == ("A2", "r6", "r7")
+
+
+def test_a_heading_numbered_under_the_section_keeps_the_group() -> None:
+    sheet = _sheet_of(
+        [
+            (3, "A9", "position"),
+            (4, "9.1", "heading"),
+            (5, "9.1.1", "position"),
+            (6, "9.2", "position"),
+        ]
+    )
+    groups = ref.section_groups(sheet)
+    assert [groups[r] for r in (3, 5, 6)] == ["A9", "A9", "A9"]

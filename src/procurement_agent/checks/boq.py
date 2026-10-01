@@ -2692,13 +2692,21 @@ def _position_groups(lines: list[BoqLine]) -> dict[int, str]:
     it ("A8" and "8.1" both carry an amount formula); bidders price one or the other. Counted
     apart, every bidder "left unpriced" whichever they did not price, and both rows fell out of
     the common scope.
+
+    A row that is no position ends the group unless its own item number is numbered under the
+    section ("9.1" inside "A9"): a heading with no number, or numbered otherwise ("2.
+    EARTHWORKS", "2", "A11"), starts items that are not the section's, whatever their numbers
+    begin with. Grouped with "A2" across such a heading, an unpriced "2.3" was hidden and the
+    colours flipped.
     """
     groups: dict[int, str] = {}
     parent: tuple[str, str] | None = None
     for line in lines:
-        if line.kind != "position":
-            continue
         item = line.item_no.strip()
+        if line.kind != "position":
+            if parent is not None and not item.startswith(parent[1] + "."):
+                parent = None
+            continue
         if m := _SECTION_POSITION.match(item):
             parent = (item, m.group(1))
             groups[line.row] = item
