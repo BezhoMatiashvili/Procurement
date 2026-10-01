@@ -492,6 +492,57 @@ error class detected except one `prose_typo` mutation (83%; one `prose_slip` cor
 too), both in the spelling reader these fixes do not touch, and 0% false positives on the
 harmless classes.
 
+### Red team, round 4: the party readers (2026-10-01)
+
+Fixed in the shared readers (`extraction/normalize.py`, `anchors.py`, the chunker), each with a
+unit test and a near miss (`tests/unit/test_r4_party_readers.py`, `test_r4_keyterms_table.py`):
+
+* **One legal-form table (AOA-R4-02, COMPARE-R4-05, EXTRACTION-R4-06).** The party reader knew
+  `შპს|სს|ააიპ|სსიპ|ი/მ` and the long forms; the contractor's kind knew `კს`, `სპს`, `შ.პ.ს.`;
+  a municipal buyer written `ა(ა)იპ` - the usual spelling - or any dotted form was no party.
+  Its name, address and signatory were then compared with nothing and nothing was said; an
+  act writing `ააიპ` for the contract's `ა(ა)იპ` was "party not found", and a renamed party was
+  only text changed in a comparison. `normalize.LEGAL_FORMS` is now the one table (long,
+  dotted, bracketed and plain spellings, each with its abbreviation); the party reader, the
+  form after a quoted name, the address's next-party stop, the comparison's wording fold and
+  `georgian.legal_form_kind` are built from it. `ა(ა)იპ` folds to `ააიპ`, the abbreviation the
+  code already used (the verifier's recommendation; the extraction probe's `ა(ა)იპ …` value is
+  therefore `ააიპ …`). A side the contract defines with fewer parties read than sides is an
+  `AOA.PARTY_NAME` skip note. `aoa._LEGAL_FORM_WORDS` gained `კს`, `სპს`.
+* **An address ends where the representative is named (COMPARE-R4-04) and where another
+  address label starts (COMPARE-R4-08).** `, წარმოდგენილი მისი დირექტორის … სახით` was part of
+  the address, so one director change was two errors. A head's title ends an address only with
+  a name after it, so a street named after an office stays whole. The comparison reads a Word
+  requisites row as one flattened line, where the line-based stops never fire: the address
+  label is the stop that holds there. A cell with no label of its own still runs on into the
+  next one - the joining is in the segmenter, outside these readers.
+* **A signatory before its title or in slashes (AOA-R4-04).** `დირექტორი ______ /X/`, `X -
+  დირექტორი` and `X (დირექტორი)` gave no signatory, so a copied or unrelated name at the
+  contractor's signature passed; only a one-letter slip was caught, as a near form of the
+  contract's name. The title reader skips a signature's blank and a slash or bracket (shared by
+  the director, deputy and attorney readers); a name before a head's nominative title is read
+  where the name opens its line or cell and the title closes it. Each layout now reports what
+  `დირექტორი: X` reports; a slip is still reported once.
+* **An attorney at the signature (AOA-R4-12, policy).** `მინდობილი პირი: …` and
+  `წარმომადგენელი (მინდობილობით) …` are the attorney's titles, read as `მინდობილობით …`
+  is. A slip of the attorney the contract names is an `AOA.DIRECTOR` error with the correction,
+  as a director's slip is; anyone else keeps the power-of-attorney warning. The lead's policy
+  asked for a skip note where the contract names no attorney: that case already had the
+  warning (pinned by `test_layout_variants`), so the warning stays and it is never silent.
+* **A key-terms table keyed by item numbers (EXTRACTION-R4-07).** Docling's triplets put a full
+  stop between a row's label cell and its value cell (`1, პირობა = X. 1, მნიშვნელობა = Y`), so
+  the five terms of the table were untyped. Such a table (three or more columns, one header
+  row, item numbers in the first column, no price/quantity/unit/sum header) is written one row
+  to a sentence, `1, პირობა = X, მნიშვნელობა = Y;`. A price table keeps the triplets: the rules
+  read its line amounts cell by cell (`rules._TABLE_CELL`), and a lump-sum line keyed by an item
+  number must stay a line, never the total.
+
+Measured after the fixes: the three strict gold sets unchanged at 100%/100%, and
+`scripts/mutate_aoa.py --seed 137 --per-class 6` detects every error class at 100% except
+`prose_typo` and `prose_slip` (83% each, one mutation each; one more `prose_slip` correction is
+off), the same cases with the same messages as on the code before these fixes - the spelling
+reader, which they do not touch - and 0% false positives on every harmless class.
+
 ### Red team, round 3: what the act check reads, and what a correction says (2026-10-01)
 
 Round 3 found figures written in forms the readers did not know, and corrections that were

@@ -125,6 +125,37 @@ How the parties and their requisites are read (red-team round 2):
   labels (`ს/კ`, `მისამართი`) labels each cell. An address ends at its cell, also where Docling
   writes a row as `<left cell>, <column header> = <right cell>`.
 
+How the parties are read (red-team round 4):
+
+* **Legal forms.** One table (`normalize.LEGAL_FORMS`) serves every reader - the party reader,
+  the comparison's wording fold, the contractor's kind. A form abbreviated with a full stop after
+  each letter (`შ.პ.ს.`, `შ. პ. ს.`, `ს.ს.`, `ა.ა.ი.პ.`, `ს.ს.ი.პ.`, `კ.ს.`, `ს.პ.ს.`) or with the
+  non-commercial entity's optional letter in brackets (`ა(ა)იპ`) is that form, and `party_name`
+  carries its abbreviation without dots or brackets: `ა(ა)იპ „ნიმუში“` is `ააიპ ნიმუში` (the
+  decision of round 4, so `ა(ა)იპ` and `ააიპ` name one party), `შ.პ.ს. „ნიმუში“` is `შპს ნიმუში`.
+  `კს` and `სპს` are forms as well. An ID label (`ს.კ.`), one letter (`ს.`) and a word ending in
+  `სს` are no form; a form with no quoted name after it names no party.
+* **Where an address ends.** Also before the party's representative: a comma and
+  `წარმოდგენილი`, `წარმომადგენელი`, `რომელსაც წარმოადგენს`, or a head's title with a name
+  after it (`, დირექტორი: …`, `, მისი დირექტორის … სახით`); and before another address label
+  (`მისამართი:`), the next column's address where a requisites row is read as one line. A
+  street named after an office (`პრეზიდენტის გამზ. N5`) has no name after the title and stays.
+* **Signatories in a signature's layouts.** A head's name is read after its title across a
+  signature's blank and in slashes or brackets (`დირექტორი ______ /ნინო ნიმუშაძე/`), and before
+  its title (`ნინო ნიმუშაძე - დირექტორი`, `ნინო ნიმუშაძე (დირექტორი)`) where the name opens its
+  line or cell and the title, in the nominative, closes it. A deputy's or a narrowed title after
+  the name (`- დირექტორის მოადგილე`, `- ფინანსური დირექტორი`) is no head's.
+* **An attorney at the signature.** `მინდობილი პირი: …`, `მინდობილი პირი …` and
+  `წარმომადგენელი (მინდობილობით) …` name the party's attorney, as `მინდობილობით მოქმედი პირი`
+  in the preamble does (decided in round 4); extraction reports it as that one is reported, a
+  `party_director` noted as signing under a power of attorney. A predicate after the title
+  (`მინდობილი პირი ვალდებულია …`) is no name.
+* **A key-terms table keyed by item numbers.** A table of three or more columns under one header
+  row whose first column holds only item numbers (`1`, `2.`, `1.1`, `ა`) and whose headers name
+  no price, quantity, unit or sum (`N | პირობა | მნიშვნელობა`) is written one row to a sentence
+  (`1, პირობა = …, მნიშვნელობა = …;`): a term's label types its value as in a two-column table.
+  A price table keeps Docling's cells (its line amounts are read cell by cell).
+
 How the rules read them (red-team round 2):
 
 * **Money.** A magnitude written as a word multiplies its figure (`48 ათას ლარს` -> `48000`,
@@ -328,7 +359,19 @@ strict_findings: true             # anything else reported (any severity) is a f
     contract names, and otherwise leaves a skip note;
   * one account whose currency sub-account the two documents name differently (`…17GEL`
     against `…17USD`) → `AOA.BANK`, a warning, text = the act's currency code, correction = the
-    contract's; the account written with a sub-account in one document only is the same account.
+    contract's; the account written with a sub-account in one document only is the same account;
+  * a party written with its legal form in another spelling in the act (`ააიპ` against the
+    contract's `ა(ა)იპ`, `შპს` against `შ.პ.ს.`) is the same party, no finding (red team R4); a
+    side the contract defines (`(შემდგომში „შემკვეთი“)`) for which it reads fewer parties than
+    sides - a party named in a form no reader knows - is an `AOA.PARTY_NAME` skip note naming
+    that side, never silence;
+  * an attorney the act names at its signature (`მინდობილი პირი: …`) is compared as one named
+    in its preamble (red team R4, policy): a slip of the attorney the contract names →
+    `AOA.DIRECTOR` error, correction = that attorney in the act's case (`ლია ნიმუშაშვილო` →
+    `ლია ნიმუშაშვილი`); any other person - the contract names another attorney, or only a
+    director - stays the power-of-attorney warning (`AOA.DIRECTOR`, no correction). The round's
+    policy asked for a skip note where the contract names no attorney; that case already had
+    this warning, which is kept (a test pins it), so it is never silent.
 * The legacy `expected_findings:` / `forbidden_findings:` (rule ids only, `"*"` = must be
   completely clean) keep working and are checked as well.
 
@@ -421,6 +464,12 @@ Red team round 3 (compare) settled these cases:
 * A version pair stays two versions however many consecutive lines were edited: a block too
   large to score pairwise is paired in order, and only lines with nothing alike are a removal
   and an addition.
+
+Red team round 4 (the party readers, section 2): a party renamed behind any legal form
+(`ა(ა)იპ`, `შ.პ.ს.`, `კს`, `სპს`) is `CMP.PARTY` "Party name", its value carrying the folded
+abbreviation (`ააიპ …`, `შპს …`); the form restyled alone (`შპს` -> `შ.პ.ს.`) is formatting. A
+director changed after an address (`…, წარმოდგენილი მისი დირექტორის … სახით`) is one "Director /
+signatory" change, and an address changed in its requisites cell is one "Legal address" change.
 
 ## 5. BOQ gold (per set, JSON) and the evaluation policy
 
