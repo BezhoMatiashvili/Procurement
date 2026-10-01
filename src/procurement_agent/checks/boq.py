@@ -131,9 +131,33 @@ _HEADER_SYNONYMS: dict[str, tuple[str, ...]] = {
         "სულ თანხა",
         "სულ ღირებულება",
         "ჯამური ღირებულება",
+        "საერთო ღირებულება",
+        # the line's total price, never the unit price: "ჯამური ფასი", "საერთო ფასი"
+        "ჯამური ფასი",
+        "საერთო ფასი",
+        "სულ ფასი",
     ),
 }
 _LABEL_TO_KEY = {label: key for key, labels in _HEADER_SYNONYMS.items() for label in labels}
+#: A description column by rule rather than one phrase at a time: "Description", "Item
+#: description", "Description of work(s) / goods / items / services", "Name of works",
+#: "სამუშაოს / საქონლის დასახელება". A bare "Name" is not one: a bid form above the bill writes
+#: "Name" and "Name of bidder", and read as the description it would start a header there.
+_DESC_LABEL = re.compile(
+    r"^(?:(?:item|work|works|goods)\s+)?descriptions?"
+    r"(?:\s+of\s+(?:the\s+)?(?:works?|goods|items?|services?|supplies|materials))?$|"
+    r"^names?\s+of\s+(?:the\s+)?(?:works?|goods|items?|services?|supplies|materials)$|"
+    r"^(?:სამუშაო(?:ებ)?ის|საქონლის|მომსახურების|მასალის)\s+(?:დასახელება|აღწერა)$"
+)
+#: A quantity column by rule: "Quantity", "Quantity of work(s)", the Georgian abbreviations
+#: "რაოდ." and "რ-ბა" (the dot is folded off with the label's end punctuation).
+_QTY_LABEL = re.compile(r"^(?:quantity|qty)(?:\s+of\s+(?:the\s+)?works?)?$|^რაოდ$|^რ-ბა$")
+#: A bare "Price" / "ფასი": the unit price where a line amount is read after it, the line's
+#: price where none is - bound by where it stands (``_map_headers``), never by its label alone.
+_PRICE_LABELS = frozenset({"price", "prices", "ფასი"})
+#: What one cell may name a column by twice: English and Georgian side by side ("Description /
+#: აღწერა", "Unit\nერთეული", "Amount | ღირებულება") or a label and its currency ("Rate - USD").
+_LABEL_PARTS = re.compile(r"\s*(?:/|\||\n|\s-\s)\s*")
 #: The parts a unit rate is built of, each with its rate ("rate_<part>") and its sum ("sum_<part>")
 #: column. Every list of component keys below is made from this one: a part listed by hand in
 #: one place and not another was how a machinery column priced a whole line.
@@ -645,6 +669,9 @@ class BoqWorkbook:
     summary_sheet: str | None = None
     #: the Summary column its rows' values are read from (the TOTAL column)
     summary_total_col: int | None = None
+    #: the Summary's header - its description or its TOTAL column - was not recognised, so no
+    #: row of it was read (said so by ``BOQ.NOT_RANKED``, never "no row states ...")
+    summary_header_unread: bool = False
     #: sheets that look priced (the Summary links to them, a SUB-TOTAL row, half a BOQ header)
     #: but whose columns could not be recognised - never skipped silently
     unreadable_sheets: list[str] = field(default_factory=list)
@@ -676,12 +703,42 @@ _UNIT_LABEL = re.compile(
 _MONEY_WORD = re.compile(r"ფას|ღირ|თანხ|rate|price|cost|amount|sum|total")
 
 
-def _label_key(value: object) -> str | None:
+def _one_label_key(value: object, *, price: bool) -> str | None:
     label = _norm_label(value)
     key = _LABEL_TO_KEY.get(label)
-    if key is None and _UNIT_LABEL.match(label) and not _MONEY_WORD.search(label):
+    if key is not None:
+        return key
+    if _DESC_LABEL.match(label):
+        return "desc"
+    if _QTY_LABEL.match(label):
+        return "qty"
+    if _UNIT_LABEL.match(label) and not _MONEY_WORD.search(label):
         return "unit"
-    return key
+    if price and label in _PRICE_LABELS:
+        return "price"
+    return None
+
+
+def _label_key(value: object, *, price: bool = False) -> str | None:
+    """The column a header label names, or None.
+
+    The whole label first ("ზ/ე" is the unit); then, where the cell names its column twice -
+    in English and Georgian side by side ("Description / აღწერა", "Unit\\nერთეული"), or a label
+    and its currency ("Unit rate - USD") - each part, and the key every part that has one
+    agrees on. Parts naming two columns ("Description / Unit") name none: a bilingual header
+    once made the template sheet unreadable and nothing was evaluated.
+
+    ``price``: a bare "Price" / "ფასი" reads as "price", which only ``_map_headers`` binds, by
+    where it stands; every other caller sees no key for it.
+    """
+    key = _one_label_key(value, price=price)
+    if key is not None or not isinstance(value, str):
+        return key
+    parts = [p for p in _LABEL_PARTS.split(value) if p.strip()]
+    if len(parts) < 2:
+        return None
+    keys = {k for p in parts if (k := _one_label_key(p, price=price))}
+    return keys.pop() if len(keys) == 1 else None
 
 
 def _row_values(ws: object, row: int) -> list[object]:
@@ -873,7 +930,7 @@ def _map_headers(ws: object) -> tuple[dict[str, int], int]:
         found = [
             (c, key)
             for c in range(1, _HEADER_SCAN_COLS + 1)
-            if (key := _label_key(ws.cell(r, c).value))  # type: ignore[attr-defined]
+            if (key := _label_key(ws.cell(r, c).value, price=True))  # type: ignore[attr-defined]
         ]
         keys = {key for _, key in found}
         if len(keys) >= 2 and keys & {"desc", "qty"}:
@@ -892,7 +949,7 @@ def _map_headers(ws: object) -> tuple[dict[str, int], int]:
             for sub_col in _unknown_component_columns(ws, r, below):
                 consumed.add((below, sub_col))
         for c in range(1, _HEADER_SCAN_COLS + 1):
-            key = _label_key(ws.cell(r, c).value)  # type: ignore[attr-defined]
+            key = _label_key(ws.cell(r, c).value, price=True)  # type: ignore[attr-defined]
             if not key or (r, c) in consumed:
                 continue
             subs = _group(ws, r, c, key, below) if below is not None else None
@@ -912,7 +969,25 @@ def _map_headers(ws: object) -> tuple[dict[str, int], int]:
         if key not in out and c not in taken:
             out[key] = c
             taken.add(c)
+    _bind_price(out)
     return out, max(block[-1], _column_number_row(ws, block[-1]))
+
+
+def _bind_price(cols: dict[str, int]) -> None:
+    """A bare "Price" / "ფასი" column by where it stands, after the quantity: the unit rate when
+    a line amount is read after it and no rate is ("Qty | Price | Amount"), the line amount when
+    none is ("Unit rate | Price", "Qty | Price"). Anywhere else it takes no key, and holding
+    numbers inside the price block it is named (``BOQ.COLUMNS_NOT_READ``). Left unread before
+    the amount, every line was priced at amount / quantity and an amount slip went unreported.
+    """
+    column = cols.pop("price", None)
+    if column is None or column <= cols.get("qty", 0):
+        return
+    amount = cols.get("amount")
+    if amount is not None and amount > column and "rate_total" not in cols:
+        cols["rate_total"] = column
+    elif amount is None:
+        cols["amount"] = column
 
 
 def _column_number_row(ws: object, after: int) -> int:
@@ -1426,25 +1501,24 @@ def _summary_columns(ws: object) -> tuple[int | None, int | None, int | None, in
     its "TOTAL" sub-label, and the group label "AMOUNT EXCL. VAT" over the materials column was
     read as the total - every chain row empty, and the bid unranked.
     """
-    cells = [
-        (cell.row, cell.column, _norm_label(cell.value))
+    raw = [
+        (cell.row, cell.column, cell.value)
         for row in ws.iter_rows(  # type: ignore[attr-defined]
             min_row=1, max_row=_HEADER_SCAN_ROWS + _HEADER_BLOCK_ROWS, max_col=_HEADER_SCAN_COLS
         )
         for cell in row
         if cell.value not in (None, "")
     ]
+    cells = [(r, c, _norm_label(v)) for r, c, v in raw]
+    totals = {(r, c) for r, c, v in raw if _summary_total_label(v)}
 
     def header_score(r: int, c: int) -> int:
         """How much a description label at (r, c) looks like the Summary's header row."""
         has_item = any(row == r and label in _SUMMARY_ITEM_LABELS for row, _, label in cells)
-        has_total = any(
-            r <= row <= r + 1 and col > c and label.startswith(_SUMMARY_TOTAL_LABELS)
-            for row, col, label in cells
-        )
+        has_total = any(r <= row <= r + 1 and col > c for row, col in totals)
         return 2 * has_item + has_total
 
-    descs = [(r, c) for r, c, label in cells if label in _SUMMARY_DESC_LABELS]
+    descs = [(r, c) for r, c, v in raw if _summary_desc_label(v)]
     desc = max(descs, key=lambda d: header_score(*d), default=None)  # the first of the best
     near = range(desc[0] - 1, desc[0] + 3) if desc else range(1, _HEADER_SCAN_ROWS + 1)
     item = next(
@@ -1463,8 +1537,8 @@ def _summary_columns(ws: object) -> tuple[int | None, int | None, int | None, in
         total = next(
             (
                 (r, c)
-                for r, c, label in cells
-                if desc[0] <= r <= desc[0] + 1 and label.startswith(_SUMMARY_TOTAL_LABELS)
+                for r, c, _ in cells
+                if desc[0] <= r <= desc[0] + 1 and c not in content and (r, c) in totals
             ),
             None,
         )
@@ -1478,12 +1552,29 @@ def _summary_columns(ws: object) -> tuple[int | None, int | None, int | None, in
 
 
 #: The Summary's own column headers: "Item | Description | TOTAL", or "No | Section | Amount,
-#: USD excl. VAT" - a label that starts with the word is the column.
+#: USD excl. VAT" - a label that starts with one of these words is the column. "sum" is never
+#: a prefix ("Summary notes"): a "Sum" column is read by the bill's names for the amount.
 _SUMMARY_TOTAL_LABELS = ("total", "amount", "ღირებულება", "ჯამი", "სულ", "თანხა")
 _SUMMARY_ITEM_LABELS = frozenset({"item", "no", "№", "#", "n"})
-_SUMMARY_DESC_LABELS = frozenset(
-    {"description", "section", "sections", "name", "აღწერა", "დასახელება", "განყოფილება"}
-)
+#: What only a Summary calls its description column, beside the bill's own names for it.
+_SUMMARY_DESC_LABELS = frozenset({"section", "sections", "name", "განყოფილება"})
+
+
+def _summary_desc_label(value: object) -> bool:
+    """The Summary's description column: the bill's names for it ("Description of works",
+    "სამუშაოს დასახელება", "Description / აღწერა") or a Summary's own ("Section")."""
+    return _label_key(value) == "desc" or _norm_label(value) in _SUMMARY_DESC_LABELS
+
+
+def _summary_total_label(value: object) -> bool:
+    """The Summary's TOTAL column: a label opening with a total's word ("TOTAL", "Amount, USD
+    excl. VAT", "ღირებულება"), or one the bill reads as the line amount ("Cost (GEL)", "Sum",
+    "ჯამური ფასი") - and with no unit rate on a Summary, a bare "Price" / "ფასი" too. A
+    separate, shorter list here once left a Summary headed "Price" unread and every bidder
+    unranked."""
+    if _label_key(value, price=True) in ("amount", "price"):
+        return True
+    return _norm_label(value).startswith(_SUMMARY_TOTAL_LABELS)
 
 
 def _read_summary_rows(book: BoqWorkbook, ws: object, wf: object) -> list[SummaryRow]:
@@ -1497,6 +1588,7 @@ def _read_summary_rows(book: BoqWorkbook, ws: object, wf: object) -> list[Summar
     book.summary_total_col = total_col
     out: list[SummaryRow] = []
     if total_col is None or desc_col is None:
+        book.summary_header_unread = True
         return out
     max_col = min(ws.max_column, _HEADER_SCAN_COLS)  # type: ignore[attr-defined]
     for r in range(header_row + 1, ws.max_row + 1):  # type: ignore[attr-defined]
@@ -2124,6 +2216,22 @@ def _not_ranked(out: BidComparison, bid: BoqWorkbook) -> Finding:
     states no number in the column read as the Summary's total, say that instead: "no row
     states the total incl. VAT" over a row that does sent the reader looking for the wrong
     thing."""
+    if bid.summary_header_unread:
+        # no row was read at all: the header is what was not recognised, not a row missing
+        sheet = bid.summary_sheet or "Summary"
+        return _finding(
+            "BOQ.NOT_RANKED",
+            "warning",
+            f"{out.bidder}: {sheet} გვერდის სათაური ვერ ამოვიცანით (აღწერის ან ჯამის - TOTAL - "
+            f"სვეტი, პირველ {_HEADER_SCAN_ROWS + _HEADER_BLOCK_ROWS} სტრიქონში) — მისი "
+            "სტრიქონები არ წაკითხულა, ფასნამატი ვერ გამოითვალა და კომპანია რანჟირებაში არ "
+            "მონაწილეობს",
+            f"{out.bidder}: the header of sheet {sheet} (its description or TOTAL column, in "
+            f"its first {_HEADER_SCAN_ROWS + _HEADER_BLOCK_ROWS} rows) was not recognised - "
+            "none of its rows were read, the bidder's markup could not be worked out, so the "
+            "bid is not ranked",
+            expected=sheet,
+        )
     if out.stated_incl_vat is None:
         role, ka, en = "incl", "ჯამი დღგ-ს ჩათვლით", "the total incl. VAT"
     else:
