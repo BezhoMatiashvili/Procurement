@@ -250,7 +250,11 @@ strict_findings: true             # anything else reported (any severity) is a f
   comments whose anchored text contains `text`. A place is where `text` stands as whole words:
   `ივნის` is not a place inside `ივნისიდან`, nor a name's nominative inside its genitive. A name
   copied from another party (the customer's director written for the contractor) is marked only
-  in the places of the party it is wrong for; where it stands in its own party's block it is right.
+  in the places of the party it is wrong for; where it stands in its own party's block it is right,
+  and a form of it that stands only there is no finding (red team R4). A finding about the act's
+  own date (`AOA.ACT_DATE`, `AOA.ACT_DATE_IN_TERM`) marks the act's own date only - where the act
+  is dated, or the date alone in its heading - never another correct copy of the same date, the
+  recital's contract date or the period's end (red team R4, AOA-R4-06).
 * An amount's correction (red team R2) is the fee as the act writes it, whole: its words in
   brackets wherever they stand (`100 ლარს (ასი)`, `GEL 100 (ასი)`, `100 ₾ (ასი)`), tetri written
   after the lari rewritten from the price (`100 ლარი და 50 თეთრი` against a price of 100 is
@@ -260,7 +264,18 @@ strict_findings: true             # anything else reported (any severity) is a f
   offers the act's own words as its correction. Tetri written after a hyphen (`3 450-00`, red
   team R3) are the figure's fraction, quoted and corrected in that style (`3 540-00 (…) ლარს` ->
   `3 450-00 (…) ლარს`); two digits after a hyphen that are more than the figure before them
-  (`10-15 ლარი`) are a range, never tetri.
+  (`10-15 ლარი`) are a range, never tetri. A fee in another currency than the contract's price
+  (red team R4) is corrected to that price in the act's wording with the contract's currency put
+  in, in the case the act writes its own (`1 200 (ათას ორასი) ლარს` against a dollar price ->
+  `1 200 (ათას ორასი) აშშ დოლარს`; a code stays a code, a sign a sign), never the machine form
+  `1,200.00 USD` unless the act's currency cannot be rewritten.
+* A running figure of the contract the act states beside its fee (red team R4) is no fee: work
+  done to date (`დღემდე შესრულებული … ღირებულება`), the contract's balance (`ხელშეკრულების
+  დარჩენილი ღირებულება`, `ხელშეკრულების ნაშთი`) and what was paid before (`წინა აქტებით
+  ანაზღაურებულია`, `უკვე გადახდილი`, `სულ ანაზღაურებულია`), named so by the words before the
+  figure in its clause. It is not compared, and `AOA.FEE` leaves a skip note naming it. A total
+  word alone (`სულ`, `ჯამი`), the contract's total and the fee's remainder after an advance are
+  not running figures.
 * Which rule owns which mistake:
   * wrong digits and/or words of the fee → `AOA.FEE` (+ `AOA.AMOUNT_WORDS` when digits and words
     disagree); words misspelled (`ასოი`) → `AOA.AMOUNT_WORDS`, an error, with the correct words
@@ -296,7 +311,10 @@ strict_findings: true             # anything else reported (any severity) is a f
     are wrong, one end's year when only that end's is); when no single year puts the period
     inside the term, the correction is the term itself, written over the whole period in the
     act's date style (`2026 წლის 1 მარტიდან 2026 წლის 1 სექტემბრის`, `01.03.2026-დან
-    01.09.2026`), never ISO unless the act wrote ISO; `AOA.ACT_DATE` only when the act's own
+    01.09.2026`), never ISO unless the act wrote ISO - an end written with no year takes the
+    year as the other end writes it (`25.05-30.06.2026` -> `01.06.2026-31.05.2027`, `25
+    მაისიდან 30 ივნისის ჩათვლით, 2026 წ.` -> `1 ივნისიდან, 2026 წ. 31 მაისის ჩათვლით, 2027
+    წ.`, red team R4); `AOA.ACT_DATE` only when the act's own
     date is the odd one out. The act's date is read after its signing verb with a one-letter
     slip too (`„აქტი“ გაორმდა …`): the slip is `AOA.SPELLING`'s, the date still the act's;
   * a signatory with the first name as an initial (`ო. ფუტკარაძე`) is the contract's director
@@ -326,6 +344,11 @@ strict_findings: true             # anything else reported (any severity) is a f
     a party the act does not name in a readable form (no quotes) is a skip note, never
     corrected to the neighbour's; a deputy or an acting head is compared only with a deputy the
     contract names, and otherwise leaves a skip note;
+  * an attorney (`მინდობილობით მოქმედი პირი`, `მინდობილი პირი` at the signature) the contract
+    names, written with a slip, is an `AOA.DIRECTOR` error corrected to the contract's attorney
+    in the act's case; an attorney the contract does not name is an `AOA.DIRECTOR` warning with
+    no correction (the power of attorney is to be checked); an attorney's signature line whose
+    name no party is read with is a skip note, never silence (red team R4, AOA-R4-12);
   * one account whose currency sub-account the two documents name differently (`…17GEL`
     against `…17USD`) → `AOA.BANK`, a warning, text = the act's currency code, correction = the
     contract's; the account written with a sub-account in one document only is the same account.
