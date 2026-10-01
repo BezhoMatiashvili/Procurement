@@ -22,9 +22,11 @@ from procurement_agent.checks.boq import (
     BoqWorkbook,
     _label_key,
     _line_kind,
+    _plays,
     _summary_columns,
     compare_all,
     read_boq,
+    reconcile_summary,
     template_findings,
 )
 from tests.unit.test_boq_reader_variants import Cells, Fx, _rules, _save
@@ -484,3 +486,145 @@ def test_a_note_beside_an_empty_description_is_still_no_line(tmp_path: Path) -> 
     cells[(21, 6)] = 125.0
     t = read_boq(_save(tmp_path / "t.xlsx", {"SUMMARY": _summary(total), _SHEET: cells}))
     assert all(ln.row < 20 for ln in t.sheets[_SHEET].lines)
+
+
+# --- R4-11: a share-of-total column beside the Summary's TOTAL is no rate ---------------------
+
+
+def _shared_summary(cost: float, *, overheads: float | None = None) -> Cells:
+    """``_summary`` with "% of total" in column D on every row (=C{r}/$C$8)."""
+    cells = _summary(cost)
+    if overheads is not None:  # the overheads row states another sum than 10% of the cost
+        oh = cells[(4, 3)]
+        assert isinstance(oh, Fx)
+        cells[(4, 3)] = Fx("=C3*0.1+100", overheads)
+    grand = cells[(8, 3)]
+    assert isinstance(grand, Fx)
+    cells[(1, 4)] = "% of total"
+    for r in range(2, 9):
+        value = cells[(r, 3)]
+        assert isinstance(value, Fx)
+        cells[(r, 4)] = Fx(f"=C{r}/$C$8", float(value.value) / float(grand.value))
+    return cells
+
+
+def test_a_share_of_the_grand_total_beside_the_summary_is_not_read_as_a_rate(
+    tmp_path: Path,
+) -> None:
+    bill, total = _bill(1.0)
+    b = read_boq(_save(tmp_path / "b.xlsx", {"SUMMARY": _shared_summary(total), _SHEET: bill}))
+    rows = {r.label: r for r in b.summary_rows}
+    assert rows["Overheads 10%"].label_rate == pytest.approx(0.10)
+    assert rows["Overheads 10%"].rate is None  # =C4/$C$8 divides the row's own total
+    assert reconcile_summary(b) == []
+
+
+def test_an_overheads_sum_off_its_labelled_rate_is_still_reported(tmp_path: Path) -> None:
+    bill, total = _bill(1.0)
+    cells = _shared_summary(total, overheads=total * 0.1 + 100)
+    b = read_boq(_save(tmp_path / "b.xlsx", {"SUMMARY": cells, _SHEET: bill}))
+    gaps = [f for f in reconcile_summary(b) if "row 4 (Overheads 10%)" in f.message_en]
+    assert gaps and gaps[0].expected == "2,400.50"
+
+
+def test_a_typed_rate_beside_the_total_still_checks_its_row() -> None:
+    """A rate typed in the column (0.12) where the label states none is the row's rate."""
+    from procurement_agent.checks.boq import SummaryRow
+
+    rows = [
+        SummaryRow(row=3, item="", label="TOTAL COST", value=1000.0),
+        SummaryRow(row=4, item="", label="Overheads", value=100.0, rate=0.12),
+    ]
+    book = BoqWorkbook(name="B", summary_rows=rows, summary_sheet="SUMMARY")
+    [gap] = reconcile_summary(book)
+    assert gap.expected == "120.00"
+
+
+# --- R4-06: the tax spelt with dots ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("role", "label"),
+    [
+        ("vat", "V.A.T. 18%"),
+        ("vat", "Add V.A.T."),
+        ("vat", "V. A. T."),
+        ("vat", "დ.ღ.გ. 18%"),
+        ("vat", "დ.ღ.გ 18%"),
+        ("incl", "Total incl. V.A.T."),
+        ("incl", "სულ დ.ღ.გ.-ს ჩათვლით"),
+        ("incl", "სულ დ.ღ.გ-ის ჩათვლით"),
+        ("excl", "Total excl. V.A.T."),
+        ("excl", "სულ დ.ღ.გ.-ს გარეშე"),
+    ],
+)
+def test_the_tax_spelt_with_dots_plays_its_part(role: str, label: str) -> None:
+    assert _plays(role, label)
+
+
+@pytest.mark.parametrize(
+    "label", ["V.A.Tech services", "Private works", "Vatican tiles", "Elevat. shaft", "დ.ღ.გამოცდა"]
+)
+def test_letters_only_resembling_the_dotted_tax_are_not_the_vat_row(label: str) -> None:
+    assert not _plays("vat", label)
+
+
+def test_a_summary_chain_with_the_tax_spelt_with_dots_reconciles_and_ranks(
+    tmp_path: Path,
+) -> None:
+    labels = {6: "Total excl. V.A.T.", 7: "V.A.T. 18%", 8: "Total incl. V.A.T."}
+    paths = {}
+    for name, factor in (("t", None), ("A", 1.0), ("B", 0.9)):
+        bill, total = _bill(factor)
+        summary = _summary(total)
+        summary.update({(r, 2): label for r, label in labels.items()})
+        paths[name] = _save(tmp_path / f"{name}.xlsx", {"SUMMARY": summary, _SHEET: bill})
+    t = read_boq(paths["t"], name="T")
+    a, b = compare_all(t, [read_boq(paths[n], name=n) for n in ("A", "B")])
+    for comp in (a, b):
+        assert "BOQ.RECONCILE" not in _rules(comp)
+        assert "BOQ.NOT_RANKED" not in _rules(comp)
+    assert a.markup_factor == pytest.approx(_MARKUP)
+    assert (a.colour, b.colour) == ("red", "green")
+
+
+# --- R4-03: a Summary section adding the bill's amount column --------------------------------
+
+
+def _range_summary(total: float, stated: float, formula: str) -> Cells:
+    cells = _summary(total)
+    cells[(2, 3)] = Fx(formula, stated)
+    return cells
+
+
+@pytest.mark.parametrize(
+    "formula",
+    [f"=SUM('{_SHEET}'!F2:F6)", f"=SUM('{_SHEET}'!$F$2:$F$6)", f"=+SUM({_SHEET[3:]}!F2:F6)"],
+)
+def test_a_summary_row_adding_a_range_of_the_bill_is_held_against_the_range(
+    tmp_path: Path, formula: str
+) -> None:
+    bill, total = _bill(1.0)
+    sheet = _SHEET if "WORKS!" not in formula else "WORKS"
+    summary = _range_summary(total, total, formula)
+    b = read_boq(_save(tmp_path / "b.xlsx", {"SUMMARY": summary, sheet: bill}))
+    assert reconcile_summary(b) == []
+    assert b.sheets[sheet].subtotal_row == len(_LINES) + 2  # the range's first row is no link
+
+
+def test_a_summary_row_stating_other_than_its_range_adds_up_is_reported(tmp_path: Path) -> None:
+    bill, total = _bill(1.0)
+    # a sum of the range whose cached value is not what the range adds up to
+    summary = _range_summary(total, total + 500, f"=SUM('{_SHEET}'!F2:F6)")
+    b = read_boq(_save(tmp_path / "b.xlsx", {"SUMMARY": summary, _SHEET: bill}))
+    [gap] = [f for f in reconcile_summary(b) if "row 2 (WORKS)" in f.message_en]
+    assert gap.expected == "24,005.00" and gap.actual == "24,505.00"
+    assert "rows 2-6" in gap.message_en
+
+
+def test_a_summary_row_scaling_a_range_is_not_held_against_it(tmp_path: Path) -> None:
+    """``=SUM(range)*0.1`` (a contingency on the works) states no sum of the range."""
+    bill, total = _bill(1.0)
+    summary = _range_summary(total, total * 0.1, f"=SUM('{_SHEET}'!F2:F6)*0.1")
+    b = read_boq(_save(tmp_path / "b.xlsx", {"SUMMARY": summary, _SHEET: bill}))
+    assert not [f for f in reconcile_summary(b) if "row 2 (WORKS)" in f.message_en]

@@ -212,21 +212,25 @@ def _has_letter(text: str) -> bool:
 #: A cell reference inside a formula, not preceded by a letter (a function name such as LOG10)
 #: and not followed by "(" (a function call).
 _CELL_REF = re.compile(r"(?<![A-Za-z_\d.])\$?([A-Z]{1,3})\$?(\d+)(?![\d(A-Za-z_])")
-#: A reference to another sheet: ``'2. CIVIL WORKS'!J30`` or ``Sheet1!$A$1``.
-_SHEET_REF = re.compile(r"(?:'((?:[^']|'')+)'|([^\W\d][\w.]*))!\$?([A-Z]{1,3})\$?(\d+)")
+#: A reference to another sheet: ``'2. CIVIL WORKS'!J30`` or ``Sheet1!$A$1``, with the end of
+#: its range if it has one (``'1. WORKS'!F2:F6``: groups 5 and 6).
+_SHEET_REF = re.compile(
+    r"(?:'((?:[^']|'')+)'|([^\W\d][\w.]*))!\$?([A-Z]{1,3})\$?(\d+)(?::\$?([A-Z]{1,3})\$?(\d+))?"
+)
 
 # Summary rows, recognised by their label (folded to lower case).
-#: The tax by its names: "VAT", "Value added tax", "დღგ", "დამატებული ღირებულების გადასახადი" -
-#: never the letters inside a word ("private", "Vatican").
+#: The tax by its names: "VAT", "Value added tax", "დღგ", "დამატებული ღირებულების გადასახადი",
+#: and the acronyms spelt with dots ("V.A.T.", "დ.ღ.გ.") - never the letters inside a word
+#: ("private", "Vatican", "V.A.Tech").
 _VAT_NAME = (
-    r"(?<![a-zა-ჰ])(?:vat|value[\s-]+added[\s-]+tax|დღგ|"
+    r"(?<![a-zა-ჰ])(?:v(?:\.\s?)?a(?:\.\s?)?t\.?|value[\s-]+added[\s-]+tax|დ\.?ღ\.?გ\.?|"
     r"დამატებული\s+ღირებულების\s+გადასახად[ა-ჰ]*)(?![a-zა-ჰ])"
 )
 #: A rate written into the label: "incl. 18% VAT", "Add 18% VAT".
 _LABEL_RATE = r"(?:\d{1,2}(?:[.,]\d+)?\s*%\s*)?"
-#: The Georgian "including" / "without" after the tax, in any case form: "დღგ-ს ჩათვლით",
-#: "დღგ-ის ჩათვლით", "გადასახადის ჩათვლით".
-_KA_VAT = r"(?:დღგ(?:-?ის|-?ს)?|გადასახადის)\s*"
+#: The Georgian "including" / "without" after the tax, in any case form and however dotted:
+#: "დღგ-ს ჩათვლით", "დღგ-ის ჩათვლით", "დ.ღ.გ.-ს ჩათვლით", "გადასახადის ჩათვლით".
+_KA_VAT = r"(?:დ\.?ღ\.?გ\.?(?:-?ის|-?ს)?|გადასახადის)\s*"
 _INCL_VAT = re.compile(
     rf"\b(?:incl(?:\.|uding|usive)?|with)\s*(?:of\s+)?(?:the\s+)?{_LABEL_RATE}{_VAT_NAME}"
     rf"|{_VAT_NAME}[\s-]+incl|{_KA_VAT}ჩათვლით",
@@ -645,12 +649,19 @@ class SummaryRow:
     label: str
     #: the TOTAL column
     value: float | None
-    #: the number right of the TOTAL column where it is a fraction (overheads %, VAT rate)
+    #: the number right of the TOTAL column where it is a fraction (overheads %, VAT rate) -
+    #: never one that divides the row's own total by another ("% of total", a share)
     rate: float | None = None
     #: (sheet, row) pairs this row's formulas link to, e.g. ("2. CIVIL WORKS", 30)
     refs: tuple[tuple[str, int], ...] = ()
     #: the TOTAL cell holds text instead of a number
     non_numeric: str | None = None
+    #: the rate the label states ("Overheads 10%", "VAT 18%")
+    label_rate: float | None = None
+    #: (sheet, first row, last row) of every range this row's formulas take from another sheet
+    ranges: tuple[tuple[str, int, int], ...] = ()
+    #: the TOTAL cell is a plain sum of one such range (``=SUM('1. WORKS'!F2:F6)``)
+    sums_range: bool = False
 
     @property
     def key(self) -> str:
@@ -1666,27 +1677,72 @@ def _read_summary_rows(book: BoqWorkbook, ws: object, wf: object) -> list[Summar
             if raw is None:
                 book.uncached_cells += 1
         rate = _num(ws.cell(r, total_col + 1).value)  # type: ignore[attr-defined]
+        rate_formula = _formula_text(wf.cell(r, total_col + 1))  # type: ignore[attr-defined]
+        if rate_formula is not None and _divides_own_total(rate_formula, r, total_col):
+            rate = None  # "=C4/$C$8": the row's share of a total, not its rate
         refs: list[tuple[str, int]] = []
+        ranges: list[tuple[str, int, int]] = []
         for c in range(1, max_col + 1):
             formula = _formula_text(wf.cell(r, c))  # type: ignore[attr-defined]
             if formula and "!" in formula:
                 for m in _SHEET_REF.finditer(formula):
-                    ref = ((m.group(1) or m.group(2) or "").replace("''", "'"), int(m.group(4)))
-                    if ref not in refs:
-                        refs.append(ref)
+                    sheet = (m.group(1) or m.group(2) or "").replace("''", "'")
+                    first, last = int(m.group(4)), int(m.group(6) or m.group(4))
+                    if last != first:
+                        # a range is no link to its first row: it was once held against it
+                        span = (sheet, min(first, last), max(first, last))
+                        if span not in ranges:
+                            ranges.append(span)
+                    elif (sheet, first) not in refs:
+                        refs.append((sheet, first))
+        total_formula = _formula_text(wf.cell(r, total_col)) or ""  # type: ignore[attr-defined]
         item = ws.cell(r, item_col).value if item_col else None  # type: ignore[attr-defined]
+        clean = normalize_spaces(label).strip()
         out.append(
             SummaryRow(
                 row=r,
                 item=str(item).strip() if item not in (None, "") else "",
-                label=normalize_spaces(label).strip(),
+                label=clean,
                 value=_num(raw),
                 rate=rate if rate is not None and 0 < rate < 1 else None,
                 refs=tuple(refs),
                 non_numeric=str(raw).strip()[:40] if _is_text_in_number_cell(raw) else None,
+                label_rate=_rate_in_label(clean),
+                ranges=tuple(ranges),
+                sums_range=len(ranges) == 1 and bool(_RANGE_SUM.fullmatch(total_formula)),
             )
         )
     return out
+
+
+#: A Summary cell that is nothing but the sum of one range of another sheet:
+#: ``=SUM('1. WORKS'!F2:F6)``, ``=+SUM(Works!$F$2:$F$6)``.
+_RANGE_SUM = re.compile(
+    r"=\s*\+?\s*SUM\s*\(\s*(?:'(?:[^']|'')+'|[^\W\d][\w.]*)!\$?[A-Z]{1,3}\$?\d+:"
+    r"\$?[A-Z]{1,3}\$?\d+\s*\)\s*",
+    re.IGNORECASE,
+)
+#: A percentage written into a label: "Overheads 10%", "VAT 18 %", "Profit 7,5%".
+_PERCENT_IN_LABEL = re.compile(r"(?<![\d.,])(\d{1,2}(?:[.,]\d+)?)\s*%")
+
+
+def _rate_in_label(label: str) -> float | None:
+    """The one rate a Summary label states ("Overheads 10%" -> 0.10), else None."""
+    rates = {float(m.group(1).replace(",", ".")) for m in _PERCENT_IN_LABEL.finditer(label)}
+    return rates.pop() / 100 if len(rates) == 1 else None
+
+
+def _divides_own_total(formula: str, row: int, total_col: int) -> bool:
+    """Whether a formula divides the row's own TOTAL cell by something: "=C4/$C$8", the row's
+    share of the grand total. Read as the row's rate, a "% of total" column beside the
+    Summary made every overheads, profit and VAT row of a faithful chain an error."""
+    if "/" not in formula:
+        return False
+    own = get_column_letter(total_col)
+    return any(
+        m.group(1) == own and int(m.group(2)) == row
+        for m in _CELL_REF.finditer(_OTHER_SHEET_REF.sub("", formula))
+    )
 
 
 def _summary_mapping(rows: list[SummaryRow]) -> dict[str, float | None]:
@@ -3016,6 +3072,13 @@ def reconcile_summary(book: BoqWorkbook) -> list[Finding]:
             )
         if row.value is None:
             continue
+        if row.ranges:
+            # "=SUM('1. WORKS'!F2:F6)": held against what the range adds up to, never its first
+            # row; a range scaled or added to anything else states no sum of it
+            gap = _range_gap(book, row) if row.sums_range and not row.refs else None
+            if gap is not None:
+                out.append(gap)
+            continue
         target: tuple[BoqSheet, int] | None = None
         linked = {(s, r) for s, r in row.refs if s in book.sheets}
         if len(linked) == 1:
@@ -3061,6 +3124,29 @@ def reconcile_summary(book: BoqWorkbook) -> list[Finding]:
     return out
 
 
+def _range_gap(book: BoqWorkbook, row: SummaryRow) -> Finding | None:
+    """A Summary row summing one range of a sheet, against the amounts of the positions in it.
+
+    Only a range of positions is held so: one that takes in a subtotal or a heading's amount
+    adds rows this reader cannot tell are not counted twice, and is left unchecked."""
+    name, first, last = row.ranges[0]
+    sheet = book.sheets.get(name)
+    if sheet is None or row.value is None:
+        return None
+    lines = [ln for ln in sheet.lines if first <= ln.row <= last]
+    if not lines or any(ln.kind != "position" and ln.amount for ln in lines):
+        return None
+    total = sum(ln.amount or 0.0 for ln in lines if ln.kind == "position")
+    if _same_money(row.value, total):
+        return None
+    return _summary_gap(
+        f"სტრიქონი {row.row} ({row.label[:40]}) ≠ გვერდი {name}, სტრიქონები {first}-{last}",
+        f"row {row.row} ({row.label[:40]}) against sheet {name} rows {first}-{last}",
+        row.value,
+        total,
+    )
+
+
 #: The item of a top-level Summary section: "2", "2.", "C" - not a group under one ("A1").
 _TOP_LEVEL_ITEM = re.compile(r"^(?:(\d{1,3})|([A-Za-z]))\.?$")
 
@@ -3087,21 +3173,22 @@ def _reconcile_chain(
     excl, vat, incl = roles.get("excl"), roles.get("vat"), roles.get("incl")
 
     def rated(part: SummaryRow | None, base: SummaryRow | None) -> None:
-        if part is None or base is None or part.rate is None:
+        """The row against its base x its rate: the rate its label states ("Overheads 10%")
+        and the one typed beside it, either of which holding is enough."""
+        if part is None or base is None or part.value is None or base.value is None:
             return
-        if part.value is None or base.value is None:
+        rates = [x for x in (part.label_rate, part.rate) if x is not None]
+        if not rates or any(_same_money(part.value, base.value * x) for x in rates):
             return
-        want = base.value * part.rate
-        if not _same_money(part.value, want):
-            out.append(
-                _summary_gap(
-                    f"სტრიქონი {part.row} ({part.label[:30]}) ≠ სტრიქონი {base.row} x "
-                    f"{part.rate:g}",
-                    f"row {part.row} ({part.label[:30]}) against row {base.row} x {part.rate:g}",
-                    part.value,
-                    want,
-                )
+        rate = rates[0]
+        out.append(
+            _summary_gap(
+                f"სტრიქონი {part.row} ({part.label[:30]}) ≠ სტრიქონი {base.row} x {rate:g}",
+                f"row {part.row} ({part.label[:30]}) against row {base.row} x {rate:g}",
+                part.value,
+                base.value * rate,
             )
+        )
 
     rated(overheads, cost)
     rated(profit, cost)
