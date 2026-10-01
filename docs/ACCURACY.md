@@ -1310,14 +1310,14 @@ real number needs labelled paraphrases and substitutions, which this corpus does
 
 ## BOQ comparison
 
-Measured 2026-10-01, after the fourth red-team round on the BOQ reader:
+Measured 2026-10-01, after the fifth red-team round on the BOQ reader:
 
 | harness | result |
 |---|---|
 | `scripts/evaluate_boq.py`, client set | 106/106 checks |
 | `scripts/evaluate_boq.py`, test set 2 | 106/106 checks |
 | `scripts/evaluate_boq.py`, test set 3 | 132/132 checks |
-| `scripts/mutate_boq.py --seed 29 --per-class 3` | 51 valid mutants, 17 classes, 100% pass, 0 false positives, 0 control false positives |
+| `scripts/mutate_boq.py --seed 37 --per-class 3` | 50 valid mutants, 17 classes, 100% pass, 0 false positives, 0 control false positives |
 
 The red team's round-2 probes were each workbooks laid out otherwise than the client's
 template: a group header over rate and amount sub-columns, a quantity split per building, a
@@ -1543,6 +1543,80 @@ Spec gaps round 4 left open, with the recommended answer:
   bill's lines; and, separately, a priced template sheet that ends with no position while its
   rows carry quantities says so once on the template (`BOQ.PRICES_NOT_READ` or a new
   `BOQ.NO_POSITIONS`), with the per-bidder RECONCILE on that sheet suppressed.
+
+### Red team, round 5 (BOQ-R5-01 to BOQ-R5-18)
+
+The same harnesses after the fixes: `evaluate_boq.py` 106/106, 106/106 and 132/132;
+`mutate_boq.py --seed 37 --per-class 3`: 50 valid mutants, 17 classes, 100% pass, 0 false
+positives, 0 control false positives (one `removed` mutant set aside by the harness itself as
+invalid, before and after these changes). On the gold sets no column map, line kind,
+position status, group, finding, total or colour moved (a snapshot of everything the module reads
+and decides on the gold workbooks, before and after, is identical), the gold writer rewrites
+the client set and test set 2 identically (test set 3's gold is derived from its generator, not
+written by it), and the 66 repro scripts of rounds 1-4 print, byte for byte, what they printed
+before. Each defect is a synthetic test in `tests/unit/test_boq_reader_round5.py`, the gold
+writer's side in `tests/unit/test_boq_reference_round5.py`; the rules are in GOLD_SPEC 5.
+
+* **A price needs a price (R5-01, 06, 07).** On a line the template leaves blank, a quantity the
+  bidder filled in with no rate or amount was "filled_blank" at 0 and in the common scope, so the
+  bidder who priced it paid for it and the one who did not paid nothing: the colours flipped. Such
+  a line, and one with text in its rate or amount, is still listed as filled in but costs 0,
+  is unpriced and leaves the common scope. A template quantity typed as any text ("2.4 t"), not
+  only the two-way "1.250", is evaluated for no bidder - it was read as a blank to fill in, at
+  each bidder's own figure.
+* **A heading ends a section group (R5-02).** "A2" and the items "2.1"-"2.3" under a heading
+  "2. EARTHWORKS" were one group, so an unpriced 2.3 was hidden and stayed in the common scope.
+  A row that is no position now ends the group unless its own number is under the section.
+* **The header and the Summary in their other usual spellings (R5-03, 04, 05, 12).** "რაოდ-ბა"
+  and a word hyphenated over two lines made the template unreadable; "ერთ.ფასი" and
+  "ერთ. ღირებულება" were not the rate, so an amount slip was priced in; "საერთო თანხა" and
+  "ღირებულება სულ" were not the amount. The quantity, the Georgian rate and the Georgian
+  amount are read by rule (stem and ending, unit word + price word, money word + total word).
+  "ჯამი დღგ-ით" and the other Georgian "with VAT" forms left every bidder unranked, or played
+  the VAT row; they are the total incl. VAT by grammar (the instrumental), and with no VAT row
+  named the total incl. VAT is held against its base plus the rows between, as the total excl.
+  VAT already was.
+* **Item numbers, Roman chapters, a rate left of TOTAL, the excluded block (R5-08 to 11).** "1."
+  is "1": a bid writing every number with a dot was five removed and five added positions and
+  nobody was ranked. Summary chapters I, II, III are top-level sections (TOTAL COST against "I"
+  alone was an error on every faithful bid). A rate typed in a "%" column left of TOTAL is
+  read as one typed right of it. The merged workbook's excluded block now lists a priced
+  placeholder; its statuses come from the analysis texts, so no excluded status can be missed.
+
+The lead's policies of round 5, each in GOLD_SPEC 5 and the gold writer:
+
+* **A price list closed by its total incl. VAT (R5-13)** - the prices including the tax, one
+  closing row plainly adding them - is ranked on that row as both TOTAL COST and the total incl.
+  VAT (markup 1.0). A total incl. VAT scaled onto a pre-VAT sum, or followed by other valued
+  rows, is not read so, and such a bid stays unranked as before.
+* **A contingency between the bill's Total and its carried total (R5-16)** is part of the
+  chain: the positions are held against the first sum row whatever its label, the rows after it
+  being rates of it and the carried total built from those. The rows are told by how they are
+  built, not by the first one's range, so a range one row short is still reported.
+* **A hidden template sheet the Summary does not link (R5-17)** is no section: one info note on
+  the template (`BOQ.SHEET_SKIPPED`), no SECTION_UNPRICED on every bidder; a bidder who prices it
+  is shown like a priced non-position. The client templates' hidden calculation sheet, which
+  has no bill on it, stays a helper sheet.
+* **The usual Georgian unit spellings are one unit (R5-18):** the man-hour კაც/სთ = კაც.სთ =
+  კაც-სთ (and the man-day and machine-hour likewise, each apart from the hour), შტ = ც = ცალი,
+  კვტ = kW (apart from kWh), მთვ = month, გრ.მ = m.
+
+Left as they are:
+
+* **Price headers with a VAT note and no currency (R5-14, by design).** "ერთეულის ფასი დღგ-ს
+  ჩათვლით" and "Unit price (excl. VAT)" are not read, as R4 decided for a label that runs on
+  after what it names; the failure is loud (`BOQ.PRICES_NOT_READ` on the template), never a
+  silent wrong ranking.
+* **Resource-based estimates (R5-15, spec gap).** In the Georgian resource-based estimate each
+  work row (number, unit, quantity, no amount) is the parent of the item-less labour, machine
+  and material rows priced under it; by the letter of GOLD_SPEC 5 ("unless they carry a quantity
+  or a unit") the work row is a position, so every faithful bid is "incomplete" with
+  `BOQ.POSITIONS_UNPRICED` on every work row (the totals and colours are right). Recommended: a
+  numbered row with a quantity and/or unit but no amount cell, directly followed by one or more
+  item-less rows each with an amount of its own row, up to the next numbered row or sum row, is
+  the parent of those rows, not a position; its completeness is that of its children. The
+  client's lone position with a missing amount formula has no such rows under it and stays a
+  position.
 
 ## Known gaps
 
