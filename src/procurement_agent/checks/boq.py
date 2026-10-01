@@ -2705,11 +2705,11 @@ def _arithmetic_findings(line: BoqLine, typed_over: tuple[str, ...] | None = Non
                     "BOQ.ARITHMETIC",
                     "error",
                     f"{line.sheet}, სტრიქონი {line.row}: {label} არ ემთხვევა გამოთვლას "
-                    f"({got:,.2f} vs {want:,.2f})",
+                    f"({_money(got)} vs {_money(want)})",
                     f"{line.sheet} row {line.row}: {label} does not match the computation "
-                    f"({got:,.2f} vs {want:,.2f})",
-                    expected=f"{want:,.2f}",
-                    actual=f"{got:,.2f}",
+                    f"({_money(got)} vs {_money(want)})",
+                    expected=_money(want),
+                    actual=_money(got),
                 )
             )
 
@@ -2774,14 +2774,14 @@ def reconcile(sheet: BoqSheet) -> Finding | None:
     return _finding(
         "BOQ.RECONCILE",
         "error",
-        f"{sheet.name}: პოზიციების ჯამი {lines_sum:,.2f}-ია, ხოლო გვერდის ჯამის სტრიქონი "
-        f"({sheet.subtotal_row} სტრიქონი, „{label}“) — {sheet.subtotal:,.2f}; სხვაობა "
-        f"{diff:,.2f}",
-        f"{sheet.name}: the positions add up to {lines_sum:,.2f}, but the sheet's closing total "
-        f"(row {sheet.subtotal_row}, '{label}') states {sheet.subtotal:,.2f} - a difference of "
-        f"{diff:,.2f}",
-        expected=f"{sheet.subtotal:,.2f}",
-        actual=f"{lines_sum:,.2f}",
+        f"{sheet.name}: პოზიციების ჯამი {_money(lines_sum)}-ია, ხოლო გვერდის ჯამის სტრიქონი "
+        f"({sheet.subtotal_row} სტრიქონი, „{label}“) — {_money(sheet.subtotal)}; სხვაობა "
+        f"{_money(diff)}",
+        f"{sheet.name}: the positions add up to {_money(lines_sum)}, but the sheet's closing total "
+        f"(row {sheet.subtotal_row}, '{label}') states {_money(sheet.subtotal)} - a difference of "
+        f"{_money(diff)}",
+        expected=_money(sheet.subtotal),
+        actual=_money(lines_sum),
     )
 
 
@@ -2789,12 +2789,12 @@ def _summary_gap(ka: str, en: str, stated: float, computed: float) -> Finding:
     return _finding(
         "BOQ.RECONCILE",
         "error",
-        f"Summary: {ka} — მითითებულია {stated:,.2f}, გამოთვლით {computed:,.2f}; "
-        f"სხვაობა {stated - computed:,.2f}",
-        f"Summary: {en} - states {stated:,.2f}, computes to {computed:,.2f}; a difference of "
-        f"{stated - computed:,.2f}",
-        expected=f"{computed:,.2f}",
-        actual=f"{stated:,.2f}",
+        f"Summary: {ka} — მითითებულია {_money(stated)}, გამოთვლით {_money(computed)}; "
+        f"სხვაობა {_money(stated - computed)}",
+        f"Summary: {en} - states {_money(stated)}, computes to {_money(computed)}; a difference of "
+        f"{_money(stated - computed)}",
+        expected=_money(computed),
+        actual=_money(stated),
     )
 
 
@@ -3070,11 +3070,11 @@ def rate_outliers(template: BoqWorkbook, comparisons: list[BidComparison]) -> li
                         "BOQ.RATE_OUTLIER",
                         "warning",
                         f"{bidder}: {line.sheet}, სტრიქონი {line.row} — ერთეულის ფასი "
-                        f"{rate:,.2f} მნიშვნელოვნად {direction_ka} მედიანაზე ({median:,.2f})",
-                        f"{bidder}: {line.sheet} row {line.row} - unit rate {rate:,.2f} is far "
-                        f"{direction_en} the median ({median:,.2f})",
-                        expected=f"{median:,.2f}",
-                        actual=f"{rate:,.2f}",
+                        f"{_money(rate)} მნიშვნელოვნად {direction_ka} მედიანაზე ({_money(median)})",
+                        f"{bidder}: {line.sheet} row {line.row} - unit rate {_money(rate)} is far "
+                        f"{direction_en} the median ({_money(median)})",
+                        expected=_money(median),
+                        actual=_money(rate),
                         confidence=0.7,
                     )
                 )
@@ -3416,7 +3416,7 @@ def _explain(comp: BidComparison) -> str:
         "summary": "Summary vs sheets",
         "other": "other",
     }
-    parts = [f"{names.get(k, k)} {v:,.2f}" for k, v in comp.difference.items()]
+    parts = [f"{names.get(k, k)} {_money(v)}" for k, v in comp.difference.items()]
     return "; ".join(parts) or "no difference"
 
 

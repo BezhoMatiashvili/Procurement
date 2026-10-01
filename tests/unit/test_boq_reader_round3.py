@@ -29,6 +29,7 @@ from procurement_agent.checks.boq import (
     _num,
     _plays,
     _summary_columns,
+    _summary_gap,
     _unit_rate,
     cents,
     compare_all,
@@ -236,6 +237,13 @@ def test_bidders_tied_to_the_cent_share_their_colour() -> None:
         comp.common_scope_total, comp.common_scope_positions = total, 5
     _colour(comps)
     assert [c.colour for c in comps] == ["green", "green", "red"]
+
+
+def test_a_finding_shows_money_to_the_same_cent_the_ranking_uses() -> None:
+    # format(x, ",.2f") rounds the binary float half even: 0.125 -> "0.12", 2.675 -> "2.67"
+    finding = _summary_gap("ka", "the total", 2.675, 0.125)
+    assert (finding.expected, finding.actual) == ("0.13", "2.68")
+    assert "states 2.68, computes to 0.13; a difference of 2.55" in finding.message_en
 
 
 def test_tied_cells_of_the_merged_workbook_share_their_colour() -> None:
