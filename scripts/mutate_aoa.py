@@ -1846,6 +1846,14 @@ def fsum(f: Any) -> dict[str, Any]:
     }
 
 
+def _iban_valid(code: str | None) -> bool:
+    """Whether ``code`` is an IBAN whose ISO 13616 checksum holds."""
+    s = re.sub(r"\s", "", code or "")
+    if not re.fullmatch(r"[A-Z]{2}\d{2}[A-Z0-9]{10,30}", s):
+        return False
+    return int("".join(str(int(c, 36)) for c in s[4:] + s[:4])) % 97 == 1
+
+
 def score_aoa(case: Case, findings: list[Any], annotated: Path) -> dict[str, Any]:
     base = Counter(f.rule_id for f in case.base.findings)
     got = Counter(f.rule_id for f in findings)
@@ -1858,6 +1866,12 @@ def score_aoa(case: Case, findings: list[Any], annotated: Path) -> dict[str, Any
     for r in list(missing):
         if r in exp_rules:
             del missing[r]
+    # a digit edit that happens to make the act's account pass its checksum takes the base's
+    # checksum note with it: that is the note being right, not a finding lost
+    if "AOA.IBAN_CHECKSUM" in missing and any(
+        f.rule_id == "AOA.BANK" and _iban_valid(f.actual) for f in findings
+    ):
+        del missing["AOA.IBAN_CHECKSUM"]
     out: dict[str, Any] = {
         "extra": sorted(extra.elements()),
         "missing_base": sorted(missing.elements()),
