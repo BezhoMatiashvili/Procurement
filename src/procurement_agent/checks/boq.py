@@ -602,6 +602,8 @@ class BoqLine:
     kind: str = "position"
     #: (column key, the text) for every number column that holds text instead of a number
     non_numeric: tuple[tuple[str, str], ...] = ()
+    #: the item number was stored as a number ("1.10" typed into a General cell reads 1.1)
+    numeric_item: bool = False
 
     @property
     def key(self) -> str:
@@ -1084,13 +1086,18 @@ def _item_columns(cols: dict[str, int]) -> tuple[int, ...]:
 def _item_no(ws: object, row: int, item_cols: tuple[int, ...]) -> str:
     """The item number of ``row``: the first candidate cell shaped like one ("1.1", "A1"), else
     the first non-empty candidate."""
+    return _item_cell(ws, row, item_cols)[0]
+
+
+def _item_cell(ws: object, row: int, item_cols: tuple[int, ...]) -> tuple[str, bool]:
+    """``_item_no``, and whether that cell holds a number rather than text."""
     values = [
-        str(v).strip()
+        (str(v).strip(), isinstance(v, int | float) and not isinstance(v, bool))
         for c in item_cols
         if (v := ws.cell(row, c).value) not in (None, "")  # type: ignore[attr-defined]
     ]
-    values = [v for v in values if v]
-    return next((v for v in values if _ITEM_NO.match(v)), values[0] if values else "")
+    values = [v for v in values if v[0]]
+    return next((v for v in values if _ITEM_NO.match(v[0])), values[0] if values else ("", False))
 
 
 def _formula_text(cell: object) -> str | None:
@@ -1203,18 +1210,27 @@ def _line_kind(
     """Position, subtotal or heading - from the row's own amount cell (GOLD_SPEC section 5).
 
     A row with no amount cell is a heading unless it carries a quantity or a unit: the client's
-    template has a position with a quantity and no amount formula, which everyone priced.
+    template has a position with a quantity and no amount formula, which everyone priced. A
+    row whose amount is a product of its own row is a position whatever its quantity adds up;
+    only a row without one is made a parent by a quantity adding other rows.
     """
     if _SUBTOTAL.match(description):
         return "subtotal"
+    column = cols.get("amount")
+    own = _formula_text(wf.cell(row, column)) if column else None  # type: ignore[attr-defined]
+    if own is not None and _own_row_formula(own, row):
+        # its own rate and amount (=D6*E6): a position whatever its quantity adds - a painting
+        # area taken as two plastering areas (=D2+D3) is linked take-off, not a parent (the
+        # lead's policy of round 4); read as a heading it dropped out and the colours flipped
+        return "position"
     qty_col = cols.get("qty")
     if qty_col:
         qty_formula = _formula_text(wf.cell(row, qty_col))  # type: ignore[attr-defined]
         if qty_formula is not None and _sums_other_rows(qty_formula, row, wf):
-            # "=SUM(G13:G19)": the quantity adds up the items under it - a parent, whose items
-            # are the positions. As a position it was always "unpriced", its items being priced.
+            # "=SUM(G13:G19)" on a row with no amount of its own: the quantity adds up the
+            # items under it - a parent, whose items are the positions. As a position it was
+            # always "unpriced", its items being priced.
             return "heading"
-    column = cols.get("amount")
     if column:
         formula = _formula_text(wf.cell(row, column))  # type: ignore[attr-defined]
         if formula is not None:
@@ -1548,7 +1564,7 @@ def _read_sheet(
         unit = unit or None
         qty_raw = ws.cell(r, cols["qty"]).value  # type: ignore[attr-defined]
         has_measure = qty_raw not in (None, "") or unit is not None
-        item_no = _item_no(ws, r, item_cols)
+        item_no, numeric_item = _item_cell(ws, r, item_cols)
         if label_col and not _ITEM_NO.match(item_no):
             item_no = ""  # the label merged over the item column is no item number
         sheet.lines.append(
@@ -1567,6 +1583,7 @@ def _read_sheet(
                 formulas=tuple(k for k in formula_keys if k in _TOTAL_KEYS),
                 kind=_line_kind(ws, wf, cols, r, description, has_measure),
                 non_numeric=tuple(non_numeric),
+                numeric_item=numeric_item,
             )
         )
     return sheet
@@ -2046,17 +2063,65 @@ def _pair_leftovers(
             ratio = difflib.SequenceMatcher(
                 None, _fold_desc(t.description), _fold_desc(b.description), autojunk=False
             ).ratio()
-            if ratio >= _DESC_SIMILARITY:
+            if ratio >= _DESC_SIMILARITY or _keeps_template_text(t, b):
                 candidates.append((ratio, i, j))
+    _take(candidates, removed, added, pairs, used_t, used_b)
+    # an item number the bidder's spreadsheet stored as a number ("1.10" read back as 1.1),
+    # on a line described word for word as the template's: the position, nearest row first
+    stored: list[tuple[float, int, int]] = []
+    for i, t in enumerate(removed):
+        if i in used_t or (number := _item_number(t.item_no)) is None:
+            continue
+        for j, b in enumerate(added):
+            if (
+                j not in used_b
+                and (t.numeric_item or b.numeric_item)
+                and _item_number(b.item_no) == number
+                and _fold_desc(b.description) == _fold_desc(t.description)
+            ):
+                stored.append((-abs(b.row - t.row), i, j))
+    _take(stored, removed, added, pairs, used_t, used_b)
+    rest_t = [t for i, t in enumerate(removed) if i not in used_t]
+    rest_b = [b for j, b in enumerate(added) if j not in used_b]
+    return pairs, rest_b, rest_t
+
+
+def _take(
+    candidates: list[tuple[float, int, int]],
+    removed: list[BoqLine],
+    added: list[BoqLine],
+    pairs: list[tuple[BoqLine, BoqLine]],
+    used_t: set[int],
+    used_b: set[int],
+) -> None:
+    """Pair the candidates (score, template index, bid index), best first, each line once."""
     for _, i, j in sorted(candidates, key=lambda c: (-c[0], c[1], c[2])):
         if i in used_t or j in used_b:
             continue
         pairs.append((removed[i], added[j]))
         used_t.add(i)
         used_b.add(j)
-    rest_t = [t for i, t in enumerate(removed) if i not in used_t]
-    rest_b = [b for j, b in enumerate(added) if j not in used_b]
-    return pairs, rest_b, rest_t
+
+
+def _item_number(item: str) -> float | None:
+    """An item number as the number a spreadsheet would store it as ("1.10" -> 1.1), else None."""
+    text = item.strip().rstrip(".")
+    return float(text) if re.fullmatch(r"\d{1,3}(?:\.\d{1,3})?", text) else None
+
+
+def _keeps_template_text(t: BoqLine, b: BoqLine) -> bool:
+    """Whether the bid's description is the template's, whole, with the bidder's own words
+    after it - the offered make or model of a goods schedule ("Desktop monitor 24 inch IPS /
+    Model M24-I"). The same item number keeps it the position (the lead's round-4 policy), said
+    by ``BOQ.DESCRIPTION_CHANGED`` (info); it ends where a word ends, so "Pipe 20" is never
+    "Pipe 200"."""
+    tdesc, bdesc = _fold_desc(t.description), _fold_desc(b.description)
+    return (
+        bool(tdesc)
+        and len(bdesc) > len(tdesc)
+        and bdesc.startswith(tdesc)
+        and not bdesc[len(tdesc)].isalnum()
+    )
 
 
 def _align(
@@ -2859,6 +2924,21 @@ def _list_findings(out: BidComparison) -> None:
         )
     for t_line, b_line in out.description_changed:
         ka, en = _where(b_line)
+        if _keeps_template_text(t_line, b_line):
+            # the template's text kept whole, the bidder's offer written after it
+            out.findings.append(
+                _finding(
+                    "BOQ.DESCRIPTION_CHANGED",
+                    "info",
+                    f"{ka}: შაბლონის აღწერა შენარჩუნებულია და კომპანიამ მას დაუმატა — "
+                    f"„{b_line.description[:120]}“",
+                    f"{en}: the template's description kept, the bidder added to it - "
+                    f"'{b_line.description[:120]}'",
+                    expected=t_line.description[:60],
+                    actual=b_line.description[:120],
+                )
+            )
+            continue
         out.findings.append(
             _finding(
                 "BOQ.DESCRIPTION_CHANGED",

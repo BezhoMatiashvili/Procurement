@@ -55,14 +55,15 @@ def _bill(
     head: tuple[str, ...] = _HEAD,
     slip: dict[str, float] | None = None,
     close: str = "Sub-total",
+    lines: tuple[tuple[object, str, str, float, float], ...] = _LINES,
 ) -> tuple[Cells, float]:
     """The bill at ``factor`` x the rates (None: the template, unpriced), a ``slip`` added into
     an amount formula by item; returns the cells and the sheet's closing total."""
     cells: Cells = {(1, c): h for c, h in enumerate(head, 1)}
     total = 0.0
-    for r, (item, desc, unit, qty, rate) in enumerate(_LINES, 2):
+    for r, (item, desc, unit, qty, rate) in enumerate(lines, 2):
         cells.update({(r, 1): item, (r, 2): desc, (r, 3): unit, (r, 4): qty})
-        extra = (slip or {}).get(item, 0.0)
+        extra = (slip or {}).get(str(item), 0.0)
         if factor is None:
             cells[(r, 6)] = Fx(f"=D{r}*E{r}", 0.0)
             continue
@@ -70,15 +71,16 @@ def _bill(
         amount = qty * rate * factor + extra
         cells[(r, 6)] = Fx(f"=D{r}*E{r}" + (f"+{extra:g}" if extra else ""), amount)
         total += amount
-    last = len(_LINES) + 1
+    last = len(lines) + 1
     cells[(last + 1, 2)] = close
     cells[(last + 1, 6)] = Fx(f"=SUM(F2:F{last})", total)
     return cells, total
 
 
-def _summary(cost: float, *, head: tuple[str, ...] = _SUMMARY_HEAD) -> Cells:
+def _summary(
+    cost: float, *, head: tuple[str, ...] = _SUMMARY_HEAD, closing: int = len(_LINES) + 2
+) -> Cells:
     """Item | Description | Total, one section linked to the bill's closing row, and the chain."""
-    closing = len(_LINES) + 2
     oh, pr = cost * 0.10, cost * 0.05
     excl = cost + oh + pr
     vat = excl * 0.18
@@ -853,3 +855,170 @@ def test_a_bill_with_no_price_at_all_is_still_unpriced(tmp_path: Path) -> None:
     a = read_boq(_save(tmp_path / "a.xlsx", {_SHEET: _components_bill((0.0, 0.0, 0.0))}), name="A")
     (comp,) = compare_all(t, [a])
     assert comp.unpriced_sheets == [_SHEET]
+
+
+# --- R4-13 (policy): the offered make or model written after the template's description -------
+
+_GOODS = (
+    ("1", "Desktop monitor 24 inch IPS", "pcs", 30.0, 410.0),
+    ("2", "Laser printer A4 mono", "pcs", 6.0, 520.0),
+    ("3", "Network switch 24 port", "pcs", 4.0, 690.0),
+    ("4", "UPS 1500 VA", "pcs", 8.0, 330.0),
+    ("5", "Keyboard and mouse set", "set", 30.0, 45.0),
+)
+_GOODS_COST = sum(q * r for *_, q, r in _GOODS)
+
+
+def _goods(
+    tmp_path: Path, bids: dict[str, tuple[float, tuple[tuple[object, str, str, float, float], ...]]]
+) -> tuple[BoqWorkbook, list[BidComparison]]:
+    closing = len(_GOODS) + 2
+    bill, total = _bill(None, lines=_GOODS)
+    t_path = _save(tmp_path / "t.xlsx", {"SUMMARY": _summary(total, closing=closing), _SHEET: bill})
+    books = []
+    for name, (factor, lines) in bids.items():
+        bill, total = _bill(factor, lines=lines)
+        summary = _summary(total, closing=closing)
+        books.append(read_boq(_save(tmp_path / f"{name}.xlsx", {"SUMMARY": summary, _SHEET: bill})))
+    t = read_boq(t_path, name="T")
+    return t, compare_all(t, books)
+
+
+_OFFERS = (
+    " / Model M24-I",
+    " - offered: LP-2040 (brand Y)",
+    ", model SW-24G",
+    " (UPS-1500X)",
+    ": KM-7",
+)
+
+
+def test_a_bid_writing_its_offer_after_the_template_description_keeps_the_position(
+    tmp_path: Path,
+) -> None:
+    offered = tuple(
+        (item, desc + offer, unit, qty, rate)
+        for (item, desc, unit, qty, rate), offer in zip(_GOODS, _OFFERS, strict=True)
+    )
+    _, (a, b) = _goods(tmp_path, {"A": (1.0, _GOODS), "B": (0.9, offered)})
+    assert b.added == [] and b.removed == []
+    assert b.evaluated_cost == pytest.approx(_GOODS_COST * 0.9)
+    assert b.common_scope_positions == len(_GOODS)
+    notes = [f for f in b.findings if f.rule_id == "BOQ.DESCRIPTION_CHANGED"]
+    assert len(notes) == len(_GOODS) and {f.severity for f in notes} == {"info"}
+    assert (a.colour, b.colour) == ("red", "green")
+
+
+@pytest.mark.parametrize(
+    ("template", "bid"),
+    [
+        ("Pipe 20", "Pipe 200 mm"),  # the template's text runs on into another word
+        ("Desktop monitor 24 inch", "Desktop monitor 24 inches IPS"),
+        ("UPS 1500 VA", "Line-interactive UPS 1500 VA"),  # not where the template's text starts
+    ],
+)
+def test_a_bid_description_only_starting_like_the_templates_is_another_position(
+    tmp_path: Path, template: str, bid: str
+) -> None:
+    t_lines = (("1", template, "pcs", 2.0, 10.0), ("2", "Cable tray", "m", 5.0, 3.0))
+    b_lines = (("1", bid, "pcs", 2.0, 10.0), ("2", "Cable tray", "m", 5.0, 3.0))
+    t = read_boq(_save(tmp_path / "t.xlsx", {_SHEET: _bill(None, lines=t_lines)[0]}))
+    b = read_boq(_save(tmp_path / "b.xlsx", {_SHEET: _bill(1.0, lines=b_lines)[0]}))
+    (comp,) = compare_all(t, [b])
+    assert [ln.item_no for ln in comp.removed] == ["1"]
+    assert [ln.item_no for ln in comp.added] == ["1"]
+
+
+def test_an_offer_under_another_item_number_is_not_the_position(tmp_path: Path) -> None:
+    t_lines = (("1", "Laser printer A4 mono", "pcs", 2.0, 10.0),)
+    b_lines = (("7", "Laser printer A4 mono / LP-2040", "pcs", 2.0, 10.0),)
+    t = read_boq(_save(tmp_path / "t.xlsx", {_SHEET: _bill(None, lines=t_lines)[0]}))
+    b = read_boq(_save(tmp_path / "b.xlsx", {_SHEET: _bill(1.0, lines=b_lines)[0]}))
+    (comp,) = compare_all(t, [b])
+    assert len(comp.removed) == 1 and len(comp.added) == 1
+
+
+# --- R4-19 (policy): an item number the bidder's spreadsheet stored as a number ----------------
+
+_ELEVEN = tuple(
+    (f"1.{n}", f"Work item number {n} described in full", "m2", 10.0 + n, 5.0 + n)
+    for n in range(1, 12)
+)
+
+
+def test_an_item_number_stored_as_a_number_is_still_the_position(tmp_path: Path) -> None:
+    """ "1.10" typed into a General cell reads 1.1: the same line, word for word, in its place."""
+    numbers = tuple((float(item), *rest) for item, *rest in _ELEVEN)
+    t = read_boq(_save(tmp_path / "t.xlsx", {_SHEET: _bill(None, lines=_ELEVEN)[0]}))
+    b = read_boq(_save(tmp_path / "b.xlsx", {_SHEET: _bill(1.0, lines=numbers)[0]}))
+    assert [ln.item_no for ln in b.sheets[_SHEET].leaf_lines][9] == "1.1"
+    (comp,) = compare_all(t, [b])
+    assert comp.added == [] and comp.removed == []
+    assert comp.common_scope_positions == len(_ELEVEN)
+    assert comp.evaluated_cost == pytest.approx(sum(q * r for *_, q, r in _ELEVEN))
+
+
+@pytest.mark.parametrize("case", ["text", "description"])
+def test_an_item_retyped_or_redescribed_is_not_taken_for_a_stored_number(
+    tmp_path: Path, case: str
+) -> None:
+    """Typed as the text "1.1", it is a renumbering (by design); a number on another line's
+    description is another line."""
+    lines = list(_ELEVEN)
+    item, desc, *rest = lines[9]
+    if case == "text":
+        lines[9] = ("1.1", desc, *rest)  # type: ignore[assignment]
+    else:
+        lines[9] = (1.1, "Another work item altogether", *rest)  # type: ignore[assignment]
+    t = read_boq(_save(tmp_path / "t.xlsx", {_SHEET: _bill(None, lines=_ELEVEN)[0]}))
+    b = read_boq(_save(tmp_path / "b.xlsx", {_SHEET: _bill(1.0, lines=tuple(lines))[0]}))
+    (comp,) = compare_all(t, [b])
+    assert [ln.item_no for ln in comp.removed] == [item]
+
+
+# --- R4-14 (policy): a position whose quantity adds up earlier positions ----------------------
+
+
+def _linked_take_off(factor: float | None) -> tuple[Cells, float]:
+    """1.1-1.5, then 1.6 "Painting" whose area is the two plastering areas (=D4+D5) at its own
+    rate (=D7*E7), and the Total."""
+    cells, _ = _bill(factor)
+    del cells[(7, 2)], cells[(7, 6)]
+    rate = 6.0 * (factor or 0.0)
+    area = _LINES[2][3] + _LINES[3][3]
+    cells.update({(7, 1): "1.6", (7, 2): "Painting", (7, 3): "m2", (7, 4): Fx("=D4+D5", area)})
+    if factor is not None:
+        cells[(7, 5)] = rate
+    cells[(7, 6)] = Fx("=D7*E7", area * rate)
+    total = (_COST * factor if factor is not None else 0.0) + area * rate
+    cells[(8, 2)] = "Total"
+    cells[(8, 6)] = Fx("=SUM(F2:F7)", total)
+    return cells, total
+
+
+def test_a_position_whose_quantity_adds_earlier_positions_is_evaluated(tmp_path: Path) -> None:
+    paths = {}
+    for name, factor in (("t", None), ("A", 1.0), ("B", 0.9)):
+        cells, total = _linked_take_off(factor)
+        sheets = {"SUMMARY": _summary(total, closing=8), _SHEET: cells}
+        paths[name] = _save(tmp_path / f"{name}.xlsx", sheets)
+    t = read_boq(paths["t"], name="T")
+    assert next(ln.kind for ln in t.sheets[_SHEET].lines if ln.item_no == "1.6") == "position"
+    a, b = compare_all(t, [read_boq(paths[n], name=n) for n in ("A", "B")])
+    painting = (_LINES[2][3] + _LINES[3][3]) * 6.0
+    assert a.evaluated_cost == pytest.approx(_COST + painting)
+    assert b.evaluated_cost == pytest.approx((_COST + painting) * 0.9)
+    for comp in (a, b):
+        assert not {"BOQ.RECONCILE", "BOQ.HEADING_PRICED"} & set(_rules(comp))
+
+
+def test_a_row_whose_quantity_adds_rows_and_which_has_no_amount_is_still_a_parent() -> None:
+    values, formulas = Workbook(), Workbook()
+    wf = formulas.active
+    assert wf is not None
+    wf.cell(6, 4, "=D2+D3")
+    wf.cell(7, 4, "=SUM(D8:D9)")
+    wf.cell(7, 6, "=SUM(F8:F9)")
+    cols = {"desc": 2, "qty": 4, "rate_total": 5, "amount": 6}
+    assert _line_kind(values.active, wf, cols, 6, "Painting", True) == "heading"
+    assert _line_kind(values.active, wf, cols, 7, "Lighting", True) == "heading"
