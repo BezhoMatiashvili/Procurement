@@ -35,6 +35,7 @@ from procurement_agent.checks.amounts import (
     digits_and_words,
     header_money,
     render_figure_like,
+    with_currency,
     words_for,
     words_like,
 )
@@ -161,6 +162,7 @@ from procurement_agent.extraction.rules import (
 from procurement_agent.extraction.schemas import FactType
 from procurement_agent.extraction.spellcheck import Difference, best_match, classify_difference
 from procurement_agent.fx.provider import NullRateProvider, RateProvider
+from procurement_agent.report.docx_annotate import whole_word_spans
 
 ContractorType = Literal[
     "company", "natural_person", "individual_entrepreneur_vat", "small_business", "foreign"
@@ -280,9 +282,10 @@ _ROLE_NAME: dict[AmountRole, tuple[str, str]] = {
     "guarantee": ("საგარანტიო თანხას", "the guarantee"),
     "tax": ("გადასახადის თანხას", "the tax amount"),
 }
-#: Act amounts that are neither the fee nor a part of it.
+#: Act amounts that are neither the fee nor a part of it. A running figure of the contract -
+#: done to date, the balance left, paid before - is none (red team R4, AOA-R4-08).
 _NOT_THE_FEE: frozenset[AmountRole | None] = frozenset(
-    {"penalty", "guarantee", "tax", "equivalent"}
+    {"penalty", "guarantee", "tax", "equivalent", "running"}
 )
 
 _NO_CONTRACT = "this rule compares the act against its contract, and none was supplied"
@@ -561,6 +564,14 @@ class DocumentView:
 
 #: How far into a document its heading - and a date written in it - can reach.
 _HEADER_CHARS = 200
+#: A signature block's line for an attorney: its title, then the name alone on the line
+#: ("მინდობილი პირი: მზევინარ გოგიჩაიშვილი", "მინდობილობით მოქმედი პირი მზევინარ
+#: გოგიჩაიშვილი ____").
+_SIGNING_PROXY = re.compile(
+    r"^\s*(?:მინდობილი\s+პირი|მინდობილობით\s+მოქმედი\s+პირი"
+    r"|წარმომადგენელი\s*\(\s*მინდობილობით\s*\)|რწმუნებული)"
+    r"\s*[:\-\u2013]?\s*(?P<name>[ა-ჰ]+(?:\s+[ა-ჰ]+){1,2})[\s_./]*$"
+)
 _CONTRACT_WORD = re.compile(r"ხელშეკრულებ|contract", re.IGNORECASE)
 _ACT_WORD = re.compile(r"აქტ|\bact\b", re.IGNORECASE)
 
@@ -1079,6 +1090,27 @@ class AoaChecker:
                 return d, hit
         return _heading_date(text, hits)
 
+    def _act_date_places(self, hit: RuleHit) -> tuple[tuple[int, ...], int] | None:
+        """Which places of the act's date, as written at ``hit``, a finding about it marks
+        (``Finding.places``; red team R4, AOA-R4-06): the act's own date - where ``_act_date``
+        read it, after the words that date the act, or alone in the heading - and never another
+        correct copy of the same date, the recital's contract date or the period's end. None
+        when every place is the act's own, or when ``hit`` is not among them."""
+        text = self.aoa.text
+        spans = whole_word_spans(text, text[hit.start : hit.end])
+        at = next((i for i, (a, b) in enumerate(spans) if a < hit.end and hit.start < b), None)
+        if at is None:
+            return None
+
+        def own(span: tuple[int, int]) -> bool:
+            a, b = span
+            if _act_dated_right_before(text, a):
+                return True
+            return a < _HEADER_CHARS and not _CONTRACT_WORD.search(text, max(0, a - 60), b + 30)
+
+        mine = [i for i, span in enumerate(spans) if i == at or own(span)]
+        return None if len(mine) == len(spans) else (tuple(mine), len(spans))
+
     def _period_hits(self) -> list[tuple[date, RuleHit]]:
         """The service period's dates, and where each is written. Every rule that needs the
         period reads it here, and so does the extraction (``document_facts``): one reader.
@@ -1586,7 +1618,9 @@ class AoaChecker:
         contract = self.contract.amounts()
         prices = [r.money for r in contract if r.role == "price"]
         if not prices:  # nothing is called a price: take what is plainly not something else
-            prices = [r.money for r in contract if r.role not in ("advance", "penalty", "tax")]
+            prices = [
+                r.money for r in contract if r.role not in ("advance", "penalty", "tax", "running")
+            ]
         return prices
 
     def _net_parts(self) -> list[RoledAmount]:
@@ -1787,6 +1821,7 @@ class AoaChecker:
                 "one cannot be told",
                 actual=act_hit.raw_text,
                 span=(act_hit.start, act_hit.end),
+                places=self._act_date_places(act_hit),
             )
             return
         if window is not None and _within(act_date, window) and not _within(expected, window):
@@ -1808,6 +1843,7 @@ class AoaChecker:
             ),
             actual=act_hit.raw_text,
             span=(act_hit.start, act_hit.end),
+            places=self._act_date_places(act_hit),
         )
 
     def rule_month_spelling(self) -> None:
@@ -2311,12 +2347,16 @@ class AoaChecker:
 
     def _places_of_director(
         self, p: Party, form: str, spans: list[tuple[int, int]]
-    ) -> tuple[tuple[int, int] | None, tuple[tuple[int, ...], int] | None]:
+    ) -> tuple[tuple[int, int] | None, tuple[tuple[int, ...], int] | None] | None:
         """Where the wrong ``form`` of ``p``'s director is ``p``'s: the first such place, and
         which of the form's places those are (``Finding.places``). A name copied from the other
         party - the customer's director written for the contractor - is right where it stands
         in the customer's block, and only the contractor's places are to be marked. Every place
-        is, when none of them is plainly another party's correct director."""
+        is, when none of them is plainly another party's correct director.
+
+        None when every place is another party's correct director (red team R4, AOA-R4-01): the
+        customer's director copied into the contractor's signature alone leaves the customer's
+        own preamble genitive right, and that form is no mistake of the contractor's at all."""
         others: list[int] = []
         for i, (start, _) in enumerate(spans):
             owner = self._owner_at(start)
@@ -2326,7 +2366,9 @@ class AoaChecker:
             if owned is not None and any(_same_person(form, cd) for cd in owned.directors):
                 others.append(i)
         mine = [i for i in range(len(spans)) if i not in others]
-        if not others or not mine:
+        if not mine and others:
+            return None
+        if not others:
             return (spans[0] if spans else None), None
         return spans[mine[0]], (tuple(mine), len(spans))
 
@@ -2443,6 +2485,30 @@ class AoaChecker:
             self._proxies(p, match)
             self._signatories(p, match, deputy=False)
             self._signatories(p, match, deputy=True)
+        self._unread_signing_proxies()
+
+    def _unread_signing_proxies(self) -> None:
+        """A skip note for an attorney the act's signature block names ("მინდობილი პირი: …") that
+        the party reader did not take for any party's signatory: what was not read is not
+        compared, and the report says so rather than stay silent (red team R4, AOA-R4-12)."""
+        # a name the act's parties are read with, or one the contract names (written right
+        # there, it needs no comparing)
+        parties = [*self.aoa.parties, *(self.contract.parties if self.contract else [])]
+        read = [n for q in parties for n in (*q.proxies, *q.directors, *q.deputies) if n]
+        for line in self.aoa.lines:
+            m = _SIGNING_PROXY.match(line)
+            if m is None:
+                continue
+            name = m.group("name")
+            if any(_same_person(name, n) for n in read):
+                continue
+            self._skip(
+                "AOA.DIRECTOR",
+                f"აქტს ხელს მინდობილობით აწერს „{name}“, რომელიც რომელიმე მხარის ხელმომწერად "
+                "ვერ წაიკითხა: ხელშეკრულებას არ შედარდა",
+                f"the act is signed under a power of attorney by '{name}', who was not read as "
+                "either party's signatory: not compared with the contract",
+            )
 
     def _signatories(self, p: Party, match: Party, *, deputy: bool) -> None:
         """AOA.DIRECTOR: the act's signatories for ``p`` against the contract's for ``match`` -
@@ -2467,63 +2533,83 @@ class AoaChecker:
                         f"'{d}', and the contract names no deputy: not compared",
                     )
                 continue
-            # The preamble writes the genitive, the signature block the nominative, and the
-            # party reader keeps one of them: every form the act writes of this person is
-            # compared, so a slip in one ("მელაძი") does not hide behind the other written
-            # right. Each wrong form has its own correction and every place of it marked.
-            forms = self._person_forms(d)
-            if not forms:
-                found = self._find_span(d)
-                forms = [(d, [found] if found else [])]
-            for written, spans in forms:
-                # a patronymic is no part of the name compared, and is kept in a correction
-                form, patronymic = split_patronymic(written)
-                # an inflection of the contract's name, and nothing else, is the same name
-                if any(_same_person(form, cd) for cd in theirs):
-                    continue
-                if (other := self._unread_party_of(form, match, theirs)) is not None:
-                    # the act writes that party in a form not read as one (AOA.PARTY_MISSING's
-                    # note): its signatory is no slip of this party's
-                    self._skip(
-                        "AOA.DIRECTOR",
-                        f"„{form}“ ყველაზე ახლოსაა {other.name}-ის ხელმომწერთან, მხარესთან, "
-                        f"რომელიც აქტში ვერ ამოიცნო: {match.name}-ის ხელმომწერს არ შედარდა",
-                        f"'{form}' is nearest to the signatory the contract names for "
-                        f"{other.name}, a party the act does not name in a form read as one: not "
-                        f"compared with {match.name}'s",
-                    )
-                    continue
-                span, places = self._places_of_director(p, form, spans)
-                # compared on the nominative, so a genitive in either document is no mistake
-                guess = best_match(lemma(form), [lemma(c) for c in theirs])
-                diff = guess[1] if guess else None
-                typo = diff is not None and diff.looks_like_typo
-                hint_ka = " (როგორც ჩანს, შეცდომაა)" if typo else ""
-                hint_en = " (looks like a misspelling)" if typo else ""
-                # the correction in the act's own grammar, form by form
-                expected = keep_initial(form, in_case_of(form, guess[0])) if guess else None
-                if expected is not None:
-                    expected = with_patronymic(expected, patronymic)
-                self._add(
+            self._person_findings(p, match, d, theirs)
+
+    def _person_findings(self, p: Party, match: Party, d: str, theirs: list[str]) -> None:
+        """AOA.DIRECTOR errors for the act's signatory ``d`` of ``p`` against the people the
+        contract names for ``match`` in the same capacity (``theirs``: its heads, its deputies or
+        its attorneys)."""
+        # The preamble writes the genitive, the signature block the nominative, and the
+        # party reader keeps one of them: every form the act writes of this person is
+        # compared, so a slip in one ("მელაძი") does not hide behind the other written
+        # right. Each wrong form has its own correction and every place of it marked.
+        forms = self._person_forms(d)
+        if not forms:
+            found = self._find_span(d)
+            forms = [(d, [found] if found else [])]
+        for written, spans in forms:
+            # a patronymic is no part of the name compared, and is kept in a correction
+            form, patronymic = split_patronymic(written)
+            # an inflection of the contract's name, and nothing else, is the same name
+            if any(_same_person(form, cd) for cd in theirs):
+                continue
+            if (other := self._unread_party_of(form, match, theirs)) is not None:
+                # the act writes that party in a form not read as one (AOA.PARTY_MISSING's
+                # note): its signatory is no slip of this party's
+                self._skip(
                     "AOA.DIRECTOR",
-                    "error",
-                    f"ხელმომწერი არ ემთხვევა ხელშეკრულებას: „{written}“, უნდა იყოს "
-                    f"„{expected}“{hint_ka}",
-                    f"signatory does not match the contract: '{written}', expected "
-                    f"'{expected}'{hint_en}",
-                    expected=expected,
-                    actual=written,
-                    span=span,
-                    places=places,
+                    f"„{form}“ ყველაზე ახლოსაა {other.name}-ის ხელმომწერთან, მხარესთან, "
+                    f"რომელიც აქტში ვერ ამოიცნო: {match.name}-ის ხელმომწერს არ შედარდა",
+                    f"'{form}' is nearest to the signatory the contract names for "
+                    f"{other.name}, a party the act does not name in a form read as one: not "
+                    f"compared with {match.name}'s",
                 )
+                continue
+            where = self._places_of_director(p, form, spans)
+            if where is None:
+                continue  # every place of it is another party's own director, written right
+            span, places = where
+            # compared on the nominative, so a genitive in either document is no mistake
+            guess = best_match(lemma(form), [lemma(c) for c in theirs])
+            diff = guess[1] if guess else None
+            typo = diff is not None and diff.looks_like_typo
+            hint_ka = " (როგორც ჩანს, შეცდომაა)" if typo else ""
+            hint_en = " (looks like a misspelling)" if typo else ""
+            # the correction in the act's own grammar, form by form
+            expected = keep_initial(form, in_case_of(form, guess[0])) if guess else None
+            if expected is not None:
+                expected = with_patronymic(expected, patronymic)
+            self._add(
+                "AOA.DIRECTOR",
+                "error",
+                f"ხელმომწერი არ ემთხვევა ხელშეკრულებას: „{written}“, უნდა იყოს "
+                f"„{expected}“{hint_ka}",
+                f"signatory does not match the contract: '{written}', expected "
+                f"'{expected}'{hint_en}",
+                expected=expected,
+                actual=written,
+                span=span,
+                places=places,
+            )
 
     def _proxies(self, p: Party, match: Party) -> None:
         """AOA.DIRECTOR, as a warning: the act is signed for ``p`` under a power of attorney by
         someone the contract does not name. Not provably wrong - the client's rule says the
         authority must be checked - so the report asks for the power of attorney, at every place
-        the attorney is named, and proposes no name to write instead."""
+        the attorney is named, and proposes no name to write instead.
+
+        An attorney the contract names, written with a slip ("მზევინარ გოგიჩაიშვილო" for the
+        contract's "მზევინარ გოგიჩაიშვილი"), is no other person: an error corrected to the
+        contract's attorney, as for a director (red team R4, AOA-R4-12). The act's attorneys are
+        the preamble's and the signature block's, as the party reader reads them
+        (``Party.proxies``)."""
         named = [*match.directors, *match.proxies]
         for proxy in p.proxies:
+            if any(_same_person(proxy, n) for n in named):
+                continue
+            if any(_slip_of_person(proxy, n) for n in match.proxies):
+                self._person_findings(p, match, proxy, match.proxies)
+                continue
             if any(names_match(proxy, n) for n in named):
                 continue
             # a slip of the attorney the contract names is that attorney misspelt, corrected
@@ -3193,6 +3279,20 @@ class AoaChecker:
                 "no price found in the contract to compare against",
             )
             return
+        running = [r.money for r in self.aoa.amounts() if r.role == "running"]
+        if running:
+            # the work done to date, the contract's balance or what was paid before: no fee of
+            # this act, and nothing the contract's price can confirm (red team R4, AOA-R4-08)
+            shown = ", ".join(m.raw for m in running[:5])
+            self._skip(
+                "AOA.FEE",
+                f"აქტში მითითებული თანხები ({shown}) ხელშეკრულების მიმდინარე მაჩვენებლებია "
+                "(დღემდე შესრულებული, დარჩენილი ან უკვე გადახდილი) და არა ამ აქტის საფასური: "
+                "ხელშეკრულების ღირებულებას არ შედარდა",
+                f"the act's amounts {shown} are running figures of the contract (done to date, "
+                "the balance left or paid before), not this act's fee: they were not compared "
+                "with the contract's price",
+            )
         if table_lines:
             shown = ", ".join(m.raw for m in table_lines[:5])
             self._skip(
@@ -3343,17 +3443,23 @@ class AoaChecker:
             None,
         )
         if other is not None:
-            expected = _money_text(other)
+            shown = _money_text(other)
+            # the correction is the fee as the act writes it, in the contract's currency (red
+            # team R4, AOA-R4-11); the machine form only when the act's currency cannot be
+            # rewritten
+            span = self._fee_span(m)
+            written = self.aoa.text[span[0] : span[1]]
+            fix = with_currency(_fee_like(other.value, written), other.currency)
             self._add(
                 "AOA.FEE",
                 "error",
                 f"{genitive_ka} ვალუტა განსხვავდება ხელშეკრულებისგან: აქტში {actual}, "
-                f"ხელშეკრულებაში {expected}",
+                f"ხელშეკრულებაში {shown}",
                 f"the {name_en}'s currency differs from the contract: the act says {actual}, "
-                f"the contract {expected}",
-                expected=expected,
+                f"the contract {shown}",
+                expected=fix or shown,
                 actual=actual,
-                span=m.span,
+                span=span if fix else m.span,
             )
             return
         shown = ", ".join(dict.fromkeys(_money_text(p) for p in prices))
@@ -3513,10 +3619,23 @@ class AoaChecker:
         a, b = ordered[0], ordered[-1]
         written = self.aoa.as_written(a.start, b.end)
 
-        def moved(d: date | None, h: RuleHit) -> str:
+        def moved(d: date | None, h: RuleHit, dated: RuleHit) -> str:
             if d is None:
                 return self.aoa.as_written(h.start, h.end)
-            return render_date_like(d, h.raw_text, following=text[h.end : h.end + 40])
+            following = text[h.end : h.end + 40]
+            out = render_date_like(d, h.raw_text, following=following)
+            if out != d.isoformat() or _ISO_WRITTEN.match(h.raw_text):
+                return out
+            # an end written without its year ("25.05-30.06.2026", "25 მაისიდან 30 ივნისის
+            # ჩათვლით, 2026 წ."): its own day and month, its "-დან" kept, with the year written
+            # as the other end writes it - or failing that, in the other end's style; never ISO
+            # unless the act wrote ISO (red team R4, AOA-R4-09)
+            for example in (_with_year_of(h.raw_text, dated.raw_text), dated.raw_text):
+                if example is not None and _YEAR_WRITTEN.search(example):
+                    out = render_date_like(d, example, following=following)
+                    if out != d.isoformat():
+                        return out
+            return out
 
         if (a.start, a.end) == (b.start, b.end):
             words = re.findall(rf"[{GEORGIAN}]+", a.raw_text)
@@ -3525,8 +3644,8 @@ class AoaChecker:
                 start = render_date_like(lo, f"{lo.year} წლის 1 მაისიდან")
                 end = render_date_like(hi, f"{hi.year} წლის 1 მაისის", following="ჩათვლით")
                 return written, f"{start} {end} ჩათვლით"
-            return written, f"{moved(lo, a)} - {moved(hi, a)}"
-        fixed = moved(lo, a) + self.aoa.as_written(a.end, b.start) + moved(hi, b)
+            return written, f"{moved(lo, a, a)} - {moved(hi, a, a)}"
+        fixed = moved(lo, a, b) + self.aoa.as_written(a.end, b.start) + moved(hi, b, a)
         return written, fixed
 
     def _period_year_repair(
@@ -3622,6 +3741,7 @@ class AoaChecker:
                 expected=allowed,
                 actual=str(d),
                 span=(hit.start, hit.end),
+                places=self._act_date_places(hit),
             )
         elif valid_until is not None and d > valid_until:
             self._add(
@@ -3633,6 +3753,7 @@ class AoaChecker:
                 expected=allowed,
                 actual=str(d),
                 span=(hit.start, hit.end),
+                places=self._act_date_places(hit),
             )
         elif perform_until is not None and d > perform_until:
             ka = (
@@ -3659,6 +3780,7 @@ class AoaChecker:
                 expected=_window_text(term.signed, perform_until),
                 actual=str(d),
                 span=(hit.start, hit.end),
+                places=self._act_date_places(hit),
                 confidence=0.8,
             )
 
@@ -4045,6 +4167,15 @@ def _same_person(written: str, named: str) -> bool:
     return lemma_word(b[-1]) in word_lemmas(a[-1])
 
 
+def _slip_of_person(written: str, named: str) -> bool:
+    """Whether ``written`` is ``named`` with a slip: the same number of words, each a form of
+    the other's or one slip from it (``_near_word``), and not the same person."""
+    a, b = normalize_name(written).split(), normalize_name(named).split()
+    if not a or len(a) != len(b) or _same_person(written, named):
+        return False
+    return all(_near_word(x, y) for x, y in zip(a, b, strict=True))
+
+
 def _same_first(written: str, named: str) -> bool:
     """A first name (or a patronymic) the same word in some form, or its initial."""
     if len(written) == 1 or len(named) == 1:
@@ -4310,6 +4441,34 @@ def _fx_term_en(p: PricedTerm, currency: str, *, priced: bool) -> str:
     if priced and p.quote is not None and p.gel is not None:
         return f"{head} ({p.quote.rate:f}) = {p.gel:,.2f} {LOCAL_CURRENCY}"
     return head
+
+
+#: A date the act writes in ISO, which a correction may then write in ISO too.
+_ISO_WRITTEN = re.compile(r"\s*\d{4}-\d{2}-\d{2}")
+#: A four-digit year in a date as written.
+_YEAR_WRITTEN = re.compile(r"(?<!\d)(?:19|20)\d\d(?!\d)")
+#: A date that opens with its year: "2026 წლის 30 ივნისის", "2026 წ. 30 ივნისი".
+_YEAR_FIRST = re.compile(r"^\s*(?:19|20)\d\d\s*(?:წლის|წ\.)\s*")
+#: A date that closes with its year, and how it is joined on: "30.06.2026", "30 ივნისი, 2026 წ.".
+_YEAR_LAST = re.compile(
+    r"(?P<join>[./-]|,?\s*)(?P<year>(?:19|20)\d\d)(?P<tail>\s*წ(?:\.|[ა-ჰ]*))?\s*$"
+)
+
+
+def _with_year_of(yearless: str, dated: str) -> str | None:
+    """``yearless`` - a period's end written as a day and a month - with the year written the way
+    ``dated``, the period's other end, writes its own: "25.05" beside "30.06.2026" reads
+    "25.05.2026", "25 მაისიდან" beside "30 ივნისის ჩათვლით, 2026 წ." reads "25 მაისიდან, 2026
+    წ.", and beside "2026 წლის 30 ივნისის" reads "2026 წლის 25 მაისიდან". None when ``dated``
+    writes no year to borrow."""
+    own = yearless.strip()
+    if _YEAR_WRITTEN.search(own):
+        return None
+    if (m := _YEAR_FIRST.match(dated)) is not None:
+        return m.group(0).lstrip() + own
+    if (m := _YEAR_LAST.search(dated)) is not None:
+        return own + m.group("join") + m.group("year") + (m.group("tail") or "")
+    return None
 
 
 def _window_text(lo: date | None, hi: date | None) -> str:

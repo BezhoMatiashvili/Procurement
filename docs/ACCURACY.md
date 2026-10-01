@@ -427,13 +427,18 @@ highlighting path exists for extraction facts, not for act findings.
 A comment goes where the finding's words stand **as whole words** (red team R1, AOA-10): the
 slip `ივნის` was marked inside the correct `ივნისიდან` and `ივნისის` too, and a director's
 nominative inside the preamble's genitive, with the nominative's correction. Words found only
-inside longer ones (a stem the act writes with an ending) are still marked there. A name copied
-from the other party (AOA-09) is the one case where not every place of the words is wrong: the
-customer's director written for the contractor is right in the customer's own block. The act
-check attributes each place to the party named last before it (its name, code or role label)
-and, when some places are plainly the other party's correct director, the finding carries which
-of the places are its own (`Finding.places`: ordinals among the whole-word places, and their
-count). The API annotates the Word file without the checked text, so the ordinals are counted in
+inside longer ones (a stem the act writes with an ending) are still marked there. Two cases mark
+only some places of the words, because the same words are right elsewhere. A name copied from
+the other party (AOA-09): the customer's director written for the contractor is right in the
+customer's own block. The act check attributes each place to the party named last before it
+(its name, code or role label) and, when some places are plainly the other party's correct
+director, the finding carries which of the places are its own (`Finding.places`: ordinals among
+the whole-word places, and their count); a form whose every place is the other party's own
+director is no finding at all (red team R4, AOA-R4-01). And the act's own date (red team R4,
+AOA-R4-06): an `AOA.ACT_DATE` or `AOA.ACT_DATE_IN_TERM` finding marks where the act is dated -
+where the date reader read it, after the words that date the act, or alone in the heading -
+never the same date written elsewhere as the recital's contract date or the period's end. The
+check counts the places with the annotator's own reader (`docx_annotate.whole_word_spans`). The API annotates the Word file without the checked text, so the ordinals are counted in
 reading order in the file, tables in place; when the file shows another number of places than
 the text did (a merged cell read twice), every place is marked rather than a guessed one.
 
@@ -620,6 +625,58 @@ right in value but wrong in place or style (`tests/unit/test_aoa_redteam_r3.py`)
 
 Round-3 AOA-R3-12 (a services annex written as a Word table is not read as the act's services;
 the skip note names the list form it looks for) is left as it is by design.
+
+### Red team, round 4: what is the fee, and corrections in the act's words (2026-10-01)
+
+Round 4's act-check defects owned here (`tests/unit/test_aoa_redteam_r4.py`):
+
+* **A name copied into one signature** (AOA-R4-01). The customer's director written at the
+  contractor's signature, with the contractor's preamble right, also gave an error on the
+  customer's own, correct preamble genitive, and a Word comment there. A form of the name whose
+  every place stands in the block of a party it is that party's director for is no mistake of
+  the other party's, and is not reported; a form with a place in the wrong party's block is, and
+  marked there only (AOA-09).
+* **The act's date, marked once** (AOA-R4-06, policy decided by the lead): the comment marks
+  the act's own date only, never another correct copy of the same date. See the comment
+  placement above. An act that writes its own date twice (the heading and the signing line) is
+  marked at both.
+* **Running figures are no fee** (AOA-R4-08). A monthly act that also states the work done to
+  date, the contract's balance or what was paid before had an `AOA.FEE` error, the balance even
+  "corrected" to the monthly price. The amount roles (`contract_terms.amount_roles`) have a new
+  one, `running`, for a figure whose own clause - the words before it, back to the sentence's
+  start, the amount before it or a ";" - names it so: `დღემდე` (not `-დან დღემდე`, a period
+  ending today), `წინა აქტ…`, `წინა პერიოდ…`, `უკვე / ადრე / სულ` before `გადახდილ…` or
+  `ანაზღაურებულ…`, `ხელშეკრულების დარჩენილი / ნაშთი / აუთვისებელი`, `კუმულაციურ…`, and the
+  English `to date`, `cumulative`, `already paid`, `contract balance`. A total word alone
+  (`სულ`, `ჯამი`, `ჯამური ღირებულება`), `სულ ასანაზღაურებელია` (to be paid), the fee's
+  remainder after an advance (`დარჩენილი თანხა`, `ღირებულების დარჩენილი ნაწილი`) and an
+  advance said to be paid keep their roles, and so does a figure whose fee or fee part (`საფასური`, `ავანსი`, `დარჩენილი თანხა`) is named after the running words (`წინა აქტით შესრულებული სამუშაოს შემდეგ, მიმდინარე თვის საფასური …`). `AOA.FEE` does not compare a running figure and
+  leaves a skip note naming it. `fx_invoice` is unchanged: its total takes a price, an amount
+  with no role or a remainder, never a running figure.
+* **The term over a period that writes its year once** (AOA-R4-09). `25.05-30.06.2026` got
+  the correction `2026-06-01-31.05.2027`: the start, written with no year, had no style to
+  copy, and fell back to ISO. Such an end now borrows the year as the other end writes it - its
+  joiner, digits and year word (`25 მაისიდან` beside `30 ივნისის ჩათვლით, 2026 წ.` reads
+  `1 ივნისიდან, 2026 წ.`), or failing that the other end's whole style - keeping its own day,
+  month and `-დან`. A correction is ISO only where the act wrote ISO.
+* **Another currency's correction** (AOA-R4-11). A lari fee against a dollar price was
+  corrected to `1,200.00 USD`. The correction is now the fee as the act writes it with the
+  contract's currency put in (`amounts.with_currency`): a word in its case, consonant stems
+  (`ლარს` -> `აშშ დოლარს`) and the vowel stem `ევრო` (`ლარით` -> `ევროთი`) alike, a code as a
+  code, a sign as a sign, tetri and cents swapped with it. The machine form is left only when
+  the act's currency cannot be rewritten (a word only starting like one, `ევროპული`). The
+  message still names the contract's price. `test_aoa_check`'s currency test pinned the
+  machine form; it now pins the act's wording.
+* **An attorney at the signature** (AOA-R4-12, the rule part; the reader that takes
+  `მინდობილი პირი: …` in a signature block into `Party.proxies` is another change this round).
+  The act's attorney who is the contract's attorney with a slip (`… გოგიჩაიშვილო` for `…
+  გოგიჩაიშვილი`) is an `AOA.DIRECTOR` error corrected to the contract's attorney in the act's
+  case, by the director's rule; another person stays the warning that asks for the power of
+  attorney, with no correction, as does any attorney when the contract names only the director
+  (ts3 `aoa_f2_08`). A signature line that names an attorney (`მინდობილი პირი`, `მინდობილობით
+  მოქმედი პირი`, `წარმომადგენელი (მინდობილობით)`, `რწმუნებული`, then two or three words and
+  nothing else) whom no party of either document is read with leaves an `AOA.DIRECTOR` skip
+  note: not compared, never silent.
 
 ## LLM configuration, and why
 

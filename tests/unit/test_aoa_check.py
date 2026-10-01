@@ -368,8 +368,10 @@ class TestFee:
     def test_the_same_figure_in_another_currency_is_an_error(self) -> None:
         act = ACT.replace("100 (ასი) ლარს", "100 (ასი) აშშ დოლარს")
         [(message, expected, actual, quote)] = _fees(act)
-        assert "currency differs" in message
-        assert (expected, actual, quote) == ("100.00 GEL", "100.00 USD", "100 (ასი) აშშ დოლარს")
+        assert "currency differs" in message and "100.00 GEL" in message
+        # the correction in the act's wording, with the contract's currency (red team R4,
+        # AOA-R4-11); the contract's price in its machine form stays in the message
+        assert (expected, actual, quote) == ("100 (ასი) ლარს", "100.00 USD", "100 (ასი) აშშ დოლარს")
 
     @pytest.mark.parametrize(
         ("fee_line", "contract"),
