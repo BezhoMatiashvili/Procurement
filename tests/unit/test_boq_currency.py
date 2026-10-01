@@ -105,3 +105,23 @@ def test_a_title_naming_a_currency_outside_the_price_columns_is_not_read(tmp_pat
         notes_header="Notes (prices in GEL are indicative)",
     )
     assert b.currencies == ("USD",)
+
+
+def test_a_note_above_the_header_is_not_the_bids_currency(tmp_path: Path) -> None:
+    """A bid form above the header ("Total offer in GEL equivalent" over the rate column) says
+    nothing of the currency the rates are in: only the header block is read."""
+    wb = Workbook()
+    ws = wb.active
+    assert ws is not None
+    ws.title = "1. WORKS"
+    ws.cell(1, 5, "Total offer in GEL equivalent")
+    ws.cell(2, 6, "ლარში")
+    for col, title in enumerate(
+        ["No", "Description", "Unit", "Quantity", "Rate in USD", "Amount in USD"], 1
+    ):
+        ws.cell(4, col, title)
+    for col, value in enumerate(["1.1", "Concrete works", "m3", 10, 150.0, 1500.0], 1):
+        ws.cell(5, col, value)
+    path = tmp_path / "b.xlsx"
+    wb.save(path)
+    assert read_boq(path, name="b").currencies == ("USD",)

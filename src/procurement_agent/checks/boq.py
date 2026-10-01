@@ -419,15 +419,30 @@ def _header_currencies(ws: object, cols: dict[str, int], header: int) -> tuple[s
     """The currencies the headers of a sheet's price columns name ("Rate in USD", "ღირებულება,
     ლარი", a group label "Unit rates in USD" over the component rates), by code.
 
-    Only the price columns: a description header that mentions a currency says nothing of what
-    the bid is priced in (red team R3, BOQ-R3-03)."""
+    Only the price columns, and only inside the header block: another column's header, or a
+    bid form's "Total offer in GEL equivalent" above the header, says nothing of what the rates
+    are in (red team R3, BOQ-R3-03)."""
     found: set[str] = set()
     for c in {cols[k] for k in (*_RATE_KEYS, *_TOTAL_KEYS) if k in cols}:
-        for r in range(1, header + 1):
+        for r in range(_header_start(ws), header + 1):
             value = ws.cell(r, c).value  # type: ignore[attr-defined]
             if isinstance(value, str):
                 found |= {code for code, pattern in _CURRENCY_CODES if pattern.search(value)}
     return tuple(sorted(found))
+
+
+def _header_start(ws: object) -> int:
+    """The first row of the header block, found as ``_map_headers`` finds it: the first row
+    naming at least two columns, one of them the description or the quantity."""
+    for r in range(1, _HEADER_SCAN_ROWS + 1):
+        keys = {
+            key
+            for c in range(1, _HEADER_SCAN_COLS + 1)
+            if (key := _label_key(ws.cell(r, c).value, price=True))  # type: ignore[attr-defined]
+        }
+        if len(keys) >= 2 and keys & {"desc", "qty"}:
+            return r
+    return 1
 
 
 def _norm_label(v: object) -> str:
