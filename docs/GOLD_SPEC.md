@@ -633,7 +633,9 @@ Red team round 5 (compare) settled these cases:
   day` the same). The period is the amount's own only between it and the next figure or rate:
   in `ჯარიმა 500 ლარი და 50 ლარი ყოველ დღეზე` the day is the 50's, and the 500 stays `500.00
   GEL`. An amount penalty with no period is reported as before. (The extraction's
-  `penalty` keeps the amount alone; this is the comparison's form.)
+  `penalty` keeps the amount alone; this is the comparison's form, read line by line between
+  two versions. The document-wide pass reads a penalty as the extraction does, so between two
+  documents that are no versions of one another an amount penalty is compared as its amount.)
 * **A "label: value" line is a sentence of its own in the comparison too** (section 2, R4): terms
   written one to a line are each typed by their own label, so a delivery term changed is one
   "Delivery deadline", never a "Payment terms" from the next line's label. Requisites are still
@@ -642,8 +644,9 @@ Red team round 5 (compare) settled these cases:
   მნიშვნელობა`, one term a row), on its line and in the document-wide pass alike: the delivery
   row changed is one `CMP.DURATION` "Delivery deadline", the penalty row one `CMP.PERCENT`
   "Penalty", the price row one `CMP.AMOUNT` "Total amount". Only a table of exactly two columns
-  whose first cell is a term's name (letters, no figure, short); a value cell that is a bare
-  figure keeps its own reading ("Number").
+  whose first cell is a term's name (letters, no figure, no colon, short); a value cell that is
+  a bare figure keeps its own reading ("Number"), and a table laid out one party per column is
+  read by its columns, as before.
 * **Two equal values in one sentence are two values**: `40 ცალი მაგიდა და 40 ცალი სკამი` with
   the chairs made 50 is `40 item` -> `50 item`, never a quantity added; an act delivering 38 of
   the 40 is `40 item` -> `38 item`, an error. The same for two equal prices or dates. A value

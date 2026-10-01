@@ -2061,15 +2061,23 @@ def _row_labels(segments: Sequence[Segment]) -> dict[int, str]:
     its line, and in the document's text, the next row's label beside it, a payment term - one
     change, two errors. Only a table of exactly two columns, and only a row whose first cell is a
     term's name: letters, no figure (an item number, a contract number, a price), short, no
-    sentence's stop at its end, no party's name. A value cell that is a bare figure keeps its
-    own reading (a quantity or a price column: ``bare_number_delta``)."""
+    sentence's stop at its end, no party's name, no "label:" of its own. A value cell that is a
+    bare figure keeps its own reading (a quantity or a price column: ``bare_number_delta``). A
+    table laid out one party per column - a party named in each column of a row - is no
+    key-terms table: its cells are each their column's party's (``_Context.party``)."""
     columns: dict[int, set[int]] = {}
+    named: dict[tuple[int, int | None], set[int]] = {}
     for s in segments:
         if s.table is not None and s.table_row is not None and s.table_col is not None:
             columns.setdefault(s.table, set()).add(s.table_col)
+            if party_column(s.text) is not None:
+                named.setdefault((s.table, s.table_row), set()).add(s.table_col)
+    by_party = {table for (table, _row), cols in named.items() if len(cols) >= 2}
     labels: dict[tuple[int | None, int | None], list[str]] = {}
     for s in segments:
-        if s.table is not None and s.table_col == 1 and columns.get(s.table) == {1, 2}:
+        if s.table is None or s.table_col != 1 or s.table in by_party:
+            continue
+        if columns.get(s.table) == {1, 2}:
             labels.setdefault((s.table, s.table_row), []).append(s.text)
     out: dict[int, str] = {}
     for s in segments:
@@ -2082,6 +2090,7 @@ def _row_labels(segments: Sequence[Segment]) -> dict[int, str]:
             or not _LETTER.search(label)
             or re.search(r"\d", label)
             or label[-1] in ".;!?"
+            or ":" in label
             or party_column(label) is not None
             or parse_number(_figure_alone(s.text).strip()) is not None
         ):
@@ -4208,6 +4217,7 @@ def _findings_of(
     ocr: bool,
     left_text: str = "",
     unrelated: bool = False,
+    reading: tuple[str, str] | None = None,
 ) -> tuple[list[Finding], int]:
     """One finding per difference worth naming.
 
@@ -4220,7 +4230,10 @@ def _findings_of(
     seen: set[tuple[str, str | None, str | None]] = set()
     minor = 0
     suppressed = 0
-    everywhere = _value_keys(left_text), _value_keys(right_text)
+    # the values each document states, read from the text the document-wide pass reads
+    # (``_reading_text``); ``right_text`` stays the coordinates of a finding's span
+    left_read, right_read = reading or (left_text, right_text)
+    everywhere = _value_keys(left_read), _value_keys(right_read)
     # an act against the contract it closes: two kinds of document, however alike their words
     from procurement_agent.checks.document_facts import is_act  # checks import compare
 
@@ -4960,6 +4973,7 @@ def compare(
         )
 
     left_text, right_text = document_text(left), document_text(right)
+    reading: tuple[str, str] | None = None
     if len(left_text) + len(right_text) > 400_000:
         field_deltas: list[ValueDelta] = []
         skipped.append(
@@ -4973,7 +4987,8 @@ def compare(
         # a workbook states no term, period or penalty clause to read as a whole
         field_deltas = deltas_between(left_text, right_text, types=FIELD_TYPES)
     else:
-        field_deltas, notes = document_deltas(_reading_text(left), _as_meant_by(pairs, right))
+        reading = _reading_text(left), _reading_text(right)
+        field_deltas, notes = document_deltas(reading[0], _as_meant_by(pairs, right))
         skipped.extend(notes)
         hunks = _named_dates(hunks, field_deltas)
         roles = _sides_reassigned(left_text, right_text)
@@ -4988,6 +5003,7 @@ def compare(
         right_text,
         ocr=ocr,
         left_text=left_text,
+        reading=reading,
         unrelated=alignment == "unrelated",
     )
     if suppressed:

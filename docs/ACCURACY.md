@@ -1249,7 +1249,10 @@ every widened reading (`tests/unit/test_compare_redteam5.py`); the cases are in
   A value cell of a two-column table whose first cell is a term's name is now read as "label:
   value" on its line (`_row_labels`, `_Context.label`) and written so in the text the
   document-wide pass reads (`_reading_text`), as the chunker writes such a table for the
-  extraction. Finding spans still index the document's own text.
+  extraction. The values each document states, which decide that a value "added" is written
+  in the other document after all, are read from that text too; finding spans still index the
+  document's own text. A table of one party per column is no key-terms table: its cells stay
+  their column's party's.
 * **Equal values in one sentence are counted** (R5-04). Values were one per type and value, so
   "40 tables and 40 chairs" was one quantity, and a chair count changed was a quantity added;
   between a contract and its act a shortfall was only a warning. A value now counts as many
@@ -1263,7 +1266,16 @@ every widened reading (`tests/unit/test_compare_redteam5.py`); the cases are in
 * **The shared readers' side.** COMPARE-R5-05 (`დღეში` as a period), -07 (a blank read as an
   address), -08 (an advance clause's share and amount), -09 (one item's price) and -11 (a staged
   delivery's batches) are fixed in the readers, apart. Their whole pairs are tests that skip
-  until the reader reads the form, then hold the comparison to the expected result.
+  until the reader reads the form, then hold the comparison to the expected result; the R5-05
+  pair was checked against the period reader widened in a scratch copy, and passes.
+* **Left open.** The fine's period is the line comparison's: the document-wide pass reads a
+  penalty as the extraction does, so between an unrelated pair an amount penalty is its amount.
+
+Measured after the fixes: the three strict gold sets unchanged at 100%/100%;
+`scripts/mutate_aoa.py --seed 191 --per-class 6` compares every class at 100% (`cmp`), its
+table the same row for row as the code before these fixes (`prose_typo` corrections at 67%/50%
+are the act check's, there before). The 68 red-team repro scripts of rounds 1-4 give the same
+output before and after.
 
 ### The findings list is a list, not a dump
 

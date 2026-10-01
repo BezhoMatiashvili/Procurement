@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import pytest
 
-from procurement_agent.checks.compare import _row_labels, compare, hits_of
+from procurement_agent.checks.compare import _reading_text, _row_labels, compare, hits_of
 from procurement_agent.eval.runner import compare_label
 from procurement_agent.extraction.schemas import FactType
-from procurement_agent.ingestion.segmenter import Segment, TableCell, build
+from procurement_agent.ingestion.segmenter import Segment, TableCell, build, document_text
 
 PRICE = "1. ხელშეკრულების ღირებულება შეადგენს 2 000 ლარს."
 
@@ -242,6 +242,45 @@ def test_only_a_two_column_table_s_term_names_label_its_values() -> None:
     assert _row_labels(three) == {}
 
 
+REQUISITES = [
+    ["შპს „მზიური ველი“", "შპს „ქვის ხიდი“"],
+    ["დირექტორი: ნინო ბერიძე", "დირექტორი: გიორგი წერეთელი"],
+    ["ბანკი: სს „ნიმუში“", "ბანკი: სს „მაგალითი“"],
+]
+
+
+def test_a_table_of_one_party_per_column_is_no_key_terms_table() -> None:
+    # near miss: two columns, words only - but each column is a party's, not a term's value
+    segments = table(REQUISITES)
+    assert _row_labels(segments) == {}
+    assert _reading_text(segments) == document_text(segments)
+    after = [list(r) for r in REQUISITES]
+    after[1][1] = "დირექტორი: ლაშა წერეთელი"
+    assert labelled(run(segments, table(after))) == [
+        ("CMP.PARTY", "Director / signatory", "გიორგი წერეთელი", "ლაშა წერეთელი", "error")
+    ]
+
+
+def test_a_key_term_moved_from_its_table_into_a_clause_is_no_value_added() -> None:
+    # the other document's values are read as the document-wide pass reads it: the delivery
+    # row's 20 days is the delivery deadline the new clause restates
+    moved = [r for r in KEY_TERMS if r[0] != "მიწოდების ვადა"]
+    left = table(KEY_TERMS)
+    right = build(
+        [
+            *((s.text, s.kind, s.path, None, None, _cell(s)) for s in table(moved)),
+            ("4. მიწოდება - გაფორმებიდან 20 კალენდარული დღის ვადაში.", "text", "¶9", None, None),
+        ]
+    )
+    assert "CMP.DURATION" not in rules(run(left, right))
+
+
+def _cell(s: Segment) -> TableCell | None:
+    if s.table is None or s.table_row is None or s.table_col is None:
+        return None
+    return TableCell(s.table, s.table_row, s.table_col, s.column)
+
+
 def test_a_bare_figure_in_a_two_column_table_is_still_a_number() -> None:
     rows = [["დასახელება", "ფასი"], ["მაგიდა", "250"]]
     after = [["დასახელება", "ფასი"], ["მაგიდა", "275"]]
@@ -404,9 +443,9 @@ def test_an_advance_clause_revised_is_its_share_and_its_amount() -> None:
         left, FactType.total_amount
     ):
         pytest.skip("the readers do not read an advance clause's share and amount yet")
-    assert labelled(run([PRICE, left], [PRICE, right])) == [
-        ("CMP.PAYMENT", "Payment terms", "advance 30%", "advance 20%", "error"),
+    assert sorted(labelled(run([PRICE, left], [PRICE, right]))) == [
         ("CMP.AMOUNT", "Amount (unclassified)", "1,200.00 GEL", "800.00 GEL", "error"),
+        ("CMP.PAYMENT", "Payment terms", "advance 30%", "advance 20%", "error"),
     ]
 
 
