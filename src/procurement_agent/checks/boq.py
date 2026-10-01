@@ -149,9 +149,25 @@ _DESC_LABEL = re.compile(
     r"^names?\s+of\s+(?:the\s+)?(?:works?|goods|items?|services?|supplies|materials)$|"
     r"^(?:სამუშაო(?:ებ)?ის|საქონლის|მომსახურების|მასალის)\s+(?:დასახელება|აღწერა)$"
 )
-#: A quantity column by rule: "Quantity", "Quantity of work(s)", the Georgian abbreviations
-#: "რაოდ." and "რ-ბა" (the dot is folded off with the label's end punctuation).
-_QTY_LABEL = re.compile(r"^(?:quantity|qty)(?:\s+of\s+(?:the\s+)?works?)?$|^რაოდ$|^რ-ბა$")
+#: A quantity column by rule: "Quantity", "Quantity of work(s)", and the Georgian რაოდენობა cut
+#: after its stem and given its ending back after a hyphen, the way estimates abbreviate it -
+#: "რაოდ.", "რაოდენ.", "რ-ბა", "რაოდ-ბა", "რაოდ-ობა" (the dot is folded off with the label's end
+#: punctuation). A bare "რ" names nothing.
+_QTY_LABEL = re.compile(
+    r"^(?:quantity|qty)(?:\s+of\s+(?:the\s+)?works?)?$|"
+    r"^(?:რაოდ(?:ენ)?(?:-(?:ნ?ობ|ბ)ა)?|რ-(?:ნ?ობ|ბ)ა)$"
+)
+#: A unit rate by rule: a unit word, then a price word - "ერთეულის ფასი", "ერთ. ფასი",
+#: "ერთ.ფასი", "ერთ. ღირებულება" (the dot after an abbreviation is spaced by ``_norm_label``).
+_RATE_LABEL = re.compile(r"^(?:ერთეულის|ერთ\.)\s*(?:ფასი|ფასები|ღირებულება)$")
+#: The line amount by rule: a money word with a total word before or after it - "სულ თანხა",
+#: "საერთო თანხა", "ღირებულება სულ", "ჯამური ფასი". A bare "ფასი" is bound by where it stands
+#: (``_bind_price``), a bare "ღირებულება" / "თანხა" is in the synonyms, and a unit word before
+#: the money word makes it the rate (``_RATE_LABEL``).
+_AMOUNT_LABEL = re.compile(
+    r"^(?:(?:სულ|საერთო|ჯამური|ჯამი)\s+(?:ღირებულება|თანხა|ფასი)|"
+    r"(?:ღირებულება|თანხა|ფასი)\s+(?:სულ|საერთო|ჯამური|ჯამში|ჯამი))$"
+)
 #: A bare "Price" / "ფასი": the unit price where a line amount is read after it, the line's
 #: price where none is - bound by where it stands (``_map_headers``), never by its label alone.
 _PRICE_LABELS = frozenset({"price", "prices", "ფასი"})
@@ -359,8 +375,19 @@ def _norm_label(v: object) -> str:
     """A header label as compared: "Qty." and "Unit:" are "qty" and "unit", and "ღირებულება, აშშ
     დოლარი", "Amount in GEL" and "ღირებულება ლარში" are the amount whatever currency they name.
     """
-    label = normalize_spaces(str(v or "")).strip().lower().rstrip(":.").strip()
+    text = str(v or "")
+    # a word hyphenated across a line break is the word: "რაოდე-\nნობა" is "რაოდენობა"
+    text = _LINE_BREAK_HYPHEN.sub("", text)
+    label = normalize_spaces(text).strip().lower().rstrip(":.").strip()
+    # an abbreviation's dot spaced the one way: "ერთ.ფასი" is "ერთ. ფასი"
+    label = _ABBREVIATION_DOT.sub(". ", label)
     return _LABEL_CURRENCY.sub("", label).strip()
+
+
+#: A hyphen ending a line inside a word, the word going on on the next line.
+_LINE_BREAK_HYPHEN = re.compile(r"(?<=[^\W\d_])-[ \t]*\r?\n\s*(?=[^\W\d_])")
+#: A dot between two letters with no space after it - an abbreviation run into the next word.
+_ABBREVIATION_DOT = re.compile(r"(?<=[^\W\d_])\.(?=[^\W\d_])")
 
 
 #: Text a number reads from two ways: one separator and exactly three digits after it ("1.250",
@@ -745,6 +772,10 @@ def _one_label_key(value: object, *, price: bool) -> str | None:
         return "desc"
     if _QTY_LABEL.match(label):
         return "qty"
+    if _RATE_LABEL.match(label):
+        return "rate_total"
+    if _AMOUNT_LABEL.match(label):
+        return "amount"
     if _UNIT_LABEL.match(label) and not _MONEY_WORD.search(label):
         return "unit"
     if price and label in _PRICE_LABELS:
