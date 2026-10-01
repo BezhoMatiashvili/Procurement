@@ -18,6 +18,7 @@ from openpyxl import Workbook
 
 import tests.boq_factory as factory
 from procurement_agent.checks.boq import (
+    _PLACEHOLDER,
     BidComparison,
     BoqWorkbook,
     _label_key,
@@ -25,6 +26,7 @@ from procurement_agent.checks.boq import (
     _plays,
     _summary_columns,
     compare_all,
+    norm_unit,
     read_boq,
     reconcile_summary,
     template_findings,
@@ -725,3 +727,87 @@ def test_a_workbook_with_several_priced_sheets_and_no_summary_is_not_ranked_on_o
     assert books["A"].summary_rows == [] and books["A"].summary_in_bill is None
     (a,) = compare_all(books["t"], [books["A"]])
     assert a.markup_factor is None and a.totals_from is None
+
+
+# --- R4-09 / R4-18: a unit with a multiplier, and the lump sum's names --------------------------
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ("100 m2", "100 მ2"),
+        ("1000 m3", "1000 მ3"),
+        ("100 m", "100 მ"),
+        ("100 m", "100 lm"),
+        ("100 m2", "100m²"),
+        ("100 м2", "100 m2"),  # Cyrillic
+        ("1,5 t", "1,5 ტ"),
+        ("LS", "Lump sum"),
+        ("LS", "lump-sum"),
+        ("L.S.", "Lumpsum"),
+        ("lump sum", "Lump Sum"),
+    ],
+)
+def test_one_unit_typed_another_way_is_one_unit(a: str, b: str) -> None:
+    assert norm_unit(a) == norm_unit(b)
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ("100 m2", "m2"),  # per hundred is not per one
+        ("100 m2", "1000 m2"),
+        ("100 m2", "100 m3"),
+        ("LS", "item"),  # a lump sum is not a count, a litre or a set
+        ("LS", "l"),
+        ("Lump sum", "set"),
+        ("Lump sum", "pcs"),
+        ("lump-sum", "each"),
+    ],
+)
+def test_different_units_with_a_multiplier_or_a_lump_sum_stay_apart(a: str, b: str) -> None:
+    assert norm_unit(a) != norm_unit(b)
+
+
+def test_units_typed_on_a_georgian_keyboard_are_no_unit_change(tmp_path: Path) -> None:
+    def units(path: Path, factor: float | None, names: tuple[str, ...]) -> Path:
+        bill, total = _bill(factor)
+        for r, name in enumerate(names, 2):
+            bill[(r, 3)] = name
+        return _save(path, {"SUMMARY": _summary(total), _SHEET: bill})
+
+    latin = ("100 m2", "1000 m3", "100 m", "LS", "m2")
+    georgian = ("100 მ2", "1000 მ3", "100 მ", "Lump sum", "მ2")
+    t = read_boq(units(tmp_path / "t.xlsx", None, latin), name="T")
+    (k,) = compare_all(t, [read_boq(units(tmp_path / "k.xlsx", 1.0, georgian), name="K")])
+    assert "BOQ.UNIT_CHANGED" not in _rules(k)
+
+
+# --- R4-10: "to be specified by the Engineer" asks nothing of the bidder ------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Other floor finishes: ceramic tiles, type and colour to be specified by the Engineer",
+        "Other fittings, to be specified by the Employer",
+        "Others as listed in the drawings, to be specified by the Supervisor",
+        "სხვა მოპირკეთება, ფერი დამკვეთის მიერ დაკონკრეტდება",
+    ],
+)
+def test_a_position_specified_by_the_engineer_is_described_work(text: str) -> None:
+    assert not _PLACEHOLDER.search(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Other works (please specify)",
+        "Other items, to be specified by the bidder",
+        "Others - to be listed by the tenderer",
+        "Other costs to be specified",
+        "Other items not included above",
+    ],
+)
+def test_an_other_position_asking_the_bidder_is_still_a_placeholder(text: str) -> None:
+    assert _PLACEHOLDER.search(text)

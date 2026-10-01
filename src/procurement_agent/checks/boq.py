@@ -335,7 +335,12 @@ _UNIT_ALIASES: dict[str, str] = {
         "pcs",
     ),
     **dict.fromkeys(("hr", "hrs", "h", "hour", "hours", "სთ", "საათი"), "hr"),
+    # a lump sum by its names - one unit, never a count, a set or a litre
+    **dict.fromkeys(("ls", "lumpsum", "lump-sum", "lumpsums"), "ls"),
 }
+#: A unit with a multiplier before it, per hundred or per thousand as Georgian estimates price
+#: ("100 m2", "1000 მ3"), once spaces and dots are folded out: the multiplier and the measure.
+_UNIT_MULTIPLIER = re.compile(r"(\d+(?:,\d+)?)(\D.*)")
 
 
 #: A currency, as a header names it: "GEL", "US $", "₾", "აშშ დოლარი", and the Georgian locative
@@ -541,9 +546,18 @@ def _money(x: float) -> str:
 
 def norm_unit(unit: str | None) -> str:
     """A unit folded for comparison: case, spaces and dots out, Cyrillic look-alikes read as the
-    Latin letters they print as, then known aliases merged."""
+    Latin letters they print as, then known aliases merged - after a multiplier, too: "100 m2"
+    and "100 მ2" are one unit, and "100 m2" stays apart from "m2" and from "1000 m2"."""
     text = unicodedata.normalize("NFC", str(unit or "")).lower()
     text = re.sub(r"[\s.]", "", text)
+    m = _UNIT_MULTIPLIER.fullmatch(text)
+    if m is not None:
+        return m.group(1) + _measure(m.group(2))
+    return _measure(text)
+
+
+def _measure(text: str) -> str:
+    """A folded unit's measure: the alias it is, read through the homoglyphs if need be."""
     if text not in _UNIT_ALIASES:
         text = text.translate(_HOMOGLYPHS)
     return _UNIT_ALIASES.get(text, text)
@@ -2511,14 +2525,20 @@ def _unit_rate(line: BoqLine, columns: dict[str, int]) -> float | None:
 #:
 #: Only the opening word counts: "Paint to walls and other surfaces, colour to be specified by
 #: the Engineer" is a described position, and read as a placeholder it would drop out of the
-#: evaluation and the common scope. "სხვადასხვა" (sundry items the template describes) is never
-#: one. A line under a heading that invites is one too (``_placeholder_rows``).
+#: evaluation and the common scope. Nor does "to be specified / listed by" anyone but the bidder
+#: ("Other floor finishes ..., colour to be specified by the Engineer"): the template describes
+#: the work, someone else settles a detail. "სხვადასხვა" (sundry items the template describes)
+#: is never one. A line under a heading that invites is one too (``_placeholder_rows``).
+_NOT_BIDDER = (
+    r"(?:engineer|employer|client|customer|owner|supervisor|consultant|architect|designer|"
+    r"project\s+manager|purchaser|დამკვეთ|ზედამხედველ|ინჟინერ|არქიტექტორ|პროექტის\s+ავტორ)"
+)
 _PLACEHOLDER = re.compile(
     r"any\s+other\s+(?:[a-z]+\s+)?(?:item|work|cost)s?\b|"
     r"\b(?:tender(?:er)?|bidder)s?\s+(?:is\s+|are\s+)?to\s+list\b|\blist\s+here\b|"
     r"\bto\s+be\s+listed\s+(?:here|below|by\s+the\s+(?:tenderer|bidder))\b|"
     r"^\W*undescribed\b|other\s+costs\s+if\s+necessary|"
-    r"^\W*others?\b.*\b(?:specify|to\s+be\s+(?:specified|listed)|"
+    rf"^\W*others?\b.*\b(?:specify|to\s+be\s+(?:specified|listed)(?!\s+by\s+(?:the\s+)?{_NOT_BIDDER})|"
     r"not\s+(?:otherwise\s+)?(?:included|covered|described|listed|mentioned)\s+"
     r"(?:above|elsewhere|in\s+(?:this|the)\s+(?:boq|bill|list|schedule|tender)))\b|"
     r"აღწერაში\s+არ\s+შეტანილ|^\W*სხვა\s+ხარჯ|"
