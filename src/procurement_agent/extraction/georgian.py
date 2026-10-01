@@ -162,8 +162,21 @@ def _stem_class(lemma: str) -> Literal["consonant", "bare", "truncating", "vowel
     return "vowel"
 
 
+def _double_name(word: str) -> tuple[str, str] | None:
+    """A hyphenated double surname split before its last part, which alone declines:
+    ("მელაძე-", "ჯაფარიძის"). None for anything else."""
+    head, sep, last = word.rpartition("-")
+    if not sep or len(last) < 3 or not is_georgian_word(last):
+        return None
+    if not all(is_georgian_word(p) for p in head.split("-")):
+        return None
+    return head + sep, last
+
+
 def inflect_word(lemma: str, case: Case) -> str:
-    """``lemma`` (nominative) in ``case``."""
+    """``lemma`` (nominative) in ``case``; a double surname in its last part."""
+    if (double := _double_name(lemma)) is not None:
+        return double[0] + inflect_word(double[1], case)
     if not lemma or case == "nom" or not is_georgian_word(lemma):
         return lemma
     cls = _stem_class(lemma)
@@ -178,7 +191,10 @@ def inflect_word(lemma: str, case: Case) -> str:
 
 def case_of(word: str) -> Case:
     """The case a word is written in, read off its ending. Nominative when nothing matches: a
-    vowel-final word, or a consonant-final loanword stem ("სილქ")."""
+    vowel-final word, or a consonant-final loanword stem ("სილქ"). A double surname is read in
+    its last part."""
+    if (double := _double_name(word)) is not None:
+        return case_of(double[1])
     if not is_georgian_word(word):
         return "nom"
     for ending, case in _ENDINGS:

@@ -68,6 +68,18 @@ def test_a_correction_takes_the_case_of_the_word_it_corrects() -> None:
     assert in_case_of("ზღვის ხედისთვის", "მზის ქალაქის") == "მზის ქალაქისთვის"
 
 
+def test_a_double_surname_declines_in_its_last_part() -> None:
+    """A hyphenated double surname is one name whose last part takes the case ending: its case
+    is read there and a correction is inflected there (red team R5, a double surname slipped in
+    the signature was corrected to the contract's genitive)."""
+    assert case_of("მელაძე-ჯაფარიძის") == "gen"
+    assert case_of("მელაძე-ჯაფარიძე") == "nom"
+    assert inflect("დავით მელაძე-ჯაფარიძე", "gen") == "დავით მელაძე-ჯაფარიძის"
+    assert lemma("დავით მელაძე-ჯაფარიძის") == "დავით მელაძე-ჯაფარიძე"
+    # a case ending hyphenated to a Latin abbreviation is no double surname
+    assert case_of("PDF-ის") == "nom"
+
+
 def test_case_of_reads_the_ending() -> None:
     assert case_of("კაპანაძის") == "gen"
     assert case_of("ქალაქისთვის") == "gen_tvis"
