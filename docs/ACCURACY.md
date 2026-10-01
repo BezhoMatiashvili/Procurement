@@ -1634,13 +1634,9 @@ fitting numbers in the same sense as above: the gold sets are this client's.
 
 Policy questions left open:
 
-* Profit on cost + overheads, usual in Georgian estimates, is a `BOQ.RECONCILE` error on every
-  faithful bid that computes it so, because `reconcile_summary` holds overheads and profit
-  against TOTAL COST x their rate. That base is the module's own documented decision, not
-  GOLD_SPEC 5's (which asks only that the rows follow from each other), and the gold writer
-  checks no rates at all. The markup and the ranking are right; the error is not. Accepting
-  either base (TOTAL COST, or TOTAL COST + overheads) and noting which was used is the
-  recommended change.
+* Profit on cost + overheads, usual in Georgian estimates, was a `BOQ.RECONCILE` error on every
+  faithful bid that computes it so. Decided (rounds 4 and 5, then for a typed rate on
+  2026-10-01): the profit rate, from its label or typed beside the total, holds on either base.
 
 The rest follow the letter of GOLD_SPEC 5, and the gold writer agrees:
 
@@ -1799,8 +1795,8 @@ are in GOLD_SPEC 5.
   was held against the range's first row; it is held against the range's positions, and a
   range scaled or mixed is not checked. "V.A.T." and "დ.ღ.გ." are the tax. A chain row's rate
   is the one its label states or the one typed beside it; a "% of total" share column is no
-  rate. A profit rate read from the label alone holds on TOTAL COST or on TOTAL COST +
-  overheads, so the labels never widen the open "profit on cost + overheads" question above.
+  rate. A profit rate, from the label or typed beside it, holds on TOTAL COST or on TOTAL COST +
+  overheads.
 * Units: "100 m2" is "100 მ2" (a multiplier kept, the measure folded; R4-09). An "Other(s)"
   position "to be specified by the Engineer" is described work, not a placeholder (R4-10). A
   sheet priced by its component rates alone is priced, and the merged sheets show every

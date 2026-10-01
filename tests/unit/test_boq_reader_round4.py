@@ -551,6 +551,26 @@ def test_profit_labelled_with_its_rate_on_cost_and_overheads_is_no_gap(label: st
     assert "row 5" in gap.message_en
 
 
+def test_profit_typed_beside_its_total_on_cost_and_overheads_is_no_gap() -> None:
+    """The profit rate typed in the column beside the total, as most Georgian estimates set it
+    out, holds on cost + overheads as a label's rate does: a faithful bid computed so was
+    reported a Summary gap on every such bid. On neither base it still is."""
+    from procurement_agent.checks.boq import SummaryRow
+
+    def chain(profit: float) -> BoqWorkbook:
+        rows = [
+            SummaryRow(row=3, item="", label="TOTAL COST", value=1000.0),
+            SummaryRow(row=4, item="", label="Overheads", value=100.0, rate=0.10),
+            SummaryRow(row=5, item="", label="Profit", value=profit, rate=0.08),
+        ]
+        return BoqWorkbook(name="B", summary_rows=rows, summary_sheet="SUMMARY")
+
+    assert reconcile_summary(chain(88.0)) == []  # 8% of 1,100
+    assert reconcile_summary(chain(80.0)) == []  # 8% of 1,000
+    [gap] = reconcile_summary(chain(95.0))
+    assert "row 5" in gap.message_en
+
+
 def test_a_typed_rate_beside_the_total_still_checks_its_row() -> None:
     """A rate typed in the column (0.12) where the label states none is the row's rate."""
     from procurement_agent.checks.boq import SummaryRow

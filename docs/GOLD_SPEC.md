@@ -1074,8 +1074,8 @@ Policy (client BOQ rules 2, 3, 5, 6 and the user's decision of 2026-09-28):
   ("Overheads 10%", "VAT 18%") or the fraction typed beside its TOTAL, either holding being
   enough - in the column right of TOTAL, else the one left of it where the header names it a
   rate column ("%", "Rate", "პროცენტი"; round 5); a cell dividing the row's own total by another
-  ("% of total", `=C4/$C$8`) is a share, never a rate. A profit rate read from the label holds on TOTAL COST or on TOTAL COST +
-  overheads (the Georgian estimate's base); a typed rate's base stays the open question in docs/ACCURACY.md (BOQ comparison). The stated total incl. VAT is the row labelled so; there
+  ("% of total", `=C4/$C$8`) is a share, never a rate. A profit rate, read from the label or typed beside the total, holds on TOTAL COST or on
+  TOTAL COST + overheads (the Georgian estimate's base). The stated total incl. VAT is the row labelled so; there
   is no fallback to another row. Each part of the chain (TOTAL COST, overheads, profit, excl.
   VAT, VAT, incl. VAT) is played by one row and each row plays one part at most: TOTAL COST is
   the last row labelled so before the chain goes on, and the rest are taken below it, top down,

@@ -3624,18 +3624,17 @@ def _reconcile_chain(
     ) -> None:
         """The row against its base x its rate: the rate its label states ("Overheads 10%")
         and the one typed beside it, either of which holding is enough. ``also``: a second
-        base the label's rate may be on - profit on cost + overheads, as Georgian estimates
-        compute it; read from the label alone, that rate once made such a faithful row an
-        error."""
+        base either rate may be on - profit on cost + overheads, as Georgian estimates compute
+        it; held against cost alone, such a faithful row was an error."""
         if part is None or not base or part.value is None or base[0].value is None:
             return
         value = sum(r.value or 0.0 for r in base)
         rates = [x for x in (part.label_rate, part.rate) if x is not None]
         if not rates or any(_same_money(part.value, value * x) for x in rates):
             return
-        if also and part.label_rate is not None:
+        if also:
             other = sum(r.value or 0.0 for r in also)
-            if _same_money(part.value, other * part.label_rate):
+            if any(_same_money(part.value, other * x) for x in rates):
                 return
         rate = rates[0]
         what = " + ".join(str(r.row) for r in base)
