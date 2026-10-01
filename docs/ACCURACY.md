@@ -803,6 +803,48 @@ Round 3 (2026-10-01), in the readers every module shares (`tests/unit/test_redte
   last group (`36 000` was a total of 0); a figure never starts right after a digit and one of
   these separators.
 
+### Extraction, red team round 3: money, terms and names (2026-10-01)
+
+EXTRACTION-R3-01, 04, 06-10, 12-14 and COMPARE-R3-04, each with a unit test on invented text
+and a near miss beside every widened pattern (`tests/unit/test_extraction_r3_money_terms.py`,
+`tests/unit/test_compare_units_r3.py`); the readers are in `docs/GOLD_SPEC.md` section 2. What
+was decided, and where one reader now serves several:
+
+* **One payment reader.** The words that make a clause a payment clause are built from verb
+  roots (`rules.PAYMENT_WORDS`), which `contract_terms` reads for the act check and the
+  extraction alike; the act check therefore also reads a deadline written with `გადაუხდის`. A
+  damages clause (`ზიანს აუნაზღაურებს`, `damages`) is no payment clause, as a penalty's is not;
+  damage named only in passing (`თუ საქონელი არ არის დაზიანებული`, `free of damage`) leaves a
+  payment clause one. English
+  `transfer` was left out: it moves goods as often as money.
+* **The VAT status is the price's.** The whole-document reader no longer lets wording decide the
+  status that belongs to something else: a restated net figure's bracket
+  (`rules.restating_bracket`, which the amount typing uses too, so the bracket's figure is an
+  `amount` and the two never disagree), "net" measuring days or a weight, "net" inside `net of
+  VAT`, and wording under a condition (used only when nothing else states a status). The kind
+  precedence among what is left (net, exempt, exclusion, inclusion) is unchanged. The act
+  check's own tax-wording rule reads `tax_phrases` unchanged: these filters are the
+  extraction's.
+* **A penalty's rate** is decided by one function (`rules.is_penalty_rate`) that the
+  whole-document reader calls: the penalty word in the rate's own sentence, where the stop of a
+  clause or heading number ends no sentence, so a heading `5. პირგასამტეხლო` still names its
+  clauses' rates.
+* **Other amounts in the price clause** are split off only past an explicit turn word; a
+  monthly fee beside a named total is an `amount` rather than a `price`, because strict gold
+  that states no `price` would count one as a false positive.
+* **Contract numbers before the word** are read only before the contract's own words
+  (`ხელშეკრულებ`, `შეთანხმებ`, `contract`, `agreement`): an act's or an invoice's number written
+  the same way stays unread, so this reading adds nothing to the open policy question of other
+  documents' numbers (EXTRACTION-R3-16, R2-16).
+* **Units in comparisons.** `მ2`, `მ3` and `ც.` joined the comparison's closed unit list, in
+  place, where the BOQ fold (`boq._UNIT_ALIASES`) already had them.
+
+Measured after the fixes: the three strict gold sets unchanged at 100%/100%.
+`scripts/mutate_aoa.py --seed 107 --per-class 6` detected every error class at 100% except
+`prose_typo` (83%, one planted typo the speller misses and one wrong correction), with 0% false
+positives on the harmless ones; the unchanged code at `ad72a3a` gives the same table, row for
+row, so the spelling miss predates these fixes and is outside them.
+
 ### Red team, round 1: what the comparison now reads (2026-09-30)
 
 Defects a red team found and a verifier reproduced, each with a unit test on invented

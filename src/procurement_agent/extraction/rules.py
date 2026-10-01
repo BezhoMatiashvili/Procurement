@@ -270,12 +270,18 @@ _MAGNITUDE_RE = (
     r"(?:(?:ათას|მილიონ|მილიარდ)(?:ი|ს|ის|ით|ად)?(?![ა-ჰ])|ათ\.|მლნ\.?|მლრდ\.?"
     r"|(?:thousand|million|billion|mln|bn)(?![A-Za-z]))"
 )
+#: The figure's words in brackets between the figure and its magnitude: "36 (ოცდათექვსმეტი) ათას
+#: ლარს", "1,2 (ერთი მთელი ორი) მილიონ ლარს". Letters and spaces only, and only where a magnitude
+#: word follows: a bracket before the currency is ``_PAREN``'s.
+_WORDS_BEFORE_MAGNITUDE = rf"(?:\s*\(\s*[ა-ჰA-Za-z][ა-ჰA-Za-z\s-]{{0,80}}\)(?=\s*{_MAGNITUDE_RE}))?"
 _AMOUNT_AFTER = re.compile(
-    rf"(?<![\d.,])({_NUM_RE})(?:\s*({_MAGNITUDE_RE}))?\s*{_PAREN}({_CUR_RE})(?![A-Za-zა-ჰ])",
+    rf"(?<![\d.,])({_NUM_RE}){_WORDS_BEFORE_MAGNITUDE}(?:\s*({_MAGNITUDE_RE}))?\s*{_PAREN}"
+    rf"({_CUR_RE})(?![A-Za-zა-ჰ])",
     re.IGNORECASE,
 )
 _AMOUNT_BEFORE = re.compile(
-    rf"({_CUR_BEFORE_RE})\s*({_NUM_RE})(?![\d])(?:\s*({_MAGNITUDE_RE}))?", re.IGNORECASE
+    rf"({_CUR_BEFORE_RE})\s*({_NUM_RE})(?![\d]){_WORDS_BEFORE_MAGNITUDE}(?:\s*({_MAGNITUDE_RE}))?",
+    re.IGNORECASE,
 )
 
 
@@ -408,6 +414,99 @@ def _is_share(text: str, start: int) -> bool:
     return _SHARE_BEFORE.search(text, max(0, start - _SHARE_REACH), start) is not None
 
 
+#: A tax named inside a bracket, before the figure there: "(დღგ-ს გარეშე 1 000 ლარი)", "(excl.
+#: VAT GEL 1,000)".
+_TAX_WORD = re.compile(r"დ\.?ღ\.?გ|გადასახად|(?<![a-z])(?:vat|tax(?:es)?)(?![a-z])", re.IGNORECASE)
+#: How far a bracket may open before its figure, and a money figure before the bracket.
+_BRACKET_REACH = 60
+_RESTATED_REACH = 60
+
+
+def restating_bracket(text: str, start: int) -> tuple[int, int] | None:
+    """The bracket around the figure at ``start`` when it restates the money figure written right
+    before it on another tax basis: "1 180 ლარს დღგ-ს ჩათვლით (დღგ-ს გარეშე 1 000 ლარი)", "GEL
+    1,180 incl. VAT (excl. VAT GEL 1,000)". Its span, "(" to ")"; None otherwise.
+
+    The bracket names a tax before its figure, and a money figure stands before the bracket in
+    the same sentence: the figure is that price again, not a second one, and the tax wording in
+    the bracket is about it, not about the price (``document_facts`` reads the VAT status so).
+    A bracket with no price before it ("ფასი (დღგ-ს ჩათვლით 1 180 ლარი)") is the price itself.
+    """
+    opened = text.rfind("(", max(0, start - _BRACKET_REACH), start)
+    if opened < 0 or ")" in text[opened:start]:
+        return None
+    closed = text.find(")", start, start + _BRACKET_REACH * 2)
+    if closed < 0 or not _TAX_WORD.search(text, opened, start):
+        return None
+    before = text[max(0, opened - _RESTATED_REACH) : opened]
+    stops = list(_SENTENCE_END.finditer(before))
+    before = before[stops[-1].end() :] if stops else before
+    if not (_AMOUNT_AFTER.search(before) or _AMOUNT_BEFORE.search(before)):
+        return None
+    return opened, closed + 1
+
+
+#: Where a sentence turns to another amount: ", საიდანაც ავანსი ...", ", ხოლო საგარანტიო თანხა
+#: ...", ", მათ შორის ...", ", of which the advance ...", ", whereas ...".
+_AMOUNT_TURN = re.compile(
+    r"[,;\u2013\u2014]\s*(?:საიდანაც|აქედან|ხოლო|მათ\s+შორის|of\s+which|whereas|while)(?![ა-ჰa-z])",
+    re.IGNORECASE,
+)
+#: What an amount is when its own clause names it so: an advance, a guarantee, a retention, a
+#: deposit - a part of the price or a security, never the document's total.
+_PART_OF_PRICE = re.compile(
+    r"ავანს|წინასწარ|საგარანტიო|გარანტი|უზრუნველყოფ(?:ა|ის|ად)(?![ა-ჰ])|დაკავ|"
+    r"(?<![a-z])(?:advance|prepayment|guarantee|retention|security|deposit)(?![a-z])",
+    re.IGNORECASE,
+)
+#: A price per period ("ყოველთვიური ღირებულება", "monthly fee") and the total a sentence names
+#: beside it ("საერთო ღირებულება", "total value").
+_PERIODIC = re.compile(
+    r"ყოველთვიურ|თვიურ|ყოველწლიურ|კვარტალურ|(?<![a-z])(?:monthly|annual|quarterly|per\s+month)"
+    r"(?![a-z])",
+    re.IGNORECASE,
+)
+_TOTAL_NAMED = re.compile(
+    r"საერთო|ჯამურ|სრულ|მთლიან|(?<![a-z])(?:total|overall|aggregate)(?![a-z])", re.IGNORECASE
+)
+_CLAUSE_REACH = 160
+
+
+def _clauses_of(text: str, start: int) -> tuple[str, list[str]]:
+    """The clause the figure at ``start`` stands in, up to it, and every other clause of its
+    sentence: a sentence is cut at its turns (``_AMOUNT_TURN``)."""
+    lo = max(0, start - _CLAUSE_REACH)
+    before = text[lo:start]
+    stops = list(_SENTENCE_END.finditer(before))
+    a = lo + (stops[-1].end() if stops else 0)
+    stop = _SENTENCE_END.search(text, start, start + _CLAUSE_REACH)
+    b = stop.start() if stop else min(len(text), start + _CLAUSE_REACH)
+    turns = [m.start() for m in _AMOUNT_TURN.finditer(text, a, b)]
+    cuts = [a, *turns, b]
+    own = sum(1 for t in turns if t <= start)
+    clauses = [text[cuts[i] : cuts[i + 1]] for i in range(len(cuts) - 1)]
+    return text[cuts[own] : start], [c for i, c in enumerate(clauses) if i != own]
+
+
+def _named_in_own_clause(text: str, start: int) -> bool:
+    """Whether the figure at ``start`` is a part of the price or a periodic price that its own
+    clause names so, in a sentence another clause of which states the price: "... 36 000 ლარს,
+    საიდანაც ავანსი შეადგენს 10 800 ლარს", "ყოველთვიური ღირებულება 3 000 ლარი, ხოლო საერთო
+    ღირებულება 36 000 ლარი". Such a figure is an ``amount``: the total is the other one.
+
+    Only past a turn of the sentence, or beside a clause naming the total: "ღირებულება, ავანსის
+    ჩათვლით, შეადგენს 36 000 ლარს" has no turn, and 36 000 stays the price."""
+    own, others = _clauses_of(text, start)
+    if not others:
+        return False
+    if _AMOUNT_TURN.match(own) and _PART_OF_PRICE.search(own):
+        return True
+    return _PERIODIC.search(own) is not None and any(
+        _TOTAL_NAMED.search(c) and (_AMOUNT_AFTER.search(c) or _AMOUNT_BEFORE.search(c))
+        for c in others
+    )
+
+
 def find_amounts(text: str) -> list[RuleHit]:
     hits: list[RuleHit] = []
     seen: set[tuple[int, int]] = set()
@@ -445,8 +544,15 @@ def find_amounts(text: str) -> list[RuleHit]:
                 continue  # "20 ლ." with no word about money: litres as likely as lari
             if ft == FactType.total_amount and _is_line_total(text, span[0]):
                 ft = None
-            if ft in (FactType.total_amount, FactType.price) and _is_share(text, span[0]):
-                ft = None  # a guarantee, an advance or the VAT, as a share of the value
+            if ft in (FactType.total_amount, FactType.price) and (
+                _is_share(text, span[0])
+                or restating_bracket(text, span[0]) is not None
+                or _named_in_own_clause(text, span[0])
+            ):
+                # a guarantee, an advance or the VAT, as a share of the value; the price again
+                # on another tax basis; an advance or a monthly fee its clause names beside
+                # the total
+                ft = None
             seen.add(span)
             hits.append(
                 RuleHit(
@@ -945,6 +1051,36 @@ def is_advance_share(text: str, start: int, end: int) -> bool:
     return _RATE_ENDS.search(before, 0, word.start()) is None
 
 
+#: A word about paying the fee, built from the verb roots rather than from finished word forms,
+#: so every preverb, version vowel and person reads: pay - "გადაიხდის", "გადაიხდება",
+#: "გადაუხდის", "გადაუხადოს", "გადახდა", "იხდის", "უხდის"; transfer the money - "გადარიცხავს",
+#: "გადაურიცხავს", "ჩაირიცხება", "ჩარიცხვა"; reimburse - "ანაზღაურება", "აანაზღაურებს",
+#: "აუნაზღაურებს"; settle - "ანგარიშსწორება"; and English "pay", "pays", "paid", "paying",
+#: "payable", "payment(s)". Not "გადამხდელი" (a payer, as in "დღგ-ს გადამხდელი") and not English
+#: "transfer", which moves goods and rights as often as money.
+PAYMENT_WORDS = re.compile(
+    r"გადა[იუ]?ხა?დ|(?<![ა-ჰ])[იუ]ხდ"
+    r"|(?:გადა|ჩა)[იუ]?რიცხ"
+    r"|(?<![ა-ჰ])(?:ა|აა|აუ)ნაზღაურ"
+    r"|ანგარიშსწორებ"
+    r"|(?<![a-z])(?:pay|pays|paid|paying|payable|payments?)(?![a-z])",
+    re.IGNORECASE,
+)
+#: A clause that goes on with the balance after a paying clause: "...; the balance within 10
+#: working days", "...; დარჩენილი თანხა - 10 სამუშაო დღეში". It pays with the verb before it.
+_BALANCE_OPENS = re.compile(
+    r"(?:ხოლო\s+|and\s+)?(?:the\s+)?(?:დარჩენ|ნაშთ|მეორე\s+ნაწილ"
+    r"|(?:remaining|remainder|balance)(?![a-z]))",
+    re.IGNORECASE,
+)
+
+
+def continues_payment(text: str, previous_end: int, start: int) -> bool:
+    """Whether the sentence at ``start`` goes on with the balance of the paying sentence that
+    ends at ``previous_end``: only after a semicolon, and only when it opens with the balance."""
+    return text[previous_end - 1 : previous_end] == ";" and bool(_BALANCE_OPENS.match(text, start))
+
+
 #: Which payment a deadline is for: the advance's, or the balance's after it.
 _PAYMENT_PARTS: dict[str, tuple[str, ...]] = {
     "advance": ("ავანს", "advance", "prepayment", "prepaid"),
@@ -1004,6 +1140,51 @@ def is_vat_rate(text: str, start: int, end: int) -> bool:
         _VAT_BEFORE_RATE.search(text, max(0, start - 40), start) is not None
         or _VAT_AFTER_RATE.match(text, end) is not None
     )
+
+
+#: "net" that measures something other than money: a payment convention ("net 30 days"), a
+#: weight, a mass, an area, a profit ("net weight", "ნეტო წონის"). It says nothing about tax.
+_NET_MEASURE = re.compile(
+    r"\s*(?:-?[ა-ჰ]{1,3}\s+)?(?:(?P<figure>\d)|(?:weight|mass|area|volume|tonnage|profit|income|"
+    r"margin|loss)(?![a-z])|წონ|მას[აი]|ფართ|მოცულობ|მოგებ|ზარალ)",
+    re.IGNORECASE,
+)
+
+
+def is_net_measure(text: str, end: int) -> bool:
+    """Whether the word "net" ending at ``end`` measures a count, a weight or a profit rather
+    than stating a net amount: "net 30 days", "net weight", "ნეტო წონის მიხედვით". A figure
+    after it is a count only when it is no money: "NET 900 ლარი" is the net amount itself."""
+    m = _NET_MEASURE.match(text, end)
+    if m is None:
+        return False
+    return m.group("figure") is None or _AMOUNT_AFTER.match(text, m.start("figure")) is None
+
+
+#: A condition the tax wording after it stands under: "თუ „შემსრულებელი“ არ არის დღგ-ს
+#: გადამხდელი, ...", "იმ შემთხვევაში, თუკი ...", "If the Contractor is not registered as a VAT
+#: payer, ...". English only where it opens its clause: "the price, where applicable, ..." has a
+#: comma before the wording.
+_CONDITION = re.compile(
+    r"(?<![ა-ჰ])(?:თუ|თუკი)(?![ა-ჰ])"
+    r"|(?:^\s*|[,;:(]\s*|\d\.\s+)(?:if|in\s+case|in\s+the\s+event|where|unless|provided\s+that)"
+    r"(?![a-z])",
+    re.IGNORECASE,
+)
+_CONDITION_REACH = 120
+
+
+def is_hypothetical(text: str, start: int) -> bool:
+    """Whether the words at ``start`` stand in a conditional clause: a condition opens their
+    clause with no comma, semicolon or sentence end between. Such wording states what applies
+    in a case that may not arise - "თუ შემსრულებელი არ არის დღგ-ს გადამხდელი, ღირებულება არ
+    იცვლება" says nothing about whether this price includes VAT."""
+    lo = max(0, start - _CONDITION_REACH)
+    before = text[lo:start]
+    stops = [m.end() for m in _SENTENCE_END.finditer(before)]
+    clause = before[max(stops, default=0) :]
+    last = next(reversed(list(_CONDITION.finditer(clause))), None)
+    return last is not None and not re.search(r"[,;]", clause[last.end() :])
 
 
 def find_percentages(text: str) -> list[RuleHit]:
@@ -1099,6 +1280,48 @@ def penalty_period(text: str, start: int, end: int) -> str | None:
         return None
     unit = next(g for g in found.groups() if g)
     return _PERIOD_UNITS[unit.lower()]
+
+
+#: The words for a penalty; the English ones whole, so "fine" is no part of "defined".
+_PENALTY_WORD = re.compile(
+    r"პირგასამტეხლო|ჯარიმ|საურავ"
+    r"|(?<![a-z])(?:penalt[a-z]*|liquidated\s+damages|fines?)(?![a-z])",
+    re.IGNORECASE,
+)
+#: A rate another role owns, named nearer to it than the penalty: a guarantee's, a retention's
+#: or an advance's share ("საგარანტიო თანხის სახით დაკავდება ღირებულების 5%"). Named before the
+#: penalty word it owns nothing: "ავანსის დაბრუნების დაგვიანებისთვის პირგასამტეხლო 0.1%".
+_RATE_OWNER = re.compile(
+    r"საგარანტიო|გარანტი|უზრუნველყოფ(?:ა|ის|ად)(?![ა-ჰ])|დაკავ|ავანს"
+    r"|(?<![a-z])(?:guarantee|retention|retained|security|deposit|advance|prepayment)(?![a-z])",
+    re.IGNORECASE,
+)
+#: A sentence's end, but not the stop of a clause or heading number ("5. პირგასამტეხლო 5.1.
+#: ..."): a heading names the penalty its clauses set.
+_SENTENCE_END_IN_TEXT = re.compile(r"(?<!\d)[.;!?](?=\s)")
+_PENALTY_BEFORE = 120
+_PENALTY_AFTER = 40
+
+
+def is_penalty_rate(text: str, start: int, end: int) -> bool:
+    """Whether the percentage at ``text[start:end]`` is a penalty's rate: a penalty word stands
+    in its own sentence, before it (or after it, when none does), with no other role's word
+    nearer to it (``_RATE_OWNER``). Never the VAT's rate ("ფასი მოიცავს 18% დღგ-ს"), a cap on
+    the penalty, or a rate in the next clause: "პირგასამტეხლო 0.2% ყოველ დღეზე. 5.2. ...
+    გარანტიას ღირებულების 5%-ის ოდენობით" sets one penalty."""
+    if is_rate_cap(text, start, end) or is_vat_rate(text, start, end):
+        return False
+    before = text[max(0, start - _PENALTY_BEFORE) : start]
+    stops = [m.end() for m in _SENTENCE_END_IN_TEXT.finditer(before)]
+    before = before[max(stops, default=0) :]
+    after = text[end : end + _PENALTY_AFTER]
+    stop = _SENTENCE_END_IN_TEXT.search(after)
+    after = after[: stop.start()] if stop else after
+    word = next(reversed(list(_PENALTY_WORD.finditer(before))), None)
+    owner = next(reversed(list(_RATE_OWNER.finditer(before))), None)
+    if word is None:
+        return owner is None and _PENALTY_WORD.search(after) is not None
+    return owner is None or owner.start() < word.start()
 
 
 # --- durations ---------------------------------------------------------------------------------
@@ -1229,11 +1452,26 @@ _CONTRACT_NO = re.compile(
     rf"(?<![A-Za-zა-ჰ])(?:{_REFERENCED_DOC})\s*{_NUMBER_MARKER}\s*({_REFERENCE})",
     re.IGNORECASE,
 )
+#: The Georgian genitive puts the number first: "N 27/2026 ხელშეკრულების საფუძველზე",
+#: "№12 შეთანხმებით". The marker stays required ("2026 წლის ხელშეკრულება" names no number), and
+#: only the contract's own words follow it: "N 5 პუნქტის" is a clause, and an act's or an
+#: invoice's number written this way is left unread rather than taken for the contract's.
+_CONTRACT_WORD_AFTER = r"ხელშეკრულებ[ა-ჰ]*|შეთანხმებ[ა-ჰ]*|contract|agreement"
+_CONTRACT_NO_BEFORE = re.compile(
+    rf"{_NUMBER_MARKER}\s*({_REFERENCE})\s+(?:{_CONTRACT_WORD_AFTER})(?![A-Za-z])",
+    re.IGNORECASE,
+)
 
 
 def find_contract_numbers(text: str) -> list[RuleHit]:
     hits: list[RuleHit] = []
-    for m in _CONTRACT_NO.finditer(text):
+    matches = list(_CONTRACT_NO.finditer(text))
+    matches += [
+        m
+        for m in _CONTRACT_NO_BEFORE.finditer(text)
+        if not any(_overlaps(m.span(1), other.span(1)) for other in matches)
+    ]
+    for m in matches:
         number = _SPACED_SLASH.sub("/", m.group(1))
         if len(number) < 2 or not any(ch.isdigit() for ch in number):
             continue

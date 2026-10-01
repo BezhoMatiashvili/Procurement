@@ -23,7 +23,9 @@ from procurement_agent.checks.compare_llm import _NEGATIONS
 from procurement_agent.extraction.anchors import preamble_end
 from procurement_agent.extraction.rules import (
     KEYWORDS,
+    PAYMENT_WORDS,
     RuleHit,
+    continues_payment,
     date_role,
     find_dates,
     find_durations,
@@ -740,17 +742,18 @@ def read_term(text: str, *, sentences: list[tuple[int, int]] | None = None) -> C
 
 PaymentMethod = Literal["non_cash", "cash"]
 
-#: A clause about paying the fee.
-_PAYMENT = re.compile(
-    r"გადაიხდ|გადახდ|ანგარიშსწორებ|ანაზღაურებ|(?<![a-z])(?:payments?|payable|paid|pay)(?![a-z])",
-    re.IGNORECASE,
-)
-#: ... unless it is about a notice, a termination or a penalty. The template gives five days'
-#: notice of termination as well as five days to pay: "შეწყვეტამდე 5 (ხუთი) კალენდარული დღით
-#: ადრე შეტყობინების საფუძველზე" is no payment deadline.
+#: A clause about paying the fee, whatever verb it pays with (``rules.PAYMENT_WORDS``).
+_PAYMENT = PAYMENT_WORDS
+#: ... unless it is about a notice, a termination, a penalty or damages. The template gives five
+#: days' notice of termination as well as five days to pay: "შეწყვეტამდე 5 (ხუთი) კალენდარული
+#: დღით ადრე შეტყობინების საფუძველზე" is no payment deadline, and "ზიანს აუნაზღაურებს 10 დღის
+#: ვადაში" compensates a loss, it does not pay the fee. Damage only as what is reimbursed: "თუ
+#: საქონელი არ არის დაზიანებული" or "free of damage" in a payment clause leaves it one.
+_DAMAGE = r"(?<![ა-ჰ])ზიან[ა-ჰ]{0,3}(?![ა-ჰ])"
 _NOT_PAYMENT = re.compile(
     r"შეწყვეტ|შეტყობინებ|ჯარიმ|პირგასამტეხლო"
-    r"|(?<![a-z])(?:terminat|notice|notif|penalt|liquidated\s+damages)",
+    rf"|{_DAMAGE}[^.;]{{0,40}}?ნაზღაურ|ნაზღაურ[ა-ჰ]*[^.;]{{0,40}}?{_DAMAGE}"
+    r"|(?<![a-z])(?:terminat|notice|notif|penalt|damages(?![a-z]))",
     re.IGNORECASE,
 )
 #: A duration is a deadline when it is written as one: "5 (ხუთი) სამუშაო დღის ვადაში", "10 დღის
@@ -834,12 +837,17 @@ def _whole_words(text: str, span: tuple[int, int]) -> tuple[int, int]:
 
 
 def _paying_sentences(text: str, spans: list[tuple[int, int]]) -> list[int]:
-    """The indexes of the sentences about paying."""
-    return [
-        i
-        for i, (a, b) in enumerate(spans)
-        if _PAYMENT.search(text, a, b) and not _NOT_PAYMENT.search(text, a, b)
-    ]
+    """The indexes of the sentences about paying: those with a payment word, and a sentence that
+    goes on with the balance after one ("...; the balance within 10 working days")."""
+    out: list[int] = []
+    for i, (a, b) in enumerate(spans):
+        if _NOT_PAYMENT.search(text, a, b):
+            continue
+        if _PAYMENT.search(text, a, b) or (
+            out and out[-1] == i - 1 and continues_payment(text, spans[i - 1][1], a)
+        ):
+            out.append(i)
+    return out
 
 
 def _deadline(hit: RuleHit) -> Deadline:

@@ -166,6 +166,40 @@ How the rules read them (red-team round 2):
   end, are a case ending and end it (`N 15/2026-ის` -> `15/2026`). Upper case applies to Latin
   letters only.
 
+How the rules read money, terms and names (red-team round 3):
+
+* **Money.** A figure's words may stand between the figure and its magnitude (`36 (ოცდათექვსმეტი)
+  ათას ლარს` -> `36000`). A figure in a bracket that names a tax before it, right after a price
+  (`1 180 ლარს დღგ-ს ჩათვლით (დღგ-ს გარეშე 1 000 ლარი)`, `(excl. VAT GEL 1,000)`), is that price
+  on another tax basis: an `amount`, and its tax wording is not the price's `vat_status`; a
+  bracket with no price before it (`ფასი (დღგ-ს ჩათვლით 1 180 ლარი)`) is the price. Past a turn
+  of the price's sentence (`, საიდანაც`, `, ხოლო`, `, მათ შორის`, `, of which`, `, whereas`), a
+  figure its own clause names as an advance, a guarantee, a retention or a deposit is an
+  `amount`; a periodic price (`ყოველთვიური`, `monthly`) beside a clause naming the total
+  (`საერთო`, `total`) is an `amount`, the total is `total_amount`. Without a turn the price
+  stays whole (`ღირებულება, ავანსის ჩათვლით, შეადგენს 36 000 ლარს`).
+* **Payment terms.** A payment clause is one whatever verb pays: every preverb and version of
+  the roots pay (`გადაიხდის`, `გადაუხდის`, `გადაუხადოს`, `იხდის`), transfer (`გადაურიცხავს`,
+  `ჩაირიცხება`), reimburse (`აუნაზღაურებს`, `აანაზღაურებს`) and settle, and English `pays`,
+  `paying`. Not a payer (`დღგ-ს გადამხდელი`), not damages reimbursed (`ზიანს აუნაზღაურებს`; damage
+  named in passing, `თუ საქონელი არ არის დაზიანებული`, is), not English
+  `transfer`. A clause after a semicolon that opens with the balance (`; the balance within 10
+  working days`, `; დარჩენილი თანხა - ...`) pays with the verb before it.
+* **VAT.** `net` is a status only where it qualifies money: not `net of VAT` (`excl`), `net 30
+  days`, `net weight`, `ნეტო წონა`; before a money figure it is (`NET 900 ლარი`). Tax wording in a conditional clause (`თუ ... არ არის დღგ-ს
+  გადამხდელი, ...`, `If the Contractor is not registered as a VAT payer, ...`) decides the
+  status only when nothing else states one.
+* **Penalties.** A rate is a `penalty` only with a penalty word in its own sentence (a heading's
+  number is no sentence end: `5. პირგასამტეხლო 5.1. ... 0.3%`), no guarantee, retention or
+  advance word nearer to it, and never the VAT's rate. English words are whole: `defined` holds
+  no `fine`.
+* **Names.** A case ending hyphenated to a Latin word, a figure or a bracket inside the quotes
+  (`„Green Valley-სთვის“`, `„ვაკე 2-ისთვის“`, `„კორპუსი N3-ის“`) is dropped: only a whole ending
+  of the declension; one letter after a hyphen (`ვაკე-ა`) and a nominative `-ი` stay.
+* **Contract numbers.** The number may stand before the contract's word, as the genitive puts it
+  (`N 27/2026 ხელშეკრულების საფუძველზე`, `№27/2026 ხელშეკრულებით`); the number sign stays
+  required, and before any other word (`N 5 პუნქტის`, `N 14 აქტის`) it is no contract number.
+
 `vat_status` meanings: `incl` = the price includes VAT/taxes; `excl` = VAT is added on top;
 `none` = no VAT applies / exempt; `net` = a net amount, taxes withheld or not mentioned by rule
 (natural person, foreign organisation).

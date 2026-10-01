@@ -32,6 +32,7 @@ from procurement_agent.checks.contract_terms import (
     _NOT_A_TERM,
     _PAYMENT,
     _VALIDITY,
+    RoledAmount,
     TaxPhrase,
     _range_in,
     fee_scope,
@@ -47,10 +48,13 @@ from procurement_agent.extraction.rules import (
     find_dates,
     find_percentages,
     is_advance_deadline,
-    is_rate_cap,
+    is_hypothetical,
+    is_net_measure,
+    is_penalty_rate,
     payment_terms_value,
     penalty_period,
     percent_of,
+    restating_bracket,
 )
 from procurement_agent.extraction.schemas import FactType
 
@@ -85,7 +89,6 @@ _MONTH_PERIOD = re.compile(r"(?<!\d)(?P<y>\d{4})\s*წ(?:ლის|\.)?\s*(?P<m>
 _UNREAD_START = re.compile(
     r"(?<![\d.])\d{1,2}(?:[./-]\d{1,2}[./-]\d{2,4})?\S*\s*[ა-ჰ]*დან(?![ა-ჰ])"
 )
-_PENALTY_WORDS = re.compile(r"პირგასამტეხლო|ჯარიმ|საურავ|penalt|liquidated damages|fine", re.I)
 _UNIT_CODES = {"day": "D", "week": "W", "month": "M", "year": "Y"}
 #: How a range reads: an en dash with a space either side, built from its code point.
 _DASH = f" {chr(0x2013)} "
@@ -384,10 +387,39 @@ def _range_fact(
 
 def _vat_status(view: DocumentView) -> DocumentFact | None:
     """Whether the fee includes VAT, excludes it, or is net: the tax wording around the fee,
-    read the way the tax-wording rule reads it."""
+    read the way the tax-wording rule reads it.
+
+    Only wording about this fee counts: not the tax wording inside a bracket that restates the
+    price on another basis ("(დღგ-ს გარეშე 1 000 ლარი)", ``rules.restating_bracket``), which is
+    that figure's; not "net" measuring days or a weight, nor inside "net of VAT" (an exclusion);
+    and wording under a condition ("თუ ... არ არის დღგ-ს გადამხდელი") only when nothing else
+    states the status."""
+    text = view.text
     sentences = view.sentences()
-    phrases = tax_phrases(view.text)
+    phrases = tax_phrases(text)
+    worded = [p.span for p in phrases if p.kind in ("inclusion", "exclusion")]
     fees = [r for r in view.amounts() if r.role in (None, "price")]
+    restated = [b for r in fees if (b := restating_bracket(text, r.money.span[0])) is not None]
+    fees = [r for r in fees if not _within(r.money.span, restated)]
+    phrases = [
+        p
+        for p in phrases
+        if not _within(p.span, restated)
+        and not (p.kind == "net" and (_within(p.span, worded) or is_net_measure(text, p.span[1])))
+    ]
+    stated = [p for p in phrases if not is_hypothetical(text, p.span[0])]
+    return _status_of(stated, fees, sentences) or _status_of(phrases, fees, sentences)
+
+
+def _within(span: tuple[int, int], others: list[tuple[int, int]]) -> bool:
+    return any(a <= span[0] and span[1] <= b for a, b in others)
+
+
+def _status_of(
+    phrases: list[TaxPhrase], fees: list[RoledAmount], sentences: list[tuple[int, int]]
+) -> DocumentFact | None:
+    """The VAT status the wording around the fees states, by kind: net, exempt, exclusion,
+    inclusion; the wording anywhere when none is near a fee."""
     near: list[TaxPhrase] = []
     for fee in fees:
         a, b = fee_scope(sentences, fee.money.span)
@@ -444,12 +476,9 @@ def _penalties(text: str) -> list[DocumentFact]:
     """Percentages a penalty clause sets, with the period it counts per: "0.5% per day"."""
     out: list[DocumentFact] = []
     for hit in find_percentages(text):
-        start = max(0, hit.start - 120)
-        before = text[start : hit.start]
-        if not _PENALTY_WORDS.search(before + text[hit.end : hit.end + 40]):
+        # a penalty word in the rate's own sentence, no cap, no VAT rate, no guarantee's share
+        if not is_penalty_rate(text, hit.start, hit.end):
             continue
-        if is_rate_cap(text, hit.start, hit.end):
-            continue  # "not exceeding 10%" caps the penalty; it is no rate of its own
         value = percent_of(hit)
         if value is None:
             continue

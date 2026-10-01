@@ -481,10 +481,22 @@ _CASE = r"(?:ი|ა|ს|ის|ას|ით|ად|ამდე|ზე|ში|
 #: A closed list: copies of the document ("2 ეგზემპლარად"), pages, trips and months are counts
 #: or periods, not quantities, and stay what the other rules make of them.
 _UNITS: tuple[tuple[str, str], ...] = (
-    (rf"ცალ{_CASE}|(?<![a-z])(?:pcs|pieces?|items?)(?![a-z])", "item"),
+    # "ც." abbreviates ცალი, and "მ2" / "მ3" write the metre with a plain digit
+    (
+        rf"ცალ{_CASE}|(?<![ა-ჰ])ც(?:\.|(?![ა-ჰ]))|(?<![a-z])(?:pcs|pieces?|items?)(?![a-z])",
+        "item",
+    ),
     (rf"კომპლექტ{_CASE}|(?<![a-z])sets?(?![a-z])", "set"),
-    (rf"კვ\.?\s*მ(?:ეტრ{_CASE})?(?![ა-ჰ])|მ²|(?<![a-z])(?:m²|m2|sq\.?\s*m)(?![a-z0-9])", "m2"),
-    (rf"კუბ\.?\s*მ(?:ეტრ{_CASE})?(?![ა-ჰ])|მ³|(?<![a-z])(?:m³|m3|cu\.?\s*m)(?![a-z0-9])", "m3"),
+    (
+        rf"კვ\.?\s*მ(?:ეტრ{_CASE})?(?![ა-ჰ])|(?<![ა-ჰ])მ[2²](?!\d)"
+        r"|(?<![a-z])(?:m²|m2|sq\.?\s*m)(?![a-z0-9])",
+        "m2",
+    ),
+    (
+        rf"კუბ\.?\s*მ(?:ეტრ{_CASE})?(?![ა-ჰ])|(?<![ა-ჰ])მ[3³](?!\d)"
+        r"|(?<![a-z])(?:m³|m3|cu\.?\s*m)(?![a-z0-9])",
+        "m3",
+    ),
     (rf"კგ(?![ა-ჰ])|კილოგრამ{_CASE}|(?<![a-z])kg(?![a-z])", "kg"),
     (rf"ტონ{_CASE}|(?<![a-z])(?:tons?|tonnes?)(?![a-z])", "t"),
     (rf"ლიტრ{_CASE}|(?<![a-z])(?:litres?|liters?)(?![a-z])", "l"),
