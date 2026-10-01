@@ -338,3 +338,18 @@ def test_a_phrase_declines_on_its_last_word_only() -> None:
     assert classify_difference("ნიმუშურმა ბინამ", "ნიმუშური ბინა") is None
     assert classify_difference("ნინო კალანაძის", "ნინო კალანაძე") is None
     assert classify_difference("ნინოს კალანაძის", "ნინო კალანაძე") is not None
+
+
+def test_a_stray_letter_dropped_beats_a_letter_guessed_in_its_place() -> None:
+    """ "ნიმუშავეთкს": dropped, the stray Cyrillic letter leaves "ნიმუშავეთს", a word the
+    documents write; put in its place, a Georgian letter with no relation to its key
+    ("ნიმუშავეთის") is a guess. One extra keystroke is the likelier slip (mutation harness,
+    seed 229). A letter in its place still wins when nothing else is a word the documents
+    write ("ნიმუშ" + a Cyrillic letter + "ახური" for "ნიმუშსახური")."""
+    from procurement_agent.extraction.georgian import mixed_script_words
+
+    vocabulary = frozenset({"ნიმუშავეთს", "ნიმუშავეთის", "ნიმუშსახური"})
+    [found] = mixed_script_words("ნიმუშავეთкს", vocabulary=vocabulary)
+    assert found.correction == "ნიმუშავეთს"
+    [found] = mixed_script_words("ნიმუშсახური", vocabulary=vocabulary)
+    assert found.correction == "ნიმუშსახური"

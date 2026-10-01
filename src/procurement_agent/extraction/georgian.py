@@ -961,14 +961,18 @@ def mixed_script_words(text: str, *, vocabulary: frozenset[str] = frozenset()) -
         correction: str | None = stripped if len(stripped) >= 3 else None
         candidates = [c for c in dict.fromkeys((keyed, stripped)) if len(c) >= 3]
         attested = (
-            (in_place if len(in_place) == 1 else [])
-            or [c for c in candidates if c in vocabulary]
+            [c for c in candidates if c in vocabulary]
+            or (in_place if len(in_place) == 1 else [])
             or [c for c in candidates if any(same_word(c, v) for v in vocabulary)]
         )
-        # a word the documents write as it stands beats one they write in another form, and
-        # otherwise the stray letter alone goes: rewriting another letter towards a word the
-        # contract spells differently ("ეგზემპლიარად" for the act's "ეგზემპლარად") is prose
-        # spelling, not the removal of a stray letter
+        # the stray key's own letter put back, or the stray letter dropped, when that leaves a
+        # word the documents write; failing that, a Georgian letter in its place - a guess with
+        # no relation to the key, taken only when nothing likelier is a written word (a stray
+        # letter inserted before a dative's "ს" is dropped, not read as the genitive's "ი",
+        # mutation harness seed 229); then a written word in another form; otherwise the stray
+        # letter alone goes: rewriting another letter towards a word the contract spells
+        # differently ("ეგზემპლიარად" for the act's "ეგზემპლარად") is prose spelling, not the
+        # removal of a stray letter
         if attested:
             correction = attested[0]
         out.append(

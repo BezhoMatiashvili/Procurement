@@ -65,16 +65,38 @@ every template position for every bidder in the merged workbook:
 
 ### Mutation harnesses (fresh seeds; mutated Word files parsed by Docling, as an upload is)
 
-`scripts/mutate_aoa.py` plants one change into a correct act and scores the act check and the
-comparison; seeds 71, 101, 131, 163, 197 and 199, 12 cases per class each:
+`scripts/mutate_aoa.py` plants one change into a correct act (the client's and Test Set 2's)
+and scores the act check and the comparison of the pair: 20 error classes (codes, IBAN, BIC,
+plot, fee digits/words, act date, period year, director, party, address, project, month and
+number-word typos, a stray Latin/Cyrillic letter, removed project/plot, swapped roles), 14
+harmless classes (quote/dash/space styles, amount and date styles, run splits, table vs
+paragraphs, unquoted names, tetri, an equivalent in USD, a relabelled price, ...) and two prose
+typo classes. A case passes only with the finding, the correction in the act's own form, a Word
+comment on every place, and nothing else reported.
 
-| | result |
-|---|---|
-| 20 error classes (codes, IBAN, BIC, plot, fee digits/words, act date, period year, director, party, address, project, month and number-word typos, a stray Latin/Cyrillic letter, removed project/plot, swapped roles) | 100% detected, 100% correction in the act's form, 100% of Word comments placed, on every seed |
-| 14 harmless classes (quote/dash/space styles, amount and date styles, run splits, table vs paragraphs, unquoted names, tetri, an equivalent in USD, a relabelled price, ...) | 0% false positives on every seed |
-| the comparison of the same pairs | 100% on every class, every seed, except one director slip that breaks its surname's declension (seed 199, see the limits) |
-| random one-letter typos in prose (`prose_typo`) | 83-92% detected; the misses are ties, letters no hand types, and words the dictionary lacks |
-| typing slips (`prose_slip`: neighbouring key, shift, doubled or extra letter, swap, drop) | 75-100% detected |
+Six small seeds (71-199, 12 cases a class) and then three large runs, 300, 300 and 150 cases a
+class (25,650 cases in all; about one in two is distinct, a repeat being scored once):
+
+| run | error classes (15,000 planted mistakes over the three runs) | harmless classes | what it found, each fixed as a general rule |
+|---|---|---|---|
+| seed 211, 300 a class | 1 address slip missed, 1 party name corrected into the wrong case | 0 false findings in 4,200 | a genitive written with and without the vowel some nouns drop is two words; a slip tied between two cases takes the case the documents write |
+| seed 223, 300 a class | 1 address missed, 1 month corrected into a form no date takes, 1 month read as another month, 2 stray letters in the signing verb hid the act's date | 0 in 4,200 | a phrase declines on its last word only; a month tie is decided by the whole word, or no month is read; a date's form wins a tie; the act's date is read past a stray letter |
+| seed 229, 150 a class, after those fixes | detection 100%, 1 stray letter corrected by a guessed letter (1 in 3,000) | 0 in 2,100 | a stray letter dropped beats a letter guessed in its place |
+
+Every failing case of the three runs passes on the final code; a targeted rerun of the classes
+touched (stray letter, month, address, party name: 300 cases each on seed 229 and on a fresh
+seed 233) is in the table below. Over the 15,000 planted mistakes the code as each run found it
+missed 2 and wrote 5 corrections in a wrong form; none of those remain.
+
+What stays below 100%:
+
+* **The comparison of a director slip that breaks a surname's declension** (99-99.3% of the
+  director class): "ლომძიე" for "ლომიძე" is reported, but its value is read off its genitive
+  ("ლომძიი"); see the limits.
+* **Prose typos** (`prose_typo`, random one-letter edits: 87-91% detected; `prose_slip`, typing
+  slips: 91-93%). The misses are words the dictionary lacks, a slip that makes another real
+  word or a real form of one ("გვედრის", the genitive of a word the dictionary holds), and
+  ties between two corrections; a prose slip gave an unrelated note 1-2 times in 300.
 
 `scripts/mutate_boq.py` (17 classes: quantity, unit, added/removed/reordered lines, description
 edits, hard-coded or wrong arithmetic, shifted Summary, renamed headers, text in numeric cells,
