@@ -1238,7 +1238,9 @@ def test_aligning_twenty_thousand_numeric_cells_is_not_quadratic() -> None:
         left_kind="xlsx",
         right_kind="xlsx",
     )
-    assert time.perf_counter() - started < 3.0
+    # linear: about 1.9 s for these 10 000 rows on an idle 18-core box (0.6 s for 2 500, 1.0 s for
+    # 5 000); the quadratic alignment took 7.5 s, and a busy machine must not fail the linear one
+    assert time.perf_counter() - started < 5.0
     assert report.counts.changed == 2
 
 
