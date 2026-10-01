@@ -4209,7 +4209,7 @@ def _match_party(p: Party, parties: list[Party]) -> _PartyMatch:
     by_code = next((q for q in parties if p.id_code and q.id_code == p.id_code), None)
     by_name = next((q for q in parties if p.name and q.name and names_match(p.name, q.name)), None)
     if by_code is None:
-        return _PartyMatch(p, by_name)
+        return _PartyMatch(p, by_name or _slipped_name_of(p, parties))
     if (
         by_name is None
         or by_name is by_code
@@ -4219,6 +4219,31 @@ def _match_party(p: Party, parties: list[Party]) -> _PartyMatch:
     ):
         return _PartyMatch(p, by_code)
     return _PartyMatch(p, by_name, code_of=by_code)
+
+
+def _slipped_name_of(p: Party, parties: list[Party]) -> Party | None:
+    """The contract party whose name the act's ``p`` - a party with no code, as a signature block
+    writes one - writes with a slip: a letter typed wrong or a word's final "ი" dropped (red
+    team R5, AOA-R5-04). Matched to it, its name is compared as the same slip in the preamble
+    is, and corrected to the contract's. Only one party's name may be that close; two are told
+    apart by the side the role word above the name gives. A name nothing like any party's is
+    matched to none: another company has no correction."""
+    if p.id_code or not p.name:
+        return None
+
+    def slip_of(name: str) -> bool:
+        diff = classify_difference(p.name or "", name)
+        if diff is not None:
+            return diff.looks_like_typo
+        written, meant = normalize_name(p.name or "").split(), normalize_name(name).split()
+        return len(written) == len(meant) and any(
+            m == f"{w}ი" for w, m in zip(written, meant, strict=True)
+        )
+
+    near = [q for q in parties if q.name and slip_of(q.name)]
+    if len(near) > 1:
+        near = [q for q in near if _side(q.role) is not None and _side(q.role) == _side(p.role)]
+    return near[0] if len(near) == 1 else None
 
 
 #: Legal forms, as ``normalize_name`` leaves them, that a party's name starts with: the name
