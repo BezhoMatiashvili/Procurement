@@ -3259,6 +3259,12 @@ class AoaChecker:
             for m in table_totals
             if not any(a < m.span[1] and m.span[0] < b for a, b in read)
         ]
+        running = [r.money for r in self.aoa.amounts() if r.role == "running"]
+        if not act and running:
+            # every figure the act states is a running one: the note names them (GOLD_SPEC 3),
+            # never a "no fee" warning (red team R5, AOA-R5-08)
+            self._running_note(running)
+            return
         if not act:
             # A fee whose currency stands in another table cell is not read as money: say that
             # no fee could be read and let a person look, rather than call the act wrong.
@@ -3279,20 +3285,8 @@ class AoaChecker:
                 "no price found in the contract to compare against",
             )
             return
-        running = [r.money for r in self.aoa.amounts() if r.role == "running"]
         if running:
-            # the work done to date, the contract's balance or what was paid before: no fee of
-            # this act, and nothing the contract's price can confirm (red team R4, AOA-R4-08)
-            shown = ", ".join(m.raw for m in running[:5])
-            self._skip(
-                "AOA.FEE",
-                f"აქტში მითითებული თანხები ({shown}) ხელშეკრულების მიმდინარე მაჩვენებლებია "
-                "(დღემდე შესრულებული, დარჩენილი ან უკვე გადახდილი) და არა ამ აქტის საფასური: "
-                "ხელშეკრულების ღირებულებას არ შედარდა",
-                f"the act's amounts {shown} are running figures of the contract (done to date, "
-                "the balance left or paid before), not this act's fee: they were not compared "
-                "with the contract's price",
-            )
+            self._running_note(running)
         if table_lines:
             shown = ", ".join(m.raw for m in table_lines[:5])
             self._skip(
@@ -3335,6 +3329,21 @@ class AoaChecker:
         for r in before_vat:
             self._net_finding(r, prices, contract)
         self._vat_amount_findings(fees, [*nets, *before_vat], prices)
+
+    def _running_note(self, running: list[Money]) -> None:
+        """The skip note for the act's running figures of the contract: the work done to date,
+        the contract's balance or what was paid before - no fee of this act, and nothing the
+        contract's price can confirm (red team R4, AOA-R4-08)."""
+        shown = ", ".join(m.raw for m in running[:5])
+        self._skip(
+            "AOA.FEE",
+            f"აქტში მითითებული თანხები ({shown}) ხელშეკრულების მიმდინარე მაჩვენებლებია "
+            "(დღემდე შესრულებული, დარჩენილი ან უკვე გადახდილი) და არა ამ აქტის საფასური: "
+            "ხელშეკრულების ღირებულებას არ შედარდა",
+            f"the act's amounts {shown} are running figures of the contract (done to date, "
+            "the balance left or paid before), not this act's fee: they were not compared "
+            "with the contract's price",
+        )
 
     def _net_finding(
         self, r: RoledAmount, prices: list[Money], contract: list[RoledAmount]

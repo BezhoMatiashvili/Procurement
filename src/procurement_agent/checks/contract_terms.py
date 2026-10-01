@@ -241,11 +241,12 @@ _TAX_AFTER = re.compile(
 #: marker: it states the fee or the contract's total; "სულ ანაზღაურებულია" (paid in all) is one,
 #: "სულ ასანაზღაურებელია" (to be paid in all) is the fee. Nor is "დარჩენილი თანხა" without the
 #: contract named (the fee's second part after an advance), nor "-დან დღემდე", a period that
-#: ends today.
+#: ends today. Nor "უკვე შესრულებული" (already performed) alone: an act states the work it
+#: accepts as performed, and its value is the act's own fee (red team R5, AOA-R5-08).
 _RUNNING = re.compile(
     r"(?<![ა-ჰ])(?:"
     r"(?<!დან )დღემდე|ამ\s+დრომდე|კუმულაციურ[ა-ჰ]*|ზრდადი\s+ჯამ[ა-ჰ]*"
-    r"|წინა\s+(?:აქტ|პერიოდ)[ა-ჰ]*|უკვე\s+(?:გადახდილ|ანაზღაურებულ|შესრულებულ)[ა-ჰ]*"
+    r"|წინა\s+(?:აქტ|პერიოდ)[ა-ჰ]*|უკვე\s+(?:გადახდილ|ანაზღაურებულ)[ა-ჰ]*"
     r"|(?:ადრე|სულ)\s+(?:გადახდილ|ანაზღაურებულ)[ა-ჰ]*"
     r"|ხელშეკრულებ(?:ის|ით)\s+(?:დარჩენილ|ნაშთ|აუთვისებელ)[ა-ჰ]*"
     r")(?![ა-ჰ])"
