@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from procurement_agent.checks.amounts import (
+    CURRENCY,
     FIGURE,
     NUM_IN_TEXT,
     looks_like_numeral,
@@ -1732,6 +1733,12 @@ def _per_period_words(per: re.Match[str]) -> list[tuple[int, int]]:
 #: words with the figure in brackets after them, "ნული მთელი ორი (0.2)".
 _FIGURE_THEN_WORDS = re.compile(rf"(?<![\d.,])({FIGURE})\s*\(([^()\d]{{2,80}})\)")
 _WORDS_THEN_FIGURE = re.compile(rf"\(\s*({FIGURE})\s*%?\s*\)")
+#: ... or with its currency between the figure and the words: "18 400 ლარს (თვრამეტი ათას
+#: ოთხასი ლარი)" - the reader of pairs' own form (``amounts._DIGITS_CURRENCY_WORDS``), whose
+#: bracket may hold the currency and the tetri as well.
+_FIGURE_CURRENCY_WORDS = re.compile(
+    rf"(?<![\d.,])({FIGURE})\s*{CURRENCY}\s*\(([ა-ჰ][^()]{{1,80}})\)"
+)
 #: The words right before a bracket: up to eight, the number's words among them.
 _WORDS_BEFORE = re.compile(r"(?<![ა-ჰ])((?:[ა-ჰ]+\s+){0,7}[ა-ჰ]+)\s*$")
 
@@ -1794,6 +1801,12 @@ _NUMBER_KEY = "number "
 def _with_own_words(text: str, span: _Span) -> _Span:
     """``span`` with the words its figure is written out in: a rate "(0.2) პროცენტის" read by
     the rules keeps "ნული მთელი ორი" before it, the same rate written another way."""
+    after = _FIGURE_CURRENCY_WORDS.match(text, span.start)
+    if after is not None and after.end() > span.end and _spelled_as(after.group(2), after.group(1)):
+        # the currency between the figure and its words, its word again inside them: "18 400
+        # ლარს (თვრამეტი ათას ოთხასი ლარი)" is the amount "18 400 ლარს" (red team R5,
+        # COMPARE-R5-06)
+        return _Span(span.start, after.end(), span.key)
     m = _WORDS_THEN_FIGURE.match(text, span.start)
     if m is None:
         return span
