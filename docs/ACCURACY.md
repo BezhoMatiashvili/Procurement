@@ -1128,6 +1128,10 @@ Changed outside the extraction's files, each the smallest change inside one func
 words), `aoa._fee_like` and `aoa._person_findings` (one call each), and
 `compare._with_own_words` (a figure's words after its currency).
 
+Measured after the fixes: the three strict gold sets (`client_v2`, `ts2`, `ts3`) pass unchanged,
+and `scripts/mutate_aoa.py --seed 173 --per-class 6` gives the base's table row for row: every
+error class detected and corrected at 100%, every harmless class at 0% false positives.
+
 ### Red team, round 1: what the comparison now reads (2026-09-30)
 
 Defects a red team found and a verifier reproduced, each with a unit test on invented
