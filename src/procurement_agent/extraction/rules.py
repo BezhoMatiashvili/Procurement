@@ -256,6 +256,8 @@ def keyword_in(text: str, kw: str) -> bool:
 
 
 _AFTER_PENALTY = 20  # keywords that follow a value are weaker evidence than those preceding it
+#: Latin or Cyrillic letters between two Georgian ones: a stray keystroke inside a word.
+_STRAY_LETTER = re.compile(r"(?<=[ა-ჰ])[a-z\u0430-\u044f\u0451]{1,2}(?=[ა-ჰ])")
 
 
 def nearest_keyword_group[K: Hashable](
@@ -288,6 +290,9 @@ def nearest_keyword_group[K: Hashable](
         lines_after = _label_line_bounds(text, end, end + len(post))
         if lines_after:
             post = post[: lines_after[0] - end]
+    # a Latin or Cyrillic letter typed into a Georgian word is that letter's own finding, and
+    # the word is still its keyword ("გაფოeრმდა" dates the act); only distances are read here
+    pre, post = _STRAY_LETTER.sub("", pre), _STRAY_LETTER.sub("", post)
 
     best: tuple[int, int, K] | None = None
     for group, keywords in groups.items():
@@ -1409,16 +1414,29 @@ def _month_ka(s: str) -> int | None:
     exact = next((v for k, v in _KA_MONTHS.items() if s.startswith(k)), None)
     if exact is not None:
         return exact
-    best: tuple[int, int] | None = None
+    best: int | None = None
+    months: set[int] = set()
     for stem, value in _KA_MONTHS.items():
         budget = max(1, len(stem) // 3)
         for n in (len(stem) - 1, len(stem), len(stem) + 1):
             if n < 3 or n > len(s):
                 continue
             d = edit_distance(s[:n], stem, cap=budget)
-            if d <= budget and (best is None or d < best[0]):
-                best = (d, value)
-    return best[1] if best else None
+            if d > budget:
+                continue
+            if best is None or d < best:
+                best, months = d, {value}
+            elif d == best:
+                months.add(value)
+    if len(months) <= 1:
+        return next(iter(months), None)
+    # two months' stems equally close ("ანვისტო": "იანვ" and "აგვისტ"): the whole word against
+    # every form of each decides, as the month check does - and when it cannot, no month is
+    # read rather than the first one listed
+    found = month_typo(s)
+    if found is None or found.correction is None or found.month not in months:
+        return None
+    return found.month
 
 
 def month_ka_is_misspelled(s: str) -> bool:

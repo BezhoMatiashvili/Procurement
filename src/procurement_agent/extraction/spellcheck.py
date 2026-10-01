@@ -61,7 +61,23 @@ def _same_words(a: str, b: str) -> bool:
     კაპანაძის" is "ნინო კაპანაძე", "მთაწმინდიის" is not "მთაწმინდის". Stripping endings
     (``names_match``) took the second for an inflection too."""
     aw, bw = a.split(), b.split()
-    return len(aw) == len(bw) and all(same_word(x, y) for x, y in zip(aw, bw, strict=True))
+    if len(aw) != len(bw) or not aw:
+        return False
+    # a phrase declines on its last word; a word before it stays as it is, an adjective taking
+    # only its attributive forms ("ლაზური" / "ლაზურ" / "ლაზურმა") - a genitive turned dative
+    # inside an address is a slip, not a case
+    leading = all(x == y or _attributive(x, y) for x, y in zip(aw[:-1], bw[:-1], strict=True))
+    return leading and same_word(aw[-1], bw[-1])
+
+
+def _attributive(a: str, b: str) -> bool:
+    """Whether two words are one adjective in two of the forms it takes before a noun: the
+    stem, the stem with "ი" (nominative, genitive, instrumental), the stem with "მა"."""
+
+    def stem(w: str) -> str:
+        return w[:-2] if w.endswith("მა") else w[:-1] if w.endswith("ი") else w
+
+    return len(a) > 3 and len(b) > 3 and stem(a) == stem(b)
 
 
 def classify_difference(actual: str, expected: str) -> Difference | None:

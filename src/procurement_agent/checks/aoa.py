@@ -343,7 +343,11 @@ _ACT_DATED_BEFORE = re.compile(rf"(?:{_ACT_VERB}|{_ACT_DATE_LABEL})[\s:,]*$")
 _ACT_SIGNED = re.compile(rf"გაფორმდა|{_ACT_DATE_LABEL}|{_ACT_VERB}")
 #: The signing verb, and a word the length of a slip of it (``_slipped_signing``).
 _SIGNING_VERB = "გაფორმდა"
-_SIGNING_VERB_LIKE = re.compile(r"(?<![ა-ჰ])[ა-ჰ]{7,9}(?![ა-ჰ])")
+_SIGNING_VERB_LIKE = re.compile(
+    r"(?<![ა-ჰa-zA-Z\u0430-\u044f\u0451\u0410-\u042f\u0401])[ა-ჰa-zA-Z\u0430-\u044f\u0451\u0410-\u042f\u0401]{7,11}(?![ა-ჰa-zA-Z\u0430-\u044f\u0451\u0410-\u042f\u0401])"
+)
+#: A Latin or Cyrillic letter typed into a Georgian word ("გაფოeრმდა"): the stray-letter rule's.
+_FOREIGN_LETTER = re.compile(r"[a-zA-Z\u0430-\u044f\u0451\u0410-\u042f\u0401]")
 #: The act named right before its signing verb: "აქტი ", "„აქტი“ ".
 _ACT_NAMED_BEFORE = re.compile(r"აქტი[\s„“”\"']*$")
 #: An advance or prepayment clause: a date there is a payment's, never the act's.
@@ -786,14 +790,19 @@ def _key_starts(
 def _slipped_signing(text: str) -> tuple[tuple[int, int], ...]:
     """The signing verb written with a one-letter slip, after the act's name: "„აქტი“ გაორმდა
     2026 წლის 30 სექტემბერი" (red team R3). The prose spelling rule reports the slip; the date
-    after it is still the act's. Only after "აქტი": "ხელშეკრულება გაორმდა" is the contract's."""
-    return tuple(
-        m.span()
-        for m in _SIGNING_VERB_LIKE.finditer(text)
-        if m.group() != _SIGNING_VERB
-        and damerau(m.group(), _SIGNING_VERB, cap=1) == 1
-        and _ACT_NAMED_BEFORE.search(text, max(0, m.start() - 12), m.start())
-    )
+    after it is still the act's. Only after "აქტი": "ხელშეკრულება გაორმდა" is the contract's. A
+    Latin or Cyrillic letter typed into the verb is read past ("გაფოeრმდა"): the stray-letter
+    rule reports it (mutation harness, seed 223)."""
+    out = []
+    for m in _SIGNING_VERB_LIKE.finditer(text):
+        word = _FOREIGN_LETTER.sub("", m.group())
+        if len(m.group()) - len(word) > 2:
+            continue  # a word of another script, not a stray letter in this one
+        if m.group() == _SIGNING_VERB or damerau(word, _SIGNING_VERB, cap=1) > 1:
+            continue
+        if _ACT_NAMED_BEFORE.search(text, max(0, m.start() - 12), m.start()):
+            out.append(m.span())
+    return tuple(out)
 
 
 def _act_date_key_starts(text: str) -> list[int]:

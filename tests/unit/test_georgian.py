@@ -309,3 +309,32 @@ def test_a_stray_letter_is_removed_not_rewritten_towards_another_spelling() -> N
     # a stray letter where a Georgian one belongs takes back the word the documents write
     [slot] = mixed_script_words("მომcახურების", vocabulary=frozenset({"მომსახურების"}))
     assert slot.correction == "მომსახურების"
+
+
+def test_a_month_slip_tied_between_two_forms_takes_the_one_dates_take() -> None:
+    """ "სექტემბრისან" is one edit from "სექტემბრიდან" (from) and from "სექტემბრისგან" (from a
+    person or a source), which no date takes; the date's form is meant (mutation harness, seed
+    223). A slip nearer the rare form still gets it: distance decides first."""
+    from procurement_agent.extraction.georgian import month_typo
+
+    found = month_typo("სექტემბრისან")
+    assert found is not None and found.correction == "სექტემბრიდან"
+    found = month_typo("სექტემბრისგნ")
+    assert found is not None and found.correction == "სექტემბრისგან"
+
+
+def test_a_phrase_declines_on_its_last_word_only() -> None:
+    """ "ქ. ნიმუშა, კალანაველს გამზირი N4" against "... კალანაველის გამზირი N4": the street's
+    genitive turned dative inside the phrase is a slip, not a case (mutation harness, seed 223:
+    such an address went unreported). Before the last word only an adjective's attributive
+    forms come and go ("ნიმუშური ბინა" / "ნიმუშურ ბინაში"); the last word takes any case."""
+    from procurement_agent.extraction.spellcheck import classify_difference
+
+    diff = classify_difference(
+        "ქ. ნიმუშა, კალანაველს გამზირი N4", "ქ. ნიმუშა, კალანაველის გამზირი N4"
+    )
+    assert diff is not None and diff.looks_like_typo
+    assert classify_difference("ნიმუშურ ბინაში", "ნიმუშური ბინა") is None
+    assert classify_difference("ნიმუშურმა ბინამ", "ნიმუშური ბინა") is None
+    assert classify_difference("ნინო კალანაძის", "ნინო კალანაძე") is None
+    assert classify_difference("ნინოს კალანაძის", "ნინო კალანაძე") is not None

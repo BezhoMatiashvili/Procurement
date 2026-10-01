@@ -370,3 +370,44 @@ def test_an_english_heading_date_changed_is_the_contract_date() -> None:
     left = ["CLEANING AGREEMENT No. 7", "Kutaisi, 4 February 2027", "1. The Contractor cleans."]
     right = [line.replace("4 February", "11 February") for line in left]
     assert _date_changes(left, right) == [("2027-02-04", "2027-02-11", "Contract date")]
+
+
+def test_a_misspelled_month_two_stems_reach_is_read_by_the_whole_word() -> None:
+    """A slip one edit from two months' stems ("ანვისტო": "იანვ" and "აგვისტ") was read as the
+    first month listed, January, while the month check corrected it to August - and the act
+    date fell outside the term (mutation harness, seed 223). The whole word decides; when it
+    cannot either, no month is read rather than a guess."""
+    from procurement_agent.extraction.rules import find_dates
+
+    assert [d.value for d in find_dates("2026 წლის 31 ანვისტო")] == ["2026-08-31"]
+    assert find_dates("2026 წლის 5 ივმისი") == []  # June or July: no guess
+
+
+@pytest.mark.parametrize("verb", ["გაფოeრმდა", "გაფсორმდა", "გაფორმდaა"])
+def test_a_stray_foreign_letter_in_the_keyword_does_not_hide_the_date_role(verb: str) -> None:
+    """A Latin or Cyrillic letter typed into the verb that dates the act ("გაფოeრმდა") is the
+    stray letter's own finding; the date is still the act's (mutation harness, seed 223: the
+    act's date was "not found" and every check on it skipped)."""
+    from procurement_agent.extraction.rules import find_dates
+
+    hits = find_dates(f"„აქტი“ {verb} 2026 წლის 31 აგვისტო")
+    assert [(d.value, d.type.value) for d in hits] == [("2026-08-31", "act_date")]
+
+
+@pytest.mark.parametrize("verb", ["გაფოeრმდა", "გაფсორმდა"])
+def test_the_act_check_reads_the_date_past_a_stray_letter_in_its_verb(verb: str) -> None:
+    """The act check's own reader of the act's date reads past a Latin or Cyrillic letter typed
+    into the signing verb, as it reads past a one-letter slip: the stray letter is reported, the
+    act's date is still read and checked."""
+    contract = (
+        "შპს „ნიმუში“ (შემკვეთი) და შპს „სინჯი“ (შემსრულებელი). ხელშეკრულება ძალაშია 2026 წლის 1 "
+        "აგვისტოდან 2027 წლის 1 თებერვლამდე."
+    )
+    act = (
+        f"„აქტი“ {verb} 2026 წლის 31 აგვისტო. მომსახურება შესრულდა 2026 წლის 1 აგვისტოდან "
+        "2026 წლის 31 აგვისტოს ჩათვლით."
+    )
+    report = check_aoa(aoa_text=act, contract_text=contract)
+    assert not any(f.rule_id == "AOA.ACT_DATE" and f.actual is None for f in report.findings), [
+        (f.rule_id, f.message_en) for f in report.findings
+    ]

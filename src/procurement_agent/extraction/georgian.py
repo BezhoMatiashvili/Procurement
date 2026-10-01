@@ -620,6 +620,10 @@ class MonthTypo:
     correction: str | None
 
 
+#: Cases a month takes as a word, never in a date: "from a person" (-ისგან), "towards" (-ისკენ),
+#: "with" (-თან), "on" (-ზე) and the ergative's subject. A slip tied between one of them and a
+#: date's form was meant as the date's.
+_NOT_WITH_DATES: frozenset[Case] = frozenset({"gen_gan", "gen_ken", "dat_tan", "dat_ze", "erg"})
 #: Words after a date that take the genitive: "30 სექტემბრის ჩათვლით" (inclusive).
 _GENITIVE_AFTER = ("ჩათვლით", "შემდეგ")
 
@@ -642,24 +646,26 @@ def month_typo(word: str, *, following: str = "") -> MonthTypo | None:
         or not is_georgian_word(low)
     ):
         return None
-    best: dict[int, tuple[int, int, int, str]] = {}
-    for form, (month, _) in MONTH_FORMS.items():
+    best: dict[int, tuple[int, int, int, int, str]] = {}
+    for form, (month, case) in MONTH_FORMS.items():
         if abs(len(form) - len(low)) > _MONTH_TYPO_DISTANCE:
             continue
         d = damerau(low, form, cap=_MONTH_TYPO_DISTANCE)
         if d > _MONTH_TYPO_DISTANCE:
             continue
-        # At equal distance the form the next word asks for wins, then the form ending like the
-        # word: "ოქტომბერის" is one edit from both "ოქტომბერი" and "ოქტომბრის", and it was
-        # meant as the genitive.
-        fits = 0 if not wants_genitive or MONTH_FORMS[form][1] == "gen" else 1
-        rank = (d, fits, -_common_suffix(low, form))
-        if month not in best or rank < best[month][:3]:
+        # At equal distance the form the next word asks for wins, then a form a date takes, then
+        # the form ending like the word: "ოქტომბერის" is one edit from both "ოქტომბერი" and
+        # "ოქტომბრის", and it was meant as the genitive; "სექტემბრისან" is one edit from
+        # "სექტემბრიდან" and from "სექტემბრისგან", which no date takes.
+        fits = 0 if not wants_genitive or case == "gen" else 1
+        rare = 1 if case in _NOT_WITH_DATES else 0
+        rank = (d, fits, rare, -_common_suffix(low, form))
+        if month not in best or rank < best[month][:4]:
             best[month] = (*rank, form)
     if not best:
         return None
-    ranked = sorted(best.items(), key=lambda kv: kv[1][:3])
-    month, (d, _, _, form) = ranked[0]
+    ranked = sorted(best.items(), key=lambda kv: kv[1][:4])
+    month, (d, _, _, _, form) = ranked[0]
     # A short month is within two edits of ordinary words: one edit only, and the word keeps
     # the month's first two letters.
     if len(_MONTH_NOMINATIVE[month]) <= 6 and (d > 1 or low[:2] != form[:2]):
