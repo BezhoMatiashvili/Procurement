@@ -1400,6 +1400,60 @@ Measured after the fixes: the three strict gold sets unchanged at 100%/100%;
 two misses outside the comparison - `script_letter` 17% false positives (an extra `AOA.PERIOD`)
 and `prose_typo` 83% corrections - are the same row for row at `4138994`, before these fixes.
 
+### Red team, round 5: one entity, one reading, one finding (2026-10-01)
+
+COMPARE-R5-01 to -04 and -12, each with a unit test on invented text and a near miss beside
+every widened reading (`tests/unit/test_compare_redteam5.py`); the cases are in
+`docs/GOLD_SPEC.md` section 4.
+
+* **A fine per day is a value with its period** (R5-01). A rate's period was part of its value,
+  an amount's was not, and the mask took the period's words as the value's: a fine of 50 lari
+  per overdue day made per month was formatting, no finding. The comparison now states it
+  `50.00 GEL per day` (`_amount_penalty_period`, the rules' `penalty_period` within the
+  amount's own reach), and the mask keys the period's words by the period they name, so a
+  period changed is never the same value written another way.
+* **The comparison reads label lines as the extraction does** (R5-02). The extraction's round-4
+  policy closed a "label: value" line for its own readers only; the comparison flattened the
+  line breaks, and each term written one to a line took the next line's label: one changed
+  delivery term was two errors, one of them a "Payment terms". `hits_of` now gives the values'
+  readers the text with label lines closed (`rules.close_label_lines`), and the document-wide
+  readers too. The anchors read the text as before, so a requisite on a label line keeps its
+  value as written. So the round-4 note above that "the act check and the comparison flatten
+  line breaks as before" no longer holds for the comparison.
+* **A key-terms table is read by its rows** (R5-03). A Word table `პირობა | მნიშვნელობა` gave
+  each value cell to the line pass alone, unclassified, and to the document-wide pass with the
+  next row's label beside it: one changed penalty was "Percentage (unclassified)" and "Penalty".
+  A value cell of a two-column table whose first cell is a term's name is now read as "label:
+  value" on its line (`_row_labels`, `_Context.label`) and written so in the text the
+  document-wide pass reads (`_reading_text`), as the chunker writes such a table for the
+  extraction. The values each document states, which decide that a value "added" is written
+  in the other document after all, are read from that text too; finding spans still index the
+  document's own text. A table of one party per column is no key-terms table: its cells stay
+  their column's party's.
+* **Equal values in one sentence are counted** (R5-04). Values were one per type and value, so
+  "40 tables and 40 chairs" was one quantity, and a chair count changed was a quantity added;
+  between a contract and its act a shortfall was only a warning. A value now counts as many
+  times as a reader finds it in one sentence (a line break ends one too); restated elsewhere it
+  is still one, so a restatement deleted is still no value removed.
+* **A value and its words come and go together** (R5-12, decided by the lead as policy). A clause
+  added or deleted whole, or a draft's blank filled in, was the value and its words, two errors
+  for one value; the words that spell their figure now go with it (`_without_own_words`). The
+  round-4 rule that words dropped with their figure are still reported now means: reported
+  through the figure.
+* **The shared readers' side.** COMPARE-R5-05 (`დღეში` as a period), -07 (a blank read as an
+  address), -08 (an advance clause's share and amount), -09 (one item's price) and -11 (a staged
+  delivery's batches) are fixed in the readers, apart. Their whole pairs are tests that skip
+  until the reader reads the form, then hold the comparison to the expected result; the R5-05
+  pair was checked against the period reader widened in a scratch copy, and passes.
+* **Left open.** The fine's period is the line comparison's: the document-wide pass reads a
+  penalty as the extraction does, so between an unrelated pair an amount penalty is its amount.
+
+Measured after the fixes: the three strict gold sets unchanged at 100%/100%;
+`scripts/mutate_aoa.py --seed 191 --per-class 6` compares every class at 100% (`cmp`), its
+table the same row for row as the code before these fixes (`prose_typo` corrections at 67%/50%
+are the act check's, there before). The 68 red-team repro scripts of rounds 1-4 give the same
+output before and after.
+
 ### The findings list is a list, not a dump
 
 Two different bid workbooks differ in over a thousand cells. Listing every one buried the
