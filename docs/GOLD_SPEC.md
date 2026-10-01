@@ -590,7 +590,8 @@ Red team round 4 (compare) settled these cases:
 
 * A figure's words dropped or added beside it, the figures of the line the same on both sides,
   are formatting (`10 (ათი) სამუშაო დღის` / `10 სამუშაო დღის`, `2 (ორი) ეგზემპლარად` / `2
-  ეგზემპლარად`); words dropped with a figure that changed or went are still reported.
+  ეგზემპლარად`); words dropped with a figure that changed or went are still reported - through
+  the figure: its change, or its removal (round 5 below).
 * A value's own words are only those its canonical form encodes; the words a reader reaches over
   are compared as the line's own. A penalty's period is `ყოველ` (`per`, `each`, `for each`) and
   the period's noun: `ყოველ ვადაგადაცილებულ დღეზე` -> `ყოველ ვადაგადაცილებულ სამუშაო დღეზე`
@@ -623,6 +624,37 @@ Red team round 4 (compare) settled these cases:
   or beside the total's after `, ხოლო`. A total paid month by month (`გადაიხდება ყოველთვიურად`,
   `paid monthly`), the price of a number of months (`6 თვის მომსახურების ღირებულება`) and an
   advance or guarantee paid monthly are no fee per period.
+
+Red team round 5 (compare) settled these cases:
+
+* **A penalty stated as an amount per period carries its period**, as a rate does: `50 ლარის
+  ოდენობით ყოველ ვადაგადაცილებულ დღეზე` is `50.00 GEL per day`, and `დღეზე` -> `თვეზე` is one
+  `CMP.PERCENT` "Penalty", `50.00 GEL per day` -> `50.00 GEL per month` (English `GEL 50 per
+  day` the same). The period is the amount's own only between it and the next figure or rate:
+  in `ჯარიმა 500 ლარი და 50 ლარი ყოველ დღეზე` the day is the 50's, and the 500 stays `500.00
+  GEL`. An amount penalty with no period is reported as before. (The extraction's
+  `penalty` keeps the amount alone; this is the comparison's form.)
+* **A "label: value" line is a sentence of its own in the comparison too** (section 2, R4): terms
+  written one to a line are each typed by their own label, so a delivery term changed is one
+  "Delivery deadline", never a "Payment terms" from the next line's label. Requisites are still
+  read as written.
+* **A two-column key-terms table types each value by its row's label** (`პირობა |
+  მნიშვნელობა`, one term a row), on its line and in the document-wide pass alike: the delivery
+  row changed is one `CMP.DURATION` "Delivery deadline", the penalty row one `CMP.PERCENT`
+  "Penalty", the price row one `CMP.AMOUNT` "Total amount". Only a table of exactly two columns
+  whose first cell is a term's name (letters, no figure, short); a value cell that is a bare
+  figure keeps its own reading ("Number").
+* **Two equal values in one sentence are two values**: `40 ცალი მაგიდა და 40 ცალი სკამი` with
+  the chairs made 50 is `40 item` -> `50 item`, never a quantity added; an act delivering 38 of
+  the 40 is `40 item` -> `38 item`, an error. The same for two equal prices or dates. A value
+  restated in another sentence, or on another line, is still one value.
+* **Policy: a value added or removed with its words is one finding, the value's.** A clause
+  added or deleted whole (`ავანსი შეადგენს 300 (სამასი) ლარს`), or a draft's blank filled in
+  (`___ (______) ლარს` -> `300 (სამასი) ლარს`, `___ (____) კალენდარული დღის` -> `20 (ოცი)
+  ...`), is the amount, term or quantity added or removed, with no `CMP.AMOUNT_WORDS` beside it;
+  a blank filled in may also be `CMP.TEXT_CHANGED` for its underscores. Words are still
+  reported when they are on both sides and differ, or when they do not spell the figure beside
+  them (`300 (ოთხასი)` added).
 
 ## 5. BOQ gold (per set, JSON) and the evaluation policy
 
