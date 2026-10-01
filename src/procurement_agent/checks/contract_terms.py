@@ -14,6 +14,7 @@ from __future__ import annotations
 import calendar
 import re
 from bisect import bisect_left, bisect_right
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from datetime import date, timedelta
 from itertools import pairwise
@@ -845,14 +846,29 @@ _TURN = re.compile(r"[,;]")
 _LENGTH_REACH = 80
 
 
-def _stated_length(text: str, a: int, b: int) -> tuple[int, str] | None:
-    """The length a validity clause ``text[a:b]`` states the contract runs for, as (count, unit),
-    counted from the signing or the clause's own first day: one length, after the validity's own
-    predicate in its clause (``_LASTS``), and no until-phrase beside it. None when it states
-    none, or more than one."""
+def _follows_validity(text: str, a: int, start: int) -> bool:
+    """Whether the length at ``start`` follows the validity's own predicate (``_LASTS``) in its
+    clause, no comma or semicolon between."""
+    lasts = [m.end() for m in _LASTS.finditer(text, max(a, start - _LENGTH_REACH), start)]
+    return bool(lasts) and _TURN.search(text, lasts[-1], start) is None
+
+
+def _stated_length(
+    text: str,
+    a: int,
+    b: int,
+    *,
+    follows: Callable[[str, int, int], bool] = _follows_validity,
+    counted_from: Collection[int] = (),
+) -> tuple[int, str] | None:
+    """The length a clause ``text[a:b]`` states, as (count, unit): one length, after the clause's
+    own predicate (``follows``; the validity's by default, ``_follows_validity``), and no
+    until-phrase beside it. A count from a word in "-დან" counts only from the signing or from
+    one of ``counted_from`` (where a first day the clause writes ends). None when it states none,
+    or more than one."""
     if _UNTIL.search(text, a, b):
         return None
-    signing_ends = {m.end() for m in _FROM_SIGNING.finditer(text, a, b)}
+    signing_ends = {m.end() for m in _FROM_SIGNING.finditer(text, a, b)} | set(counted_from)
     found: set[tuple[int, str]] = set()
     for h in find_durations(text[a:b]):
         start, end = a + h.start, a + h.end
@@ -869,12 +885,72 @@ def _stated_length(text: str, a: int, b: int) -> tuple[int, str] | None:
                 continue
         if _FROM_AN_EVENT_AFTER.match(text, end, b):
             continue
-        lasts = [m.end() for m in _LASTS.finditer(text, max(a, start - _LENGTH_REACH), start)]
-        if not lasts or _TURN.search(text, lasts[-1], start):
-            continue  # not the validity's own length: a notice, a report's deadline
+        if not follows(text, a, start):
+            continue  # not the clause's own length: a notice, a report's deadline
         count = int(str(h.normalized)[1:-1])
         found.add((count, str(h.unit)))
     return found.pop() if len(found) == 1 else None
+
+
+#: A performance window's length right after its label: "მომსახურების გაწევის ვადა: 6 თვე".
+_PERFORMANCE_LABEL = re.compile(r"(?:შესრულების|გაწევის)\s+ვადა[ა-ჰ]*\s*[:\u2013\u2014-]?\s*$")
+#: ... or right after the window's first day, only "for (a period of)" between: "2026 წლის 1
+#: ივნისიდან 12 (თორმეტი) თვის განმავლობაში", "from 1 June 2026 for 12 months".
+_LENGTH_LEAD = re.compile(
+    r"\s*(?:(?:for|of)(?:\s+(?:a|the)\s+(?:period|term)\s+of)?\s*)?", re.IGNORECASE
+)
+
+
+def _first_day_ends(text: str, sentence: tuple[int, int], hits: list[RuleHit]) -> list[int]:
+    """Where each first day a clause writes ends, its "-დან" written after it included: "2026
+    წლის 1 მარტიდან", "01.03.2026-დან", "from 1 March 2026"."""
+    a, b = sentence
+    out: list[int] = []
+    for h in hits:
+        before = text[max(a, h.start - _MARK_REACH) : h.start]
+        mark = _FIRST_AFTER.match(text, h.end, b)
+        if date_role(h.raw_text) == "from" or mark or _FIRST_BEFORE.search(before):
+            out.append(mark.end() if mark else h.end)
+    return out
+
+
+def _performance_length(
+    text: str, sentence: tuple[int, int], hits: list[RuleHit]
+) -> tuple[int, str] | None:
+    """The length a performance clause states its window runs for (policy, red team R5:
+    AOA-R5-06): right after the window's first day or after the window's label
+    (``_PERFORMANCE_LABEL``, ``_LENGTH_LEAD``), as the validity's length follows its predicate
+    (``_stated_length``). A report's deadline in the clause ("... 1 მარტიდან და წარმოადგინოს
+    ანგარიში 10 დღის ვადაში"), a count from another event and a length beside an until-phrase
+    close nothing."""
+    a, b = sentence
+    firsts = _first_day_ends(text, sentence, hits)
+
+    def follows(text: str, a: int, start: int) -> bool:
+        if _PERFORMANCE_LABEL.search(text, max(a, start - _MARK_REACH), start):
+            return True
+        return any(e <= start and _LENGTH_LEAD.fullmatch(text, e, start) for e in firsts)
+
+    return _stated_length(text, a, b, follows=follows, counted_from=firsts)
+
+
+def is_window_length(text: str, start: int, end: int) -> bool:
+    """Whether the duration at ``text[start:end]`` is the length a performance clause states its
+    window by (``_performance_length``): the window's own words, typed as the window is."""
+    span = sentence_at(sentence_spans(text), start)
+    if span is None or not performance_clause(text, *span):
+        return False
+    a, b = span
+    if _NOT_A_TERM.search(text, a, b) or _PAYMENT.search(text, a, b):
+        return False
+    sentence = text[a:b]
+    length = _performance_length(sentence, (0, len(sentence)), find_dates(sentence))
+    if length is None:
+        return False
+    return any(
+        (a + h.start, a + h.end) == (start, end) and (int(str(h.normalized)[1:-1]), h.unit) == length
+        for h in find_durations(sentence)
+    )
 
 
 def _after_length(start: date, count: int, unit: str) -> date:
@@ -904,6 +980,7 @@ def read_term(text: str, *, sentences: list[tuple[int, int]] | None = None) -> C
     signed = _signing_date(text, hits)
     validity: list[TermRange] = []
     performance: list[TermRange] = []
+    performance_lengths: set[tuple[int, str]] = set()
     for a, b in spans:
         performs = performance_clause(text, a, b)
         valid = _VALIDITY.search(text, a, b)
@@ -913,7 +990,12 @@ def read_term(text: str, *, sentences: list[tuple[int, int]] | None = None) -> C
             continue
         inside = _hits_between(hits, starts, a, b)
         if performs:
-            performance.append(_range_in(text, (a, b), inside, takes_effect=False))
+            window = _range_in(text, (a, b), inside, takes_effect=False)
+            performance.append(window)
+            if window.end is None:
+                length = _performance_length(text, (a, b), inside)
+                if length is not None:
+                    performance_lengths.add(length)
             continue
         takes_effect = _TAKES_EFFECT.search(text, a, b) is not None
         found = _range_in(text, (a, b), inside, takes_effect=takes_effect)
@@ -927,7 +1009,18 @@ def read_term(text: str, *, sentences: list[tuple[int, int]] | None = None) -> C
             if start is not None:
                 found = TermRange(start=start, end=_after_length(start, *length))
         validity.append(found)
-    return ContractTerm(signed=signed, validity=_merge(validity), performance=_merge(performance))
+    window = _merge(performance)
+    if (
+        window is not None
+        and window.start is not None
+        and window.end is None
+        and len(performance_lengths) == 1
+    ):
+        # a first day and a length close the window, as a validity's length closes it (policy,
+        # red team R5: AOA-R5-06); the length counted from the window's first day
+        [length] = performance_lengths
+        window = TermRange(start=window.start, end=_after_length(window.start, *length))
+    return ContractTerm(signed=signed, validity=_merge(validity), performance=window)
 
 
 # --- payment terms ------------------------------------------------------------------------------

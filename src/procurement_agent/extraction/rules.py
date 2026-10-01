@@ -1994,6 +1994,25 @@ def find_durations(text: str) -> list[RuleHit]:
     return sorted(hits, key=lambda h: h.start)
 
 
+def _window_lengths(text: str, hits: list[RuleHit]) -> list[RuleHit]:
+    """A performance window's length, nearest no keyword of its own, typed as the window: "გასწიოს
+    მომსახურება 2026 წლის 1 ივნისიდან 12 (თორმეტი) თვის განმავლობაში", "მომსახურების გაწევის ვადა:
+    12 თვე" (red team R5, AOA-R5-06). The whole-document reader closes the window with it
+    (``contract_terms.read_term``); left an unclassified duration, a comparison reported the
+    one change twice."""
+    if not any(h.type is FactType.duration for h in hits):
+        return hits
+    # imported here: the terms reader imports this module
+    from procurement_agent.checks.contract_terms import is_window_length
+
+    return [
+        replace(h, type=FactType.execution_period, confidence=0.7)
+        if h.type is FactType.duration and is_window_length(text, h.start, h.end)
+        else h
+        for h in hits
+    ]
+
+
 # --- contract numbers --------------------------------------------------------------------------
 
 # The document kinds that carry a reference number. "contract_number" is documented as the
@@ -2172,7 +2191,7 @@ def run_rules(text: str) -> list[RuleHit]:
         *find_dates(text),
         *find_id_codes(text),
         *find_percentages(text),
-        *find_durations(text),
+        *_window_lengths(text, find_durations(text)),
         *find_contract_numbers(text),
         *find_bank_accounts(text),
         *find_cadastral_codes(text),
