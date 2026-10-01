@@ -373,6 +373,41 @@ miss that must not match (`tests/unit/test_redteam_r3_dates.py`):
   number read as the contract-number reader reads it). A date after the contract named for
   another purpose (`ხელშეკრულების შესაბამისად, … 10 ივნისს გადაიხადა`) is not its signing.
 
+Red team round 4 (2026-10-01) found six more, each fixed by rule with a unit test and a near
+miss that must not match (`tests/unit/test_redteam_r4_dates.py`):
+
+* **One reader for an act's service period** (AOA-R4-03). The act check read the period after a
+  closed list of words; the extraction read it there and then by its form. An act whose period
+  followed `შესრულებულია`, `გაწეულ იქნა`, `განხორციელდა`, `ჩატარდა` or a bare `პერიოდი:` got a
+  warning when correct and passed when dated a day early, while the extraction stated the period.
+  `AoaChecker._period_hits` now reads both ways and `document_facts` states what it read. A past
+  verb opens the period only in its own sentence (`მომსახურება შესრულებულია სრულად.` dates
+  nothing after it); the form reader skips a guarantee's, an advance's or the validity's
+  sentence and a recital of the work still to be done, and ranks a sentence with a past verb or
+  a period label above one that only names the service. Two near misses the extraction used to
+  read as the period (`საგარანტიო პერიოდი: …`, a recital of the contract's window) are no period
+  now. Measured on the mutation harness (seed 149): the prose-typo class's false positive (a slip
+  that turned `შესრულდა` into `შეასრულა` lost the period) went from 17% to 0%.
+* **A date that names the contract, one predicate** (COMPARE-R4-01). The period reader knew a
+  contract reference only with `N`; after `№ 318` the contract's date became the period's first
+  day, so a contract-vs-act comparison stated a wrong period and a revision of the contract's
+  date was two errors. `aoa.contract_named_by` reads the number as the number reader does and
+  serves the act's date, its period and the extraction's contract date.
+* **An act's heading date under a title that dates its contract** (AOA-R4-05): only the first
+  header date was tried. Now a date its own reference names as the contract's is passed over,
+  its contract word no longer disqualifies the next date, and a later date must stand before
+  the preamble ends.
+* **The act's date in its other wordings** (AOA-R4-07): one verb alternation (`გაფორმებულია`,
+  `შედგა`, `ხელი მოეწერა`, the label's copula `თარიღია`) for every reader of the act's date,
+  whole words only.
+* **A validity stated as a length** (EXTRACTION-R4-08) was an open range from the signing. The
+  lead decided it is the closed range: the length counted from the clause's first day or the
+  signing, the day kept, held to the month's last. The red team's probe asks for `P12M`; it
+  reports the range now, by that decision.
+* **A signing date labelled at the foot** (EXTRACTION-R4-11) was read as `contract_date` by the
+  chunk rule but not by the term reader, so the validity "from signing" was lost. The term
+  reader now takes a labelled signing date anywhere when the preamble has none.
+
 ### Scanned PDFs cannot carry Word comments
 
 The client asked for findings marked in the document itself. `report/docx_annotate.py` writes
