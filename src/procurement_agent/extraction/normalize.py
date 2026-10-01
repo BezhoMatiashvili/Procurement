@@ -543,14 +543,20 @@ ID_LABEL = (
 )
 #: between the label and the code: a number sign ("ს/კ N 204567890", "№"), a colon or a dash
 _ID_SEPARATOR = r"(?:\s*(?:N|№|#)(?![A-Za-z]))?\s*[:\-]?\s*"
-#: The code: 9 digits (a company) or 11 (a person), compact or printed in threes by one
-#: separator throughout - a space, a hyphen or a dot ("406 444 789", "406-444-789"). Behind its
-#: label a run a slip makes of a code - a digit dropped or doubled, 7 to 13 digits - is read too:
-#: it is the code the document states, and the act check says what is wrong with its digits
-#: (red team R3, AOA-R3-01). Fewer digits, or more (an account's), are no code.
-_ID_VALUE = r"(\d{7,13}|\d{3}(?P<id_sep>[ .\-])\d{3}(?P=id_sep)\d{2,5})(?!\d)"
+#: The code: 9 digits (a company) or 11 (a person), compact or a company's printed in threes by
+#: one separator throughout - a space, a hyphen or a dot ("406 444 789", "406-444-789"): the
+#: same code (GOLD_SPEC 2 party_id_code).
+_ID_VALUE = r"(\d{9}|\d{11}|\d{3}(?P<id_sep>[ .\-])\d{3}(?P=id_sep)\d{3})(?!\d)"
 #: An identification code behind its label; group 1 is the code as written (``id_code_digits``).
+#: The code facts are read with it: a value is 9 or 11 digits.
 ID_CODE_RE = re.compile(ID_LABEL + _ID_SEPARATOR + _ID_VALUE, re.IGNORECASE)
+#: What a slip makes of a code behind its label - a digit dropped or doubled, 7 to 13 digits,
+#: grouped or not - read as well: it is the code the document states, and the act check says
+#: what is wrong with its digits (red team R3, AOA-R3-01). Fewer digits, or more (an account's),
+#: are no code; a date's grouping ("12-34-56") neither.
+_ID_VALUE_WRITTEN = r"(\d{7,13}|\d{3}(?P<id_sep>[ .\-])\d{3}(?P=id_sep)\d{2,5})(?!\d)"
+#: ``ID_CODE_RE`` with the wrong lengths too, for the readers that compare a party's code.
+ID_CODE_WRITTEN_RE = re.compile(ID_LABEL + _ID_SEPARATOR + _ID_VALUE_WRITTEN, re.IGNORECASE)
 
 
 def id_code_digits(code: str) -> str:

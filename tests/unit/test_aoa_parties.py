@@ -343,7 +343,8 @@ class TestPartyMissing:
         report = _check(act, contract)
         assert "AOA.PARTY_MISSING" not in _ids(report)
         [reason] = _skips(report, "AOA.PARTY_MISSING")
-        assert reason.startswith("ინდ. მეწარმე ნიკა ხარაზი: the act gives this party's code")
+        # the party named with its legal form written short (red team R3, AOA-R3-04)
+        assert reason.startswith("ი/მ ნიკა ხარაზი: the act gives this party's code")
 
     def test_an_entrepreneur_named_without_quotes_is_read_and_compared(self) -> None:
         """ "ი / მ ნიკა ხარაზი": an individual entrepreneur is named, not quoted, and read as the

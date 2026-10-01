@@ -22,6 +22,7 @@ from procurement_agent.extraction.normalize import (
     FUNCTION_WORDS,
     IBAN_CURRENCY_SUFFIXES,
     ID_CODE_RE,
+    ID_CODE_WRITTEN_RE,
     ID_LABEL,
     QUOTE_CHARS,
     bic_has_country,
@@ -79,8 +80,11 @@ _PERSON_PARTY = re.compile(
 )
 # The code behind any of its labels (``normalize.ID_LABEL``: "ს/კ", "ს.კ.", "საიდ. კოდი", "ID",
 # ...), compact or a company's nine digits printed in threes ("406 444 789"); its value is the
-# digits alone. The rules and the act check read codes with the same pattern.
+# digits alone. The rules and the act check read codes with the same pattern. A party's code
+# is read as written, a slip's wrong length included, for the act check to compare
+# (``ID_CODE_WRITTEN_RE``, red team R3, AOA-R3-01); a code fact is 9 or 11 digits.
 _ID_CODE = ID_CODE_RE
+_PARTY_CODE = ID_CODE_WRITTEN_RE
 _code_digits = id_code_digits
 
 
@@ -762,12 +766,12 @@ def find_parties(text: str, *, split_conflicts: bool = False) -> list[Party]:
         # brings an identification code with it, so require one before believing the name.
         after = window[len(m.group(0)) : len(m.group(0)) + 60]
         looks_like_bank = "ბანკ" in before[-25:] or "ბანკ" in m.group(2) or "ბანკის კოდი" in after
-        party.is_bank = looks_like_bank and not _ID_CODE.search(window[: len(m.group(0)) + 80])
+        party.is_bank = looks_like_bank and not _PARTY_CODE.search(window[: len(m.group(0)) + 80])
         gm = _GRID_BEFORE.search(text[max(0, start - 100) : start])
         if gm and (column := _column(gm.group("h"))):
             headed[id(party)] = column
 
-        if mm := _ID_CODE.search(window):
+        if mm := _PARTY_CODE.search(window):
             party.id_code = _code_digits(mm.group(1))
             party.id_span = (start + mm.start(1), start + mm.end(1))
         if mm := _ADDRESS.search(window):

@@ -119,7 +119,7 @@ from procurement_agent.extraction.georgian import (
 )
 from procurement_agent.extraction.georgian import words as georgian_words
 from procurement_agent.extraction.normalize import (
-    ID_CODE_RE,
+    ID_CODE_WRITTEN_RE,
     amounts_equal,
     edit_distance,
     fold_comma_quotes_mapped,
@@ -463,8 +463,9 @@ _CONTRACT_WORD = re.compile(r"ხელშეკრულებ|contract", re.IG
 _ACT_WORD = re.compile(r"აქტ|\bact\b", re.IGNORECASE)
 
 
-#: every label the party reader knows, read by the one shared pattern (red team R2, AOA-R2-01)
-_ID_LABELLED = ID_CODE_RE
+#: every label the party reader knows, read by the one shared pattern (red team R2, AOA-R2-01),
+#: a slip's wrong length included (R3, AOA-R3-01)
+_ID_LABELLED = ID_CODE_WRITTEN_RE
 
 
 #: The share of an act's letters that must be Georgian for the rules to read it. A Georgian act
