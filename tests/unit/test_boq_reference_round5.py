@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.unit.test_boq_reader_round5 import _save_hidden
 from tests.unit.test_boq_reader_variants import Cells, Fx, _save
 from tests.unit.test_boq_reference_round4 import ref
 
@@ -218,3 +219,31 @@ def test_the_usual_georgian_unit_spellings_are_one_unit(a: str, b: str) -> None:
 )
 def test_units_the_georgian_spellings_do_not_merge(a: str, b: str) -> None:
     assert ref.unit_key(a) != ref.unit_key(b)
+
+
+@pytest.mark.parametrize("hidden", [True, False])
+def test_a_hidden_draft_sheet_no_summary_links_is_no_section(tmp_path: Path, hidden: bool) -> None:
+    dig = ("1.1", "Trench excavation", "m3")
+
+    def book(name: str, live: float | None, draft: float | None) -> None:
+        def lines(rate: float | None) -> tuple[_Line, ...]:
+            return ((*dig, 10.0, rate, None if rate is None else 10.0 * rate),)
+
+        sheets = {
+            "1. WORKS": _ref_bill(lines(live), template=live is None),
+            "1. WORKS (old)": _ref_bill(lines(draft), template=draft is None),
+        }
+        _save_hidden(tmp_path / f"{name}.xlsx", sheets, {"1. WORKS (old)"} if hidden else set())
+
+    book("template", None, None)
+    book("A", 110.0, 95.0)
+    book("B", 100.0, None)
+    gold = ref.build_gold(tmp_path, tmp_path / "template.xlsx")
+    a, b = gold["bids"]["A"], gold["bids"]["B"]
+    if hidden:
+        assert list(gold["positions"]) == ["1. WORKS"]
+        assert b["unpriced_sheets"] == []
+        assert [(h["sheet"], h["item"]) for h in a["heading_priced"]] == [("1. WORKS (old)", "1.1")]
+        assert a["evaluated_cost"] == 1100.0
+    else:  # near miss: a visible second bill is a section
+        assert b["unpriced_sheets"] == ["1. WORKS (old)"]

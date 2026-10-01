@@ -773,6 +773,11 @@ class BoqWorkbook:
     unreadable_sheets: list[str] = field(default_factory=list)
     #: sheets with no BOQ columns that nothing in the Summary refers to (a calculation aid)
     helper_sheets: list[str] = field(default_factory=list)
+    #: hidden sheets laid out as a bill that the Summary does not link to (an earlier draft
+    #: kept in the template): not read as priced sections (GOLD_SPEC 5, round 5)
+    hidden_sheets: list[str] = field(default_factory=list)
+    #: those of them whose columns were read, with their lines
+    hidden_bills: dict[str, BoqSheet] = field(default_factory=dict)
     #: formula cells read, and how many of them carried no cached value
     formula_cells: int = 0
     uncached_cells: int = 0
@@ -1406,15 +1411,27 @@ def _read_boq(values: Workbook, formulas: Workbook, *, name: str) -> BoqWorkbook
             continue
         ws, wf = values[sheet_name], formulas[sheet_name]
         cols, header_row = _map_headers(ws)
-        if "desc" not in cols or "qty" not in cols:
-            if sheet_name in linked or _looks_priced(ws):
+        readable = "desc" in cols and "qty" in cols
+        if not readable and sheet_name not in linked and not _looks_priced(ws):
+            book.helper_sheets.append(sheet_name)
+            continue
+        hidden = wf.sheet_state != "visible" and sheet_name not in linked
+        if hidden:
+            # a hidden sheet the Summary does not link to - an earlier draft of a bill, kept in
+            # the template - is no section of the tender (the lead's round-5 policy): said once,
+            # never "section left unpriced" on every bidder. Its lines are still read, so a
+            # bidder who prices it is shown (``compare_bid``)
+            book.hidden_sheets.append(sheet_name)
+        if not readable:
+            if not hidden:
                 book.unreadable_sheets.append(sheet_name)
-            else:
-                book.helper_sheets.append(sheet_name)
             continue
         sheet = _read_sheet(
             book, ws, wf, sheet_name, cols, header_row, linked_rows.get(sheet_name, set())
         )
+        if hidden:
+            book.hidden_bills[sheet_name] = sheet
+            continue
         closing = _closing_line(sheet, linked_rows.get(sheet_name, set()))
         if closing is not None:
             sheet.subtotal, sheet.subtotal_row = closing.amount, closing.row
@@ -2328,6 +2345,18 @@ def template_findings(template: BoqWorkbook) -> list[Finding]:
                 actual=s,
             )
         )
+    for s in template.hidden_sheets:
+        out.append(
+            _finding(
+                "BOQ.SHEET_SKIPPED",
+                "info",
+                f"დამალული გვერდი {s} Summary-ს არ უკავშირდება — სექციად არ ითვლება და "
+                "შეფასებაში არ მონაწილეობს",
+                f"hidden sheet {s} is not linked from the Summary - it is not a section of the "
+                "tender and is not evaluated",
+                actual=s,
+            )
+        )
     for name, sheet in template.sheets.items():
         if "unit" not in sheet.columns:
             # an unknown quantity label fails loudly (the sheet is unreadable); an unknown unit
@@ -2546,6 +2575,14 @@ def compare_bid(template: BoqWorkbook, bid: BoqWorkbook) -> BidComparison:
         if sheet_name not in template.sheets and sheet_name not in template.unreadable_sheets:
             for b_line in b_sheet.lines:
                 out.findings.extend(_arithmetic_findings(b_line, ()))
+    for sheet_name in template.hidden_sheets:
+        # the template's hidden draft, priced by the bidder (hidden or not): shown like a priced
+        # non-position, never evaluated
+        b_sheet = bid.sheets.get(sheet_name) or bid.hidden_bills.get(sheet_name)
+        if b_sheet is not None:
+            out.priced_headings.extend(
+                b for b in b_sheet.lines if b.kind == "position" and b.amount
+            )
 
     if bid.summary_in_bill is not None and template.summary_sheet is not None:
         # the template has a Summary and the bid dropped it: it states no totals and is not

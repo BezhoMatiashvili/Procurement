@@ -12,11 +12,13 @@ is worked out here from the test's own data.
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 import pytest
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 
+import tests.boq_factory as factory
 from procurement_agent.checks.boq import (
     BidComparison,
     BoqLine,
@@ -685,3 +687,75 @@ def test_the_usual_georgian_unit_spellings_are_one_unit(a: str, b: str) -> None:
 )
 def test_units_the_georgian_spellings_do_not_merge(a: str, b: str) -> None:
     assert norm_unit(a) != norm_unit(b)
+
+
+# --- R5-17 (the lead's policy): a hidden template sheet the Summary does not link ------------
+
+
+def _save_hidden(path: Path, sheets: dict[str, Cells], hidden: set[str]) -> Path:
+    """``_save`` with the sheets named in ``hidden`` hidden, cached values kept."""
+    wb = Workbook()
+    default = wb.active
+    assert default is not None
+    wb.remove(default)
+    cache: dict[tuple[int, str], object] = {}
+    for index, (name, cells) in enumerate(sheets.items()):
+        ws = wb.create_sheet(name)
+        if name in hidden:
+            ws.sheet_state = "hidden"
+        for (r, c), v in cells.items():
+            cell = ws.cell(r, c, v.text if isinstance(v, Fx) else v)
+            if isinstance(v, Fx):
+                cache[(index, cell.coordinate)] = v.value
+    buf = io.BytesIO()
+    wb.save(buf)
+    path.write_bytes(factory._with_cached_values(buf.getvalue(), cache))
+    return path
+
+
+_DRAFT = "1. WORKS (old)"
+
+
+def _hidden_draft_compare(
+    tmp_path: Path, *, draft_priced_by: str = "", linked: bool = False, hidden: bool = True
+) -> tuple[BoqWorkbook, list[BidComparison]]:
+    books = []
+    for name, factor in (("T", None), ("A", 1.0), ("B", 0.9)):
+        bill, total = _bill(factor)
+        draft, draft_total = _bill(1.0 if name == draft_priced_by else None)
+        summary = _summary(total)
+        if linked:
+            summary[(9, 1)] = "2"
+            summary[(9, 2)] = "OLD WORKS"
+            summary[(9, 3)] = Fx(f"='{_DRAFT}'!F{len(_LINES) + 2}", draft_total)
+        sheets = {"SUMMARY": summary, _SHEET: bill, _DRAFT: draft}
+        path = _save_hidden(tmp_path / f"{name}.xlsx", sheets, {_DRAFT} if hidden else set())
+        books.append(read_boq(path, name=name))
+    return books[0], compare_all(books[0], books[1:])
+
+
+def test_a_hidden_draft_sheet_the_summary_does_not_link_is_no_section(tmp_path: Path) -> None:
+    t, (a, b) = _hidden_draft_compare(tmp_path)
+    assert list(t.sheets) == [_SHEET] and t.hidden_sheets == [_DRAFT]
+    [note] = [f for f in template_findings(t) if f.actual == _DRAFT]
+    assert (note.rule_id, note.severity) == ("BOQ.SHEET_SKIPPED", "info")
+    for comp in (a, b):
+        assert "BOQ.SECTION_UNPRICED" not in _rules(comp)
+        assert comp.complete and not comp.unpriced_sheets
+    assert (a.colour, b.colour) == ("red", "green")
+
+
+def test_a_hidden_draft_priced_by_a_bidder_is_shown_never_evaluated(tmp_path: Path) -> None:
+    _, (a, b) = _hidden_draft_compare(tmp_path, draft_priced_by="A")
+    assert len(a.priced_headings) == len(_LINES) and not b.priced_headings
+    assert a.evaluated_cost == pytest.approx(_COST)
+
+
+@pytest.mark.parametrize(("linked", "hidden"), [(True, True), (False, False)])
+def test_a_linked_or_visible_second_bill_is_still_a_section(
+    tmp_path: Path, linked: bool, hidden: bool
+) -> None:
+    # near misses: the Summary links the hidden sheet, or the sheet is not hidden
+    t, (a, _) = _hidden_draft_compare(tmp_path, linked=linked, hidden=hidden)
+    assert _DRAFT in t.sheets and not t.hidden_sheets
+    assert "BOQ.SECTION_UNPRICED" in _rules(a)

@@ -221,6 +221,8 @@ class Book:
     uncached: int
     values: object
     formulas: object
+    #: hidden bills the Summary does not link to (round 5): not priced sections
+    hidden: dict[str, Sheet] = field(default_factory=dict)
 
 
 def find_header(ws) -> tuple[int, int, dict[str, int]] | None:
@@ -549,6 +551,19 @@ def read_book(path: Path, name: str) -> Book:
             k = sum(1 for s in sheets if s in txt)
             best = max(best, (k, n), key=lambda x: x[0])
         cands = [best[1]] if best[1] else []
+    # round 5 (the lead's decision): a hidden sheet the Summary does not link to is no priced
+    # section - read for sheet presence only (sheet_names), never evaluated
+    summary_text = (
+        " ".join(str(c.value) for row in wf[cands[0]].iter_rows() for c in row if formula_of(c))
+        if cands
+        else ""
+    )
+    hidden: dict[str, Sheet] = {}
+    for n in list(sheets):
+        if wf[n].sheet_state != "visible" and not (
+            f"'{n}'!" in summary_text or f"{n}!" in summary_text
+        ):
+            hidden[n] = sheets.pop(n)
     if cands:
         summary = read_summary(wv[cands[0]], wf[cands[0]], names, set(sheets))
         if summary:
@@ -564,6 +579,7 @@ def read_book(path: Path, name: str) -> Book:
         uncached=uncached,
         values=wv,
         formulas=wf,
+        hidden=hidden,
     )
 
 
@@ -1003,6 +1019,15 @@ def check_bid(tpl: Book, bid: Book, placeholders: set[tuple[str, int]] | None = 
             notes.append(explain_gap(bid, bsh, leaf_rows, amt, st, res["heading_priced"], sname))
         for rr, a in bsh.below_subtotal:
             notes.append(f"{sname}: amount {a:.2f} below the SUB-TOTAL at bid row {rr} (not read)")
+    # round 5: the template's hidden draft, priced by the bidder, is shown like a priced
+    # non-position and never evaluated
+    for sname in tpl.hidden:
+        bsh = bid.sheets.get(sname) or bid.hidden.get(sname)
+        for b in bsh.rows if bsh is not None else ():
+            if nz(b.amount) and (b.qty is not None or b.unit):
+                res["heading_priced"].append(
+                    {"sheet": sname, "item": b.item, "row": b.row, "amount": r2(b.amount)}
+                )
     # GOLD_SPEC 5, section groups: a group is priced when any member is; an unpriced member of a
     # priced group is not listed as unpriced
     group_of = {
