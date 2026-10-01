@@ -20,6 +20,7 @@ from procurement_agent.checks.boq import (
     BidComparison,
     BoqLine,
     BoqWorkbook,
+    _item_key,
     _label_key,
     _plays,
     _position_groups,
@@ -30,6 +31,7 @@ from procurement_agent.checks.boq import (
 from tests.unit.test_boq_reader_round4 import (
     _COST,
     _HEAD,
+    _LINES,
     _MARKUP,
     _SHEET,
     _bill,
@@ -463,3 +465,47 @@ def test_an_item_unpriced_under_its_own_heading_is_listed_and_out_of_the_common_
     assert x.common_scope_cost == pytest.approx(3500 + 1200 + 300 * 12.6 + 180 * 9.975)
     assert y.common_scope_cost == pytest.approx(3500 + 1200 + 300 * 12.0 + 180 * 9.5)
     assert (x.colour, y.colour) == ("red", "green")
+
+
+# --- R5-08: item numbers written with a closing dot ------------------------------------------
+
+
+@pytest.mark.parametrize("dotted", [False, True])
+def test_item_numbers_written_with_a_closing_dot_are_the_same_positions(
+    tmp_path: Path, dotted: bool
+) -> None:
+    def lines(rates: tuple[float, ...] | None, dot: str) -> tuple[_Line, ...]:
+        out: list[_Line] = []
+        for (item, desc, unit, qty, _), rate in zip(_LINES, rates or (0.0,) * 5, strict=True):
+            item_no = item.split(".")[1] if not dotted else item
+            amount = qty * rate if rates else None
+            out.append((item_no + dot, desc, unit, qty, rate if rates else None, amount))
+        return tuple(out)
+
+    rates = tuple(r for *_, r in _LINES)
+    _, (a, b) = _evaluate(
+        tmp_path,
+        lines(None, ""),
+        {"A": lines(rates, "."), "B": lines(tuple(r * 0.9 for r in rates), "")},
+    )
+    assert not a.added and not a.removed
+    assert a.evaluated_cost == pytest.approx(_COST)
+    assert a.common_scope_positions == 5
+    assert (a.colour, b.colour) == ("red", "green")
+
+
+@pytest.mark.parametrize(
+    ("template", "bid", "same"),
+    [
+        ("1", "1.", True),
+        ("1.1", "1.1.", True),
+        ("A1", "A1.", True),
+        ("1.1", "1.10", False),  # a digit is never folded
+        ("1.1", "1.1.1", False),
+        ("1", "11", False),
+    ],
+)
+def test_only_a_closing_dot_is_folded_from_an_item_number(
+    template: str, bid: str, same: bool
+) -> None:
+    assert (_item_key(template) == _item_key(bid)) is same

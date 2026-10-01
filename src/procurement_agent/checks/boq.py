@@ -604,6 +604,14 @@ def _fold_desc(text: str) -> str:
     return text.rstrip(" .;:,")
 
 
+def _item_key(item: str) -> str:
+    """An item number as positions are matched by: case folded and one closing dot off - "1."
+    is "1" and "1.1." is "1.1" (the dot is how some bills write every number), while "1.10"
+    stays apart from "1.1": only the dot is folded, never a digit."""
+    text = item.strip().lower()
+    return text[:-1].rstrip() if len(text) > 1 and text.endswith(".") else text
+
+
 @dataclass(frozen=True, slots=True)
 class BoqLine:
     sheet: str
@@ -645,7 +653,7 @@ class BoqLine:
         change, reported as such - not a deleted line plus an unrelated new one.
         """
         desc = re.sub(r"\s+", " ", self.description).strip().lower()[:70]
-        return f"{self.item_no.strip().lower()}|{desc}"
+        return f"{_item_key(self.item_no)}|{desc}"
 
     @property
     def is_priced(self) -> bool:
@@ -716,7 +724,7 @@ class SummaryRow:
 
     @property
     def key(self) -> str:
-        return f"{self.item.strip().lower()}|{_fold_desc(self.label)}"
+        return f"{_item_key(self.item)}|{_fold_desc(self.label)}"
 
 
 @dataclass(slots=True)
@@ -2097,7 +2105,7 @@ def _pair_leftovers(
         if i in used_t or not t.item_no:
             continue
         for j, b in enumerate(added):
-            if j in used_b or b.item_no.strip().lower() != t.item_no.strip().lower():
+            if j in used_b or _item_key(b.item_no) != _item_key(t.item_no):
                 continue
             ratio = difflib.SequenceMatcher(
                 None, _fold_desc(t.description), _fold_desc(b.description), autojunk=False

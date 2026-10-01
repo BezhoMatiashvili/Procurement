@@ -179,3 +179,19 @@ def test_a_heading_numbered_under_the_section_keeps_the_group() -> None:
     )
     groups = ref.section_groups(sheet)
     assert [groups[r] for r in (3, 5, 6)] == ["A9", "A9", "A9"]
+
+
+def _match(t_item: str, b_item: str) -> bool:
+    t = ref.Row(row=3, item=t_item, desc="Trench excavation", qty=2.0, qty_formula=None, unit="m3")
+    b = ref.Row(row=3, item=b_item, desc="Trench excavation", qty=2.0, qty_formula=None, unit="m3")
+    return ref.match_rows([t], [b])[0] == {3: b}
+
+
+@pytest.mark.parametrize(
+    ("t_item", "b_item", "same"),
+    [("1", "1.", True), ("1.1", "1.1.", True), ("1.1", "1.10", False), ("1", "11", False)],
+)
+def test_only_a_closing_dot_is_folded_from_an_item_number(
+    t_item: str, b_item: str, same: bool
+) -> None:
+    assert _match(t_item, b_item) is same

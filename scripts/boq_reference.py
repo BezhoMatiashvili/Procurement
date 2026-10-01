@@ -656,8 +656,15 @@ def match_rows(t_rows: list[Row], b_rows: list[Row]) -> tuple[dict[int, Row], di
             if rt < 1.0:
                 ratio[t.row] = rt
 
-    # 1. item number + description
-    assign([(t, b, 1.0) for t in cand_t for b in cand_b if t.item == b.item and t.fdesc == b.fdesc])
+    # 1. item number + description ("1." and "1" are one item number, round 5)
+    assign(
+        [
+            (t, b, 1.0)
+            for t in cand_t
+            for b in cand_b
+            if item_key(t.item) == item_key(b.item) and t.fdesc == b.fdesc
+        ]
+    )
     # 2. same item number, descriptions >= 0.9 alike - or the template's description kept whole
     # with the bidder's offer written after it (GOLD_SPEC 5, round 4)
     pairs = []
@@ -665,7 +672,7 @@ def match_rows(t_rows: list[Row], b_rows: list[Row]) -> tuple[dict[int, Row], di
         if t.row in out or not t.item:
             continue
         for b in cand_b:
-            if b.row in used or b.item != t.item:
+            if b.row in used or item_key(b.item) != item_key(t.item):
                 continue
             rt = difflib.SequenceMatcher(None, t.fdesc, b.fdesc).ratio()
             if rt >= 0.9 or keeps_template_text(t.fdesc, b.fdesc):
@@ -692,6 +699,13 @@ def keeps_template_text(t: str, b: str) -> bool:
     """The bid's folded description is the template's whole, then words of the bidder's own,
     starting where a word ends ("PIPE 20" is not kept by "PIPE 200")."""
     return bool(t) and len(b) > len(t) and b.startswith(t) and not b[len(t)].isalnum()
+
+
+def item_key(item: str) -> str:
+    """An item number as rows are matched by (round 5): one closing dot off - "1." is "1", "1.1."
+    is "1.1" - and never a digit, so "1.10" stays apart from "1.1"."""
+    text = item.strip()
+    return text[:-1].rstrip() if len(text) > 1 and text.endswith(".") else text
 
 
 def item_number(item: str) -> float | None:
