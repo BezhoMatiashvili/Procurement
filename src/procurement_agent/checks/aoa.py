@@ -2282,8 +2282,9 @@ class AoaChecker:
 
         An attorney the contract names, written with a slip ("მზევინარ გოგიჩაიშვილო" for the
         contract's "მზევინარ გოგიჩაიშვილი"), is no other person: an error corrected to the
-        contract's attorney, as for a director (red team R4, AOA-R4-12). The act's attorneys are the preamble's and the
-        signature block's, as the party reader reads them (``Party.proxies``)."""
+        contract's attorney, as for a director (red team R4, AOA-R4-12). The act's attorneys are
+        the preamble's and the signature block's, as the party reader reads them
+        (``Party.proxies``)."""
         named = [*match.directors, *match.proxies]
         for proxy in p.proxies:
             if any(_same_person(proxy, n) for n in named):
