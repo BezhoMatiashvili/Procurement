@@ -111,9 +111,10 @@ class PartyColumnsTableSerializer(TripletTableSerializer):
     ) -> SerializationResult:
         first = _party_columns(item)
         by_rows = first is None and _first_row_is_data(item)
-        if (first is None and not by_rows) or item.self_ref in doc_serializer.get_excluded_refs(
-            **kwargs
-        ):
+        keyed = first is None and not by_rows and _keyed_by_item_number(item)
+        if (
+            first is None and not by_rows and not keyed
+        ) or item.self_ref in doc_serializer.get_excluded_refs(**kwargs):
             return super().serialize(item=item, doc_serializer=doc_serializer, doc=doc, **kwargs)
         parts: list[SerializationResult] = []
         captions = doc_serializer.serialize_captions(item=item, **kwargs)
@@ -130,7 +131,10 @@ class PartyColumnsTableSerializer(TripletTableSerializer):
             ]
             for r, row in enumerate(item.data.grid)
         ]
-        text = _by_row(texts) if first is None else _by_column(texts, first)
+        if keyed:
+            text = _keyed_rows(texts)
+        else:
+            text = _by_row(texts) if first is None else _by_column(texts, first)
         if text:
             if shared is not None:
                 shared.update(local["visited"])
@@ -215,6 +219,64 @@ def _by_row(texts: list[list[str]]) -> str:
         *labels, last = cells
         head = " ".join(label.rstrip(" :") for label in labels)
         line = f"{head}: {last}" if head else last
+        lines.append(line if line.endswith((".", ";", ":", "!", "?")) else f"{line};")
+    return "\n".join(lines)
+
+
+#: A row key that is an item number: "1", "2.", "1.1", "3)", "ა", "ბ)".
+_ITEM_NUMBER = re.compile(r"\s*(?:\d{1,3}(?:\.\d{1,3})*[.)]?|[ა-ჰ][.)]?)\s*")
+#: A column header of a price table - a price, a quantity, a unit, a sum: its rows are lines
+#: the rules read cell by cell ("1, ჯამი = 500"), and stay as Docling writes them.
+_PRICED_HEADER = re.compile(
+    r"ფას|რაოდენობ|ერთეულ|ჯამ|ღირებულ|თანხ|ლარ|დოლარ|ევრო|სულ|[₾$€]"
+    r"|(?<![a-z])(?:price|rate|quantity|qty|unit|amount|total|sum|cost|gel|usd|eur)",
+    re.IGNORECASE,
+)
+
+
+def _keyed_by_item_number(table: TableItem) -> bool:
+    """Whether a table of three or more columns under one header row keys each row by an item
+    number in its first column ("N | პირობა | მნიშვნელობა", red team R4, EXTRACTION-R4-07),
+    and is no price table (``_PRICED_HEADER``). Docling's triplets put a full stop between one
+    row's cells ("1, პირობა = ხელშეკრულების ღირებულება. 1, მნიშვნელობა = 36 000 ლარი"), so a
+    term's label and its value were two sentences and every value went unread."""
+    grid = table.data.grid
+    if table.data.num_cols < 3 or len(grid) < 3:
+        return False
+    header, *rows = grid
+    if not any(cell.column_header for cell in header) or any(
+        cell.column_header for row in rows for cell in row
+    ):
+        return False
+    if any(_PRICED_HEADER.search(cell.text) for cell in header[1:]):
+        return False
+    for r, row in enumerate(rows, start=1):
+        if any(
+            cell.start_row_offset_idx != r or cell.start_col_offset_idx != c
+            for c, cell in enumerate(row)
+        ):
+            return False  # a merged cell: left to Docling
+        if not _ITEM_NUMBER.fullmatch(row[0].text):
+            return False
+    return True
+
+
+def _keyed_rows(texts: list[list[str]]) -> str:
+    """A table keyed by item numbers one row to a line, Docling's triplets kept but joined by
+    ", " within the row: "1, პირობა = ხელშეკრულების ღირებულება, მნიშვნელობა = 36 000 ლარი;". A
+    row is one sentence, its label beside its value, and ends with ";" as ``_by_row``'s does."""
+    header, *rows = texts
+    names = [" ".join(cell.split()) for cell in header]
+    lines: list[str] = []
+    for row in rows:
+        cells = [
+            f"{names[c]} = {' '.join(cell.split())}" if names[c] else " ".join(cell.split())
+            for c, cell in enumerate(row)
+            if c and cell
+        ]
+        if not cells:
+            continue
+        line = ", ".join([" ".join(row[0].split()), *cells])
         lines.append(line if line.endswith((".", ";", ":", "!", "?")) else f"{line};")
     return "\n".join(lines)
 
