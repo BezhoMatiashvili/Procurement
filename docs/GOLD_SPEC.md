@@ -143,8 +143,10 @@ How the parties are read (red-team round 4):
 * **Signatories in a signature's layouts.** A head's name is read after its title across a
   signature's blank and in slashes or brackets (`დირექტორი ______ /ნინო ნიმუშაძე/`), and before
   its title (`ნინო ნიმუშაძე - დირექტორი`, `ნინო ნიმუშაძე (დირექტორი)`) where the name opens its
-  line or cell and the title, in the nominative, closes it. A deputy's or a narrowed title after
-  the name (`- დირექტორის მოადგილე`, `- ფინანსური დირექტორი`) is no head's.
+  line or cell and the title, in the nominative, closes it. In these layouts the name's last word
+  must end as a surname does, or the document must name the person again: `(უფლებამოსილი
+  პირი)`, `/სახელი გვარი/` are a phrase and a blank's caption. A deputy's or a narrowed title
+  after the name (`- დირექტორის მოადგილე`, `- ფინანსური დირექტორი`) is no head's.
 * **An attorney at the signature.** `მინდობილი პირი: …`, `მინდობილი პირი …` and
   `წარმომადგენელი (მინდობილობით) …` name the party's attorney, as `მინდობილობით მოქმედი პირი`
   in the preamble does (decided in round 4); extraction reports it as that one is reported, a

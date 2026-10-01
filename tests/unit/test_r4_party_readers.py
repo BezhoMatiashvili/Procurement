@@ -282,6 +282,10 @@ def test_a_signatory_is_read_in_every_signature_layout(style: str, flat: bool) -
         "ნანა ხელაძე - პროექტის ხელმძღვანელი",  # another body's officer
         "ხელშეკრულების პირობები - დირექტორი ვალდებულია",  # prose
         "ამის შემდეგ ნანა ხელაძე - დირექტორი",  # the name does not open its line
+        "დირექტორი (უფლებამოსილი პირი)",  # a phrase in brackets after the title
+        "ხელმძღვანელი (სტრუქტურული ერთეული)",
+        "დირექტორი ________ /სახელი გვარი/",  # a blank's caption
+        "სახელი გვარი - დირექტორი",
     ],
 )
 def test_a_name_before_another_title_or_in_prose_is_no_head(line: str) -> None:

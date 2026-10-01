@@ -606,32 +606,34 @@ def _read_signatory(window: str, m: re.Match[str]) -> tuple[str, int, bool] | No
     adjectival = _ADJECTIVAL_TITLE.search(window[m.start() : m.start("sep")]) is not None
     if adjectival and first.endswith("ს") and len(first) > 4 and not _surname_shaped(last):
         return None
-    mark = (m.group("mark") or "").strip()
+    if m.group("mark"):
+        # in slashes or brackets ("/ნინო კაპანაძე/", "(ნინო კაპანაძე)") only a surname's ending
+        # says it is a name: "(უფლებამოსილი პირი)", "/სახელი გვარი/" are a phrase, a blank's
+        # caption. Otherwise kept only when the document names the person again.
+        return f"{first} {last}", end, _surname_shaped(last) and not adjectival
     confirmed = bool(
         m.group("sep") == ":"
         or _IN_THE_PERSON_OF.match(window, end)
         or _NAME_ENDS.match(window, end)
-        # written in slashes or brackets: "/ნინო კაპანაძე/", "(ნინო კაპანაძე)"
-        or (mark and re.match(rf"[ \t]*{re.escape(_CLOSING_MARK[mark])}", window[end:]))
         or (_surname_shaped(last) and not adjectival)
     )
     return f"{first} {last}", end, confirmed
 
 
-#: The mark that closes a name written in slashes or brackets
-_CLOSING_MARK = {"/": "/", "(": ")"}
-
-
-def _name_before_title(m: re.Match[str]) -> str | None:
-    """The signatory ``_NAME_BEFORE_TITLE`` read at ``m``: its first name and surname, without
-    a patronymic; None when the words are no name ("ხელშეკრულების პირობები - დირექტორი")."""
+def _name_before_title(m: re.Match[str]) -> tuple[str, bool] | None:
+    """The signatory ``_NAME_BEFORE_TITLE`` read at ``m``, its first name and surname without a
+    patronymic, and whether it is confirmed: its last word ends as a surname does ("სახელი
+    გვარი - დირექტორი", a blank's caption, is kept only when the document names the person
+    again). None when the words are no name ("ხელშეკრულების პირობები - დირექტორი")."""
     words = _NAME_WORD.findall(m.group("name"))
     if len(words) == 4:
         del words[1:3]  # the patronymic
     first, last = words[0], words[-1]
     if {first, last} & (FUNCTION_WORDS | _NOT_A_NAME | ROLE_WORDS) or last.endswith("."):
         return None
-    return f"{first} {last}" if _name_shaped(first, last) else None
+    if not _name_shaped(first, last):
+        return None
+    return f"{first} {last}", _surname_shaped(last)
 
 
 # --- a signature table serialised row by row ------------------------------------------------
@@ -898,12 +900,14 @@ def find_parties(text: str, *, split_conflicts: bool = False) -> list[Party]:
                 signatories.append(
                     _Signatory(owner, name, start + dm.start("name"), confirmed, kind)
                 )
-        # "ნინო კაპანაძე - დირექტორი": the head's title after the name; its place confirms it
+        # "ნინო კაპანაძე - დირექტორი": the head's title after the name
         for bm in _NAME_BEFORE_TITLE.finditer(window):
             if (head := _name_before_title(bm)) is None:
                 continue
             owner = _grid_owner(text, start + bm.end(), party, parties, headed)
-            signatories.append(_Signatory(owner, head, start + bm.start("name"), True, "director"))
+            signatories.append(
+                _Signatory(owner, head[0], start + bm.start("name"), head[1], "director")
+            )
         party.accounts = list(dict.fromkeys(iban for iban, _, _ in _ibans(window)))
         parties.append(party)
         befores.append(before)
