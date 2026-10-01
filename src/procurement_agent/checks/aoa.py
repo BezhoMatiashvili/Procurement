@@ -121,6 +121,7 @@ from procurement_agent.extraction.georgian import (
     CASES,
     GEORGIAN,
     MONTH_FORMS,
+    attested_nominatives,
     damerau,
     in_case_of,
     inflect,
@@ -2571,13 +2572,17 @@ class AoaChecker:
                 continue  # every place of it is another party's own director, written right
             span, places = where
             # compared on the nominative, so a genitive in either document is no mistake
-            guess = best_match(lemma(form), [lemma(c) for c in theirs])
+            # the nominative the contract writes, never one read off a genitive that drops a
+            # vowel ("წერეთლის" is "წერეთელი", red team R5, AOA-R5-05)
+            guess = best_match(lemma(form), attested_nominatives(theirs))
             diff = guess[1] if guess else None
             typo = diff is not None and diff.looks_like_typo
             hint_ka = " (როგორც ჩანს, შეცდომაა)" if typo else ""
             hint_en = " (looks like a misspelling)" if typo else ""
             # the correction in the act's own grammar, form by form
-            expected = keep_initial(form, in_case_of(form, guess[0])) if guess else None
+            expected = (
+                keep_initial(form, in_case_of(form, guess[0], written=theirs)) if guess else None
+            )
             if expected is not None:
                 expected = with_patronymic(expected, patronymic)
             self._add(
