@@ -673,8 +673,14 @@ _FIRST_BEFORE = re.compile(
     r"(?<![a-z])(?:from|since|starting|commencing|beginning|effective)(?:\s+(?:on|from))?\s*$",
     re.IGNORECASE,
 )
+#: "Not later than", a date's end and a deadline's alike: "არაუგვიანეს 2026 წლის 31 დეკემბრისა"
+#: (the genitive with its emphatic vowel), "არაუგვიანეს 31.12.2026-ისა", "no later than 31
+#: December 2026" (red team R5, EXTRACTION-R5-01). One definition for the range reader and the
+#: payment deadline's (``_DEADLINE_BEFORE``).
+_NOT_LATER_THAN = r"არაუგვიანეს|(?<![a-z])(?:no|not)\s+later\s+than"
 _LAST_BEFORE = re.compile(
-    r"(?<![a-z])(?:to|until|till|through|by|up\s+to(?:\s+and\s+including)?|ending(?:\s+on)?)\s*$",
+    r"(?:(?<![a-z])(?:to|until|till|through|by|up\s+to(?:\s+and\s+including)?|ending(?:\s+on)?)"
+    rf"|{_NOT_LATER_THAN})\s*$",
     re.IGNORECASE,
 )
 #: How far from a date the words that mark it may stand.
@@ -935,9 +941,7 @@ _DEADLINE_AFTER = re.compile(
     r"\s*(?:ვადა|(?P<during>განმავლობა))[ა-ჰ]*|\s+(?:after|(?P<of>of)|from|following)(?![a-z])",
     re.IGNORECASE,
 )
-_DEADLINE_BEFORE = re.compile(
-    r"(?:არაუგვიანეს|(?<![a-z])(?:within|(?:no|not)\s+later\s+than))\s*$", re.IGNORECASE
-)
+_DEADLINE_BEFORE = re.compile(rf"(?:{_NOT_LATER_THAN}|(?<![a-z])within)\s*$", re.IGNORECASE)
 #: "განმავლობაში" (during) and "of" also say how long the work ran - "(1 თვის განმავლობაში)
 #: გაწეული მომსახურება", "6 months of service" - so a span longer than these is a time limit only
 #: when it is counted from something: "ხელშეკრულების გაფორმებიდან 1 თვის განმავლობაში".
