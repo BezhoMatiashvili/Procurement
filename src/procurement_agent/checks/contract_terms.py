@@ -260,12 +260,21 @@ _RUNNING_YIELDS_TO: frozenset[AmountRole | None] = frozenset(
 )
 
 
+#: The act's fee, or a part of it, named after a running figure's words and before the figure:
+#: the figure is that, and the words before it say what it follows ("წინა აქტით შესრულებული
+#: სამუშაოს შემდეგ, მიმდინარე თვის საფასური შეადგენს 100 ლარს").
+_FEE_NAMED = re.compile(
+    r"საფასურ|ავანს|დარჩენ|ნაშთ|ტრანშ|(?<![a-z])(?:fee|advance|remainder)", re.IGNORECASE
+)
+
+
 def _names_a_running_figure(text: str, lo: int, start: int) -> bool:
     """Whether the words before the figure at ``start``, in its clause (``lo`` on: its sentence,
     or the end of the amount before it) and on this side of a ";", name it a running figure of
-    the contract (``_RUNNING``)."""
+    the contract (``_RUNNING``), with no word for the fee or a part of it after them."""
     lo = max(lo, start - _RUNNING_REACH, text.rfind(";", lo, start) + 1)
-    return _RUNNING.search(text, lo, start) is not None
+    found = list(_RUNNING.finditer(text, lo, start))
+    return bool(found) and _FEE_NAMED.search(text, found[-1].end(), start) is None
 
 
 @dataclass(frozen=True, slots=True)

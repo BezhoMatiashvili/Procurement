@@ -105,9 +105,9 @@ class TestCopiedIntoTheSignatureOnly:
 
     def test_a_name_nobody_signs_is_still_reported_everywhere(self) -> None:
         """Near miss: an unrelated person at the signature is in no other party's block."""
-        act = _TWO_DIRECTORS.replace("დირექტორი: დავით მელაძე", "დირექტორი: ზურაბ ქობალია")
+        act = _TWO_DIRECTORS.replace("დირექტორი: დავით მელაძე", "დირექტორი: ციცინო ჭიაბრიშვილი")
         found = [(f.quote, f.places) for f in _of(_check(act), "AOA.DIRECTOR")]
-        assert found == [("ზურაბ ქობალია", None)]
+        assert found == [("ციცინო ჭიაბრიშვილი", None)]
 
 
 # --- AOA-R4-06: the act's date is marked where the act is dated, not on a correct copy -----------
@@ -232,6 +232,17 @@ class TestRunningFiguresAreNoFee:
             1
         ] in (None, "price")
 
+    def test_the_fee_named_after_the_words_is_the_fee(self) -> None:
+        """Near misses: running-figure words earlier in the sentence, then the fee or a part of
+        it named before the figure."""
+        fee = "წინა აქტით შესრულებული სამუშაოს შემდეგ, მიმდინარე თვის საფასური შეადგენს 100 ლარს."
+        assert _roles(fee)[-1][1] in (None, "price")
+        part = "წინა აქტით გადახდილი ავანსის გამოკლებით დარჩენილი თანხა 70 ლარი."
+        assert _roles(part)[-1][1] == "remainder"
+        assert _substantive(_check(_fee_sentence(fee))) == []
+        slip = _fee_sentence(fee.replace("100 ლარს", "110 ლარს"))
+        assert [f.quote for f in _of(_check(slip), "AOA.FEE")] == ["110 ლარს"]
+
     def test_a_total_word_alone_is_still_a_wrong_fee(self) -> None:
         act = _with_figure("სულ: 150 ლარი.")
         assert [f.quote for f in _of(_check(act), "AOA.FEE")] == ["150 ლარი"]
@@ -330,7 +341,7 @@ def _fee_sentence(sentence: str) -> str:
 
 # --- AOA-R4-12: an attorney at the act's signature is compared, or a note says it was not --------
 
-_BY_PROXY = "წარმოდგენილი მინდობილობით მოქმედი პირის, თამარ გოგიჩაიშვილის სახით"
+_BY_PROXY = "წარმოდგენილი მინდობილობით მოქმედი პირის, მზევინარ გოგიჩაიშვილის სახით"
 _PROXY_CONTRACT = CONTRACT.replace("წარმოდგენილი დირექტორის ნინო კაპანაძის სახით", _BY_PROXY)
 _PROXY_ACT = ACT.replace("წარმოდგენილი დირექტორის ნინო კაპანაძის სახით", _BY_PROXY)
 
@@ -352,40 +363,40 @@ def _run_with_signing_proxy(act: str, name: str) -> CheckReport:
 
 class TestAttorneyAtTheSignature:
     def test_the_pair_signed_by_the_contract_s_attorney_is_clean(self) -> None:
-        report = _check(_signed_by("თამარ გოგიჩაიშვილი"), _PROXY_CONTRACT)
+        report = _check(_signed_by("მზევინარ გოგიჩაიშვილი"), _PROXY_CONTRACT)
         assert _substantive(report) == []
         assert not [s for s in report.skipped if s.rule_id == "AOA.DIRECTOR"]
 
     def test_an_attorney_not_read_leaves_a_note(self) -> None:
-        for name in ("თამარ გოგიჩაიშვილო", "ნათია გოგიჩაიშვილი"):
+        for name in ("მზევინარ გოგიჩაიშვილო", "ციცინო გოგიჩაიშვილი"):
             report = _check(_signed_by(name), _PROXY_CONTRACT)
             notes = [s for s in report.skipped if s.rule_id == "AOA.DIRECTOR"]
             assert any(name in s.reason_en for s in notes), name
 
     def test_a_slip_of_the_contract_s_attorney_is_an_error_with_its_correction(self) -> None:
-        act = _signed_by("თამარ გოგიჩაიშვილო")
-        report = _run_with_signing_proxy(act, "თამარ გოგიჩაიშვილო")
+        act = _signed_by("მზევინარ გოგიჩაიშვილო")
+        report = _run_with_signing_proxy(act, "მზევინარ გოგიჩაიშვილო")
         found = [(f.severity, f.quote, f.expected) for f in _of(report, "AOA.DIRECTOR")]
-        assert found == [("error", "თამარ გოგიჩაიშვილო", "თამარ გოგიჩაიშვილი")]
+        assert found == [("error", "მზევინარ გოგიჩაიშვილო", "მზევინარ გოგიჩაიშვილი")]
 
     def test_another_person_asks_for_the_power_of_attorney(self) -> None:
-        act = _signed_by("ნათია გოგიჩაიშვილი")
-        report = _run_with_signing_proxy(act, "ნათია გოგიჩაიშვილი")
+        act = _signed_by("ციცინო გოგიჩაიშვილი")
+        report = _run_with_signing_proxy(act, "ციცინო გოგიჩაიშვილი")
         found = [(f.severity, f.quote, f.expected) for f in _of(report, "AOA.DIRECTOR")]
-        assert found == [("warning", "ნათია გოგიჩაიშვილი", None)]
+        assert found == [("warning", "ციცინო გოგიჩაიშვილი", None)]
 
     def test_an_attorney_the_contract_does_not_name_is_still_a_warning(self) -> None:
         """Near miss: with only the director in the contract, an attorney in the act is not
         provably wrong - a warning asking for the power of attorney, never a correction."""
-        act = _PROXY_ACT.replace("თამარ გოგიჩაიშვილის", "თამარ გოგიჩაიშვილოს")
+        act = _PROXY_ACT.replace("მზევინარ გოგიჩაიშვილის", "მზევინარ გოგიჩაიშვილოს")
         found = [(f.severity, f.expected) for f in _of(_check(act), "AOA.DIRECTOR")]
         assert found and all(f == ("warning", None) for f in found)
 
     def test_a_slip_in_the_preamble_is_corrected_too(self) -> None:
-        act = _PROXY_ACT.replace("თამარ გოგიჩაიშვილის", "თამარ გოგიჩაიშვილოს")
+        act = _PROXY_ACT.replace("მზევინარ გოგიჩაიშვილის", "მზევინარ გოგიჩაიშვილოს")
         report = _check(act, _PROXY_CONTRACT)
         found = [(f.severity, f.quote, f.expected) for f in _of(report, "AOA.DIRECTOR")]
-        assert found == [("error", "თამარ გოგიჩაიშვილოს", "თამარ გოგიჩაიშვილის")]
+        assert found == [("error", "მზევინარ გოგიჩაიშვილოს", "მზევინარ გოგიჩაიშვილის")]
 
     def test_the_word_in_prose_is_no_signature(self) -> None:
         """Near misses: a power of attorney named in a sentence, and the title followed by more
@@ -396,5 +407,5 @@ class TestAttorneyAtTheSignature:
             "მინდობილი პირი ვალდებულია წარადგინოს მინდობილობა ხელმოწერისას.\n"
             "4. გაფორმების თარიღი",
         )
-        report = _check(_signed_by("თამარ გოგიჩაიშვილი", act), _PROXY_CONTRACT)
+        report = _check(_signed_by("მზევინარ გოგიჩაიშვილი", act), _PROXY_CONTRACT)
         assert not [s for s in report.skipped if s.rule_id == "AOA.DIRECTOR"]

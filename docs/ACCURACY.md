@@ -562,7 +562,7 @@ Round 4's act-check defects owned here (`tests/unit/test_aoa_redteam_r4.py`):
   English `to date`, `cumulative`, `already paid`, `contract balance`. A total word alone
   (`სულ`, `ჯამი`, `ჯამური ღირებულება`), `სულ ასანაზღაურებელია` (to be paid), the fee's
   remainder after an advance (`დარჩენილი თანხა`, `ღირებულების დარჩენილი ნაწილი`) and an
-  advance said to be paid keep their roles. `AOA.FEE` does not compare a running figure and
+  advance said to be paid keep their roles, and so does a figure whose fee or fee part (`საფასური`, `ავანსი`, `დარჩენილი თანხა`) is named after the running words (`წინა აქტით შესრულებული სამუშაოს შემდეგ, მიმდინარე თვის საფასური …`). `AOA.FEE` does not compare a running figure and
   leaves a skip note naming it. `fx_invoice` is unchanged: its total takes a price, an amount
   with no role or a remainder, never a running figure.
 * **The term over a period that writes its year once** (AOA-R4-09). `25.05-30.06.2026` got
@@ -581,8 +581,8 @@ Round 4's act-check defects owned here (`tests/unit/test_aoa_redteam_r4.py`):
   machine form; it now pins the act's wording.
 * **An attorney at the signature** (AOA-R4-12, the rule part; the reader that takes
   `მინდობილი პირი: …` in a signature block into `Party.proxies` is another change this round).
-  The act's attorney who is the contract's attorney with a slip (`… ხუციშვილო` for `…
-  ხუციშვილი`) is an `AOA.DIRECTOR` error corrected to the contract's attorney in the act's
+  The act's attorney who is the contract's attorney with a slip (`… გოგიჩაიშვილო` for `…
+  გოგიჩაიშვილი`) is an `AOA.DIRECTOR` error corrected to the contract's attorney in the act's
   case, by the director's rule; another person stays the warning that asks for the power of
   attorney, with no correction, as does any attorney when the contract names only the director
   (ts3 `aoa_f2_08`). A signature line that names an attorney (`მინდობილი პირი`, `მინდობილობით

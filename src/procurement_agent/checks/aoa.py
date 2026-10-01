@@ -478,7 +478,8 @@ class DocumentView:
 #: How far into a document its heading - and a date written in it - can reach.
 _HEADER_CHARS = 200
 #: A signature block's line for an attorney: its title, then the name alone on the line
-#: ("მინდობილი პირი: ლია ხუციშვილი", "მინდობილობით მოქმედი პირი ლია ხუციშვილი ____").
+#: ("მინდობილი პირი: მზევინარ გოგიჩაიშვილი", "მინდობილობით მოქმედი პირი მზევინარ
+#: გოგიჩაიშვილი ____").
 _SIGNING_PROXY = re.compile(
     r"^\s*(?:მინდობილი\s+პირი|მინდობილობით\s+მოქმედი\s+პირი"
     r"|წარმომადგენელი\s*\(\s*მინდობილობით\s*\)|რწმუნებული)"
@@ -2279,9 +2280,9 @@ class AoaChecker:
         authority must be checked - so the report asks for the power of attorney, at every place
         the attorney is named, and proposes no name to write instead.
 
-        An attorney the contract names, written with a slip ("ლია ხუციშვილო" for the contract's
-        "ლია ხუციშვილი"), is no other person: an error corrected to the contract's attorney, as
-        for a director (red team R4, AOA-R4-12). The act's attorneys are the preamble's and the
+        An attorney the contract names, written with a slip ("მზევინარ გოგიჩაიშვილო" for the
+        contract's "მზევინარ გოგიჩაიშვილი"), is no other person: an error corrected to the
+        contract's attorney, as for a director (red team R4, AOA-R4-12). The act's attorneys are the preamble's and the
         signature block's, as the party reader reads them (``Party.proxies``)."""
         named = [*match.directors, *match.proxies]
         for proxy in p.proxies:
