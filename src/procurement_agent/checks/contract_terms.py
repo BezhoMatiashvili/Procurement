@@ -224,9 +224,10 @@ _QUALIFIER_REACH = 20
 #: ("100 ლარი დღგ: 18 ლარი"). No list of them is ever complete, and a price read as the tax
 #: leaves the act with no fee at all, so only a tax that closes the clause counts. A comma or a
 #: "+" between the figure and the tax adds the tax to a price, so neither is allowed there.
-#: Matched at the end of the figure.
+#: Nor does the dotted abbreviation stop short of its own stop: "დ.ღ.გ.-ჩათვლით" goes on
+#: (red team R5, AOA-R5-09). Matched at the end of the figure.
 _TAX_AFTER = re.compile(
-    rf"\s*\(?\s*(?:{_KA_VAT}|vat)(?:-?ის|-?ს)?(?![\w-])"
+    rf"\s*\(?\s*(?:{_KA_VAT}|vat)(?:-?ის|-?ს)?(?![\w-])(?!\.-)"
     r"(?:\s*\(\s*\d{1,2}(?:[.,]\d{1,2})?\s*%\s*\))?+"
     r"(?=\s*(?:[.,;)]|$|(?:სახით|ოდენობით)(?![ა-ჰ])))",
     re.IGNORECASE,
@@ -438,15 +439,21 @@ TaxKind = Literal["net", "inclusion", "exclusion", "exempt", "mention"]
 #: A Georgian tax word in any case: tax, tax-related, VAT (დღგ-ს, დღგ-ის, or spelled out),
 #: income tax, pension (საპენსიო შენატანი). The tail is possessive: a shorter word must never
 #: let a lookahead after it pass ("გადასახადებ|ის გარეშე" is still "without taxes").
-_KA_TAX = (
-    r"(?<![ა-ჰ])(?:დამატებული\s+ღირებულების\s+გადასახად|გადასახად|საგადასახად|"
-    rf"{_KA_VAT}|საშემოსავლო|საპენსიო)[ა-ჰ-]*+"
-)
-_KA_WORD = r"[ა-ჰ][ა-ჰ-]*+"
 #: "including" and "taking into account" - the instrumental only: "კანონმდებლობით
 #: გათვალისწინებული გადასახადები" (the taxes the law provides for) includes nothing.
 _KA_INCLUDING = r"(?:ჩათვლით|გათვალისწინებით)"
 _KA_EXCLUDING = r"(?:გარეშე|გამოკლებით|ჩაუთვლელად)"
+#: A word's tail: letters and hyphens, but never a hyphen that joins "including" or "excluding"
+#: on - "დღგ-ჩათვლით" is VAT and "including", not one word (red team R5, AOA-R5-09).
+_KA_TAIL = rf"(?:(?!-\s*(?:{_KA_INCLUDING}|{_KA_EXCLUDING})(?![ა-ჰ]))[ა-ჰ-])*+"
+#: Between a tax and its "including" / "excluding": a space, or a hyphen ("დღგ-ჩათვლით",
+#: "დ.ღ.გ.-ჩათვლით", "დღგ-გარეშე").
+_KA_JOIN = r"(?:\s*-\s*|\s+)"
+_KA_TAX = (
+    r"(?<![ა-ჰ])(?:დამატებული\s+ღირებულების\s+გადასახად|გადასახად|საგადასახად|"
+    rf"{_KA_VAT}|საშემოსავლო|საპენსიო){_KA_TAIL}"
+)
+_KA_WORD = rf"[ა-ჰ]{_KA_TAIL}"
 #: A tax word and up to three words after it, joined by spaces, a comma, "და" or "ან" - the
 #: taxes a phrase names: "საშემოსავლო და საპენსიო გადასახადების", "საშემოსავლო გადასახადისა და
 #: საპენსიო შენატანის". "და" (and) and "ან" (or) join the words and are not counted among them.
@@ -503,7 +510,7 @@ _KA_ADDED_AFTER = r"(?!\s+(?:დამატებით|(?:და)?(?:ემა
 _INCLUSION = re.compile(
     "|".join(
         (
-            rf"{_KA_TAX_RUN}\s+{_KA_INCLUDING}",
+            rf"{_KA_TAX_RUN}{_KA_JOIN}{_KA_INCLUDING}",
             # not "ძალაში შედის" (enters into force)
             rf"(?<!არ )(?:მოიცავს|შეიცავს|ითვალისწინებს|(?<!ძალაში )შედის|მათ\s+შორის)"
             rf"{_KA_REACH}{_KA_TAX}(?!\s+{_KA_EXCLUDING}){_KA_ADDED_AFTER}",
@@ -528,7 +535,7 @@ _INCLUSION = re.compile(
 _EXCLUSION = re.compile(
     "|".join(
         (
-            rf"{_KA_TAX_RUN}\s+{_KA_EXCLUDING}",
+            rf"{_KA_TAX_RUN}{_KA_JOIN}{_KA_EXCLUDING}",
             rf"არ\s+(?:მოიცავს|შეიცავს|ითვალისწინებს|შედის){_KA_REACH}{_KA_TAX}",
             rf"{_KA_TAX}\s+არ\s+შედის",
             # "+ დღგ", and with its rate: "+ 18% დღგ"; "plus 18% VAT"
