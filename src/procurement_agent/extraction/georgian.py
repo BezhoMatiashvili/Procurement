@@ -28,6 +28,7 @@ from datetime import date
 from typing import Literal, get_args
 
 from procurement_agent.extraction.normalize import (
+    LEGAL_FORMS,
     QUOTE_CHARS,
     normalize_confusables,
     normalize_spaces,
@@ -958,13 +959,21 @@ def typing_slip(typed: str, meant: str) -> bool:
 
 ContractorKind = Literal["company", "natural_person", "individual_entrepreneur", "foreign"]
 
+#: The abbreviations of ``normalize.LEGAL_FORMS`` that make a company contractor.
+_COMPANY_FORMS = frozenset({"შპს", "სს", "კს", "სპს", "ააიპ"})
+#: Every spelling of those forms - written out, dotted, bracketed ("შ.პ.ს.", "ა(ა)იპ") - read
+#: from the one legal-form table (red team R4, AOA-R4-02). A form is a word of its own, and a
+#: dotted form's prefix inside a longer one ("ს.ს" of "ს.ს.ი.პ.") is no form.
+_COMPANY_FORM = "|".join(f"(?:{p})" for p, short in LEGAL_FORMS if short in _COMPANY_FORMS)
+_ENTREPRENEUR_FORM = "|".join(f"(?:{p})" for p, short in LEGAL_FORMS if short == "ი/მ")
+
 #: How a party's legal form reads, and what kind of contractor it makes. A small business is a
 #: tax status, not a legal form, so it cannot be read off the name: an individual entrepreneur
 #: may or may not be one.
 _LEGAL_FORMS: tuple[tuple[re.Pattern[str], ContractorKind], ...] = (
-    (re.compile(r"(?<!\w)(?:შპს|სს|კს|სპს|ააიპ|შ\.პ\.ს\.?|ს\.ს\.?)(?!\w)"), "company"),
+    (re.compile(rf"(?<!\w)(?:{_COMPANY_FORM})(?!\w)(?!\.\s?\w\.)"), "company"),
     (
-        re.compile(r"(?<!\w)(?:ი/მ|ი\.მ\.|ინდ\.?\s*მეწარმე|ინდივიდუალური\s+მეწარმე)"),
+        re.compile(rf"(?<!\w)(?:{_ENTREPRENEUR_FORM}|ი\.მ\.)"),
         "individual_entrepreneur",
     ),
     (re.compile(r"(?<!\w)(?:ფ/პ|ფ\.პ\.|ფიზიკური\s+პირი)"), "natural_person"),

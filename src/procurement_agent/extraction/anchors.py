@@ -19,16 +19,21 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from procurement_agent.extraction.normalize import (
+    ABBREVIATED_LEGAL_FORMS,
+    ENTREPRENEUR,
     FUNCTION_WORDS,
     IBAN_CURRENCY_SUFFIXES,
     ID_CODE_RE,
     ID_CODE_WRITTEN_RE,
     ID_LABEL,
+    LEGAL_FORM,
+    LEGAL_FORMS,
     QUOTE_CHARS,
     bic_has_country,
     iban_is_valid,
     iban_length,
     id_code_digits,
+    legal_form_abbreviation,
     name_stem,
     names_match,
     normalize_confusables,
@@ -45,31 +50,19 @@ _QUOTED = rf"[{_Q}]([^{_Q}]{{2,90}}?)[{_Q}]"
 
 # Georgian legal forms. "ი/მ" and "ინდ. მეწარმე" matter because the client's tax-wording rules
 # branch on whether the contractor is a company, an individual entrepreneur or a person.
-# A form is also written out in full, in any case: "შეზღუდული პასუხისმგებლობის საზოგადოება
-# „…“" is "შპს „…“", "ინდივიდუალური მეწარმე" and "ინდ. მეწარმე" are "ი/მ", and a party name
-# carries the abbreviation (``_legal_form``). This table is the one list of the long forms: a
-# form the readers accept is always written short (red team R3, AOA-R3-04).
-_ENTREPRENEUR = r"ინდ(?:\.|ივიდუალური)?\s*მეწარმ"
-_SPELLED_OUT_FORMS: tuple[tuple[str, str], ...] = (
-    (r"შეზღუდული\s+პასუხისმგებლობის\s+საზოგადოებ[აისმ]{0,2}", "შპს"),
-    (r"სააქციო\s+საზოგადოებ[აისმ]{0,2}", "სს"),
-    (r"არასამეწარმეო\s*\(?\s*არაკომერციული\s*\)?\s*იურიდიული\s+პირ[ისმა]{0,2}", "ააიპ"),
-    (r"საჯარო\s+სამართლის\s+იურიდიული\s+პირ[ისმა]{0,2}", "სსიპ"),
-    (rf"{_ENTREPRENEUR}[ეის]*", "ი/მ"),
-)
-_LEGAL_FORM = (
-    "|".join(pattern for pattern, _ in _SPELLED_OUT_FORMS) + r"|შპს|სს|ააიპ|სსიპ|ი\s*/\s*მ"
-)
+# A form is also written out in full, in any case ("შეზღუდული პასუხისმგებლობის საზოგადოება
+# „…“" is "შპს „…“", red team R3, AOA-R3-04), or abbreviated with dots or a bracketed letter
+# ("შ.პ.ს.", "ა(ა)იპ", red team R4, AOA-R4-02), and a party name carries the abbreviation
+# (``_legal_form``). ``normalize.LEGAL_FORMS`` is the one list every reader is built from.
+_ENTREPRENEUR = ENTREPRENEUR
+_LEGAL_FORM = LEGAL_FORM
 
 _PARTY_NAME = re.compile(rf"(?<![ა-ჰ])({_LEGAL_FORM})\s*{_QUOTED}")
 
 
 def _legal_form(written: str) -> str:
     """The legal form as a party name carries it: abbreviated, "ი / მ" as "ი/მ"."""
-    for pattern, short in _SPELLED_OUT_FORMS:
-        if re.fullmatch(pattern, written):
-            return short
-    return re.sub(r"\s*/\s*", "/", written)
+    return legal_form_abbreviation(written) or re.sub(r"\s*/\s*", "/", written)
 
 
 #: An individual entrepreneur or a natural person is named, not quoted: "ი/მ ირაკლი სულაძე",
@@ -88,9 +81,9 @@ _PARTY_CODE = ID_CODE_WRITTEN_RE
 _code_digits = id_code_digits
 
 
-_SPELLED_OUT_BEFORE_NAME = tuple(
-    (re.compile(rf"(?<![ა-ჰ]){pattern}(?=\s*[{_Q}])"), short)
-    for pattern, short in _SPELLED_OUT_FORMS
+#: each legal form before a quoted name, and its abbreviation
+_FORM_BEFORE_NAME = tuple(
+    (re.compile(rf"(?<![ა-ჰ])(?:{pattern})(?=\s*[{_Q}])"), short) for pattern, short in LEGAL_FORMS
 )
 _HONORIFIC_WORD = re.compile(
     r"(?<![ა-ჰ])(?:(?:ქალ)?ბატონ(?:ი|ის|მა)?|[ბქ]\s?-\s?ნ(?:ი|ის|მა)?\.?)\s+(?=[ა-ჰ])"
@@ -98,11 +91,11 @@ _HONORIFIC_WORD = re.compile(
 
 
 def plain_party_wording(text: str) -> str:
-    """``text`` with each legal form written out before a quoted name abbreviated and each
-    courtesy title before a name dropped: "შეზღუდული პასუხისმგებლობის საზოგადოება „ა“" and
-    "შპს „ა“", "ქალბატონ ნინო" and "ნინო" name one party and one person. For a comparison that
-    must not report the other spelling as a change."""
-    for pattern, short in _SPELLED_OUT_BEFORE_NAME:
+    """``text`` with each legal form before a quoted name abbreviated and each courtesy title
+    before a name dropped: "შეზღუდული პასუხისმგებლობის საზოგადოება „ა“", "შ.პ.ს. „ა“" and "შპს
+    „ა“", "ქალბატონ ნინო" and "ნინო" name one party and one person. For a comparison that must
+    not report the other spelling as a change."""
+    for pattern, short in _FORM_BEFORE_NAME:
         text = pattern.sub(short, text)
     return _HONORIFIC_WORD.sub("", text)
 
@@ -157,10 +150,26 @@ _CELL_BOUNDARY = r",\s*[^,=\n]{1,40}?\s=\s"
 _NEXT_PARTY = (
     rf"[\s,]+(?:[{_Q}](?:{'|'.join(sorted(_SIDE_WORDS))})[{_Q}]|(?:{_LEGAL_FORM})\s*[{_Q}])"
 )
+#: An address's label: "მისამართი:", "იურიდიული მისამართი:". Another one after an address ends
+#: it - the next column's address where a requisites table's cells are joined into one line
+#: (red team R4, COMPARE-R4-08).
+_ADDRESS_LABEL = r"(?:იურიდიული\s*)?მისამართი\s*[:\uff1a]"
+#: Who represents the party, after its address: "..., წარმოდგენილი მისი დირექტორის X-ის სახით",
+#: "..., რომელსაც წარმოადგენს დირექტორი X", "..., დირექტორი: X" (red team R4, COMPARE-R4-04).
+#: A head's title ends an address only with a name after it, so a street named after an office
+#: ("პრეზიდენტის გამზ. N5") stays in it.
+_REPRESENTED_BY = (
+    r",\s*(?:(?:წარმოდგენილ(?:ი|ია)|წარმომადგენელ(?:ი|ია)|რომელ(?:საც|იც)\s+წარმოადგენს"
+    r"|რომლის\s+სახელით)(?![ა-ჰ])"
+    r"|(?:მისი\s+)?(?:(?:გენერალური|აღმასრულებელი)\s+)?"
+    r"(?:დირექტორ|რექტორ|პრეზიდენტ|ხელმძღვანელ|მმართველ)(?:ი|ის|მა)?(?![ა-ჰ])"
+    r"\s*[:,]?\s*(?:[ა-ჰ]\.\s?)?[ა-ჰ]{2,20}\s+[ა-ჰ]{2,25}(?![ა-ჰ.]))"
+)
 _ADDRESS = re.compile(
-    r"(?:იურიდიული\s*)?მისამართი\s*[:\uff1a]\s*([^;()]{4,140}?)\s*"
+    rf"{_ADDRESS_LABEL}\s*([^;()]{{4,140}}?)\s*"
     rf"(?=[;()]|{_NEXT_LINE_FIELD}|[\s,]+{_CONTACT_LABEL}\s*[.:\uff1a]|"
-    rf"[\s,]+{_REQUISITE_LABEL}|{_CELL_BOUNDARY}|{_NEXT_PARTY}|\s*$)",
+    rf"[\s,]+{_REQUISITE_LABEL}|{_CELL_BOUNDARY}|{_NEXT_PARTY}|{_REPRESENTED_BY}|"
+    rf"[\s,]+{_ADDRESS_LABEL}|\s*$)",
     re.IGNORECASE,
 )
 #: "ბატონი", "ქალბატონ", "ბ-ნ", "ქ-ნი": a courtesy title before a name, not part of it
@@ -187,10 +196,35 @@ _OTHER_HEAD = (
     r"(?<![ა-ჰ\-])(?:(?:რექტორ|პრეზიდენტ|ხელმძღვანელ|მმართველ)(?:ი|ის|მა)?"
     r"|თავმჯდომარ(?:ე|ის|ემ))"
 )
+#: Between a signatory's title and the name: a colon or a comma, a signature's blank line of
+#: underscores or dots ("დირექტორი ______ /ნინო კაპანაძე/"), and a slash or a bracket the name
+#: is written in (red team R4, AOA-R4-04). The name's place says it is a name when the mark
+#: closes after it (``_read_signatory``).
+_TITLE_TO_NAME = r"\s*(?P<sep>[:,]?)\s*(?:(?:_{2,}|\.{3,}|…+)\s*)?(?P<mark>[/(]\s*)?"
 _DIRECTOR = re.compile(
     rf"(?:(?:გენერალური|აღმასრულებელი)\s+)?(?:დირექტორ(?:ი|ის|მა)?|{_OTHER_HEAD})(?![ა-ჰ])"
-    r"\s*(?P<sep>[:,]?)\s*"
+    rf"{_TITLE_TO_NAME}"
     rf"{_HONORIFIC}(?!მოადგილ|მოვალეობ|შემსრულებ)(?P<name>{_PERSON})"
+)
+#: A head's title in the nominative, as a signature writes it after the name.
+_HEAD_NOMINATIVE = (
+    r"(?:(?:გენერალური|აღმასრულებელი)\s+)?"
+    r"(?:დირექტორი|რექტორი|პრეზიდენტი|ხელმძღვანელი|მმართველი|თავმჯდომარე)"
+)
+#: A signatory written before the head's title (red team R4, AOA-R4-04): "ნინო კაპანაძე -
+#: დირექტორი", "ნინო კაპანაძე (დირექტორი)". The place says it is a name, and is required whole:
+#: the name opens its line or cell (after a line break, a ";", a ":" or a quote - a party's name
+#: or side right above it), and the title closes it (a line break, the end, a ";", a quote, a
+#: signature's blank or slash). A first name and a surname, a patronymic between them, or an
+#: initial and a surname. A deputy ("- დირექტორის მოადგილე") or a narrowed title ("-
+#: ფინანსური დირექტორი") is no head's title here: the title must follow the dash or bracket.
+_NAME_BEFORE_TITLE = re.compile(
+    rf"(?:^|(?<=[\n;:{_Q}]))[ \t]*{_HONORIFIC}"
+    r"(?P<name>[ა-ჰ]\.\s?[ა-ჰ]{2,25}|[ა-ჰ]{2,20}(?:[ \t]+[ა-ჰ]{2,20}ს[ \t]+(?:ძე|ასული))?"
+    r"[ \t]+[ა-ჰ]{2,25})"
+    rf"[ \t]*(?:[-\u2013\u2014][ \t]*{_HEAD_NOMINATIVE}|\([ \t]*{_HEAD_NOMINATIVE}[ \t]*\))"
+    rf"(?=[ \t]*(?:$|\n|[;{_Q}_/]))",
+    re.MULTILINE,
 )
 #: A head's title narrowed by a function is not the party's head (red team R3, AOA-R3-05): a
 #: financial, commercial, technical or operations director ("ფინანსური დირექტორი", "საოპერაციო
@@ -215,7 +249,7 @@ _HEAD_GENITIVE = (
 _DEPUTY = re.compile(
     rf"(?<![ა-ჰ\-])(?:{_HEAD_GENITIVE}\s+)?(?:პირველი\s+)?"
     r"(?:მოადგილ(?:ე|ის|ემ)|მოვალეობის\s+შემსრულებ(?:ელი|ლის|ელმა))(?![ა-ჰ])"
-    rf"\s*(?P<sep>[:,]?)\s*{_HONORIFIC}(?P<name>{_PERSON})"
+    rf"{_TITLE_TO_NAME}{_HONORIFIC}(?P<name>{_PERSON})"
 )
 #: A genitive before a title that makes it another body's officer, unless it is a party's own
 #: board or a side ("სამეთვალყურეო საბჭოს თავმჯდომარე", "შემსრულებლის ხელმძღვანელი").
@@ -233,10 +267,14 @@ _OWN_BODY_GENITIVES = frozenset(
     }
 )
 # "წარმოდგენილი მინდობილობით მოქმედი პირის, ლევან გელაშვილის სახით", "მინდობილობით: ლევან
-# გელაშვილი": a signatory acting under a power of attorney, not the party's director
+# გელაშვილი": a signatory acting under a power of attorney, not the party's director. A
+# signature block writes the attorney's title as "მინდობილი პირი: ..." or "წარმომადგენელი
+# (მინდობილობით) ..." (red team R4, AOA-R4-12): read with the same guards on the name's place.
 _PROXY = re.compile(
-    r"(?:მინდობილობით(?:\s+მოქმედი\s+პირ(?:ი|ის|მა)?)?|რწმუნებულ(?:ი|ის|მა))(?![ა-ჰ])"
-    rf"\s*(?P<sep>[:,]?)\s*{_HONORIFIC}(?P<name>{_PERSON})"
+    r"(?:მინდობილობით(?:\s+მოქმედი\s+პირ(?:ი|ის|მა)?)?|რწმუნებულ(?:ი|ის|მა)"
+    r"|მინდობილ(?:ი|მა)\s+პირ(?:ი|ის|მა)?"
+    r"|წარმომადგენ(?:ელი|ლის|ელმა)\s*\(\s*მინდობილობით\s*\))(?![ა-ჰ])"
+    rf"{_TITLE_TO_NAME}{_HONORIFIC}(?P<name>{_PERSON})"
 )
 _PROJECT_WORD = r"პრო[ეა]{1,3}ქტ[ა-ჰ]*"
 # "პროექტ „ზღვის რეზიდენსი“", after a dash or a colon: "პროექტის - „ზღვის რეზიდენსი“", and
@@ -293,6 +331,10 @@ _NOT_A_NAME = {
     "კომპანია",
     "საზოგადოება",
     "შესაბამისად",
+    # a predicate after a title: "მინდობილი პირი ვალდებულია წარმოადგინოს" (red team R4)
+    "ვალდებულია",
+    "უფლებამოსილია",
+    "პასუხისმგებელია",
 }
 
 
@@ -564,6 +606,11 @@ def _read_signatory(window: str, m: re.Match[str]) -> tuple[str, int, bool] | No
     adjectival = _ADJECTIVAL_TITLE.search(window[m.start() : m.start("sep")]) is not None
     if adjectival and first.endswith("ს") and len(first) > 4 and not _surname_shaped(last):
         return None
+    if m.group("mark"):
+        # in slashes or brackets ("/ნინო კაპანაძე/", "(ნინო კაპანაძე)") only a surname's ending
+        # says it is a name: "(უფლებამოსილი პირი)", "/სახელი გვარი/" are a phrase, a blank's
+        # caption. Otherwise kept only when the document names the person again.
+        return f"{first} {last}", end, _surname_shaped(last) and not adjectival
     confirmed = bool(
         m.group("sep") == ":"
         or _IN_THE_PERSON_OF.match(window, end)
@@ -571,6 +618,22 @@ def _read_signatory(window: str, m: re.Match[str]) -> tuple[str, int, bool] | No
         or (_surname_shaped(last) and not adjectival)
     )
     return f"{first} {last}", end, confirmed
+
+
+def _name_before_title(m: re.Match[str]) -> tuple[str, bool] | None:
+    """The signatory ``_NAME_BEFORE_TITLE`` read at ``m``, its first name and surname without a
+    patronymic, and whether it is confirmed: its last word ends as a surname does ("სახელი
+    გვარი - დირექტორი", a blank's caption, is kept only when the document names the person
+    again). None when the words are no name ("ხელშეკრულების პირობები - დირექტორი")."""
+    words = _NAME_WORD.findall(m.group("name"))
+    if len(words) == 4:
+        del words[1:3]  # the patronymic
+    first, last = words[0], words[-1]
+    if {first, last} & (FUNCTION_WORDS | _NOT_A_NAME | ROLE_WORDS) or last.endswith("."):
+        return None
+    if not _name_shaped(first, last):
+        return None
+    return f"{first} {last}", _surname_shaped(last)
 
 
 # --- a signature table serialised row by row ------------------------------------------------
@@ -650,8 +713,14 @@ def _grid_owner(
 # own, is not followed by another quoted name ("„შემსრულებელი“ შპს „...“" is a role above a
 # party), and the quoted words are no role. A name without quotes is not read: nothing marks
 # where it ends, and the act check says so in a skip note.
+#: The abbreviated company forms, in every spelling (``normalize.ABBREVIATED_LEGAL_FORMS``);
+#: a person ("ი/მ") is named after the form, never before it.
+_COMPANY_FORM_ABBREVIATED = "|".join(
+    f"(?:{pattern})" for pattern, short in ABBREVIATED_LEGAL_FORMS if short != "ი/მ"
+)
 _FORM_AFTER_NAME = re.compile(
-    rf"{_QUOTED}[ \t]*(შპს|სს|ააიპ|სსიპ)(?![ა-ჰ\-])(?![ \t]*[{_Q}])(?![ \t]*(?:{_LEGAL_FORM}))"
+    rf"{_QUOTED}[ \t]*({_COMPANY_FORM_ABBREVIATED})(?![ა-ჰ\-])(?![ \t]*[{_Q}])"
+    rf"(?![ \t]*(?:{_LEGAL_FORM}))"
 )
 
 
@@ -831,6 +900,14 @@ def find_parties(text: str, *, split_conflicts: bool = False) -> list[Party]:
                 signatories.append(
                     _Signatory(owner, name, start + dm.start("name"), confirmed, kind)
                 )
+        # "ნინო კაპანაძე - დირექტორი": the head's title after the name
+        for bm in _NAME_BEFORE_TITLE.finditer(window):
+            if (head := _name_before_title(bm)) is None:
+                continue
+            owner = _grid_owner(text, start + bm.end(), party, parties, headed)
+            signatories.append(
+                _Signatory(owner, head[0], start + bm.start("name"), head[1], "director")
+            )
         party.accounts = list(dict.fromkeys(iban for iban, _, _ in _ibans(window)))
         parties.append(party)
         befores.append(before)
@@ -869,6 +946,19 @@ def find_parties(text: str, *, split_conflicts: bool = False) -> list[Party]:
         _merge_into(existing, p)
         last = existing
     return merged
+
+
+def defined_sides(text: str) -> list[str]:
+    """The sides ``text`` defines for its parties - "(შემდგომში „შემკვეთი“)" - in order, each
+    once. Only a side: "(შემდგომში „მომსახურება“)" defines the service. The act check compares
+    them with the parties read, to say which side's party it could not read (red team R4,
+    AOA-R4-02) instead of passing it over."""
+    out: list[str] = []
+    for m in _ROLE.finditer(_prepare(text)):
+        role = _clean(m.group(1) or m.group(2) or "")
+        if role in _SIDE_WORDS and role not in out:
+            out.append(role)
+    return out
 
 
 def first_party_start(text: str) -> int | None:
