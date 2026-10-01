@@ -184,7 +184,7 @@ _NEXT_INLINE_LABEL = (
 #: "... საფოსტო მისამართი:" - the qualifier belongs to the next label, whatever the separator.
 _QUALIFIED_ADDRESS_LABEL = r"[\s,.]+[ა-ჰ]{3,}\.?\s+მისამართი\s*[:\uff1a]"
 #: A website after the address, labelled or not: "ვებგვერდი www...", "web: ...".
-_WEBSITE = r"[\s,]+(?:ვებ-?(?:გვერდი|საიტი)|საიტი|web(?:site|page)?|www\.)"
+_WEBSITE = r"[\s,]+(?:ვებ-?(?:გვერდი|საიტი)|web(?:site|page)?|www\.)"
 _ADDRESS = re.compile(
     rf"{_ADDRESS_LABEL}\s*([^;()]{{4,140}}?)\s*"
     rf"(?=[;()]|{_NEXT_LINE_FIELD}|[\s,]+{_CONTACT_LABEL}\s*[.:\uff1a]|"
