@@ -37,8 +37,11 @@ LABELS: dict[FactType, tuple[str, str]] = {
 
 # One line per type, shown to the LLM so it knows what each type means.
 PROMPT_DESCRIPTIONS: dict[FactType, str] = {
-    FactType.price: "unit price of a product/service (ფასი, ერთეულის ღირებულება)",
-    FactType.total_amount: "total contract/offer value (სულ, ჯამი, საერთო ღირებულება)",
+    FactType.price: "unit price of a product/service (ერთეულის ფასი, ერთეულის ღირებულება)",
+    FactType.total_amount: (
+        "total contract/offer value, also when called its price "
+        "(სულ, ჯამი, საერთო ღირებულება, ხელშეკრულების ფასი, total price)"
+    ),
     FactType.vat_status: "whether amounts include VAT and the VAT rate (დღგ)",
     FactType.quantity: "quantity of goods/works with unit (რაოდენობა, ცალი, კომპლექტი)",
     FactType.delivery_deadline: "delivery date or period (მიწოდების ვადა)",

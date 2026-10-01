@@ -186,7 +186,8 @@ def test_a_share_of_the_value_is_no_total(text: str, share: float) -> None:
 
 def test_a_share_of_the_price_is_no_price() -> None:
     text = "4.1. The Contract price is GEL 2,000.00. The security is 5% of the price, GEL 100.00."
-    assert _amount_types(text) == {2000.0: FactType.price, 100.0: FactType.amount}
+    # the Contract's price is its total_amount (red team R4, EXTRACTION-R4-13 policy)
+    assert _amount_types(text) == {2000.0: FactType.total_amount, 100.0: FactType.amount}
 
 
 @pytest.mark.parametrize(

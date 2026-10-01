@@ -286,3 +286,35 @@ class TestBreakdown:
         assert _money("ღირებულება შეადგენს 4 000 ლარს, დღგ - 720 ლარი.")[4000.0] is (
             FactType.total_amount
         )
+
+
+# --- EXTRACTION-R4-13 (policy): the contract's whole price is its total -------------------------
+
+
+class TestContractPriceIsTheTotal:
+    def test_the_contract_s_price_is_the_total(self) -> None:
+        for text in (
+            "4.1. ხელშეკრულების ფასი შეადგენს 52 000 ლარს.",
+            "4.1. ხელშეკრულების საერთო ფასი შეადგენს 52 000 ლარს.",
+            "3.1. The total price of the Goods is GEL 52,000.00, including VAT.",
+        ):
+            assert _money(text) == {52000.0: FactType.total_amount}, text
+            facts = _extract(HEAD + text)
+            assert facts[FactType.total_amount] == ["52000.0"], text
+            assert FactType.price not in facts, text
+
+    def test_a_unit_price_beside_it_stays_a_price(self) -> None:
+        text = (
+            "3.1. The unit price is GEL 650 per desk, and the total Contract price is GEL 52,000, "
+            "VAT included."
+        )
+        assert _money(text) == {650.0: FactType.price, 52000.0: FactType.total_amount}
+
+    def test_near_miss_a_price_per_unit_or_in_a_table_stays_a_price(self) -> None:
+        assert _money("ერთეულის ფასი შეადგენს 650 ლარს.") == {650.0: FactType.price}
+        assert _money("მაგიდის ფასი შეადგენს 650 ლარს 1 ცალზე.") == {650.0: FactType.price}
+        assert _money("ფასი: 650 ლარი.") == {650.0: FactType.price}
+        assert _money("1, ფასი = 650 ლარი. 2, ფასი = 410 ლარი.") == {
+            650.0: FactType.price,
+            410.0: FactType.price,
+        }

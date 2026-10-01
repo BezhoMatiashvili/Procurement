@@ -679,6 +679,63 @@ def restatement(text: str, start: int) -> tuple[int, int] | None:
 restating_bracket = restatement
 
 
+# --- the contract's price ------------------------------------------------------------------------
+
+#: The word for a price, its last letters any case ending: "ფასი", "ფასს", "price".
+_PRICE_WORD = re.compile(r"(?<![ა-ჰ])ფას(?!ურ)[ა-ჰ]*|(?<![a-z])price(?![a-z])", re.IGNORECASE)
+#: What names a price the contract's whole value: a total word ("საერთო ფასი", "the total
+#: price"), or the contract or what it buys whose price it is ("ხელშეკრულების ფასი", "the
+#: Contract price", "the price of the Goods").
+_WHOLE_PRICE = re.compile(
+    r"საერთო|ჯამურ|სრულ|მთლიან|ხელშეკრულებ|შეთანხმებ|მომსახურებ|საქონ|სამუშაო|შესყიდვ"
+    r"|(?<![a-z])(?:total|overall|aggregate|contract|agreement|goods|services|works)(?![a-z])",
+    re.IGNORECASE,
+)
+#: A price per unit: "ერთეულის ფასი", "1 ცალის ფასი", "the unit price", "GEL 450 per chair",
+#: "თითო ცალზე".
+_PER_UNIT = re.compile(
+    r"ერთეულ|თითო|ცალ(?:ის|ზე)|(?:1|ერთი)\s+(?:ც|მ|კგ|ტ|ლ)|"
+    r"(?<![a-z])(?:unit|per|each|apiece|a\s+piece)(?![a-z])|/\s*(?:ც|მ|კგ|ტ|ლ|pcs?|m|kg|t)(?![a-zა-ჰ])",
+    re.IGNORECASE,
+)
+_PRICE_LABEL_WORDS = 3
+_PER_UNIT_AFTER = 30
+
+
+def is_contract_price(text: str, start: int, end: int) -> bool:
+    """Whether the money figure at ``text[start:end]``, labelled a price, is the contract's whole
+    value: a ``total_amount`` (docs/GOLD_SPEC.md section 2, red team R4). The price word before it
+    in its sentence is named the whole price - by a total word, or as the contract's or the
+    goods' price - and nothing says it is a price per unit: "ხელშეკრულების საერთო ფასი შეადგენს
+    36 000 ლარს", "The total Contract price is GEL 36,000" are the total; "ერთეულის ფასი",
+    "the unit price is GEL 450 per chair" stay a price, and so does a cell of a price table."""
+    if _table_cell_at(text, start):
+        return False
+    sentence = _sentence_start(text, start)
+    words = list(_PRICE_WORD.finditer(text, sentence, start))
+    if not words:
+        return False
+    word = words[-1]
+    between = text[word.end() : start]
+    if _next_money(text, word.end(), start) is not None:
+        return False  # another figure is that price's
+    lead = text[sentence : word.start()].split()[-_PRICE_LABEL_WORDS:]
+    label = " ".join(lead) + " " + text[word.start() : start]
+    after = text[end : end + _PER_UNIT_AFTER]
+    stop = _SENTENCE_END.search(after)
+    after = after[: stop.start()] if stop else after
+    if _PER_UNIT.search(label) or _PER_UNIT.search(after):
+        return False
+    return _WHOLE_PRICE.search(" ".join(lead)) is not None or _WHOLE_PRICE.search(between) is not None
+
+
+def _table_cell_at(text: str, start: int) -> bool:
+    """Whether the figure at ``start`` is a cell of a serialised table row ("<row>, <column> =
+    <cell>")."""
+    line_start = text.rfind("\n", 0, start) + 1
+    return any(c.end() <= start for c in _TABLE_CELL.finditer(text[line_start:start + 1]))
+
+
 def find_amounts(text: str) -> list[RuleHit]:
     hits: list[RuleHit] = []
     seen: set[tuple[int, int]] = set()
@@ -716,6 +773,8 @@ def find_amounts(text: str) -> list[RuleHit]:
                 continue  # "20 ლ." with no word about money: litres as likely as lari
             if ft == FactType.total_amount and _is_line_total(text, span[0]):
                 ft = None
+            if ft == FactType.price and is_contract_price(text, *span):
+                ft = FactType.total_amount  # "ხელშეკრულების ფასი", "the total price"
             if ft in (FactType.total_amount, FactType.price) and (
                 _is_share(text, span[0])
                 or restatement(text, span[0]) is not None
