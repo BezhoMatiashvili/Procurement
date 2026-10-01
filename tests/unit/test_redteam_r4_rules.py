@@ -142,9 +142,7 @@ class TestDeadlineInWordsOrAbbreviated:
         report = _check(_act(terms=_ACT_TERMS.replace("5 (ხუთი)", "თხუთმეტი")))
         finding = _only(report, "AOA.PAYMENT_DEADLINE")
         assert (finding.severity, finding.actual) == ("error", "თხუთმეტი სამუშაო დღის")
-        assert finding.expected == "5 (ხუთი) სამუშაო\nდღის" or "5 (ხუთი) სამუშაო" in (
-            finding.expected or ""
-        )
+        assert finding.expected == "5 (ხუთი) სამუშაო დღის"
 
     def test_a_different_abbreviated_deadline_is_an_error(self) -> None:
         report = _check(_act(terms=_ACT_TERMS.replace("5 (ხუთი) სამუშაო", "15 სამ.")))
