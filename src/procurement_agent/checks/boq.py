@@ -247,15 +247,20 @@ _LABEL_RATE = r"(?:\d{1,2}(?:[.,]\d+)?\s*%\s*)?"
 #: The Georgian "including" / "without" after the tax, in any case form and however dotted:
 #: "დღგ-ს ჩათვლით", "დღგ-ის ჩათვლით", "დ.ღ.გ.-ს ჩათვლით", "გადასახადის ჩათვლით".
 _KA_VAT = r"(?:დ\.?ღ\.?გ\.?(?:-?ის|-?ს)?|გადასახადის)\s*"
+#: The Georgian "with the tax", by grammar rather than phrase: the tax's name in the
+#: instrumental case, its ending attached or after a hyphen ("ჯამი დღგ-ით", "სულ დღგ-თ",
+#: "გადასახადით") - never "დღგ-თან" or any other word the name only begins.
+_KA_WITH_VAT = r"(?:დ\.?ღ\.?გ\.?-?ი?თ|გადასახადით)(?![ა-ჰ])"
 _INCL_VAT = re.compile(
     rf"\b(?:incl(?:\.|uding|usive)?|with)\s*(?:of\s+)?(?:the\s+)?{_LABEL_RATE}{_VAT_NAME}"
-    rf"|{_VAT_NAME}[\s-]+incl|{_KA_VAT}ჩათვლით",
+    rf"|{_VAT_NAME}[\s-]+incl|{_KA_VAT}(?:ჩათვლით|გათვალისწინებით|შეტანით)|{_KA_WITH_VAT}",
     re.IGNORECASE,
 )
-#: The total without the tax, however joined: "excl. VAT", "before VAT", "VAT-exclusive total".
+#: The total without the tax, however joined: "excl. VAT", "before VAT", "VAT-exclusive total",
+#: "დღგ-ს გარეშე", "დღგ-ს გამოკლებით" (the tax taken off).
 _EXCL_VAT = re.compile(
     rf"\b(?:excl(?:\.|uding|usive)?|without|before|net\s+of)\s*(?:of\s+)?(?:the\s+)?"
-    rf"{_LABEL_RATE}{_VAT_NAME}|{_VAT_NAME}[\s-]+excl|{_KA_VAT}გარეშე",
+    rf"{_LABEL_RATE}{_VAT_NAME}|{_VAT_NAME}[\s-]+excl|{_KA_VAT}(?:გარეშე|გამოკლებით|გამოკლებული)",
     re.IGNORECASE,
 )
 #: The VAT row: the tax's name opens the label, after an "Add", its rate or a word saying the
@@ -3414,9 +3419,10 @@ def _reconcile_chain(
         base = _excl_parts(rows, cost, end)
     rated(vat, base)
     if incl is not None and incl.value is not None and base and base[0].value is not None:
-        want = sum(r.value or 0.0 for r in base) + (vat.value or 0.0 if vat is not None else 0.0)
+        added = [vat] if vat is not None else _rows_between(rows, base, incl)
+        want = sum(r.value or 0.0 for r in [*base, *added])
         if not _same_money(incl.value, want):
-            joined = " + ".join(str(r.row) for r in [*base, *([vat] if vat is not None else [])])
+            joined = " + ".join(str(r.row) for r in [*base, *added])
             out.append(
                 _summary_gap(
                     f"სტრიქონი {incl.row} ({incl.label[:30]}) ≠ სტრიქონები {joined}",
@@ -3425,6 +3431,27 @@ def _reconcile_chain(
                     want,
                 )
             )
+
+
+def _rows_between(
+    rows: list[SummaryRow], base: list[SummaryRow], incl: SummaryRow
+) -> list[SummaryRow]:
+    """With no row the chain reads as the VAT, what the total incl. VAT adds to its base: every
+    valued row between the base and it ("გადასახადი 18%", a tax named otherwise), a row
+    restating the running sum not added twice - as the total excl. VAT adds the rows between it
+    and TOTAL COST (``_excl_parts``). Held against the base alone, a faithful Summary whose tax
+    row the reader does not name was a false error."""
+    running = sum(r.value or 0.0 for r in base)
+    last = max(r.row for r in base)
+    out: list[SummaryRow] = []
+    for row in rows:
+        if not last < row.row < incl.row or row.value is None:
+            continue
+        if _same_money(row.value, running):
+            continue
+        out.append(row)
+        running += row.value
+    return out
 
 
 def _excl_parts(rows: list[SummaryRow], cost: SummaryRow, excl: SummaryRow) -> list[SummaryRow]:

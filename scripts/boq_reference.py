@@ -397,13 +397,17 @@ _TAX = (
     r"დამატებული ღირებულების გადასახად[ა-ჰ]*)(?![A-Zა-ჰ])"
 )
 _PCT = r"(?:\d{1,2}(?:[.,]\d+)?\s*%\s*)?"
+#: round 5: the Georgian "with VAT" is the tax's name in the instrumental ("დღგ-ით", "დღგ-თ",
+#: "გადასახადით") or followed by "including / taking into account / entered" (ჩათვლით,
+#: გათვალისწინებით, შეტანით); "without / taken off" (გარეშე, გამოკლებით) is excl. VAT
 INCL_VAT = re.compile(
     rf"\b(?:INCL(?:\.|UDING|USIVE)?|WITH)\s*(?:OF )?{_PCT}{_TAX}|{_TAX} INCL"
-    r"|(?:დღგ(?:-?ის|-?ს)?|გადასახადის)\s*ჩათვლით"
+    r"|(?:დღგ(?:-?ის|-?ს)?|გადასახადის)\s*(?:ჩათვლით|გათვალისწინებით|შეტანით)"
+    r"|(?:დღგ-?ი?თ|გადასახადით)(?![ა-ჰ])"
 )
 EXCL_VAT = re.compile(
     rf"\b(?:EXCL(?:\.|UDING|USIVE)?|WITHOUT|BEFORE|NET OF)\s*(?:OF )?{_PCT}{_TAX}"
-    r"|(?:დღგ(?:-?ის|-?ს)?|გადასახადის)\s*გარეშე"
+    r"|(?:დღგ(?:-?ის|-?ს)?|გადასახადის)\s*(?:გარეშე|გამოკლებით|გამოკლებული)"
 )
 VAT_ROW = re.compile(rf"(?:ADD )?{_PCT}{_TAX}")
 
