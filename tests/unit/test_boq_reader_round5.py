@@ -26,6 +26,7 @@ from procurement_agent.checks.boq import (
     _position_groups,
     compare_all,
     read_boq,
+    reconcile_summary,
     template_findings,
 )
 from tests.unit.test_boq_reader_round4 import (
@@ -38,7 +39,8 @@ from tests.unit.test_boq_reader_round4 import (
     _compare,
     _summary,
 )
-from tests.unit.test_boq_reader_variants import Cells, Fx, _rules, _save
+from tests.unit.test_boq_reader_variants import Cells, Fx, _rules, _save, _summary_book
+from tests.unit.test_boq_reader_variants import _row as _srow
 
 # --- R5-04, R5-05, R5-12: the header's other usual Georgian spellings ---------------------
 
@@ -509,3 +511,41 @@ def test_only_a_closing_dot_is_folded_from_an_item_number(
     template: str, bid: str, same: bool
 ) -> None:
     assert (_item_key(template) == _item_key(bid)) is same
+
+
+# --- R5-09: Summary sections numbered with Roman numerals --------------------------------------
+
+
+@pytest.mark.parametrize(
+    "items", [("I", "II", "III"), ("I.", "II.", "III."), ("IV", "V", "VI"), ("VIII", "IX", "X")]
+)
+def test_total_cost_is_the_sum_of_sections_numbered_in_roman(items: tuple[str, ...]) -> None:
+    rows = [_srow(r, item, f"Chapter {r}", 100.0 * r) for r, item in enumerate(items, 2)]
+    faithful = _summary_book([*rows, _srow(5, "", "TOTAL COST", 900.0)])
+    assert reconcile_summary(faithful) == []
+    wrong = _summary_book([*rows, _srow(5, "", "TOTAL COST", 950.0)])
+    [gap] = reconcile_summary(wrong)
+    assert "rows 2, 3, 4" in gap.message_en and gap.expected == "900.00"
+
+
+def test_roman_chapters_do_not_add_their_numbered_sub_sections_twice() -> None:
+    book = _summary_book(
+        [
+            _srow(2, "I", "EARTHWORKS", 300.0),
+            _srow(3, "1", "Excavation", 200.0),
+            _srow(4, "2", "Backfill", 100.0),
+            _srow(5, "II", "CONCRETE", 700.0),
+            _srow(6, "", "TOTAL COST", 1000.0),
+        ]
+    )
+    assert reconcile_summary(book) == []
+
+
+def test_lettered_sections_that_include_roman_shaped_letters_stay_letters() -> None:
+    # near miss: A, B, C, D - "C" and "D" are Roman-shaped, but no item is a numeral of more
+    # than one character, and "A" and "B" are no numerals: the sections are lettered
+    rows = [_srow(r, item, f"Section {item}", 100.0) for r, item in enumerate("ABCD", 2)]
+    assert reconcile_summary(_summary_book([*rows, _srow(6, "", "TOTAL COST", 400.0)])) == []
+    # and a lone "I" among lettered sections is one of them, not a chapter of its own
+    rows = [_srow(r, item, f"Section {item}", 100.0) for r, item in enumerate("GHI", 2)]
+    assert reconcile_summary(_summary_book([*rows, _srow(5, "", "TOTAL COST", 300.0)])) == []

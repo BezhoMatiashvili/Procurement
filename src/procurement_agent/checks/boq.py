@@ -3388,21 +3388,41 @@ def _range_gap(book: BoqWorkbook, row: SummaryRow) -> Finding | None:
 
 #: The item of a top-level Summary section: "2", "2.", "C" - not a group under one ("A1").
 _TOP_LEVEL_ITEM = re.compile(r"^(?:(\d{1,3})|([A-Za-z]))\.?$")
+#: A Roman numeral from I to XXX, the Georgian estimate's chapter numbering ("I", "II", "IV.").
+_ROMAN_ITEM = re.compile(r"^(?=[IVX])X{0,3}(?:IX|IV|V?I{0,3})\.?$", re.IGNORECASE)
+
+
+def _section_style(item: str, roman: bool) -> str | None:
+    """How a Summary item numbers a top-level section: "digit", "roman" or "letter", else None."""
+    if roman and _ROMAN_ITEM.match(item):
+        return "roman"
+    m = _TOP_LEVEL_ITEM.match(item)
+    if m is None:
+        return None
+    return "digit" if m.group(1) else "letter"
 
 
 def _top_level_sections(rows: list[SummaryRow], cost: SummaryRow) -> list[SummaryRow]:
     """The sections TOTAL COST must add up: the valued rows above it numbered like a top-level
     section - all numbered the way the first one is ("0", "1", "2" in the client's Summary, "A",
-    "B", "C" in another's), so a lettered section's numbered sub-sections are not added twice."""
-    shaped = [
-        (r, bool(m.group(1)))
-        for r in rows
-        if r.row < cost.row and r.value is not None and (m := _TOP_LEVEL_ITEM.match(r.item))
-    ]
+    "B", "C" in another's, "I", "II", "III" in a Georgian estimate's), so a lettered section's
+    numbered sub-sections are not added twice.
+
+    I, V and X are letters as well as numerals, so the style is read from the sequence: where
+    the items above TOTAL COST include a Roman numeral of more than one character (II, IV) and
+    no letter that is not one, they are Roman, and every Roman item is a section. Read by its
+    first item alone, "I" was a letter, II and III were nothing, and every faithful bid got a
+    RECONCILE error on TOTAL COST."""
+    valued = [r for r in rows if r.row < cost.row and r.value is not None]
+    items = [r.item.strip() for r in valued]
+    roman = any(len(i.rstrip(".")) > 1 and _ROMAN_ITEM.match(i) for i in items) and not any(
+        _section_style(i, False) == "letter" and not _ROMAN_ITEM.match(i) for i in items
+    )
+    shaped = [(r, style) for r in valued if (style := _section_style(r.item.strip(), roman))]
     if not shaped:
         return []
-    digits = shaped[0][1]
-    return [r for r, is_digit in shaped if is_digit == digits]
+    first = shaped[0][1]
+    return [r for r, style in shaped if style == first]
 
 
 def _reconcile_chain(
