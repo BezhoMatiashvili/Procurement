@@ -35,6 +35,7 @@ from procurement_agent.checks.amounts import (
     digits_and_words,
     header_money,
     render_figure_like,
+    with_currency,
     words_for,
     words_like,
 )
@@ -3056,17 +3057,23 @@ class AoaChecker:
             None,
         )
         if other is not None:
-            expected = _money_text(other)
+            shown = _money_text(other)
+            # the correction is the fee as the act writes it, in the contract's currency (red
+            # team R4, AOA-R4-11); the machine form only when the act's currency cannot be
+            # rewritten
+            span = self._fee_span(m)
+            written = self.aoa.text[span[0] : span[1]]
+            fix = with_currency(_fee_like(other.value, written), other.currency)
             self._add(
                 "AOA.FEE",
                 "error",
                 f"{genitive_ka} ვალუტა განსხვავდება ხელშეკრულებისგან: აქტში {actual}, "
-                f"ხელშეკრულებაში {expected}",
+                f"ხელშეკრულებაში {shown}",
                 f"the {name_en}'s currency differs from the contract: the act says {actual}, "
-                f"the contract {expected}",
-                expected=expected,
+                f"the contract {shown}",
+                expected=fix or shown,
                 actual=actual,
-                span=m.span,
+                span=span if fix else m.span,
             )
             return
         shown = ", ".join(dict.fromkeys(_money_text(p) for p in prices))

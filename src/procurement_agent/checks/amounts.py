@@ -39,6 +39,7 @@ __all__ = [
     "number_of",
     "read_words",
     "render_figure_like",
+    "with_currency",
     "word_amounts",
     "words_for",
     "words_like",
@@ -450,6 +451,73 @@ def words_like(value: float, example: str) -> str:
             tetri = number_to_words(cents) if cents else "ნული"
         return f"{out} და {tetri} {tail.group(0).strip()}"
     return f"{out} და {cents} თეთრი" if cents else out
+
+
+#: Each currency as a Georgian word's stem, a code and a sign.
+_CURRENCY_FORMS: dict[str, tuple[str, str, str]] = {
+    "GEL": ("ლარ", "GEL", "₾"),
+    "USD": ("აშშ დოლარ", "USD", "$"),
+    "EUR": ("ევრო", "EUR", "€"),
+}
+#: The endings a currency word takes, by case, for a stem that ends in a consonant ("ლარ",
+#: "დოლარ") and for "ევრო", whose stem ends in a vowel. A vowel stem's dative and genitive are
+#: one word ("ევროს"), read as the dative a fee is stated in ("შეადგენს 100 ევროს").
+_CONSONANT_ENDINGS = {
+    "nom": "ი", "erg": "მა", "dat": "ს", "gen": "ის", "ins": "ით", "adv": "ად", "upto": "ამდე",
+    "for": "ისთვის", "from": "ისგან", "on": "ზე", "in": "ში",
+}  # fmt: skip
+_VOWEL_ENDINGS = {
+    "nom": "", "erg": "მ", "dat": "ს", "gen": "ს", "ins": "თი", "adv": "დ", "upto": "მდე",
+    "for": "სთვის", "from": "სგან", "on": "ზე", "in": "ში",
+}  # fmt: skip
+#: A currency where it stands: a word in any case, a code or a sign, whole.
+_CURRENCY_TOKEN = re.compile(
+    r"(?<![ა-ჰA-Za-z])(?:(?:აშშ\s+)?(?P<stem>ლარ|დოლარ|ევრო)(?P<ending>[ა-ჰ]*)"
+    r"|(?P<code>GEL|USD|EUR)(?![A-Za-z])|(?P<sign>[₾$€]))"
+)
+#: The small unit's word: tetri for the lari, cents for the others.
+_SMALL_UNIT = re.compile(r"(?<![ა-ჰ])(?:თეთრ|ცენტ)")
+
+
+def _case_of_ending(stem: str, ending: str) -> str | None:
+    table = _VOWEL_ENDINGS if stem.endswith("ო") else _CONSONANT_ENDINGS
+    found = [case for case, e in table.items() if e == ending]
+    if not found:
+        return None
+    return "dat" if "dat" in found else found[0]
+
+
+def with_currency(written: str, currency: str) -> str | None:
+    """``written`` - an amount as a document writes it - with every currency it names written
+    as ``currency`` in the same form (red team R4, AOA-R4-11): a word in its case ("1 200 (ათას
+    ორასი) ლარს" as USD reads "1 200 (ათას ორასი) აშშ დოლარს", "(ასი ლარი)" reads "(ასი აშშ
+    დოლარი)"), a code as a code, a sign as a sign, and the small unit's word with it (tetri for
+    the lari, cents for the others). None when ``currency`` is none of these, or when
+    ``written`` names no currency in a form that can be rewritten."""
+    forms = _CURRENCY_FORMS.get(currency)
+    if forms is None:
+        return None
+    stem_to, code_to, sign_to = forms
+    endings_to = _VOWEL_ENDINGS if stem_to.endswith("ო") else _CONSONANT_ENDINGS
+    failed = False
+
+    def rewrite(m: re.Match[str]) -> str:
+        nonlocal failed
+        if m.group("code"):
+            return code_to
+        if m.group("sign"):
+            return sign_to
+        case = _case_of_ending(m.group("stem"), m.group("ending"))
+        if case is None:
+            failed = True
+            return m.group(0)
+        return stem_to + endings_to[case]
+
+    out, n = _CURRENCY_TOKEN.subn(rewrite, written)
+    if failed or n == 0:
+        return None
+    small = "თეთრ" if currency == "GEL" else "ცენტ"
+    return _SMALL_UNIT.sub(small, out)
 
 
 def render_figure_like(value: float, example: str) -> str:

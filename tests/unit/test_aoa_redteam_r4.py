@@ -285,3 +285,48 @@ class TestTermCorrectionWithTheYearWrittenOnce:
         # near misses: an end with its own year, and another end with none to lend
         assert _with_year_of("25.05.2025", "30.06.2026") is None
         assert _with_year_of("25.05", "30.06") is None
+
+
+# --- AOA-R4-11: a fee in another currency is corrected in the act's own wording ------------------
+
+_DOLLARS = CONTRACT.replace("100 (ასი) ლარს", "100 (ასი) აშშ დოლარს")
+
+
+class TestCurrencyCorrectionInTheActsWording:
+    def test_lari_against_a_dollar_price(self) -> None:
+        [f] = _of(_check(contract=_DOLLARS), "AOA.FEE")
+        assert (f.quote, f.expected) == ("100 (ასი) ლარს", "100 (ასი) აშშ დოლარს")
+        assert "100.00 USD" in f.message_en  # the message still names the contract's price
+
+    def test_the_words_after_the_currency_and_a_code(self) -> None:
+        act = _fee_sentence("საფასური შეადგენს 100 ლარს (ასი) გადასახადების ჩათვლით.")
+        [f] = _of(_check(act, _DOLLARS), "AOA.FEE")
+        assert f.expected == "100 აშშ დოლარს (ასი)"
+        act = _fee_sentence("საფასური შეადგენს GEL 100 (ასი) გადასახადების ჩათვლით.")
+        [f] = _of(_check(act, _DOLLARS), "AOA.FEE")
+        assert f.expected == "USD 100 (ასი)"
+
+    def test_each_form_is_rewritten_in_its_own_case(self) -> None:
+        from procurement_agent.checks.amounts import with_currency
+
+        assert with_currency("100 (ასი) აშშ დოლარს", "GEL") == "100 (ასი) ლარს"
+        assert with_currency("100 ევროთი", "GEL") == "100 ლარით"
+        assert with_currency("100 ლარის", "EUR") == "100 ევროს"
+        assert with_currency("100 ₾ (ასი)", "USD") == "100 $ (ასი)"
+        assert with_currency("100 (ასი ლარი და 50 თეთრი)", "USD") == (
+            "100 (ასი აშშ დოლარი და 50 ცენტი)"
+        )
+
+    def test_what_cannot_be_rewritten_is_left_to_the_machine_form(self) -> None:
+        """Near misses: a word that only starts like a currency, no currency at all, and a
+        currency with no Georgian form here."""
+        from procurement_agent.checks.amounts import with_currency
+
+        assert with_currency("100 ევროპული", "GEL") is None
+        assert with_currency("100", "GEL") is None
+        assert with_currency("100 ლარს", "GBP") is None
+
+
+def _fee_sentence(sentence: str) -> str:
+    assert _FEE_LINE in ACT
+    return ACT.replace(_FEE_LINE, sentence)
