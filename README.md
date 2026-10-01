@@ -51,9 +51,16 @@ The UI asks what you want to do, then collects the files that task needs. It is
 ```
 
 Uploads happen from the task screen (drag and drop, one request per file, a progress row each),
-and the report URL carries the document ids — so a result is bookmarkable and re-runnable, with
-no run table and no migration. When retention has swept the documents the page says so instead
-of rendering a raw 404.
+and the report URL carries the document ids — so a result is bookmarkable and re-runnable.
+Every report is recomputed from the stored files whenever it is opened, and the database keeps
+only enough to open it again: one small `check_runs` row per check — which check, over which
+documents, with which options, never what the documents say. The page of each uploaded file
+lists the checks it took part in and reopens them; the row goes with its documents. The same
+page lists the file's jobs, and every job opens its result: the reading job shows what was read
+from the file (text, tables, sheets with their cell positions), an extraction its fields, and a
+model job the report it belongs to. Checks opened before `check_runs` existed were never
+recorded, so they appear once they are opened again. When retention has swept the documents the
+page says so instead of rendering a raw 404.
 
 ## Checks
 
@@ -247,10 +254,10 @@ Word comment marks), rules and anchors only:
 |---|---|
 | client set, Test Set 2, Test Set 3 (strict `scripts/evaluate.py`) | every field and every finding matched; nothing missing, nothing unexpected |
 | BOQ against an independent reference reader (`scripts/evaluate_boq.py`) | 106/106, 106/106, 132/132 checks: totals to the cent, common scope, colours, merged workbook |
-| act check, mutation harness (20 error classes, 6 fresh seeds) | 100% detected, 100% corrected in the act's own form, 100% of Word comments placed |
-| harmless edits (14 classes: styles, layouts, formats) | 0% false positives |
-| comparison of the same mutated pairs | 100% per class (one known edge case) |
-| BOQ mutation harness (17 classes, 6 seeds) | 100% of valid mutants |
+| act check, mutation harness (20 error classes; 15,000 planted mistakes over three large runs) | 2 missed and 5 corrected in a wrong form, each traced to a general rule and fixed; the last fresh run: 100% detected, 1 correction in 3,000 wrong (since fixed) |
+| harmless edits (14 classes: styles, layouts, formats; 10,500 cases) | 0 false findings |
+| comparison of the same mutated pairs | 100% per class, but a director slip that breaks the surname's declension (99%) |
+| BOQ mutation harness (17 classes, 7 seeds, the last 25 a class) | 100% of valid mutants |
 | scanned acts (OCR) against the Word contract | every planted mistake reported, no false error |
 | five adversarial red-team rounds | 285 confirmed defects, fixed test-first except the known limits in docs/ACCURACY.md; the rate fell from 17% to 8% of deliberately unusual variants |
 

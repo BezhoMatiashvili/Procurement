@@ -101,7 +101,7 @@ What stays below 100%:
 `scripts/mutate_boq.py` (17 classes: quantity, unit, added/removed/reordered lines, description
 edits, hard-coded or wrong arithmetic, shifted Summary, renamed headers, text in numeric cells,
 merged cells, hidden rows, missing cached values, reconciliation, filled blanks), seeds 11, 17,
-23, 31, 41 and 43: every valid mutant 100% (a mutant whose deletion breaks a Summary formula into
+23, 31, 41, 43 and 47 (the last 25 cases a class, 422 valid): every valid mutant 100% (a mutant whose deletion breaks a Summary formula into
 `#REF!` is reported invalid, not scored).
 
 ### Scanned PDFs (OCR inside the Docker image, Tesseract `kat+eng`, 216 dpi)
@@ -140,9 +140,16 @@ COST by its usual names, and a profit rate typed beside its total held on cost +
 client's own documents and the three test sets pass completely. The decisions taken on the
 policy questions are in docs/GOLD_SPEC.md; the ones left open are listed below.
 
+### Repeatability
+
+`scripts/snapshot_outputs.py --include-held-out` (every module's output on every set, the
+held-out one too) run three times on the same code: three byte-identical files (418 KB, one
+SHA-256). Rules and anchors only, no model in the path, so the same documents give the same
+report on every run.
+
 ### Tests
 
-4,014 unit and integration tests, 93.7% line coverage (`scripts/check.sh --offline`: ruff,
+4,104 unit and integration tests, 93.8% line coverage (`scripts/check.sh --offline`: ruff,
 format, mypy strict, bandit, pytest).
 
 ### The deployable image
