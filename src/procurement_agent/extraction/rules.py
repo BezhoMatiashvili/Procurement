@@ -240,8 +240,15 @@ def keyword_pattern(kw: str) -> re.Pattern[str]:
     pat = _KW_CACHE.get(kw)
     if pat is None:
         prefix = "" if _GEORGIAN_LETTER.search(kw) else r"(?<!\w)"
+        prefix += _NOT_THE_STEM.get(kw, "")
         pat = _KW_CACHE[kw] = re.compile(prefix + re.escape(kw))
     return pat
+
+
+#: A stem inside a word that is not about it: "ფას" (price) in "შეფასებულია" (is valued) and
+#: "შეფასება" (an assessment) - "ღირებულება შეფასებულია 18 450 ლარად" states the value, not a
+#: price (red team R5, EXTRACTION-R5-10), as "defined" holds no "fine".
+_NOT_THE_STEM: dict[str, str] = {"ფას": r"(?<!შე)"}
 
 
 def keyword_in(text: str, kw: str) -> bool:
@@ -449,40 +456,114 @@ _TOTAL_ROW = re.compile(
 _ITEM_NUMBER = re.compile(r"\d{1,3}(?:\.\d{1,3})*[.)]?")
 
 
+#: A table row: its cells and each one's value, in order.
+_Row = list[tuple[re.Match[str], str]]
+
+
+def _table_rows(line: str) -> list[_Row]:
+    """The rows of a serialised table line. A row is its cells in order; the next row begins
+    where the key changes or a column comes again - the closing rows of a table often have no
+    key at all (", დასახელება = სულ. , ჯამი = ..."), and read by their key alone they were one
+    row, so the tax's row took the total's name."""
+    cells = list(_TABLE_CELL.finditer(line))
+    rows: list[_Row] = []
+    current: _Row = []
+    columns: set[str] = set()
+    for c, nxt in zip(cells, [*cells[1:], None], strict=False):
+        value = line[c.end() : nxt.start() if nxt else len(line)].strip(" .")
+        column = c.group(2).strip().lower()
+        if current and (c.group(1).strip() != current[-1][0].group(1).strip() or column in columns):
+            rows.append(current)
+            current, columns = [], set()
+        current.append((c, value))
+        columns.add(column)
+    if current:
+        rows.append(current)
+    return rows
+
+
+def _names_a_total(row: _Row) -> bool:
+    key = row[0][0].group(1).strip()
+    return _TOTAL_ROW.fullmatch(key) is not None or any(_TOTAL_ROW.fullmatch(v) for _, v in row)
+
+
+#: A row the tax alone names: "დღგ", "დღგ (18%)", "დღგ-ს თანხა", "VAT 18%".
+_TAX_ROW = re.compile(
+    r"(?:დ\.?ღ\.?გ\.?|vat|value\s+added\s+tax)(?:-?ის|-?ს)?(?:\s+(?:თანხა|ოდენობა|amount))?"
+    r"\s*(?:\(?\s*\d{1,2}(?:[.,]\d{1,2})?\s*%\s*\)?)?",
+    re.IGNORECASE,
+)
+
+
+def _row_label(row: _Row) -> str:
+    """What names a row: its key and its cells of words, figures left out."""
+    words = [row[0][0].group(1).strip(), *(v for _, v in row)]
+    return " ".join(w for w in words if w and not re.fullmatch(rf"{_NUM_RE}", w))
+
+
+def _is_tax_row(row: _Row) -> bool:
+    return any(
+        _TAX_ROW.fullmatch(w)
+        for w in (row[0][0].group(1).strip(), *(v for _, v in row))
+        if w and _TOTAL_ROW.fullmatch(w) is None
+    )
+
+
+def _closing_part(rows: list[_Row], i: int) -> bool:
+    """Whether row ``i``, which a total word names, is a part of the table's closing breakdown,
+    not its total: the tax's row comes after it and another total's row after that ("სულ" /
+    "დღგ" / "სულ დღგ-ს ჩათვლით"), or it names the tax's absence while another total's row
+    names none ("ჯამი დღგ-ს გარეშე" beside "სულ ჯამი"). The total is the one the total word
+    names last (docs/GOLD_SPEC.md section 2, red team R5, EXTRACTION-R5-04); a table whose only
+    closing row is "ჯამი დღგ-ს გარეშე" keeps it as its total."""
+    later = rows[i + 1 :]
+    tax = next((j for j, r in enumerate(later) if _is_tax_row(r)), None)
+    if tax is not None and any(_names_a_total(r) for r in later[tax + 1 :]):
+        return True
+    if _TAX_EXCLUDED.search(_row_label(rows[i])) is None:
+        return False
+    return any(
+        _names_a_total(r) and _TAX_EXCLUDED.search(_row_label(r)) is None
+        for j, r in enumerate(rows)
+        if j != i
+    )
+
+
 def _is_line_total(text: str, start: int) -> bool:
     """Whether the amount at ``start`` is a line amount of a price table: a cell of a column a
     total word names ("ჯამი"), in a row that no total word names and that is a line - it has a
     unit price or a quantity, it is keyed by an item number, or the table has a total row of
     its own. A lump-sum table ("N | დასახელება | ჯამი") has neither price nor quantity, and its
-    lines are still lines. The document's total is the row "სულ" or a figure in the prose."""
+    lines are still lines. The document's total is the row "სულ" or a figure in the prose.
+
+    A closing row is no total either when it is the tax's ("დღგ (18%)") or a part of the
+    breakdown the total closes (``_closing_part``)."""
     line_start = text.rfind("\n", 0, start) + 1
     line_end = text.find("\n", start)
     line = text[line_start : len(text) if line_end < 0 else line_end]
     at = start - line_start
-    cells = list(_TABLE_CELL.finditer(line))
-    own = next((c for c in reversed(cells) if c.end() <= at), None)
-    column = own.group(2).lower() if own is not None else ""
-    if own is None or not any(keyword_in(column, kw) for kw in KEYWORDS[FactType.total_amount]):
+    rows = _table_rows(line)
+    found: tuple[int, re.Match[str]] | None = None
+    for i, r in enumerate(rows):
+        for c, _ in r:
+            if c.end() <= at:
+                found = (i, c)
+    if found is None:
         return False
-    row = own.group(1).strip()
-    siblings = [c for c in cells if c.group(1).strip() == row]
-    values = {
-        c: line[c.end() : nxt.start() if nxt else len(line)].strip(" .")
-        for c, nxt in zip(cells, [*cells[1:], None], strict=True)
-    }
-
-    def names_a_total(key: str) -> bool:
-        return _TOTAL_ROW.fullmatch(key) is not None or any(
-            _TOTAL_ROW.fullmatch(v) for c, v in values.items() if c.group(1).strip() == key
-        )
-
-    if names_a_total(row):
+    i, own = found
+    column = own.group(2).lower()
+    if not any(keyword_in(column, kw) for kw in KEYWORDS[FactType.total_amount]):
         return False
-    if any(_LINE_COLUMN.search(c.group(2)) for c in siblings if c is not own):
+    row = rows[i]
+    if _names_a_total(row):
+        return _closing_part(rows, i)
+    if _is_tax_row(row):
         return True
-    if _ITEM_NUMBER.fullmatch(row):
+    if any(_LINE_COLUMN.search(c.group(2)) for c, _ in row if c is not own):
         return True
-    return any(names_a_total(key) for key in {c.group(1).strip() for c in cells} - {row})
+    if _ITEM_NUMBER.fullmatch(row[0][0].group(1).strip()):
+        return True
+    return any(_names_a_total(r) for j, r in enumerate(rows) if j != i)
 
 
 #: A figure that restates a share of the value written right before it: "ღირებულების 5%-ის,
@@ -567,6 +648,14 @@ _PERIODIC = re.compile(
 _TOTAL_NAMED = re.compile(
     r"საერთო|ჯამურ|სრულ|მთლიან|(?<![a-z])(?:total|overall|aggregate)(?![a-z])", re.IGNORECASE
 )
+#: What is left of the price to pay, past a turn of its sentence: "ხოლო ასანაზღაურებელი თანხა -
+#: 4 200 ლარს", "გადასახდელი თანხა", "დარჩენილი თანხა", "the balance payable", "the remaining
+#: amount" (red team R5, EXTRACTION-R5-14). A part of the price's settlement, as an advance is.
+_SETTLEMENT_PART = re.compile(
+    r"ასანაზღაურებელ|ანაზღაურებას\s+ექვემდებარება|გადასახდელ|დარჩენილ|დაქვითულ|გამოქვითულ"
+    r"|(?<![a-z])(?:payable|balance|remaining|remainder|deducted)(?![a-z])",
+    re.IGNORECASE,
+)
 _CLAUSE_REACH = 160
 
 
@@ -597,7 +686,7 @@ def _named_in_own_clause(text: str, start: int) -> bool:
     own, others = _clauses_of(text, start)
     if not others:
         return False
-    if _AMOUNT_TURN.match(own) and _PART_OF_PRICE.search(own):
+    if _AMOUNT_TURN.match(own) and (_PART_OF_PRICE.search(own) or _SETTLEMENT_PART.search(own)):
         return True
     return _PERIODIC.search(own) is not None and any(
         _TOTAL_NAMED.search(c) and (_AMOUNT_AFTER.search(c) or _AMOUNT_BEFORE.search(c))
@@ -773,8 +862,18 @@ def _money_type(text: str, span: tuple[int, int]) -> FactType | None:
     ft = _classify(text, *span, (FactType.total_amount, FactType.penalty, FactType.price))
     if ft == FactType.total_amount and _is_line_total(text, span[0]):
         ft = None
+    if ft == FactType.penalty and (_is_share(text, span[0]) or is_rate_cap(text, *span)):
+        # a penalty's rate restated as money ("ღირებულების 5%-ის, 100 ლარის ოდენობით") or the cap
+        # on its total ("მაგრამ არაუმეტეს 1 000 ლარისა") is no fine of its own
+        return None
+    if ft in (None, FactType.price) and _sum_named_whole(text, span[0]):
+        ft = FactType.total_amount  # "ხელშეკრულების საერთო თანხა", "ხელშეკრულების თანხა"
     if ft == FactType.price and is_contract_price(text, *span):
         ft = FactType.total_amount  # "ხელშეკრულების ფასი", "the total price"
+    if ft == FactType.total_amount and _priced_per_unit(text, span[0]):
+        ft = FactType.price  # "ერთი სკამის ღირებულება", "1 (ერთი) ცალი ... ღირებულება"
+    if ft in (FactType.total_amount, FactType.price) and _named_a_part(text, span[0]):
+        return None  # "გადაიხდის ავანსს 5 520 ლარის ოდენობით": the advance's, not the price
     if ft in (FactType.total_amount, FactType.price) and (
         _is_share(text, span[0])
         or restatement(text, span[0]) is not None
@@ -844,9 +943,11 @@ def find_header_amounts(text: str) -> list[RuleHit]:
 _PRICE_WORD = re.compile(r"(?<![ა-ჰ])ფას(?!ურ)[ა-ჰ]*|(?<![a-z])price(?![a-z])", re.IGNORECASE)
 #: What names a price the contract's whole value: a total word ("საერთო ფასი", "the total
 #: price"), or the contract or what it buys whose price it is ("ხელშეკრულების ფასი", "the
-#: Contract price", "the price of the Goods").
+#: Contract price", "the price of the Goods"). "სამუშაო" names the works only as a noun
+#: ("სამუშაოს", "სამუშაოების", "სამუშაოთა"): "სამუშაო მაგიდის ფასი" prices a work desk (red team
+#: R5, COMPARE-R5-09).
 _WHOLE_PRICE = re.compile(
-    r"საერთო|ჯამურ|სრულ|მთლიან|ხელშეკრულებ|შეთანხმებ|მომსახურებ|საქონ|სამუშაო|შესყიდვ"
+    r"საერთო|ჯამურ|სრულ|მთლიან|ხელშეკრულებ|შეთანხმებ|მომსახურებ|საქონ|სამუშაო(?:ს|ებ|თა)|შესყიდვ"
     r"|(?<![a-z])(?:total|overall|aggregate|contract|agreement|goods|services|works)(?![a-z])",
     re.IGNORECASE,
 )
@@ -887,6 +988,104 @@ def is_contract_price(text: str, start: int, end: int) -> bool:
         return False
     named = " ".join(lead)
     return _WHOLE_PRICE.search(named) is not None or _WHOLE_PRICE.search(between) is not None
+
+
+#: The contract's sum named as such: "ხელშეკრულების თანხა", "ხელშეკრულების საერთო თანხა",
+#: "საერთო თანხა" - the contract's overall figure as much as "ხელშეკრულების ღირებულება" is
+#: (docs/GOLD_SPEC.md section 2, red team R4 policy; R5, EXTRACTION-R5-10).
+_WHOLE_SUM = re.compile(
+    r"(?<![ა-ჰ])(?:(?:ხელშეკრულებ|შეთანხმებ)[ა-ჰ]*\s+(?:(?:საერთო|ჯამურ[ა-ჰ]*|სრულ[ა-ჰ]*|"
+    r"მთლიან[ა-ჰ]*)\s+)?|(?:საერთო|ჯამურ[ა-ჰ]*|მთლიან[ა-ჰ]*)\s+)თანხ[ა-ჰ]*"
+)
+_WHOLE_SUM_REACH = 60
+
+
+def _sum_named_whole(text: str, start: int) -> bool:
+    """Whether the money figure at ``start`` is the one its sentence names the contract's sum,
+    with no other figure and no rate between: "ხელშეკრულების საერთო თანხა შეადგენს 18 450
+    ლარს"; not "ავანსის თანხა", and not the base of a share ("ხელშეკრულების თანხის 30%")."""
+    sentence = _sentence_start(text, start)
+    named = next(reversed(list(_WHOLE_SUM.finditer(text, sentence, start))), None)
+    if named is None or start - named.end() > _WHOLE_SUM_REACH:
+        return False
+    between = text[named.end() : start]
+    return "%" not in between and _next_money(text, named.end(), start) is None
+
+
+#: A money noun a figure may be labelled with: "ღირებულება", "ფასი", "თანხა", "price", "cost".
+_MONEY_NOUN = re.compile(
+    r"ღირებულებ|(?<![ა-ჰ])ფას(?!ურ)|თანხ|საფასურ|(?<![a-z])(?:price|cost|value|amount)(?![a-z])",
+    re.IGNORECASE,
+)
+#: A count of one before the priced item: "ერთი სკამის", "1 (ერთი) ცალი", "თითო", "one chair",
+#: "each" - the price of one item is a price per unit (red team R5, COMPARE-R5-09). The figure's
+#: own words are no count: brackets are left out before this is read.
+_ONE_ITEM = re.compile(
+    r"(?<![ა-ჰ\d.,])(?:ერთი|თითო)(?![ა-ჰ])|(?<![\d.,])1(?![\d.,)])\s+[ა-ჰ]"
+    r"|(?<![a-z])(?:one|each|a\s+single)\s+[a-z]",
+    re.IGNORECASE,
+)
+_BRACKETED = re.compile(r"\([^()]*\)")
+_LABEL_WORDS = 4
+_CLAUSE_CUT = re.compile(r"[,;:]")
+
+
+def _clause_start(text: str, start: int) -> int:
+    """Where the clause of the figure at ``start`` begins: its sentence's start, or the last
+    comma, semicolon or colon after it."""
+    sentence = _sentence_start(text, start)
+    cuts = [m.end() for m in _CLAUSE_CUT.finditer(text, sentence, start)]
+    return cuts[-1] if cuts else sentence
+
+
+def _priced_per_unit(text: str, start: int) -> bool:
+    """Whether the words that label the money figure at ``start`` price one unit: "ერთეულის
+    ღირებულება", "ერთი სკამის ღირებულება", "1 (ერთი) ცალი სამუშაო მაგიდის ღირებულება" - a
+    ``price``, never the contract's total (docs/GOLD_SPEC.md section 2, R4 policy: a price per
+    unit stays a price). The label is the money word with up to four words before it, in the
+    figure's clause; a cell of a price table is typed as the table's cells are."""
+    if _table_cell_at(text, start):
+        return False
+    clause = _clause_start(text, start)
+    nouns = list(_MONEY_NOUN.finditer(text, clause, start))
+    if not nouns or _next_money(text, nouns[-1].end(), start) is not None:
+        return False
+    noun = nouns[-1]
+    lead = _BRACKETED.sub(" ", text[clause : noun.start()]).split()[-_LABEL_WORDS:]
+    label = " ".join(lead) + " " + _BRACKETED.sub(" ", text[noun.start() : start])
+    return _PER_UNIT.search(label) is not None or _ONE_ITEM.search(label) is not None
+
+
+#: A part of the price or a security its own clause names, right before the figure: "გადაიხდის
+#: ავანსს 5 520 ლარის ოდენობით", "საგარანტიო თანხა 900 ლარი", "an advance of GEL 5,520". Not
+#: "დაკავშირებით" (in connection with).
+_PART_NAMED = re.compile(
+    r"ავანს|საგარანტიო|გარანტი|უზრუნველყოფ(?:ა|ის|ად)(?![ა-ჰ])|დაკავ(?!შირ)"
+    r"|წინასწარი?\s+(?:გადახდ|გადაიხდ|ანგარიშსწორებ|ჩარიცხ|თანხ)"
+    r"|(?<![a-z])(?<!in )(?:advance|prepayment|guarantee|retention|deposit)(?![a-z])",
+    re.IGNORECASE,
+)
+#: ... unless it only qualifies another figure: "ღირებულება ავანსის ჩათვლით", "ავანსის
+#: გამოკლებით", "excluding the advance".
+_PART_QUALIFIES = re.compile(
+    r"[ა-ჰ]*\s*(?:ჩათვლით|გათვალისწინებით|გამოკლებით|გამოქვითვით|დაქვითვით|გარეშე)(?![ა-ჰ])"
+    r"|\s+(?:included|excluded|deducted)(?![a-z])",
+    re.IGNORECASE,
+)
+
+
+def _named_a_part(text: str, start: int) -> bool:
+    """Whether the clause the money figure at ``start`` stands in names it an advance, a
+    guarantee, a retention or a deposit before it, with nothing naming the total after that word:
+    such a figure is an ``amount`` with or without a turn before it (docs/GOLD_SPEC.md section 2,
+    R3: "a figure its own clause names as an advance ... is an amount"; red team R5,
+    COMPARE-R5-08). A clause is cut at a comma, so "ღირებულება, ავანსის ჩათვლით, შეადგენს 36 000
+    ლარს" stays the price, and a part word that only qualifies ("ავანსის ჩათვლით") names none."""
+    clause = _clause_start(text, start)
+    part = next(reversed(list(_PART_NAMED.finditer(text, clause, start))), None)
+    if part is None or _PART_QUALIFIES.match(text, part.end()):
+        return False
+    return _TOTAL_NAMED.search(text, part.end(), start) is None
 
 
 def _table_cell_at(text: str, start: int) -> bool:
@@ -1463,16 +1662,53 @@ def is_advance_share(text: str, start: int, end: int) -> bool:
         after_verb.group("en") or PAYMENT_WORDS.search(after_verb.group("verb"))
     ):
         return True
-    before = text[max(0, start - _CTX) : start]
-    cut = list(_SENTENCE_BOUNDARY.finditer(before))
-    before = before[cut[-1].end() :] if cut else before
+    # the rate's sentence up to it, however long the advance's words are ("ავანსს 5 520 (ხუთი
+    # ათას ხუთას ოცი) ლარის ოდენობით, ხელშეკრულების ღირებულების 30%"): a window of characters
+    # let the figure's words decide the reading (red team R5, COMPARE-R5-08); a turn to another
+    # clause (", ხოლო", ", მაგრამ") ends it
+    before = text[_sentence_start(text, start) : start]
+    turns = list(_SHARE_TURN.finditer(before))
+    before = before[turns[-1].end() :] if turns else before
     word = next(reversed(list(_ADVANCE_WORD.finditer(before))), None)
     if word is None:
         return False
     between = before[word.end() :]
-    if _REMAINDER_WORD.search(between) or _PCT.search(between):
+    if _REMAINDER_WORD.search(between) or _PCT.search(between) or _NEGATED.search(between):
+        return False
+    # the advance a security is for: "საბანკო გარანტიას ავანსის თანხის 100%-ის ოდენობით" is the
+    # guarantee's rate
+    near = before[max(0, word.start() - _SECURITY_REACH) : word.end() + _SECURITY_REACH]
+    if _SECURITY_WORD.search(near):
         return False
     return _RATE_ENDS.search(before, 0, word.start()) is None
+
+
+_SECURITY_REACH = 25
+
+
+#: A security the advance's share may be the base of: "საბანკო გარანტია ავანსის თანხის 100%-ის
+#: ოდენობით" is the guarantee's rate, not an advance.
+_SECURITY_WORD = re.compile(
+    r"საგარანტიო|გარანტი|უზრუნველყოფ|(?<![a-z])(?:guarantee|security)(?![a-z])", re.IGNORECASE
+)
+
+
+def _advance_share_far(text: str, start: int, end: int) -> bool:
+    """Whether a rate no keyword types is the advance's share all the same (``is_advance_share``)
+    with no security named in its sentence."""
+    if not is_advance_share(text, start, end):
+        return False
+    return _SECURITY_WORD.search(text, _sentence_start(text, start), start) is None
+
+
+#: Where a sentence turns to another clause before a rate: ", ხოლო", ", მაგრამ", ", თუმცა", ",
+#: whereas", ", but".
+_SHARE_TURN = re.compile(
+    r"[,;\u2013\u2014]\s*(?:ხოლო|მაგრამ|თუმცა|whereas|but|however)(?![ა-ჰa-z])", re.IGNORECASE
+)
+#: A negation between the advance word and the rate: "ავანსი არ გაიცემა, ... 100%-ით" pays no
+#: advance.
+_NEGATED = re.compile(r"(?<![ა-ჰ])(?:არ|არა)(?![ა-ჰ])|(?<![a-z])(?:not|no)(?![a-z])", re.IGNORECASE)
 
 
 #: A word about paying the fee, built from the verb roots rather than from finished word forms,
@@ -1659,6 +1895,11 @@ def find_percentages(text: str) -> list[RuleHit]:
                 ft = None
         elif ft == FactType.penalty and is_rate_cap(text, m.start(), m.end()):
             ft = None  # "not exceeding 10%" caps the penalty: no rate of its own
+        elif ft is None and _advance_share_far(text, m.start(), m.end()):
+            # the advance word further back than the keyword window: the share is the advance's
+            # however many words its amount is written in (red team R5, COMPARE-R5-08)
+            ft = FactType.payment_terms
+            shown = normalized = payment_terms_value(advance=v) or shown
         # a penalty counted per period is stated with it, canonically (docs/GOLD_SPEC.md):
         # "0.5% per day" and "0.5% per week" are two penalties, not one
         period = penalty_period(text, m.start(), m.end()) if ft == FactType.penalty else None
