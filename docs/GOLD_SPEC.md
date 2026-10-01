@@ -158,6 +158,29 @@ How the parties are read (red-team round 4):
   (`1, პირობა = …, მნიშვნელობა = …;`): a term's label types its value as in a two-column table.
   A price table keeps Docling's cells (its line amounts are read cell by cell).
 
+How the parties are read (red-team round 5):
+
+* **A blank is no value.** A draft's fill-in line - a value with no letter and no digit, only
+  underscores, dots, ellipses, dashes and spaces (`მისამართი: ___________`) - is no
+  `party_address`, `party_name`, `party_director` or `project_name`; a reader yields nothing for
+  it (`normalize.is_blank`), so a blank filled in is a value added (COMPARE-R5-07).
+* **Where an address ends (continued).** Also at the next field's label on its line: a comma,
+  one to four words with no figure, a colon (`, სახაზინო კოდი: …`, `, დღგ-ს გადამხდელის ნომერი:
+  …`, `, ვებგვერდი: …`), and before another address's qualifier (`, ფაქტობრივი მისამართი:`,
+  `ფაქტიური`, `საფოსტო`), which belongs to the next label, not to this address; a website
+  (`ვებგვერდი`, `www.`) ends it with no colon too. A part of the address with a colon after it
+  (`კორპუსი: 3, ბინა: 12`) or words with a figure before a colon (`სართ. 4:`) stay in the
+  address (EXTRACTION-R5-06).
+* **A double surname.** A hyphenated surname is one surname (`ნინო ბერიძე-ნიმუშაძე`); only its
+  last part inflects, so `party_director` folds that part to the nominative
+  (`…-ნიმუშაძის სახით` is `…-ნიმუშაძე`). A hyphen before a case ending or a postposition (`-ს`,
+  `-მა`, `-სთვის`), a title (`-დირექტორი`) or a side, or a dash with spaces, is no second
+  surname (EXTRACTION-R5-12).
+* **`პირადი №` (policy, decided in round 5).** `პირადი` with a number sign in place of
+  `ნომერი` (`პირადი №:`, `პირადი N`, `პირადი #`) labels a personal number, as `საიდ. №` labels a
+  code - only with the sign and only before eleven digits. `პირადი` alone (`პირადი შემოსავალი`)
+  is no label (EXTRACTION-R5-16).
+
 How the rules read them (red-team round 2):
 
 * **Money.** A magnitude written as a word multiplies its figure (`48 ათას ლარს` -> `48000`,
@@ -425,6 +448,11 @@ strict_findings: true             # anything else reported (any severity) is a f
   * a party's name is written whole: a word's final `ი` dropped (`შპს „ბეტა სერვის“`) is
     `AOA.PARTY_NAME`, corrected to the contract's name, unless an ending is attached to the stem
     (`„ბეტა სერვის“-ის`). A case ending inside the quotes (`„ბეტა სერვისის“`) is still the name;
+  * so is a party's name slipped only in its signature block, which writes no code (red team
+    R5, AOA-R5-04): it is the contract party whose name it is one slip from (a letter typed
+    wrong, a final `ი` dropped), `AOA.PARTY_NAME` corrected to that name, as the same slip in
+    the preamble is; where two parties' names are that close, the side its role word gives
+    decides. A name no slip from any party's stays "party not found", with no correction;
   * a month name, a Latin/Cyrillic letter inside a Georgian word, or a prose typo →
     `AOA.SPELLING` with the corrected word, a warning. A prose typo whose correction neither
     the act nor the contract writes rests on the dictionary alone, which lacks words and forms:
@@ -585,6 +613,10 @@ Red team round 4 (the party readers, section 2): a party renamed behind any lega
 abbreviation (`ააიპ …`, `შპს …`); the form restyled alone (`შპს` -> `შ.პ.ს.`) is formatting. A
 director changed after an address (`…, წარმოდგენილი მისი დირექტორის … სახით`) is one "Director /
 signatory" change, and an address changed in its requisites cell is one "Legal address" change.
+
+Red team round 5 (the party readers, section 2): a draft's blank party block filled in is each
+value added - `CMP.PARTY` "Legal address" before `None` after the address, never "changed" from
+the underscores (COMPARE-R5-07).
 
 Red team round 4 (compare) settled these cases:
 
