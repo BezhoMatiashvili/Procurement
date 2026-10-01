@@ -11,10 +11,11 @@ clause is recognised by its number rather than by the line it starts.
 
 from __future__ import annotations
 
+import calendar
 import re
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from itertools import pairwise
 from typing import Literal
 
@@ -688,18 +689,106 @@ def _merge(ranges: list[TermRange]) -> TermRange | None:
     )
 
 
-def _signing_date(text: str, hits: list[RuleHit]) -> date | None:
-    """The date the preamble states: the first one, if it comes before the first party or the
-    first numbered clause (``anchors.preamble_end``).
+#: A label that dates the contract's signing anywhere in it, the date right after it (red team
+#: R4, EXTRACTION-R4-11): "ხელშეკრულების გაფორმების თარიღი: 03.03.2026" at the foot, "დადების
+#: თარიღი:", "Date of signing:". The label stands as a word: "ხელმოწერის თარიღიდან 5 დღეში"
+#: counts from the date.
+_SIGNING_LABEL = re.compile(
+    r"(?:(?<![ა-ჰ])(?:გაფორმების|ხელმოწერის|დადების)\s+თარიღია?(?![ა-ჰ])"
+    r"|(?<![a-z])(?:date\s+of\s+(?:signing|signature|conclusion)|signing\s+date)(?![a-z]))"
+    r"[\s:\u2013\u2014-]*$",
+    re.IGNORECASE,
+)
+#: ... unless the label is another document's: "მიღება-ჩაბარების აქტის გაფორმების თარიღი" dates
+#: an act.
+_ANOTHER_DOCUMENTS = re.compile(
+    r"(?:(?<![ა-ჰ])აქტ[ა-ჰ]*|(?<![a-z])(?:act|certificate|invoice))[\s„“”\"']*$", re.IGNORECASE
+)
+#: How far before its date a signing label may stand.
+_SIGNING_LABEL_REACH = 50
 
-    The fact classifier cannot tell it: with no keyword near it, ``rules._classify`` calls the
-    preamble's date an execution period. Its place is what marks it. None when no date comes
-    before the parties - never a guess, because a wrong signing date calls a correct act early.
+
+def _signing_date(text: str, hits: list[RuleHit]) -> date | None:
+    """The contract's signing date: the date the preamble states - the first one, if it comes
+    before the first party or the first numbered clause (``anchors.preamble_end``) - else a date
+    a signing label states anywhere (``_SIGNING_LABEL``).
+
+    The fact classifier cannot tell the preamble's date: with no keyword near it,
+    ``rules._classify`` calls it an execution period. Its place is what marks it, or a label.
+    None when neither says - never a guess, because a wrong signing date calls a correct act
+    early: an unlabelled date outside the preamble is no signing date (GOLD_SPEC 2).
     """
     end = preamble_end(text)
-    if end is None or not hits or hits[0].end > end:
+    if end is not None and hits and hits[0].end <= end:
+        return _date_of(hits[0])
+    for h in hits:
+        label = _SIGNING_LABEL.search(text, max(0, h.start - _SIGNING_LABEL_REACH), h.start)
+        if label is None:
+            continue
+        if _ANOTHER_DOCUMENTS.search(text, max(0, label.start() - 40), label.start()):
+            continue
+        return _date_of(h)
+    return None
+
+
+#: A validity stated as a length (red team R4, EXTRACTION-R4-08): the count, then "განმავლობაში"
+#: (for), "ვადით" (for a term of), "ვადაში" - "მოქმედებს 12 (თორმეტი) თვის განმავლობაში" - or
+#: after the word for a term or an English "for": "მოქმედების ვადა: 12 თვე", "valid for 6
+#: months", "for a period of 12 months".
+_LENGTH_AFTER = re.compile(r"\s*(?:განმავლობაში|ვადით|ვადაში)(?![ა-ჰ])")
+_LENGTH_BEFORE = re.compile(
+    r"(?:ვადა[ა-ჰ]*\s*[:\u2013\u2014-]?"
+    r"|(?<![a-z])(?:for|of)(?:\s+(?:a|the)\s+(?:period|term)\s+of)?)\s*$",
+    re.IGNORECASE,
+)
+#: An end the clause states by another event: "... შესრულებამდე" (until fulfilled), "until ...".
+#: Beside a length it leaves which of the two ends the contract unsaid.
+_UNTIL = re.compile(r"[ა-ჰ]მდე(?![ა-ჰ])|(?<![a-z])until(?![a-z])", re.IGNORECASE)
+#: A count from another event than the signing: "მიწოდებიდან 12 თვის", "12 months after delivery".
+_FROM_AN_EVENT_BEFORE = re.compile(r"(?<![ა-ჰ])[ა-ჰ]+დან\s*$")
+_FROM_AN_EVENT_AFTER = re.compile(
+    r"\s*(?:from|after|following)\s+(?!(?:the\s+)?(?:date\s+of\s+)?(?:its\s+)?sign)",
+    re.IGNORECASE,
+)
+_LENGTH_UNITS = frozenset({"day", "week", "month", "year"})
+
+
+def _stated_length(text: str, a: int, b: int) -> tuple[int, str] | None:
+    """The length a validity clause ``text[a:b]`` states the contract runs for, as (count, unit),
+    counted from the signing or the clause's own first day: one length, and no until-phrase
+    beside it. None when it states none, or more than one."""
+    if _UNTIL.search(text, a, b):
         return None
-    return _date_of(hits[0])
+    signing_ends = {m.end() for m in _FROM_SIGNING.finditer(text, a, b)}
+    found: set[tuple[int, str]] = set()
+    for h in find_durations(text[a:b]):
+        start, end = a + h.start, a + h.end
+        if h.unit not in _LENGTH_UNITS:
+            continue
+        before = text[max(a, start - _MARK_REACH) : start]
+        if not (_LENGTH_AFTER.match(text, end, b) or _LENGTH_BEFORE.search(before)):
+            continue
+        event = _FROM_AN_EVENT_BEFORE.search(before)
+        if event is not None:
+            # counted from a word in "-დან": only the signing's ("ხელმოწერის დღიდან 1 წლის")
+            word_end = start - len(before) + event.start() + len(event.group().rstrip())
+            if word_end not in signing_ends:
+                continue
+        if _FROM_AN_EVENT_AFTER.match(text, end, b):
+            continue
+        count = int(str(h.normalized)[1:-1])
+        found.add((count, str(h.unit)))
+    return found.pop() if len(found) == 1 else None
+
+
+def _after_length(start: date, count: int, unit: str) -> date:
+    """``start`` moved on by a length: days and weeks counted, months and years on the calendar,
+    the day kept and held to the month's last (31 August and six months is 28 February)."""
+    if unit in ("day", "week"):
+        return start + timedelta(days=count * (7 if unit == "week" else 1))
+    months = start.month - 1 + count * (12 if unit == "year" else 1)
+    year, month = start.year + months // 12, months % 12 + 1
+    return date(year, month, min(start.day, calendar.monthrange(year, month)[1]))
 
 
 def read_term(text: str, *, sentences: list[tuple[int, int]] | None = None) -> ContractTerm:
@@ -734,6 +823,13 @@ def read_term(text: str, *, sentences: list[tuple[int, int]] | None = None) -> C
         found = _range_in(text, (a, b), inside, takes_effect=takes_effect)
         if found.start is None and _FROM_SIGNING.search(text, a, b):
             found = TermRange(start=signed, end=found.end)
+        length = _stated_length(text, a, b) if found.end is None else None
+        if length is not None:
+            # a length closes the range: from the clause's first day, else from the signing - a
+            # length with no first day of its own runs from it (red team R4, EXTRACTION-R4-08)
+            start = found.start or signed
+            if start is not None:
+                found = TermRange(start=start, end=_after_length(start, *length))
         validity.append(found)
     return ContractTerm(signed=signed, validity=_merge(validity), performance=_merge(performance))
 

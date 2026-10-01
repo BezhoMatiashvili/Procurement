@@ -1,6 +1,6 @@
 """Red team round 4: an act's period and its date, and a contract's validity, read by rule.
 
-AOA-R4-03, AOA-R4-05, AOA-R4-07 and COMPARE-R4-01. Synthetic
+AOA-R4-03, AOA-R4-05, AOA-R4-07, COMPARE-R4-01, EXTRACTION-R4-08 and EXTRACTION-R4-11. Synthetic
 text only: every name, code and date here is invented.
 """
 
@@ -10,6 +10,7 @@ import pytest
 
 from procurement_agent.checks.aoa import check_aoa
 from procurement_agent.checks.compare import compare
+from procurement_agent.checks.contract_terms import read_term
 from procurement_agent.checks.document_facts import document_facts
 from procurement_agent.ingestion.segmenter import Segment, build
 from tests.unit.test_aoa_check import ACT, CONTRACT
@@ -283,3 +284,121 @@ def test_the_acts_date_is_read_in_every_wording(wording: str) -> None:
 def test_words_about_the_act_that_date_nothing_give_it_no_date(line: str) -> None:
     report = check_aoa(aoa_text=ACT.replace(_SIGNED, line), contract_text=CONTRACT)
     assert "act_date" not in report.summary
+
+
+# --- EXTRACTION-R4-08: a validity stated as a length is a closed range ---------------------------
+
+
+def _contract(
+    validity: str, *, dated: str = "ქ. თბილისი, 2026 წლის 3 მარტი", foot: str = ""
+) -> str:
+    return (
+        "ხელშეკრულება N 9\n"
+        f"{dated}\n"
+        f"{_PARTIES}"
+        "1.1. „შემსრულებელი“ ვალდებულია გასწიოს მომსახურება.\n"
+        f"3.1. {validity}\n"
+        "4.1. ღირებულება გადაიხდება მიღება-ჩაბარების აქტის გაფორმების თარიღიდან 7 (შვიდი) სამუშაო "
+        "დღის განმავლობაში.\n"
+        f"{foot}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("validity", "dated", "expected"),
+    [
+        (
+            "ხელშეკრულება ძალაში შედის ხელმოწერისთანავე და მოქმედებს 12 (თორმეტი) თვის "
+            "განმავლობაში.",
+            "ქ. თბილისი, 2026 წლის 3 მარტი",
+            "2026-03-03/2027-03-03",
+        ),
+        (
+            "ხელშეკრულება ძალაშია ხელმოწერის დღიდან 1 (ერთი) წლის განმავლობაში.",
+            "ქ. თბილისი, 2026 წლის 3 მარტი",
+            "2026-03-03/2027-03-03",
+        ),
+        (
+            "ხელშეკრულება ძალაში შედის ხელმოწერის მომენტიდან და მოქმედებს 90 დღის ვადით.",
+            "ქ. თბილისი, 2026 წლის 3 მარტი",
+            "2026-03-03/2026-06-01",
+        ),
+        (
+            "ხელშეკრულება მოქმედებს 6 (ექვსი) თვის განმავლობაში.",
+            "ქ. თბილისი, 2026 წლის 3 მარტი",
+            "2026-03-03/2026-09-03",
+        ),
+        (
+            "The Contract enters into force upon signing and is valid for 6 months.",
+            "ქ. თბილისი, 2026 წლის 31 აგვისტო",
+            "2026-08-31/2027-02-28",
+        ),
+    ],
+)
+def test_a_validity_stated_as_a_length_is_the_closed_range(
+    validity: str, dated: str, expected: str
+) -> None:
+    text = _contract(validity, dated=dated)
+    assert _facts(text)["validity_period"] == [expected]
+    term = read_term(text)
+    assert term.validity is not None and term.validity.end is not None
+    assert f"{term.validity.start}/{term.validity.end}" == expected
+
+
+@pytest.mark.parametrize(
+    "validity",
+    [
+        "ხელშეკრულება ძალაში შედის ხელმოწერის მომენტიდან და მოქმედებს ნაკისრი ვალდებულებების "
+        "სრულად შესრულებამდე.",
+        # a length beside an until: which ends it the clause does not say
+        "ხელშეკრულება ძალაში შედის ხელმოწერისთანავე და მოქმედებს 12 თვის განმავლობაში ან "
+        "ვალდებულებების სრულ შესრულებამდე.",
+        # a count from another event, or a notice, is no length of the contract
+        "ხელშეკრულება ძალაში შედის ხელმოწერისთანავე და მოქმედებს მიწოდებიდან 12 თვის განმავლობაში.",
+        "ხელშეკრულება ძალაში შედის ხელმოწერისთანავე და მოქმედებს შესრულებამდე, ხოლო შეწყვეტის "
+        "შესახებ მხარე აცნობებს 30 დღით ადრე.",
+    ],
+)
+def test_a_validity_with_no_length_of_its_own_stays_open(validity: str) -> None:
+    assert _facts(_contract(validity))["validity_period"] == ["2026-03-03/.."]
+
+
+# --- EXTRACTION-R4-11: a signing date labelled at the foot is the signing date -------------------
+
+_OPEN = (
+    "ხელშეკრულება ძალაში შედის ხელმოწერის მომენტიდან და მოქმედებს ნაკისრი ვალდებულებების სრულად "
+    "შესრულებამდე."
+)
+
+
+@pytest.mark.parametrize(
+    "foot",
+    [
+        "ხელშეკრულების გაფორმების თარიღი: 03.03.2026\n",
+        "გაფორმების თარიღი: 2026 წლის 3 მარტი\n",
+        "Date of signing: 3 March 2026\n",
+    ],
+)
+def test_a_signing_date_labelled_at_the_foot_gives_the_validity(foot: str) -> None:
+    facts = _facts(_contract(_OPEN, dated="ქ. თბილისი", foot=foot))
+    assert facts["contract_date"] == ["2026-03-03"]
+    assert facts["validity_period"] == ["2026-03-03/.."]
+
+
+@pytest.mark.parametrize(
+    "foot",
+    [
+        "მიღება-ჩაბარების აქტის გაფორმების თარიღი: 30.04.2026\n",
+        "4.2. ჯარიმა გადაიხდება ხელმოწერის თარიღიდან 03.04.2026-მდე.\n",
+    ],
+)
+def test_a_date_after_another_label_is_no_signing_date(foot: str) -> None:
+    facts = _facts(_contract(_OPEN, dated="ქ. თბილისი", foot=foot))
+    assert "contract_date" not in facts
+    assert "validity_period" not in facts
+
+
+def test_the_preambles_date_comes_before_a_labelled_one() -> None:
+    text = _contract(_OPEN, foot="ხელშეკრულების გაფორმების თარიღი: 05.03.2026\n")
+    assert read_term(text).signed is not None
+    assert str(read_term(text).signed) == "2026-03-03"
