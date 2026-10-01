@@ -26,10 +26,10 @@ letters upper-cased. Nothing else - no stemming, no substring match, no case-end
 
 | type | canonical form | example |
 |---|---|---|
-| `party_name` | legal form + name, no quotes; the legal form **abbreviated** however the document writes it (`შეზღუდული პასუხისმგებლობის საზოგადოება` is `შპს`, `სააქციო საზოგადოება` is `სს`) | `შპს ნიმუში დეველოპმენტ` |
-| `party_director` | full name, **nominative**, without a courtesy title (`ბატონი`, `ქალბატონ`, `ბ-ნ`); a name written with an initial keeps it (`გ. ნიმუშაძე`); the act check compares it with the contract's director whose first name starts with that letter, on the surname | `გიორგი ნიმუშაძე` (not `…ნიმუშაძის`) |
+| `party_name` | legal form + name, no quotes; the legal form **abbreviated** however the document writes it (`შეზღუდული პასუხისმგებლობის საზოგადოება` is `შპს`, `სააქციო საზოგადოება` is `სს`, `ინდივიდუალური მეწარმე` and `ინდ. მეწარმე` are `ი/მ`) | `შპს ნიმუში დეველოპმენტ` |
+| `party_director` | full name, **nominative**, without a courtesy title (`ბატონი`, `ქალბატონ`, `ბ-ნ`) and without a patronymic (`გიორგის ძე`, `ზურაბის ასული` between the first name and the surname); a name written with an initial keeps it (`გ. ნიმუშაძე`); the act check compares it with the contract's director whose first name starts with that letter, on the surname | `გიორგი ნიმუშაძე` (not `…ნიმუშაძის`) |
 | `party_address` | as written, no quotes, no trailing punctuation; it ends where another requisite (code, account, bank) begins | `ქ. თბილისი, ნიმუშის ქ. N5` |
-| `party_id_code` | digits only (9 or 11); a code printed in groups (`123 456 789`) is the same code | `123456789` |
+| `party_id_code` | digits only (9 or 11); a code printed in groups of three by one separator (`123 456 789`, `123-456-789`, `123.456.789`) is the same code; a labelled run of another length is no code fact | `123456789` |
 | `bank_account` | IBAN, no spaces, upper case; printed in groups or broken over a line it is read whole, to its country's fixed length (GE: 22), whether or not its checksum holds | `GE00NB0000000000000000` |
 | `bank_code` | BIC/SWIFT, upper case | `NBGEGE22` |
 | `cadastral_code` | dotted, as written | `01.02.03.456` |
@@ -42,7 +42,7 @@ letters upper-cased. Nothing else - no stemming, no substring match, no case-end
 | `warranty_period` | ISO duration | `P24M` |
 | `payment_terms` | ISO duration + ` working`/` calendar`, then ` advance N%` when an advance is stated; the share alone when no deadline is; never a bare number. A staged payment states the deadline of the balance (the payment after the advance) | `P5D working`, `P10D working advance 30%`, `advance 30%` |
 | `vat_status` | one of `incl`, `excl`, `none`, `net` | `incl` for "გადასახადების ჩათვლით" |
-| `total_amount`, `price` | number, `.` decimal, no separators (compared numerically) | `2400` |
+| `total_amount`, `price` | number, `.` decimal, no separators (compared numerically); thousands are grouped by a space of any kind (no-break, thin, narrow no-break), an apostrophe (`36'000`), a dot or a comma | `2400` |
 | `penalty` | number with `%` (per period after it if stated: `0.5% per day`) or an amount | `0.5% per day` |
 | `quantity` | number + unit | `4 item` |
 | `contract_number` | as written, upper case, no spaces | `PR-2026/017` |
@@ -108,8 +108,10 @@ How the parties and their requisites are read (red-team round 2):
   where it ends.
 * **Signatories.** A party's head signs as `დირექტორი` (also `გენერალური`/`აღმასრულებელი`),
   `თავმჯდომარე`, `ხელმძღვანელი`, `რექტორი`, `პრეზიდენტი` or `მმართველი`, in any case;
-  `პრორექტორი`, `ვიცე-პრეზიდენტი` and a title after another body's genitive (`პროექტის
-  ხელმძღვანელი`) are not the party's head. `ხელმძღვანელი` and `მმართველი` are adjectives too
+  `პრორექტორი`, `ვიცე-პრეზიდენტი`, a title after another body's genitive (`პროექტის
+  ხელმძღვანელი`) and a director narrowed by a function (`ფინანსური`, `კომერციული`,
+  `ტექნიკური`, `იურიდიული`, `საოპერაციო`, … `დირექტორი`: red team R3) are not the party's
+  head; such a co-signer is not compared. `ხელმძღვანელი` and `მმართველი` are adjectives too
   (`ხელმძღვანელი პირი`, `მმართველი ორგანო`): a name after them needs its place (a colon,
   `სახით`, the end of its line) or a second mention. A deputy or an acting head (`დირექტორის
   მოადგილე`, `… მოვალეობის შემსრულებელი`) is not `party_director`.
@@ -253,7 +255,17 @@ strict_findings: true             # anything else reported (any severity) is a f
     codes, the project, the period) is a skip note saying so, never a finding - an English
     label's code included;
   * a code the act gives a party whose code the contract does not state is a skip note, never
-    corrected to the other party's code; a signatory nearest to the one the contract names for
+    corrected to the other party's code;
+  * a labelled code of the wrong length (7 to 13 digits) or grouped by hyphens or dots is read
+    as the code the act states (red team R3): not the contract's → `AOA.ID_CODES`, text = the
+    code as printed, correction = the contract code it is two digit slips or fewer from (a digit
+    dropped, doubled or changed), written in the act's grouping (`987-654-312` →
+    `987-654-321`), and none when no contract code is that near; the message gives a wrong
+    length. Whether every party the contract codes must state its code in the act is not
+    decided: a code left out is silent;
+  * a signatory written with a patronymic (`დავით გიორგის ძე მელაძე`) is compared on the first
+    name and the surname; a finding quotes the whole name as written and its correction keeps
+    the patronymic, in the act's case; a signatory nearest to the one the contract names for
     a party the act does not name in a readable form (no quotes) is a skip note, never
     corrected to the neighbour's; a deputy or an acting head is compared only with a deputy the
     contract names, and otherwise leaves a skip note;
