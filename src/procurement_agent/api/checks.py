@@ -501,7 +501,15 @@ def annotated_pdf(settings: Settings, aoa: Document, report: CheckReport) -> Res
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "annotated.pdf"
         try:
-            annotate_pdf(source, report.findings, out, summary=summary_comment(report), items=items)
+            annotate_pdf(
+                source,
+                report.findings,
+                out,
+                # the text the findings were read in, as for a Word act
+                text=load_document_text(settings, aoa.id, aoa.kind),
+                summary=summary_comment(report),
+                items=items,
+            )
         except UnsupportedDocumentError as e:
             raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, str(e)) from e
         data = out.read_bytes()

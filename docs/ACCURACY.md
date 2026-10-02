@@ -386,6 +386,13 @@ body's text is left as it was.
   the client's 7 scanned acts inside the image (Tesseract), each checked against its Word
   contract: 45 findings, 41 marked on the line OCR read them in (32 highlights, some lines
   holding two findings), 4 in the first page's note.
+* **A page cropped or turned (red team R6, R6-13 and R6-14):** a page shows its crop box,
+  turned as it says. The note was placed by the page's full size, unturned, and could fall
+  outside what is shown; a scanned line's box, which Docling gives on the page as shown, was
+  used as if in the page's own space. Both now go through the crop box and the turn - checked
+  against PDFium's own page-to-screen transform for every quarter turn. The annotated copy is
+  also rebuilt from the act's pages (R6-08, `docs/SECURITY.md`); on Test Set 4's PDF acts every
+  mark is where it was.
 
 ### Scanned PDFs (OCR inside the Docker image, Tesseract `kat+eng`, 216 dpi)
 

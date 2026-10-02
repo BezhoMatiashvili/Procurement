@@ -194,6 +194,165 @@ class TestScanned:
         assert _close(item.box, (72.0, 688.0, 300.0, 700.0))
 
 
+def _with_active_content(src: Path, out: Path, *, page_action: bool = False) -> Path:
+    """``src`` with what a PDF can run or carry added by an incremental update: an action and a
+    script run on opening, an attached file, and on the first page a link that launches a
+    program and one that runs a script - and, with ``page_action``, a script run when the first
+    page opens. Invented content; no viewer runs it here."""
+    import re
+
+    data = src.read_bytes()
+    root = int(re.findall(rb"/Root (\d+) 0 R", data)[-1])
+
+    def obj(n: int) -> bytes:
+        found = re.search(rb"\n%d 0 obj\s*(<<.*?>>)\s*endobj" % n, data, re.S)
+        assert found is not None
+        return found.group(1)
+
+    catalog = obj(root)
+    pages = obj(int(re.search(rb"/Pages (\d+) 0 R", catalog).group(1)))  # type: ignore[union-attr]
+    first = int(re.search(rb"/Kids\s*\[\s*(\d+) 0 R", pages).group(1))  # type: ignore[union-attr]
+    script = b"<< /S /JavaScript /JS (app.alert\\('invented'\\);) >>"
+    launch = b"<< /S /Launch /F (x.exe) >>"
+    objs = {
+        990: script,
+        991: b"<< /Names [(opened) 992 0 R] >>",
+        992: script,
+        993: b"<< /Type /Filespec /F (payload.exe) /EF << /F 994 0 R >> >>",
+        994: b"<< /Type /EmbeddedFile /Length 5 >>\nstream\nMZ...\nendstream",
+        995: b"<< /Names [(payload.exe) 993 0 R] >>",
+        996: b"<< /Type /Annot /Subtype /Link /Rect [10 10 100 30] /A " + launch + b" >>",
+        997: b"<< /Type /Annot /Subtype /Link /Rect [10 40 100 60] /A " + script + b" >>",
+        root: catalog[:-2]
+        + b" /OpenAction 990 0 R /Names << /JavaScript 991 0 R /EmbeddedFiles 995 0 R >> >>",
+        first: obj(first)[:-2]
+        + (b" /AA << /O " + script + b" >>" if page_action else b"")
+        + b" /Annots [996 0 R 997 0 R] >>",
+    }
+    size = int(re.findall(rb"/Size (\d+)", data)[-1])
+    prev = int(re.findall(rb"startxref\s+(\d+)", data)[-1])
+    body = bytearray(data if data.endswith(b"\n") else data + b"\n")
+    offsets = {}
+    for n in sorted(objs):
+        offsets[n] = len(body)
+        body += b"%d 0 obj\n" % n + objs[n] + b"\nendobj\n"
+    xref = len(body)
+    body += b"xref\n" + b"".join(b"%d 1\n%010d 00000 n \n" % (n, offsets[n]) for n in sorted(objs))
+    body += b"trailer\n<< /Size %d /Root %d 0 R /Prev %d >>\nstartxref\n%d\n%%%%EOF\n" % (
+        max(size, 998),
+        root,
+        prev,
+        xref,
+    )
+    out.write_bytes(bytes(body))
+    return out
+
+
+_ACTIVE = (b"/JavaScript", b"/OpenAction", b"/EmbeddedFile", b"/Launch", b"app.alert", b"payload")
+
+
+class TestActiveContent:
+    """Red team R6, R6-08: the annotated copy is the act's pages and the notes, nothing that runs
+    or is carried inside - a reviewer opens it as the application's own output."""
+
+    def test_what_a_pdf_runs_or_carries_does_not_reach_the_annotated_copy(
+        self, tmp_path: Path
+    ) -> None:
+        src = _with_active_content(TEXT_PDF, tmp_path / "act.pdf")
+        assert all(m in src.read_bytes() for m in _ACTIVE)
+        out, unanchored = annotate_pdf(src, [_finding("405123456")], tmp_path / "o.pdf")
+        data = out.read_bytes()
+        assert [m for m in _ACTIVE if m in data] == []
+        pdf = pdfium.PdfDocument(str(out))
+        try:
+            assert pdfium_c.FPDFDoc_GetJavaScriptActionCount(pdf) == 0
+            assert pdfium_c.FPDFDoc_GetAttachmentCount(pdf) == 0
+        finally:
+            pdf.close()
+        # the words are still marked where they stand, and nothing else is there
+        assert unanchored == []
+        marks = _annots(out)
+        assert [m["subtype"] for m in marks] == [HIGHLIGHT, HIGHLIGHT]
+        assert _close(marks[0]["rect"], _word_box(TEXT_PDF, "405123456"))
+
+    def test_a_page_that_runs_a_script_when_opened_is_refused(self, tmp_path: Path) -> None:
+        src = _with_active_content(TEXT_PDF, tmp_path / "act.pdf", page_action=True)
+        with pytest.raises(UnsupportedDocumentError):
+            annotate_pdf(src, [_finding("405123456")], tmp_path / "o.pdf")
+
+
+def _cropped(src: Path, out: Path, crop: tuple[float, ...], turn: int) -> Path:
+    pdf = pdfium.PdfDocument(str(src))
+    try:
+        page = pdf[0]
+        page.set_cropbox(*crop)
+        page.set_rotation(turn)
+        pdf.save(str(out))
+    finally:
+        pdf.close()
+    return out
+
+
+def _shown(path: Path, box: tuple[float, ...]) -> tuple[float, float, float, float]:
+    """A box on the first page in the page's own space, as the page is shown: PDFium's own
+    transform, its origin the shown page's bottom left."""
+    pdf = pdfium.PdfDocument(str(path))
+    try:
+        page = pdf[0]
+        w, h = page.get_size()
+        xs, ys = [], []
+        for x, y in ((box[0], box[1]), (box[2], box[3])):
+            dx, dy = ctypes.c_int(), ctypes.c_int()
+            pdfium_c.FPDF_PageToDevice(
+                page, 0, 0, int(w * 10), int(h * 10), 0, x, y, ctypes.byref(dx), ctypes.byref(dy)
+            )
+            xs.append(dx.value / 10)
+            ys.append(h - dy.value / 10)
+        return (min(xs), min(ys), max(xs), max(ys))
+    finally:
+        pdf.close()
+
+
+_CROP = (40.0, 60.0, 500.0, 760.0)
+
+
+class TestAPageCroppedAndTurned:
+    """Red team R6, R6-13 and R6-14: a page shows its crop box, turned as it says - a note or a
+    mark placed by the page's full size, unturned, falls outside what is shown or on the wrong
+    line."""
+
+    @pytest.mark.parametrize("turn", [0, 90, 180, 270])
+    def test_the_note_is_at_the_top_left_corner_the_page_shows(
+        self, tmp_path: Path, turn: int
+    ) -> None:
+        src = _cropped(TEXT_PDF, tmp_path / "act.pdf", _CROP, turn)
+        out, _ = annotate_pdf(src, [], tmp_path / "o.pdf", summary="[შეჯამება / Summary] test")
+        [note] = _annots(out)
+        left, bottom, right, top = note["rect"]
+        assert _CROP[0] <= left < right <= _CROP[2] and _CROP[1] <= bottom < top <= _CROP[3]
+        shown = _shown(out, note["rect"])
+        pdf = pdfium.PdfDocument(str(out))
+        try:
+            _, height = pdf[0].get_size()
+        finally:
+            pdf.close()
+        assert _close(shown, (12.0, height - 32.0, 32.0, height - 12.0))
+
+    @pytest.mark.parametrize("turn", [0, 90, 180, 270])
+    def test_a_scanned_line_is_marked_where_the_page_shows_it(
+        self, tmp_path: Path, turn: int
+    ) -> None:
+        src = _cropped(SCANNED_PDF, tmp_path / "scan.pdf", _CROP, turn)
+        # a line as Docling gives it: on the page as shown, its origin the shown bottom left
+        line = PdfItem(1, (72.0, 300.0, 400.0, 312.0), 'შპს "სინთეზ ენერჯი" (ს/კ 405123456)')
+        out, unanchored = annotate_pdf(
+            src, [_finding("405123456")], tmp_path / "o.pdf", items=[line]
+        )
+        assert unanchored == []
+        [mark] = _annots(out)
+        assert _close(_shown(out, mark["rect"]), line.box)
+
+
 class TestRefused:
     def test_a_file_that_is_not_a_pdf_is_refused(self, tmp_path: Path) -> None:
         other = tmp_path / "act.docx"

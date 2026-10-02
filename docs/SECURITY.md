@@ -308,7 +308,14 @@ reach every copy of the data, which is why the volume belongs on an encrypted di
   setters on annotations the module creates, under the process-wide PDFium lock. It is the one
   module allowed that import (`tests/unit/test_egress_surface.py`, `FFI_IMPORTS`); `ctypes`
   itself stays forbidden everywhere, and the output carries nothing but annotations - no
-  action, link or script (`tests/unit/test_pdf_annotate.py`).
+  action, link or script (`tests/unit/test_pdf_annotate.py`). Nor does it carry the act's own
+  (red team R6, R6-08): the copy is a new document the act's pages are imported into, so what
+  the file runs or carries when it opens - an open action, a document script, an attached file,
+  a form - stays behind; each page's own annotations (links that launch a program or run a
+  script, form fields) are drawn into the page and their actions dropped, and the pages are
+  imported once more so that no object they no longer use is saved. A page that runs an action
+  itself when opened or closed, which nothing can take off it, is refused (415). Three
+  mutations of `scripts/mutate_security.py` stand for these controls.
 * Model files are checked against a manifest at start (§2); the formats in use (safetensors, ONNX)
   cannot carry code the way a pickle can, so this detects a swapped or truncated weight file, not
   a code-execution attempt.

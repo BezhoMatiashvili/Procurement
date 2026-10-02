@@ -14,6 +14,13 @@ highlighted, and the note says the line is marked, not the word.
 
 Findings no words of the act stand for, and the summary of what could not be checked, go in a
 note on the first page. Nothing but annotations is added: no action, no link, no script.
+
+The annotated copy is a new document holding the act's pages, each with its own annotations
+drawn into it, and the notes - never the act's file with notes added: what a PDF runs or carries
+when it opens (an action, a script, an attached file, a form, a link that launches a program)
+stays behind, since a reviewer opens the copy as the application's own output (red team R6,
+R6-08). A page that runs an action itself when opened or closed is refused: nothing can take it
+off the page.
 """
 
 from __future__ import annotations
@@ -244,15 +251,50 @@ def _highlight(page: Any, boxes: Sequence[Box], note: str, severity: str) -> boo
     return True
 
 
+def _shown(page: Any) -> tuple[Box, int]:
+    """What a page shows - its crop box, in the page's own space - and how far it is turned
+    when shown, clockwise."""
+    left, bottom, right, top = page.get_cropbox()
+    return (float(left), float(bottom), float(right), float(top)), int(page.get_rotation()) % 360
+
+
+def _to_page(page: Any, box: Box) -> Box:
+    """A box on the page as it is shown - Docling's, its origin the shown page's bottom left - in
+    the page's own space: the crop box's corner added and the turn undone (red team R6, R6-14)."""
+    (left, bottom, right, top), turn = _shown(page)
+
+    def point(x: float, y: float) -> tuple[float, float]:
+        if turn == 90:
+            return right - y, bottom + x
+        if turn == 180:
+            return right - x, top - y
+        if turn == 270:
+            return left + y, top - x
+        return left + x, bottom + y
+
+    (x0, y0), (x1, y1) = point(box[0], box[1]), point(box[2], box[3])
+    return (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+
+
+def _corner_note(page: Any) -> Any:
+    """A note's box, 20 points square, 12 points in from the corner the page shows at its top
+    left - inside its crop box, however it is turned (red team R6, R6-13)."""
+    (left, bottom, right, top), turn = _shown(page)
+    x, y = {
+        90: (left + 12.0, bottom + 12.0),
+        180: (right - 32.0, bottom + 12.0),
+        270: (right - 32.0, top - 32.0),
+    }.get(turn, (left + 12.0, top - 32.0))
+    return pdfium_c.FS_RECTF(x, y + 20.0, x + 20.0, y)
+
+
 def _sticky_note(page: Any, note: str) -> None:
     """A note on the page's top left corner: what no words of the act stand for."""
     annot = pdfium_c.FPDFPage_CreateAnnot(page, pdfium_c.FPDF_ANNOT_TEXT)
     if not annot:
         return
     try:
-        _width, height = page.get_size()
-        rect = pdfium_c.FS_RECTF(12.0, height - 12.0, 32.0, height - 32.0)
-        pdfium_c.FPDFAnnot_SetRect(annot, rect)
+        pdfium_c.FPDFAnnot_SetRect(annot, _corner_note(page))
         _set_text(annot, "Contents", note)
         _set_text(annot, "T", AUTHOR)
         pdfium_c.FPDFAnnot_SetFlags(annot, pdfium_c.FPDF_ANNOT_FLAG_PRINT)
@@ -281,14 +323,61 @@ def annotate_pdf(
         raise UnsupportedDocumentError(msg)
     with PDFIUM_LOCK:  # pdfium is not thread-safe, not even across documents
         try:
-            pdf = pdfium.PdfDocument(str(source))
+            source_pdf = pdfium.PdfDocument(str(source))
         except (pdfium.PdfiumError, OSError) as e:
             msg = f"the file is not a PDF notes can be written into ({type(e).__name__})"
             raise UnsupportedDocumentError(msg) from e
         try:
-            return _annotate(pdf, findings, out_path, text, summary, items)
+            # the act's pages in a document of their own: what the act's file runs or carries
+            # when it opens - an action, a script, an attached file, a form - stays behind
+            pages = pdfium.PdfDocument.new()
+            try:
+                pages.import_pages(source_pdf)
+                _cleared(pages)
+                # and again: the annotations the pages no longer hold stay behind as well -
+                # a document saves every object it was ever given
+                pdf = pdfium.PdfDocument.new()
+                try:
+                    pdf.import_pages(pages)
+                    return _annotate(pdf, findings, out_path, text, summary, items)
+                finally:
+                    pdf.close()
+            finally:
+                pages.close()
         finally:
-            pdf.close()
+            source_pdf.close()
+
+
+_PAGE_ACTIONS = (pdfium_c.FPDFPAGE_AACTION_OPEN, pdfium_c.FPDFPAGE_AACTION_CLOSE)
+
+
+def _cleared(pdf: pdfium.PdfDocument) -> None:
+    """Each page's own annotations - links, form fields, notes - drawn into the page, their
+    actions gone with them; ``UnsupportedDocumentError`` for a document that still runs or
+    carries anything: a page's own action on opening or closing, which nothing takes off it."""
+    if pdfium_c.FPDFDoc_GetJavaScriptActionCount(pdf) or pdfium_c.FPDFDoc_GetAttachmentCount(pdf):
+        msg = "the PDF carries a script or an attached file: no annotated copy of it is made"
+        raise UnsupportedDocumentError(msg)
+    for i in range(len(pdf)):
+        page = pdf[i]
+        try:
+            if any(pdfium_c.FPDF_GetPageAAction(page, kind) for kind in _PAGE_ACTIONS):
+                msg = (
+                    "the PDF runs an action when a page is opened or closed: no annotated copy "
+                    "of it is made"
+                )
+                raise UnsupportedDocumentError(msg)
+            flattened = pdfium_c.FPDFPage_Flatten(page, pdfium_c.FLAT_NORMALDISPLAY)
+        finally:
+            page.close()
+        page = pdf[i]  # a flattened page is read again
+        try:
+            left = pdfium_c.FPDFPage_GetAnnotCount(page)
+        finally:
+            page.close()
+        if flattened == pdfium_c.FLATTEN_FAIL or left:
+            msg = "the PDF's own annotations could not be drawn into its pages"
+            raise UnsupportedDocumentError(msg)
 
 
 def _annotate(
@@ -315,16 +404,20 @@ def _annotate(
             for place in places:
                 key = (place.page, tuple(tuple(round(v, 1) for v in b) for b in place.boxes))
                 notes.setdefault(key, (place, []))[1].append(finding)
-        for place, here in notes.values():
-            note = "\n\n".join(comment_text(f) for f in here)
-            if not place.exact:
-                note = f"{note}\n\n{_SCANNED_NOTE}"
-            severity = min((f.severity for f in here), key=lambda s: _SEVERITY_ORDER[s])
-            _highlight(pdf[place.page], place.boxes, note, severity)
-        extra = [*([summary] if summary else []), *(comment_text(f) for f in unanchored)]
-        if extra and len(pdf):
-            _sticky_note(pdf[0], "\n\n".join(extra))
     finally:
         text_pages.close()
+    for place, here in notes.values():
+        note = "\n\n".join(comment_text(f) for f in here)
+        page = pdf[place.page]
+        boxes = place.boxes
+        if not place.exact:
+            # a scanned page's line is Docling's, on the page as shown
+            boxes = tuple(_to_page(page, box) for box in boxes)
+            note = f"{note}\n\n{_SCANNED_NOTE}"
+        severity = min((f.severity for f in here), key=lambda s: _SEVERITY_ORDER[s])
+        _highlight(page, boxes, note, severity)
+    extra = [*([summary] if summary else []), *(comment_text(f) for f in unanchored)]
+    if extra and len(pdf):
+        _sticky_note(pdf[0], "\n\n".join(extra))
     pdf.save(str(out_path))
     return out_path, unanchored
