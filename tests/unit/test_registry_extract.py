@@ -151,6 +151,8 @@ def test_a_liquidation_under_way_is_the_status() -> None:
     "text",
     [
         "ხელშეკრულება N5\nსაიდენტიფიკაციო კოდი: 400000017",
+        # a contract that names a party by its labels is still no extract: no extract's title
+        "ხელშეკრულება N5\nსაფირმო სახელწოდება: შპს ნიმუში\nსაიდენტიფიკაციო კოდი: 400000017",
         TITLE + "საფირმო სახელწოდება: შპს ნიმუში\n",  # no code
         TITLE + "საიდენტიფიკაციო კოდი: 400000017\n",  # no name
     ],

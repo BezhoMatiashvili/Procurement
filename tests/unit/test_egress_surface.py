@@ -13,7 +13,11 @@ from pathlib import Path
 
 import pytest
 
-SRC = Path(__file__).resolve().parents[2] / "src" / "procurement_agent"
+import procurement_agent
+
+#: The package as Python imports it - the source under test, a mutated copy of it included
+#: (scripts/mutate_security.py) - rather than whatever sits beside this file.
+SRC = Path(procurement_agent.__file__).resolve().parent
 
 #: Modules that can reach a network, and the only file that may import each.
 NETWORK_IMPORTS = {

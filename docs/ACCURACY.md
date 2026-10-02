@@ -333,9 +333,10 @@ body's text is left as it was.
   A scanned page has no characters: the line or table cell Docling's OCR read the words in is
   highlighted, and the note says so. The summary and the findings no words stand for are a note
   on the first page; nothing but annotations is added (tests check for no script, action or
-  link). Measured on the synthetic fixtures and an upload through the API end to end; the gold
-  sets hold no PDF act, so the client's scans are checked inside the image (OCR) in the final
-  run.
+  link). Measured on the synthetic fixtures and an upload through the API end to end, and on
+  the client's 7 scanned acts inside the image (Tesseract), each checked against its Word
+  contract: 45 findings, 41 marked on the line OCR read them in (32 highlights, some lines
+  holding two findings), 4 in the first page's note.
 
 ### Scanned PDFs (OCR inside the Docker image, Tesseract `kat+eng`, 216 dpi)
 

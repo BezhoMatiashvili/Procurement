@@ -65,6 +65,64 @@ class Mutation:
 
 
 MUTATIONS = [
+    # --- what the acceptance-act work added: imported and typed rates, registry extracts, the
+    # --- annotated files
+    Mutation(
+        "rates_quantity_unchecked",
+        "src/procurement_agent/fx/rates_table.py",
+        "if not isinstance(value, int) or value not in QUANTITIES:",
+        "if not isinstance(value, int):",
+        "a rate file's per-unit quantity is not checked: a rate per 100 units is read per unit",
+        ("tests/unit/test_fx_rates_table.py",),
+    ),
+    Mutation(
+        "rates_unbounded",
+        "src/procurement_agent/fx/rates_table.py",
+        "if not rate.is_finite() or rate <= 0 or rate >= _MAX_RATE:",
+        "if not rate.is_finite():",
+        "a rate file may carry a zero, negative or absurd rate into an invoice",
+        ("tests/unit/test_fx_rates_table.py",),
+    ),
+    Mutation(
+        "typed_rate_any_currency",
+        "src/procurement_agent/api/checks.py",
+        'currency: str = Field(pattern=r"^[A-Z]{3}$")',
+        "currency: str = Field(max_length=64)",
+        "a typed rate is taken for any currency text",
+        ("tests/integration/test_checks_api.py",),
+    ),
+    Mutation(
+        "typed_rate_unbounded",
+        "src/procurement_agent/api/checks.py",
+        "rate: Decimal = Field(gt=0, lt=1_000_000, max_digits=14, decimal_places=6)",
+        "rate: Decimal = Field()",
+        "a typed rate may be zero, negative or carry any precision",
+        ("tests/integration/test_checks_api.py",),
+    ),
+    Mutation(
+        "extract_without_title",
+        "src/procurement_agent/registry/extract.py",
+        "if not _TITLE.search(text):",
+        "if False:",
+        "any upload that names a party by its labels is trusted as a registry extract",
+        ("tests/unit/test_registry_extract.py",),
+    ),
+    Mutation(
+        "tracked_change_text_unsanitised",
+        "src/procurement_agent/report/docx_annotate.py",
+        'text = _XML_ILLEGAL.sub("", new)',
+        "text = new",
+        "a correction's characters XML cannot carry break the annotated act",
+        ("tests/unit/test_docx_tracked_changes.py",),
+    ),
+    Mutation(
+        "raw_pdfium_anywhere",
+        "src/procurement_agent/ingestion/render.py",
+        "import pypdfium2 as pdfium\n",
+        "import pypdfium2 as pdfium\nimport pypdfium2.raw as pdfium_c  # noqa: F401\n",
+        "PDFium's raw C bindings are imported outside the one module allowed them",
+        ("tests/unit/test_egress_surface.py",),
+    ),
     Mutation(
         "owned_document",
         "src/procurement_agent/api/deps.py",
