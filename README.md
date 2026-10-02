@@ -71,7 +71,8 @@ curl -s -H "$K" -X POST localhost:8000/api/v1/checks/aoa \
      -d '{"aoa_document_id":"<act>","contract_document_id":"<contract>"}'
 # ?format=docx returns the act with one Word comment per finding. For an act in a foreign
 # currency, "advance_amount" (in the act's currency; 0 = none) and "advance_date" (ISO) give the
-# advance paid; left out, the act's own is used
+# advance paid; left out, the act's own is used. "rates": [{"currency":"USD","date":"2026-09-10",
+# "rate":"2.6104"}] types in a day's rate (lari per one unit), used instead of the imported one
 # optional: ask the local model about the notes the rules could not decide (subject, services);
 # 202 queues a job, 200 reuses the one that asked the same thing, "job": null means none open
 curl -s -H "$K" -X POST localhost:8000/api/v1/checks/aoa/review \
@@ -136,8 +137,16 @@ and a character span, so the same object serves the API, the Excel export and th
 
 An act written in a foreign currency gets one note with the invoice it needs in lari, at the
 NBG rate: the advance at the rate of the day it was paid, the rest at the rate of the act's
-date. No rate source is connected yet (`PA_FX_RATE_SOURCE=none`, `fx/provider.py`), so the note
-gives the formula and the days to look up, and a skip note says the total was not calculated.
+date, each term rounded to the tetri - `1,000.00 USD × NBG rate of 2026-09-10 (2.6104) =
+2,610.40 GEL + 10,000.00 USD × NBG rate of 2026-09-17 (2.6081) = 26,081.00 GEL; in total
+28,691.40 GEL — verify the invoice`, the client's own example. The server never goes online, so
+the rates arrive as a file: `scripts/fetch_nbg_rates.py`, run on any connected machine, asks the
+NBG for every day of a range (nothing but dates and currency codes leaves that machine), and
+`procurement-agent load-fx-rates <file>` imports it (`fx-rates-status` lists the days held). A
+day no file covered has no rate - a neighbouring day's is never borrowed - and the report's form
+offers a field for each day the invoice uses, to type a missing rate or correct an imported one;
+the note then says the rate was entered. Amounts are read in any currency the NBG quotes (codes,
+signs, and the Georgian and English names - with the country where the name alone is ambiguous).
 The advance is read from the act, or entered on the upload page or the report's re-run form,
 where the one read from the act comes back to be confirmed; a contract's advance is never taken
 for a payment, since a contract only plans one. A small business or a foreign organisation needs
@@ -323,9 +332,9 @@ number words changed and every digit stayed put, and the bank code naming a diff
 
 Next: Phase 3 proper — a contract draft reviewed against *itself* for internal inconsistency
 (the client's own draft uses "შემკვეთი" and "დამკვეთი" for the same party), which the
-comparison's entity layer does not cover because it compares two files rather than one; Phase 5
-power-of-attorney register lookup; and an NBG rate source for the foreign-currency invoice,
-which today stops at the formula (`fx/provider.py`).
+comparison's entity layer does not cover because it compares two files rather than one; and
+Phase 5, the power-of-attorney register lookup (the client's rule 2, "not relevant at this
+stage").
 
 How accuracy is measured, and which approaches were tried and rejected:
 **[docs/ACCURACY.md](docs/ACCURACY.md)**.

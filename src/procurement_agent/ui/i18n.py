@@ -193,6 +193,18 @@ STRINGS: dict[str, tuple[str, str]] = {
         "The advance was read from the act — confirm or correct it.",
         "ავანსი ამოღებულია აქტიდან — დაადასტურეთ ან შეასწორეთ.",
     ),
+    "aoa.rate.label": (
+        "Exchange rate, GEL per 1 {currency}, {day}",
+        "კურსი, ლარი 1 {currency}-ზე, {day}",
+    ),
+    "aoa.rate.nbg": (
+        "Imported NBG rate: {rate}. Type a rate only to use another one.",
+        "შემოტანილი NBG-ის კურსი: {rate}. კურსი შეიყვანეთ მხოლოდ სხვა კურსის გამოსაყენებლად.",
+    ),
+    "aoa.rate.missing": (
+        "No NBG rate for this day has been imported: type the rate from nbg.gov.ge.",
+        "ამ დღის NBG-ის კურსი შემოტანილი არ არის: შეიყვანეთ კურსი nbg.gov.ge-დან.",
+    ),
     "aoa.not_applicable": (
         "Not applicable to this contractor type: {rules}.",
         "ამ ტიპის შემსრულებელზე არ ვრცელდება: {rules}.",

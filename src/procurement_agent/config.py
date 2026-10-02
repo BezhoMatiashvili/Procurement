@@ -268,10 +268,13 @@ class Settings(BaseSettings):
     registry_db: Path | None = None
 
     # --- exchange rates for the foreign-currency invoice (client rule 9) ---
-    #: Where the NBG rates come from (``fx/provider.py``). Only "none" exists: with no source the
-    #: check writes out the invoice formula and the days whose rates to look up, and says the
-    #: total in lari was not calculated. A connector adds its name here.
-    fx_rate_source: Literal["none"] = "none"
+    #: Where the NBG rates come from (``fx/provider.py``): "table" reads the rates an operator
+    #: imported (``procurement-agent load-fx-rates``, from a file ``scripts/fetch_nbg_rates.py``
+    #: wrote on a connected machine); "none" turns the lookup off. A day with no rate leaves the
+    #: invoice as a formula with the days to look up, unless the user types the rate in.
+    fx_rate_source: Literal["none", "table"] = "table"
+    #: The imported rates table; default ``<data_dir>/fx_rates.db``.
+    fx_rates_db: Path | None = None
 
     # --- network ---
     #: Refuse, inside the process, every outbound connection that is not loopback, a Unix socket
@@ -367,6 +370,11 @@ class Settings(BaseSettings):
     @property
     def db_path(self) -> Path:
         return self.data_dir / "app.db"
+
+    @property
+    def fx_rates_path(self) -> Path:
+        """The imported NBG rates (``fx/rates_table.py``)."""
+        return self.fx_rates_db or self.data_dir / "fx_rates.db"
 
     @property
     def max_file_bytes(self) -> int:

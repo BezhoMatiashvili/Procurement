@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import date
+from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, cast, get_args
 from urllib.parse import urlencode
@@ -44,8 +46,12 @@ from procurement_agent.api.deps import (
 from procurement_agent.api.extraction import ExtractRequest, start_extraction
 from procurement_agent.checks.aoa import ContractorType
 from procurement_agent.checks.compare import ComparisonReport, Hunk, ValueDelta
-from procurement_agent.checks.findings import Finding
-from procurement_agent.checks.fx_invoice import parse_advance
+from procurement_agent.checks.findings import CheckReport, Finding
+from procurement_agent.checks.fx_invoice import (
+    format_entered_rates,
+    parse_advance,
+    parse_entered_rates,
+)
 from procurement_agent.config import Settings, get_settings
 from procurement_agent.db import get_session
 from procurement_agent.extraction.labels import LABELS
@@ -636,6 +642,7 @@ def aoa_report(
             session, principal, act, contract, contractor_type
         )
         advance = parse_advance(advance_amount, advance_date)
+        typed, typed_link = _typed_rates(request)
         review_row = owned_review_job(session, principal, review, aoa_doc, contract_doc)
         report = run_aoa(
             settings,
@@ -644,11 +651,19 @@ def aoa_report(
             ctype,
             advance,
             review_job_id=review_row.id if review_row is not None else None,
+            entered_rates=typed,
         )
     except HTTPException as e:
         return _http_error(request, principal, e, "/ui/start/aoa")
     _remember_aoa(
-        session, principal, aoa_doc, contract_doc, ctype, (advance_amount, advance_date), review_row
+        session,
+        principal,
+        aoa_doc,
+        contract_doc,
+        ctype,
+        (advance_amount, advance_date),
+        review_row,
+        typed_link,
     )
     audit(
         session,
@@ -670,6 +685,7 @@ def aoa_report(
         contractor_types=get_args(ContractorType),
         query=request.url.query,
         groups=_by_severity(report.findings),
+        fx_days=_fx_days(report),
         # the model review: offered only where it can run, and only for notes left open
         can_review=settings.aoa_llm_enabled
         and get_llm(request) is not None
@@ -714,6 +730,7 @@ def aoa_annotated(
             ctype,
             advance,
             review_job_id=review_row.id if review_row is not None else None,
+            entered_rates=_typed_rates(request)[0],
         )
         # 415 for a scan or a spreadsheet: an HTML navigation must not land on raw JSON.
         resp = annotated_docx(settings, aoa_doc, report)
@@ -778,6 +795,8 @@ def aoa_review(
     for name, value in (("advance_amount", advance_amount), ("advance_date", advance_date)):
         if value and value.strip():
             params[name] = value.strip()
+    if typed_link := _typed_rates(request)[1]:
+        params["rates"] = typed_link
     if queued is not None and queued.job is not None:
         params["review"] = queued.job.id
     return RedirectResponse(
@@ -1246,6 +1265,36 @@ def _aoa_inputs(
     return aoa_doc, contract_doc, cast("ContractorType | None", valid)
 
 
+def _typed_rates(request: Request) -> tuple[dict[tuple[str, date], Decimal], str]:
+    """The exchange rates typed in for rule 9's invoice, from the link (``rates``) and from the
+    report form's fields (``rate_day`` / ``rate_value`` pairs, which win), and the same rates
+    written back as a link carries them - for the history and the next links. Lenient: what does
+    not read is left out (``fx_invoice.parse_entered_rates``)."""
+    q = request.query_params
+    days = [d[:24] for d in q.getlist("rate_day")]
+    values = [v[:24] for v in q.getlist("rate_value")]
+    typed = parse_entered_rates((q.get("rates") or "")[:1200], days, values)
+    return typed, format_entered_rates(typed)
+
+
+def _fx_days(report: CheckReport) -> list[dict[str, str]]:
+    """One entry per day whose rate the act's invoice takes, for the report form's rate fields:
+    the day, the rate it got and from where (the imported NBG table, or typed in)."""
+    s = report.summary
+    currency = s.get("currency", "")
+    out: list[dict[str, str]] = []
+    for day in filter(None, s.get("fx_days", "").split(",")):
+        out.append(
+            {
+                "key": f"{currency}:{day}",
+                "day": day,
+                "rate": s.get(f"fx_rate_{day}", ""),
+                "source": s.get(f"fx_source_{day}", ""),
+            }
+        )
+    return out
+
+
 def _boq_inputs(
     session: Session, principal: Principal, template: str, bids: str
 ) -> tuple[Document, list[Document]]:
@@ -1285,7 +1334,15 @@ def _lang(request: Request) -> Lang:
 #: What each report's URL may carry besides its documents. Anything else in a stored check is
 #: ignored when its link is rebuilt, so a damaged row cannot put a stray parameter in a URL.
 _RUN_OPTIONS: dict[str, tuple[str, ...]] = {
-    "aoa": ("act", "contract", "contractor_type", "advance_amount", "advance_date", "review"),
+    "aoa": (
+        "act",
+        "contract",
+        "contractor_type",
+        "advance_amount",
+        "advance_date",
+        "rates",
+        "review",
+    ),
     "compare": ("left", "right", "job"),
 }
 
@@ -1298,6 +1355,7 @@ def _remember_aoa(
     ctype: str | None,
     advance: tuple[str | None, str | None],
     review: Job | None,
+    rates: str = "",
 ) -> None:
     """Record the act check that was just opened, with the options its URL carried."""
     params: dict[str, object] = {"act": act.id}
@@ -1310,6 +1368,8 @@ def _remember_aoa(
     for name, value in zip(("advance_amount", "advance_date"), advance, strict=True):
         if value and value.strip():
             params[name] = value.strip()[:64]  # as typed: the report reads it leniently
+    if rates:
+        params["rates"] = rates  # already read and written back (``_typed_rates``)
     if review is not None:
         params["review"] = review.id
     history.record_run(

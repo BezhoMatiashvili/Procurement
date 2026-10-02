@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import functools
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -19,7 +19,7 @@ from typing import Annotated, Concatenate, Literal, get_args
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -50,7 +50,7 @@ from procurement_agent.checks.boq import (
 from procurement_agent.checks.compare import ComparisonReport, DocumentTooLargeError
 from procurement_agent.checks.compare_llm import ExplanationSet, apply_explanations
 from procurement_agent.checks.findings import CheckReport, Finding, SkipNote
-from procurement_agent.checks.fx_invoice import AdvanceInput, to_money
+from procurement_agent.checks.fx_invoice import LOCAL_CURRENCY, AdvanceInput, to_money
 from procurement_agent.config import Settings, get_settings
 from procurement_agent.db import get_session
 from procurement_agent.extraction.pipeline import (
@@ -79,6 +79,24 @@ _DOCX_MEDIA = "application/vnd.openxmlformats-officedocument.wordprocessingml.do
 _XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
+#: The lari's first day: no exchange rate is older.
+_FIRST_RATE_DAY = date(1995, 9, 25)
+
+
+class EnteredRate(BaseModel):
+    """An exchange rate the user typed in for one day: lari for ONE unit of ``currency``.
+
+    Rule 9's invoice uses it in place of (or where there is no) imported NBG rate for that day,
+    and the report says the figure was entered.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+    on: date = Field(alias="date", ge=_FIRST_RATE_DAY, le=date(2100, 12, 31))
+    rate: Decimal = Field(gt=0, lt=1_000_000, max_digits=14, decimal_places=6)
+
+
 class AoaCheckRequest(BaseModel):
     aoa_document_id: str = Field(max_length=64)
     contract_document_id: str | None = Field(default=None, max_length=64)
@@ -93,12 +111,30 @@ class AoaCheckRequest(BaseModel):
     #: A finished ``aoa_review`` job (``POST /aoa/review``) whose model answers are applied to
     #: the notes the rules could not decide. The check itself never calls the model.
     review_job_id: str | None = Field(default=None, max_length=64)
+    #: Exchange rates typed in for the foreign-currency invoice (rule 9), one per currency and
+    #: day; each wins over the imported NBG rate of its day.
+    rates: list[EnteredRate] = Field(default_factory=list, max_length=20)
+
+    @model_validator(mode="after")
+    def _one_rate_a_day(self) -> AoaCheckRequest:
+        seen: dict[tuple[str, date], Decimal] = {}
+        for r in self.rates:
+            if r.currency == LOCAL_CURRENCY:
+                msg = "the lari has no exchange rate against itself"
+                raise ValueError(msg)
+            if seen.setdefault((r.currency, r.on), r.rate) != r.rate:
+                msg = f"two different rates for {r.currency} on {r.on.isoformat()}"
+                raise ValueError(msg)
+        return self
 
     def advance(self) -> AdvanceInput | None:
         if self.advance_amount is None and self.advance_date is None:
             return None
         amount = None if self.advance_amount is None else to_money(self.advance_amount)
         return AdvanceInput(amount=amount, paid_on=self.advance_date)
+
+    def entered_rates(self) -> dict[tuple[str, date], Decimal]:
+        return {(r.currency, r.on): r.rate for r in self.rates}
 
 
 def _document_text(settings: Settings, doc: Document) -> str:
@@ -134,12 +170,14 @@ def run_aoa(
     advance: AdvanceInput | None = None,
     *,
     review_job_id: str | None = None,
+    entered_rates: Mapping[tuple[str, date], Decimal] | None = None,
 ) -> CheckReport:
     """The whole act check. Shared by the JSON API, the DOCX download and the UI page, so the
     registry snapshot and the exchange-rate source are opened and closed in exactly one place.
 
     ``review_job_id`` names a model review to apply, already resolved through
     ``owned_review_job``; its answers are checked again against the notes this run leaves open.
+    ``entered_rates`` are the exchange rates the user typed in, by (currency, day), lari per unit.
     """
     review = (
         load_review(settings, aoa.id, review_job_id)
@@ -148,7 +186,7 @@ def run_aoa(
     )
     registry = open_snapshot(settings.registry_db) if settings.registry_db else None
     try:
-        rates = open_rate_provider(settings)
+        rates = open_rate_provider(settings, entered_rates)
         try:
             return check_aoa(
                 aoa_text=_document_text(settings, aoa),
@@ -353,6 +391,7 @@ def check_acceptance_act(
         body.contractor_type,
         body.advance(),
         review_job_id=review.id if review is not None else None,
+        entered_rates=body.entered_rates(),
     )
 
     audit(

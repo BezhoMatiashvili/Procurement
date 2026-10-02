@@ -70,6 +70,12 @@ Three independent layers, then a proof. Each has a test (§11).
   refused before it leaves.
 * Models are downloaded **once, on a connected machine**, by `scripts/prefetch_models.sh`, and
   copied to the server. The server never needs internet access.
+* So are the National Bank's exchange rates for the foreign-currency invoice (rule 9):
+  `scripts/fetch_nbg_rates.py` runs on a connected machine - standard library only, never
+  imported by the application, HTTPS to the one host `nbg.gov.ge`, redirects refused, every
+  answer size-capped and checked field by field - and sends nothing but dates and currency
+  codes. The server imports its file (`load-fx-rates`), checking every row again and refusing
+  the whole file for one bad row; an audit row records the counts, never the rates.
 
 **Proof.** `scripts/verify_offline.sh` runs the whole product - upload, parse, extract, compare,
 bill of quantities, reports, UI, delete, plus live-socket checks of the refusals below - inside a

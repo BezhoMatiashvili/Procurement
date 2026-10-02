@@ -183,6 +183,8 @@ _NO_REVIEW: dict[str, object] = {
     "review_state": None,
     "review_marked": False,
     "review_auto": False,
+    # and no foreign-currency invoice whose days could take a typed rate
+    "fx_days": [],
 }
 
 
@@ -529,6 +531,50 @@ def test_the_rerun_keeps_the_chosen_type_and_an_entered_zero(client: TestClient)
     assert re.search(
         r'annotated\.docx\?act=[0-9a-f]+&amp;contractor_type=company&amp;advance_amount=0"', body
     )
+
+
+def test_the_form_offers_a_rate_field_for_each_day_the_invoice_takes(client: TestClient) -> None:
+    """Rule 9 with no NBG rates imported: one field per day, each saying none is imported."""
+    form = _rerun_form(client.get(f"/ui/checks/aoa?act={_usd_act(client)}").text)
+    assert re.findall(r'name="rate_day" value="([^"]+)"', form) == [
+        "USD:2026-09-10",
+        "USD:2026-09-17",
+    ]
+    assert form.count('name="rate_value"') == 2
+    assert form.count("ამ დღის NBG-ის კურსი შემოტანილი არ არის") == 2
+
+
+def test_typed_rates_work_out_the_invoice_and_ride_along_in_every_link(
+    client: TestClient,
+) -> None:
+    act = _usd_act(client)
+    typed = (
+        f"/ui/checks/aoa?act={act}&rate_day=USD:2026-09-10&rate_value=2,6104"
+        "&rate_day=USD:2026-09-17&rate_value=2.6081"
+    )
+    body = client.get(typed).text
+    assert "28,691.40 GEL" in body  # the client's example, with a decimal comma typed
+    form = _rerun_form(body)
+    # typed rates come back in their fields, so a re-run keeps them
+    assert re.search(r'id="rerun-rate-1" name="rate_value"\s+value="2.6104"', form)
+    assert re.search(r'id="rerun-rate-2" name="rate_value"\s+value="2.6081"', form)
+    # the Word file is worked out with the same rates
+    assert client.get(f"/ui/checks/aoa/annotated.docx?{typed.split('?', 1)[1]}").status_code == 200
+    # and the history reopens the check with them
+    doc_page = client.get(f"/ui/documents/{act}").text
+    assert "rates=USD%3A2026-09-10%3A2.6104%2CUSD%3A2026-09-17%3A2.6081" in doc_page
+
+
+def test_typed_rates_that_do_not_read_are_left_out(client: TestClient) -> None:
+    act = _usd_act(client)
+    for bad in ("abc", "-2.6", "0", "2.61041234", "1000", ""):
+        r = client.get(f"/ui/checks/aoa?act={act}&rate_day=USD:2026-09-10&rate_value={bad}")
+        assert r.status_code == 200
+        assert "28,691.40" not in r.text
+    for key in ("GEL:2026-09-10", "usd:2026-09-10", "USD:2026-13-40", "USD"):
+        r = client.get(f"/ui/checks/aoa?act={act}&rate_day={key}&rate_value=2.6104")
+        assert r.status_code == 200
+    assert client.get(f"/ui/checks/aoa?act={act}&rates=" + "x" * 5000).status_code == 200
 
 
 def test_an_exempt_contractor_or_an_act_in_lari_gets_no_advance_fields(client: TestClient) -> None:

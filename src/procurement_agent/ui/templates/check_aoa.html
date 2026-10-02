@@ -145,6 +145,19 @@
   {% if "advance_source" in report.summary and report.summary["advance_source"] == "act" %}
   <p class="small">{{ icon("info") }} {{ t("aoa.advance.auto.act") }}</p>
   {% endif %}
+  {# one field per day whose rate the invoice takes: typed in, it is used instead of the
+     imported NBG rate (rule 9); left blank, the imported rate is used #}
+  {% for d in fx_days %}
+  <input type="hidden" name="rate_day" value="{{ d.key }}">
+  <label for="rerun-rate-{{ loop.index }}">{{ t("aoa.rate.label", currency=currency, day=d.day) }}
+    <input type="text" inputmode="decimal" id="rerun-rate-{{ loop.index }}" name="rate_value"
+           value="{{ d.rate if d.source == 'entered' else '' }}" autocomplete="off" maxlength="12"></label>
+  {% if d.source == "NBG" %}
+  <p class="small">{{ icon("info") }} {{ t("aoa.rate.nbg", rate=d.rate) }}</p>
+  {% elif d.source != "entered" %}
+  <p class="small">{{ icon("info") }} {{ t("aoa.rate.missing") }}</p>
+  {% endif %}
+  {% endfor %}
   {% endif %}
   <button type="submit" class="secondary">{{ icon("refresh") }}{{ t("aoa.rerun") }}</button>
 </form>

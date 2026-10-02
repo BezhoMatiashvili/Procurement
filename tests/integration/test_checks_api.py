@@ -8,8 +8,10 @@ exhaustively in tests/unit/test_aoa_check.py.
 from __future__ import annotations
 
 import io
+import json
 import time
 from collections.abc import Iterator
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -367,6 +369,76 @@ def test_an_entered_advance_reaches_the_invoice_note(client: TestClient) -> None
     )
     # no rate source is connected, and the report says what it could not do
     assert "AOA.FX_RATE" in {s["rule_id"] for s in report["skipped"]}
+
+
+#: The client's two rates (10 and 17 September 2026), as the API takes them.
+_CLIENT_RATES = [
+    {"currency": "USD", "date": "2026-09-10", "rate": "2.6104"},
+    {"currency": "USD", "date": "2026-09-17", "rate": "2.6081"},
+]
+
+
+def test_typed_rates_work_out_the_invoice_in_lari(client: TestClient) -> None:
+    act = _upload(client, "act.xlsx", USD_ACT_LINES)
+    body = {
+        "aoa_document_id": act,
+        "advance_amount": "1000",
+        "advance_date": "2026-09-10",
+        "rates": _CLIENT_RATES,
+    }
+    r = client.post("/api/v1/checks/aoa", headers=H, json=body)
+    assert r.status_code == 200, r.text
+    report = r.json()
+    [note] = [f for f in report["findings"] if f["rule_id"] == "AOA.FX_INVOICE"]
+    assert "in total 28,691.40 GEL" in note["message_en"]
+    assert "the rate entered for 2026-09-10 (2.6104)" in note["message_en"]
+    assert report["summary"]["invoice_gel"] == "28691.40"
+    assert "AOA.FX_RATE" not in {s["rule_id"] for s in report["skipped"]}
+
+
+def test_imported_rates_work_out_the_invoice_without_typing(tmp_path: Path) -> None:
+    from procurement_agent.fx.rates_table import import_rates, parse_rates
+
+    rates_file = tmp_path / "rates.json"
+    rates_file.write_text(
+        json.dumps({"source": "NBG", "rates": [{**r, "quantity": 1} for r in _CLIENT_RATES]}),
+        encoding="utf-8",
+    )
+    db = tmp_path / "fx.db"
+    import_rates(parse_rates(rates_file, today=date(2026, 10, 2)), db)
+    for c in _make_client(tmp_path, fx_rates_db=db):
+        act = _upload(c, "act.xlsx", USD_ACT_LINES)
+        r = c.post(
+            "/api/v1/checks/aoa",
+            headers=H,
+            json={"aoa_document_id": act, "advance_amount": "1000", "advance_date": "2026-09-10"},
+        )
+        assert r.status_code == 200, r.text
+        [note] = [f for f in r.json()["findings"] if f["rule_id"] == "AOA.FX_INVOICE"]
+        assert (
+            "1,000.00 USD × NBG rate of 2026-09-10 (2.6104) = 2,610.40 GEL + 10,000.00 USD × "
+            "NBG rate of 2026-09-17 (2.6081) = 26,081.00 GEL; in total 28,691.40 GEL"
+        ) in note["message_en"]
+
+
+@pytest.mark.parametrize(
+    "rates",
+    [
+        [{"currency": "GEL", "date": "2026-09-10", "rate": "1"}],
+        [*_CLIENT_RATES, {"currency": "USD", "date": "2026-09-10", "rate": "2.7"}],
+        [{"currency": "usd", "date": "2026-09-10", "rate": "2.6104"}],
+        [{"currency": "USD", "date": "2026-09-10", "rate": "0"}],
+        [{"currency": "USD", "date": "2026-09-10", "rate": "2.6104123"}],
+        [{"currency": "USD", "date": "1990-01-01", "rate": "2.6"}],
+        [{"currency": "USD", "date": "10.09.2026", "rate": "2.6"}],
+        [{"currency": "USD", "date": f"2026-08-{d:02d}", "rate": "2.6"} for d in range(1, 22)],
+    ],
+)
+def test_bad_typed_rates_are_refused(client: TestClient, rates: list[dict[str, str]]) -> None:
+    r = client.post(
+        "/api/v1/checks/aoa", headers=H, json={"aoa_document_id": "x" * 32, "rates": rates}
+    )
+    assert r.status_code == 422, r.text
 
 
 @pytest.mark.parametrize(

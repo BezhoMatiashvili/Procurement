@@ -8,6 +8,8 @@ uv run python -m procurement_agent.cli audit [--last 50] [--action X] [--actor Y
 uv run python -m procurement_agent.cli audit-prune --older-than-days 365 --yes
 uv run python -m procurement_agent.cli load-registry registry.csv --as-of 2026-09-01
 uv run python -m procurement_agent.cli registry-status
+uv run python -m procurement_agent.cli load-fx-rates nbg-rates-2026.json
+uv run python -m procurement_agent.cli fx-rates-status
 uv run python -m procurement_agent.cli models-manifest write|verify
 """
 
@@ -112,6 +114,46 @@ def _models_manifest(action: str, settings: Settings) -> int:
     return 0 if checked.ok else 1
 
 
+def _load_fx_rates(path: Path, settings: Settings) -> int:
+    """Import a rates file into the table the checks read; counts and dates only on screen."""
+    from procurement_agent.fx.rates_table import RatesFormatError, import_rates, parse_rates
+
+    try:
+        rows = parse_rates(path)
+    except RatesFormatError as e:
+        print(f"refused, nothing imported - {e}", file=sys.stderr)
+        audit_now(actor=CLI_ACTOR, action="fx.import", outcome="denied", detail="invalid file")
+        return 2
+    except OSError as e:
+        print(f"cannot read {path}: {e.strerror}", file=sys.stderr)
+        return 2
+    result = import_rates(rows, settings.fx_rates_path)
+    span = f"{result.first} … {result.last}" if result.first else "no days"
+    detail = (
+        f"{result.added} added, {result.changed} changed, {result.unchanged} unchanged; "
+        f"{len(result.currencies)} currencies; {span}"
+    )
+    audit_now(actor=CLI_ACTOR, action="fx.import", detail=detail)
+    print(f"{detail}\ninto {settings.fx_rates_path}")
+    if settings.fx_rate_source != "table":
+        print('set PA_FX_RATE_SOURCE=table to use them (it is "none")')
+    return 0
+
+
+def _fx_rates_status(settings: Settings) -> int:
+    from procurement_agent.fx.rates_table import open_rates_table
+
+    table = open_rates_table(settings.fx_rates_path)
+    if table is None:
+        print("no exchange rates imported; the invoice check gives the formula and the days")
+        return 0
+    with table:
+        for c in table.coverage():
+            gaps = f", {c.missing} day(s) missing in between" if c.missing else ""
+            print(f"{c.currency}  {c.first} … {c.last}  ({c.days} days{gaps})")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="procurement-agent")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -142,6 +184,13 @@ def main(argv: list[str] | None = None) -> int:
         "--as-of", default=None, type=_as_of, help="date the export was taken (ISO, YYYY-MM-DD)"
     )
     sub.add_parser("registry-status", help="show whether a registry snapshot is loaded")
+    p_fx = sub.add_parser(
+        "load-fx-rates",
+        help="import NBG exchange rates (JSON from scripts/fetch_nbg_rates.py, or CSV "
+        "date,currency,quantity,rate)",
+    )
+    p_fx.add_argument("rates_path", type=Path)
+    sub.add_parser("fx-rates-status", help="show which days the imported exchange rates cover")
     p_models = sub.add_parser(
         "models-manifest", help="write or verify MANIFEST.sha256 for the model files"
     )
@@ -193,6 +242,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"loaded {count} companies into {target}")
         if settings.registry_db is None:
             print(f"set PA_REGISTRY_DB={target} to enable the registry checks")
+    elif args.cmd == "load-fx-rates":
+        return _load_fx_rates(args.rates_path, settings)
+    elif args.cmd == "fx-rates-status":
+        return _fx_rates_status(settings)
     elif args.cmd == "models-manifest":
         return _models_manifest(args.action, settings)
     elif args.cmd == "registry-status":

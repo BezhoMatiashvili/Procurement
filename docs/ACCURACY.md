@@ -111,6 +111,33 @@ merged cells, hidden rows, missing cached values, reconciliation, filled blanks)
 23, 31, 41, 43 and 47 (the last 25 cases a class, 422 valid): every valid mutant 100% (a mutant whose deletion breaks a Summary formula into
 `#REF!` is reported invalid, not scored).
 
+### Rule 9: the invoice in lari, end to end (`scripts/fx_accuracy.py`, 2026-10-02)
+
+Random acts written from scratch - 14 currencies the National Bank quotes (four of them per 10,
+100 or 1,000 units), each written as its code, its sign or its Georgian or English name, before
+or after the figure; four ways of grouping digits; three date styles; no advance, or an advance
+in one of three phrasings with or without the remainder spelled out - run through the whole act
+check against a real imported rates table, and the invoice compared with one computed
+independently from the case's numbers.
+
+* **First run (seed 1, 600 acts): 522 exact (87.0%).** Every miss was "no invoice worked out",
+  for one general reason with two faces: the keyword search behind every amount's role cut a
+  sentence at any dot, so the date in "ავანსის სახით 30.08.2026 ჩარიცხულია 2 000 USD" or the
+  "წ." of "1 იანვარს, 2026 წ. ჩარიცხულია" took the advance's keyword away from its figure. A dot
+  between two digits, and the stop of a one-letter abbreviation after a figure, now end no
+  sentence (`rules._SENTENCE_BOUNDARY`). On the gold sets the only effect was one redundant
+  untyped date fewer in Test Set 3's dollar acts; every finding is unchanged.
+* **After that fix: seed 1 600/600; fresh seeds 2 and 3, 3,000 acts each: 6,000/6,000 exact to
+  the tetri (100%).**
+* The client's own example, from a file `scripts/fetch_nbg_rates.py` fetched from the NBG on
+  2026-10-02 (USD 2.6104 on 10 September 2026, 2.6081 on the 17th) and imported with
+  `load-fx-rates`: 28,691.40 GEL with the advance and 2,610.40 GEL without (the client's text
+  says 2,610.04 for the second - a typo for 1,000 x 2.6104).
+
+What the harness does not vary: the act's layout (one template), and acts in two foreign
+currencies (a skip by design). Several layouts are measured with the synthetic families
+(`scripts/gen_aoa_families.py`) and the held-out set.
+
 ### Scanned PDFs (OCR inside the Docker image, Tesseract `kat+eng`, 216 dpi)
 
 The client's 7 scans, each paired with its Word twin by content: character error rate 0.16-0.40
@@ -1995,12 +2022,11 @@ Left as they are:
 
 * The scanned PDFs are not yet in the gold set; OCR only runs inside the Docker image, so they
   must be scored there.
-* `AOA.FX_INVOICE` (the invoice in lari for a foreign-currency act) works out the formula — the
-  advance at the NBG rate of its payment day, the rest at the rate of the act's date — but no rate
-  source is connected (`PA_FX_RATE_SOURCE=none`), so the note names the days whose rates to look
-  up and an `AOA.FX_RATE` skip says the total in lari was not calculated. A connector implements
-  `fx/provider.RateProvider`; an offline table the operator loads (`date,currency,rate`) needs no
-  egress. Open with the client: their no-advance example writes 2,610.04 for 1,000 x 2.6104, which
+* `AOA.FX_INVOICE` (the invoice in lari for a foreign-currency act) works the invoice out — the
+  advance at the NBG rate of its payment day, the rest at the rate of the act's date — from the
+  NBG rates imported (`load-fx-rates`, a file `scripts/fetch_nbg_rates.py` writes on a connected
+  machine) or typed in on the report's form; a day with neither is named in an `AOA.FX_RATE`
+  skip, never priced at another day's rate. Open with the client: their no-advance example writes 2,610.04 for 1,000 x 2.6104, which
   is 2,610.40 (the tests hold the arithmetic); whether the act states the full value or only the
   remainder (the check assumes the full value); and whether each term or only the sum is rounded
   (the check rounds each term).

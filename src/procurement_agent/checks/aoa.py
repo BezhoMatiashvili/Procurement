@@ -105,6 +105,7 @@ from procurement_agent.checks.fx_invoice import (
     invoice_gel,
     plan_invoice,
     price_terms,
+    to_money,
 )
 from procurement_agent.extraction.anchors import (
     PATRONYMIC,
@@ -163,7 +164,7 @@ from procurement_agent.extraction.rules import (
 )
 from procurement_agent.extraction.schemas import FactType
 from procurement_agent.extraction.spellcheck import Difference, best_match, classify_difference
-from procurement_agent.fx.provider import NullRateProvider, RateProvider
+from procurement_agent.fx.provider import ENTERED, NullRateProvider, RateProvider
 from procurement_agent.report.docx_annotate import whole_word_spans
 
 ContractorType = Literal[
@@ -967,7 +968,7 @@ class AoaChecker:
         self.findings: list[Finding] = []
         self.skipped: list[SkipNote] = []
         #: the invoice ``rule_fx_invoice`` worked out, and its total in lari, for the summary
-        self._fx: tuple[InvoicePlan, Decimal | None] | None = None
+        self._fx: tuple[InvoicePlan, Decimal | None, tuple[PricedTerm, ...]] | None = None
         #: which contract party each act party is (``_matched_parties``), worked out once a run
         self._party_matches: list[_PartyMatch] | None = None
         #: both documents' subjects and services, aligned (``_scope_reading``), once a run
@@ -1505,8 +1506,17 @@ class AoaChecker:
         if currencies:
             out["currency"] = ", ".join(foreign) or LOCAL_CURRENCY
         if self._fx is not None:
-            plan, gel = self._fx
+            plan, gel, priced = self._fx
             out["fx_total"] = f"{plan.total:.2f}"
+            # the days whose rates the invoice takes, and the rate each got: the report's form
+            # offers a field per day, to type a rate in or correct one
+            days = list(dict.fromkeys(p.term.on for p in priced if p.term.on is not None))
+            if days:
+                out["fx_days"] = ",".join(d.isoformat() for d in days)
+            for p in priced:
+                if p.quote is not None and p.term.on is not None:
+                    out[f"fx_rate_{p.term.on.isoformat()}"] = f"{p.quote.rate:f}"
+                    out[f"fx_source_{p.term.on.isoformat()}"] = p.quote.source
             advances = plan.advances
             if len(advances) == 1:
                 out["advance_amount"] = f"{advances[0].amount:.2f}"
@@ -2209,7 +2219,7 @@ class AoaChecker:
             return
         priced = price_terms(found, self.rates)
         gel = invoice_gel(priced)
-        self._fx = (found, gel)
+        self._fx = (found, gel, priced)
         formula_ka = " + ".join(
             _fx_term_ka(p, found.currency, priced=gel is not None) for p in priced
         )
@@ -2236,9 +2246,42 @@ class AoaChecker:
         self._add("AOA.FX_INVOICE", "info", ka, en, span=found.anchor)
         if gel is None:
             self._fx_rate_skip(found.currency, priced)
+        if act:
+            self._late_advances(found, act[0])
+
+    def _late_advances(self, plan: InvoicePlan, act_day: date) -> None:
+        """An advance dated after the act's own date: an advance is paid before the act, so one of
+        the two dates is wrong - and the invoice would convert it at the wrong day's rate. A
+        warning, with no "should be": which date is wrong is not for the check to say. Marked on
+        the act's advance where the act states it."""
+        stated = self.aoa.advance(in_act=True).payments
+        for term in plan.advances:
+            if term.on is None or term.on <= act_day:
+                continue
+            span = next(
+                (
+                    p.money.span
+                    for p in stated
+                    if p.paid_on == term.on and to_money(p.money.value) == term.amount
+                ),
+                None,
+            )
+            paid, signed = term.on.isoformat(), act_day.isoformat()
+            self._add(
+                "AOA.FX_INVOICE",
+                "warning",
+                f"ავანსის გადახდის თარიღი ({paid}) აქტის თარიღზე ({signed}) გვიანაა — ავანსი "
+                "აქტამდე იხდება და ლარში მისი გადახდის დღის კურსით გადაიანგარიშება; შეამოწმეთ "
+                "თარიღები",
+                f"the advance is dated {paid}, after the act's date {signed}: an advance is paid "
+                "before the act and converted at the rate of its payment day - check the dates",
+                span=span,
+            )
 
     def _fx_rate_skip(self, currency: str, priced: tuple[PricedTerm, ...]) -> None:
-        """Say the total in lari was not calculated, and name the days whose rates it needs."""
+        """Say the total in lari was not calculated, name the days whose rates it needs, and
+        say what would supply them: the imported NBG rates cover other days, or none are
+        imported - either way a rate typed in on the form is enough for this check."""
         missing = [p.term for p in priced if p.quote is None]
         days_ka = ", ".join(dict.fromkeys(_fx_day(t)[0] for t in missing))
         days_en = ", ".join(dict.fromkeys(_fx_day(t)[1] for t in missing))
@@ -2251,13 +2294,29 @@ class AoaChecker:
                 f"calculated; look up the NBG {currency} rate of: {days_en}",
             )
             return
-        self._skip(
-            "AOA.FX_RATE",
-            f"ანგარიშფაქტურის თანხა ლარში არ გამოთვლილა — NBG-ის {currency} კურსი ვერ მოიძებნა: "
-            f"{days_ka}",
-            f"the invoice total in lari was not calculated: no NBG {currency} rate was found for "
-            f"{days_en}",
-        )
+        held = self.rates.coverage(currency)
+        if held is None:
+            ka = (
+                f"NBG-ის {currency} კურსები სისტემაში შემოტანილი არ არის, ამიტომ ანგარიშფაქტურის "
+                f"თანხა ლარში არ გამოთვლილა; შეიყვანეთ {currency} კურსი: {days_ka}"
+            )
+            en = (
+                f"no NBG {currency} rates have been imported, so the invoice total in lari was "
+                f"not calculated; enter the {currency} rate of: {days_en}"
+            )
+        else:
+            first, last = (d.isoformat() for d in held)
+            ka = (
+                f"ანგარიშფაქტურის თანხა ლარში არ გამოთვლილა — NBG-ის {currency} კურსი ვერ "
+                f"მოიძებნა: {days_ka} (შემოტანილი კურსები მოიცავს {first} … {last}); შეიყვანეთ "
+                "კურსი ან შემოიტანეთ ახალი კურსები"
+            )
+            en = (
+                f"the invoice total in lari was not calculated: no NBG {currency} rate was found "
+                f"for {days_en} (the imported rates cover {first} … {last}); enter the rate or "
+                "import newer rates"
+            )
+        self._skip("AOA.FX_RATE", ka, en)
 
     # --- rules that need the contract -----------------------------------------------------
 
@@ -4557,11 +4616,18 @@ def _fx_day(term: InvoiceTerm) -> tuple[str, str]:
     return "აქტის თარიღი — ვერ მოიძებნა", "the act's date (not found)"
 
 
+def _typed(p: PricedTerm) -> bool:
+    """Whether the term's rate is one the user typed in, not an imported NBG rate."""
+    return p.quote is not None and p.quote.source == ENTERED
+
+
 def _fx_term_ka(p: PricedTerm, currency: str, *, priced: bool) -> str:
     """One term of the invoice formula in Georgian - the amount times "NBG-ის კურსი (2026-09-10)"
-    - with the rate and the lari when every term has its rate."""
+    - with the rate and the lari when every term has its rate. A rate the user typed in is named
+    so ("შეყვანილი კურსი"): the figure is theirs, not the National Bank's."""
     day = _fx_day(p.term)[0]
-    head = f"{p.term.amount:,.2f} {currency} {_TIMES} NBG-ის კურსი ({day}"
+    name = "შეყვანილი კურსი" if _typed(p) else "NBG-ის კურსი"
+    head = f"{p.term.amount:,.2f} {currency} {_TIMES} {name} ({day}"
     if priced and p.quote is not None and p.gel is not None:
         return f"{head}: {p.quote.rate:f}) = {p.gel:,.2f} {LOCAL_CURRENCY}"
     return f"{head})"
@@ -4569,8 +4635,10 @@ def _fx_term_ka(p: PricedTerm, currency: str, *, priced: bool) -> str:
 
 def _fx_term_en(p: PricedTerm, currency: str, *, priced: bool) -> str:
     """One term of the invoice formula in English - the amount times "NBG rate of 2026-09-10" -
-    with the rate and the lari when every term has its rate."""
-    head = f"{p.term.amount:,.2f} {currency} {_TIMES} NBG rate of {_fx_day(p.term)[1]}"
+    with the rate and the lari when every term has its rate; "the rate entered for 2026-09-10"
+    when the user typed it in."""
+    name = "the rate entered for" if _typed(p) else "NBG rate of"
+    head = f"{p.term.amount:,.2f} {currency} {_TIMES} {name} {_fx_day(p.term)[1]}"
     if priced and p.quote is not None and p.gel is not None:
         return f"{head} ({p.quote.rate:f}) = {p.gel:,.2f} {LOCAL_CURRENCY}"
     return head

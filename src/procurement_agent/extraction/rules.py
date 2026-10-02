@@ -60,6 +60,40 @@ _CUR_CASES = r"(?:ი|ის|ისა|ს|ით|ად)?"
 #: carry its adjective of origin in the case the noun takes: "ქართული ლარი", "ამერიკული დოლარი",
 #: "ამერიკულ დოლარს" (red team R5, AOA-R5-10: the adjective broke the match, so a dollar fee
 #: written so was no fee at all).
+#: The other currencies the National Bank of Georgia quotes, by ISO code. Matched in capitals only
+#: (``(?-i:...)``): the amount patterns ignore case, and "100 try" or "5 cad" are no money.
+_NBG_CODES = (
+    "AED|AMD|AUD|AZN|BRL|BYN|CAD|CHF|CNY|CZK|DKK|EGP|HKD|HUF|ILS|INR|IRR|ISK|JPY|KGS|KRW|KWD"
+    "|KZT|MDL|NOK|NZD|PLN|QAR|RON|RSD|RUB|SEK|SGD|TJS|TMT|TRY|UAH|UZS|ZAR"
+)
+#: The endings of a currency whose name ends in -ა ("ლირა", "გრივნა", "კრონა"): its stem takes them.
+_CUR_CASES_A = r"(?:ა|ის|ას|ით|ად)"
+#: Their names after an amount, in Georgian - with the adjective of origin, which is required where
+#: the noun alone names several currencies (კრონა, მანათი, another country's dollar) - and in
+#: English; and their signs, where a sign names one currency only ("¥" is the yen and the yuan).
+_OTHER_CUR_RE = (
+    rf"(?:შვეიცარიულ(?:ი|მა)?\s+)?ფრანკ{_CUR_CASES}"
+    rf"|(?:რუსულ(?:ი|მა)?\s+)?რუბლ{_CUR_CASES}"
+    rf"|(?:თურქულ(?:ი|მა)?\s+)?ლირ{_CUR_CASES_A}"
+    rf"|(?:ჩინურ(?:ი|მა)?\s+)?იუან{_CUR_CASES}"
+    rf"|(?:იაპონურ(?:ი|მა)?\s+)?იენ{_CUR_CASES}"
+    rf"|(?:უკრაინულ(?:ი|მა)?\s+)?გრივნ{_CUR_CASES_A}"
+    rf"|(?:სომხურ(?:ი|მა)?\s+)?დრამ{_CUR_CASES}"
+    r"|(?:ყაზახურ(?:ი|მა)?\s+)?ტენგე(?:ს|თი|დ)?"
+    rf"|(?:პოლონურ(?:ი|მა)?\s+)?ზლოტ{_CUR_CASES}"
+    rf"|(?:ისრაელის\s+|ისრაელურ(?:ი|მა)?\s+)?შეკელ{_CUR_CASES}"
+    rf"|(?:არაბული\s+|ემირატების\s+)?დირჰამ{_CUR_CASES}"
+    rf"|აზერბაიჯანულ(?:ი|მა)?\s+მანათ{_CUR_CASES}"
+    rf"|(?:კანადურ|ავსტრალიურ|ჰონკონგურ|სინგაპურულ|ახალზელანდიურ)(?:ი|მა)?\s+დოლარ{_CUR_CASES}"
+    rf"|(?:შვედურ|ნორვეგიულ|დანიურ|ჩეხურ|ისლანდიურ)(?:ი|მა)?\s+კრონ{_CUR_CASES_A}"
+    r"|(?:swiss\s+)?francs?|(?:russian\s+)?r(?:o)?ubles?|(?:turkish\s+)?liras?"
+    r"|(?:chinese\s+)?yuan|renminbi|(?:japanese\s+)?yen|(?:ukrainian\s+)?hryvnias?"
+    r"|armenian\s+drams?|tenge|zlot(?:y|ys|ies)|shekels?|dirhams?|azerbaijani\s+manats?"
+    r"|(?:canadian|australian|hong\s+kong|singapore|new\s+zealand)\s+dollars?"
+    r"|(?:swedish|norwegian|danish|czech|icelandic)\s+kron(?:a|or|er|e|ur)"
+    r"|₽|₺|₴|₸|₼|₹|₪|₩"
+    rf"|(?-i:{_NBG_CODES})"
+)
 _CUR_RE = (
     r"₾|\$|€|£|GEL|USD|EUR|GBP"
     rf"|(?:ქართულ(?:ი|მა)?\s+)?ლარ{_CUR_CASES}"
@@ -67,6 +101,7 @@ _CUR_RE = (
     r"|ევრო(?:ს|თი|დ)?"
     rf"|(?:გირვანქა|ფუნტი?)\s*სტერლინგ{_CUR_CASES}"
     r"|(?:US\s*|U\.S\.\s*)?dollars?|euros?|pounds?\s+sterling|lari"
+    rf"|{_OTHER_CUR_RE}"
     r"|ლ\.(?![ა-ჰA-Za-z])"
 )
 #: The lari abbreviated, which is also a litre: an amount in it needs a money word to be one.
@@ -74,13 +109,61 @@ _LARI_ABBREVIATION = "ლ."
 #: A currency written *before* an amount: a code or a sign only. A name there is the end of a
 #: sentence about something else - "... აშშ დოლარს 2026 წლის" read as 2,026 lari, because the
 #: name pattern found "ლარს" inside "დოლარს" - never "ლარი 100".
-_CUR_BEFORE_RE = r"(?<![A-Za-z])(?:GEL|USD|EUR|GBP)|₾|\$|€|£"
+_CUR_BEFORE_RE = (
+    rf"(?<![A-Za-z])(?:GEL|USD|EUR|GBP|(?-i:{_NBG_CODES}))(?![A-Za-z])|₾|\$|€|£|₽|₺|₴|₸|₼|₹|₪|₩"
+)
 #: What each currency is called, tested in this order: dollars before lari, because "დოლარ"
 #: (dollar) contains "ლარ" (lari).
 _CURRENCY_NAMES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    # another country's dollar before the US one, which every dollar contains
+    ("CAD", re.compile(r"კანადურ|canadian|(?<![A-Za-z])CAD(?![A-Za-z])", re.IGNORECASE)),
+    ("AUD", re.compile(r"ავსტრალიურ|australian|(?<![A-Za-z])AUD(?![A-Za-z])", re.IGNORECASE)),
+    ("HKD", re.compile(r"ჰონკონგურ|hong\s+kong|(?<![A-Za-z])HKD(?![A-Za-z])", re.IGNORECASE)),
+    ("SGD", re.compile(r"სინგაპურულ|singapore|(?<![A-Za-z])SGD(?![A-Za-z])", re.IGNORECASE)),
+    ("NZD", re.compile(r"ახალზელანდიურ|new\s+zealand|(?<![A-Za-z])NZD(?![A-Za-z])", re.I)),
     ("USD", re.compile(r"\$|usd|დოლარ|dollar", re.IGNORECASE)),
     ("EUR", re.compile(r"€|eur|ევრო", re.IGNORECASE)),
     ("GBP", re.compile(r"£|gbp|სტერლინგ|sterling", re.IGNORECASE)),
+    ("CHF", re.compile(r"ფრანკ|franc|(?<![A-Za-z])CHF(?![A-Za-z])", re.IGNORECASE)),
+    ("RUB", re.compile(r"₽|რუბლ|r(?:o)?uble|(?<![A-Za-z])RUB(?![A-Za-z])", re.IGNORECASE)),
+    ("TRY", re.compile(r"₺|ლირ|lira|(?<![A-Za-z])TRY(?![A-Za-z])", re.IGNORECASE)),
+    ("CNY", re.compile(r"იუან|yuan|renminbi|(?<![A-Za-z])CNY(?![A-Za-z])", re.IGNORECASE)),
+    ("JPY", re.compile(r"იენ|(?<![A-Za-z])yen|(?<![A-Za-z])JPY(?![A-Za-z])", re.IGNORECASE)),
+    ("UAH", re.compile(r"₴|გრივნ|hryvnia|(?<![A-Za-z])UAH(?![A-Za-z])", re.IGNORECASE)),
+    ("AMD", re.compile(r"დრამ|dram|(?<![A-Za-z])AMD(?![A-Za-z])", re.IGNORECASE)),
+    ("KZT", re.compile(r"₸|ტენგე|tenge|(?<![A-Za-z])KZT(?![A-Za-z])", re.IGNORECASE)),
+    ("PLN", re.compile(r"ზლოტ|zlot|(?<![A-Za-z])PLN(?![A-Za-z])", re.IGNORECASE)),
+    ("ILS", re.compile(r"₪|შეკელ|shekel|(?<![A-Za-z])ILS(?![A-Za-z])", re.IGNORECASE)),
+    ("AED", re.compile(r"დირჰამ|dirham|(?<![A-Za-z])AED(?![A-Za-z])", re.IGNORECASE)),
+    ("AZN", re.compile(r"₼|მანათ|manat|(?<![A-Za-z])AZN(?![A-Za-z])", re.IGNORECASE)),
+    ("SEK", re.compile(r"შვედურ|swedish|(?<![A-Za-z])SEK(?![A-Za-z])", re.IGNORECASE)),
+    ("NOK", re.compile(r"ნორვეგიულ|norwegian|(?<![A-Za-z])NOK(?![A-Za-z])", re.IGNORECASE)),
+    ("DKK", re.compile(r"დანიურ|danish|(?<![A-Za-z])DKK(?![A-Za-z])", re.IGNORECASE)),
+    ("CZK", re.compile(r"ჩეხურ|czech|(?<![A-Za-z])CZK(?![A-Za-z])", re.IGNORECASE)),
+    ("ISK", re.compile(r"ისლანდიურ|icelandic|(?<![A-Za-z])ISK(?![A-Za-z])", re.IGNORECASE)),
+    ("INR", re.compile(r"₹|(?<![A-Za-z])INR(?![A-Za-z])")),
+    ("KRW", re.compile(r"₩|(?<![A-Za-z])KRW(?![A-Za-z])")),
+    *(
+        (code, re.compile(rf"(?<![A-Za-z]){code}(?![A-Za-z])"))
+        for code in [
+            "BRL",
+            "BYN",
+            "EGP",
+            "HUF",
+            "IRR",
+            "KGS",
+            "KWD",
+            "MDL",
+            "QAR",
+            "RON",
+            "RSD",
+            "TJS",
+            "TMT",
+            "UZS",
+            "ZAR",
+        ]
+    ),
+    # last: the lari's name is inside the dollar's ("დოლარ")
     ("GEL", re.compile(r"₾|gel|ლარ|lari|ლ\.", re.IGNORECASE)),
 )
 #: a figure, read by the one pattern every reader shares (``normalize.FIGURE``)
@@ -173,8 +256,11 @@ class RuleHit:
 
 # Newlines are NOT boundaries: Docling emits inline runs ("შეადგენს\n100\n(ასი) ლარს") and
 # table cells on separate lines; the nearest-keyword rule keeps neighbouring rows apart. The one
-# exception is a label line (``label_line_spans``).
-_SENTENCE_BOUNDARY = re.compile(r"[.;!?]")
+# exception is a label line (``label_line_spans``). Nor is a dot between two digits: it belongs
+# to a date ("30.08.2026") or a figure ("10.5%"), and cutting there took "ავანსის სახით
+# 30.08.2026 ჩარიცხულია 2 000 USD" from its advance. Nor the stop of a one-letter abbreviation
+# right after a figure: "1 იანვარს, 2026 წ. ჩარიცხულია" goes on (``sentence_spans`` keeps it too).
+_SENTENCE_BOUNDARY = re.compile(r"[;!?]|(?<!\d\s[ა-ჰ])(?<!\d[ა-ჰ])(?:(?<!\d)\.|\.(?!\d))")
 _KW_CACHE: dict[str, re.Pattern[str]] = {}
 
 #: A "label: value" line: a short label of words (no figure, quote or comma), a colon, and a

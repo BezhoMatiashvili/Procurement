@@ -77,6 +77,10 @@ class StaticRateProvider:
             return None
         return RateQuote(currency=currency, rate=value, valid_on=on, source="NBG")
 
+    def coverage(self, currency: str) -> tuple[date, date] | None:
+        days = sorted(d for c, d in self.table if c == currency)
+        return (days[0], days[-1]) if days else None
+
     def close(self) -> None:
         self.closed = True
 
@@ -368,14 +372,15 @@ def test_an_unknown_contractor_type_is_calculated_and_says_who_needs_none() -> N
 def test_without_a_rate_source_the_null_provider_is_used() -> None:
     reason = _skip(_check(), "AOA.FX_RATE")
     assert reason.startswith("no exchange-rate source is connected")
-    assert isinstance(open_rate_provider(Settings()), NullRateProvider)
+    assert isinstance(open_rate_provider(Settings(fx_rate_source="none")), NullRateProvider)
 
 
-def test_a_source_missing_a_day_names_that_day() -> None:
+def test_a_source_missing_a_day_names_that_day_and_what_it_holds() -> None:
     rates = StaticRateProvider({("USD", _SEP_17): "2.6081"})
     report = _check(rates=rates)
     assert _skip(report, "AOA.FX_RATE") == (
-        "the invoice total in lari was not calculated: no NBG USD rate was found for 2026-09-10"
+        "the invoice total in lari was not calculated: no NBG USD rate was found for 2026-09-10 "
+        "(the imported rates cover 2026-09-17 … 2026-09-17); enter the rate or import newer rates"
     )
     assert "in total" not in _note(report).message_en
     assert rates.asked == [("USD", _SEP_10), ("USD", _SEP_17)]

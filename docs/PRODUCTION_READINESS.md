@@ -145,6 +145,16 @@ the relay cannot reach Ollama; verify with the command in SECURITY.md §2.
   (`python -m procurement_agent.cli models-manifest write`): production verifies it at every
   start and refuses to run on a changed, missing or extra model file. The spelling dictionary is not among them: the image carries
   it, fetched and hash-checked by `docker compose build`, which needs the network anyway.
+- [ ] Reference data, loaded the same way - prepared on a connected machine, copied in, imported,
+  the copy removed:
+  - NBG exchange rates (rule 9): `python3 scripts/fetch_nbg_rates.py --from <first day needed>
+    --out nbg.json` (repeat as acts need newer days; a day's rate can also be typed on the report),
+    then `docker compose cp nbg.json app:/data/nbg.json`, `docker compose exec app python -m
+    procurement_agent.cli load-fx-rates /data/nbg.json`, `docker compose exec app rm
+    /data/nbg.json`; `fx-rates-status` lists the days held.
+  - The business registry (rule 1): the client's export as CSV (`id_code,name,address,directors,
+    status,as_of[,legal_form]`), imported with `load-registry <csv> --as-of <export date>` and
+    `PA_REGISTRY_DB` set; or a party's NAPR extract uploaded with the act.
 
 ### 5.4 Keys
 

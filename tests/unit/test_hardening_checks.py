@@ -669,9 +669,13 @@ _AMOUNT_TEXTS = [
         [100.0, 48750.0],
         [(100, "ასი"), (48750, "ორმოცდარვა ათას შვიდას ორმოცდაათი")],
     ),
-    ("Price USD 1,250.00, penalty 0.5% per day, 50 ლარი", [50.0, 1250.0], []),
+    # the 50 lari in the penalty's own clause is the penalty's: the dot of "0.5%" used to end the
+    # sentence its keyword was read in, so the figure was once taken for money (rule 9's harness
+    # found the same slip hiding an advance behind "30.08.2026"); a full stop still separates
+    ("Price USD 1,250.00, penalty 0.5% per day, 50 ლარი", [1250.0], []),
     ("თანხა (ორასი) და (not a number) და (ოცდახუთი)", [], [(200, "ორასი"), (25, "ოცდახუთი")]),
     ("3 (სამი) ცალი, 200 (ორასი) ლარი, 5 (ხუთთთ) დღე", [200.0], [(3, "სამი"), (200, "ორასი")]),
+    ("Price USD 1,250.00. Penalty 0.5% per day. 50 ლარი", [50.0, 1250.0], []),
 ]
 
 

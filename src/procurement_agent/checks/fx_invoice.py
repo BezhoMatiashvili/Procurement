@@ -23,6 +23,7 @@ the user, can say one was paid, and when.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -35,6 +36,7 @@ from procurement_agent.fx.provider import RateProvider, RateQuote
 
 __all__ = [
     "LOCAL_CURRENCY",
+    "MAX_TYPED_RATES",
     "AdvanceInput",
     "InvoicePlan",
     "InvoiceTerm",
@@ -42,8 +44,11 @@ __all__ = [
     "PricedTerm",
     "fee_currencies",
     "foreign_currencies",
+    "format_entered_rates",
     "invoice_gel",
     "parse_advance",
+    "parse_entered_rates",
+    "parse_typed_rate",
     "plan_invoice",
     "price_terms",
     "to_money",
@@ -125,6 +130,65 @@ def parse_advance(amount_text: str | None, date_text: str | None) -> AdvanceInpu
     """
     entered = AdvanceInput(amount=_amount(amount_text), paid_on=_day(date_text))
     return None if entered == AdvanceInput() else entered
+
+
+#: An exchange rate typed in on the report's form: lari for ONE unit, up to six decimals. No
+#: currency the National Bank quotes is worth a thousand lari a unit.
+_TYPED_RATE = re.compile(r"\d{1,3}(?:\.\d{1,6})?")
+#: One typed rate as a link carries it: "USD:2026-09-10".
+_RATE_DAY = re.compile(r"([A-Z]{3}):(\d{4}-\d{2}-\d{2})")
+#: The most typed rates one check takes: an invoice has a few terms, not dozens.
+MAX_TYPED_RATES = 20
+
+
+def parse_typed_rate(text: str | None) -> Decimal | None:
+    """A rate as a user types it - "2.6104", or with a decimal comma "2,6104" - or None.
+
+    A rate never reaches a thousand lari a unit, so a comma in it is a decimal comma, not a
+    thousands separator.
+    """
+    raw = (text or "").strip().replace(" ", "")
+    if not raw or len(raw) > 12:
+        return None
+    if raw.count(",") == 1 and "." not in raw:
+        raw = raw.replace(",", ".")
+    if not _TYPED_RATE.fullmatch(raw):
+        return None
+    value = Decimal(raw)
+    return value if value > 0 else None
+
+
+def parse_entered_rates(
+    compact: str | None, days: Sequence[str] = (), values: Sequence[str] = ()
+) -> dict[tuple[str, date], Decimal]:
+    """The exchange rates a user typed in, by (currency, day): from a link's ``rates`` value
+    ("USD:2026-09-10:2.6104,USD:2026-09-17:2.6081") and from the report form's fields (a day
+    "USD:2026-09-10" and its value, pair by pair), the form's winning.
+
+    Lenient like ``parse_advance``: what does not read - a lari rate, a malformed day, an empty
+    field - is left out, so a link always opens. At most ``MAX_TYPED_RATES``.
+    """
+    pairs: list[tuple[str, str]] = []
+    for part in (compact or "").split(",")[: MAX_TYPED_RATES + 1]:
+        key, _, value = part.strip().rpartition(":")
+        pairs.append((key, value))
+    pairs.extend(zip(days[:MAX_TYPED_RATES], values[:MAX_TYPED_RATES], strict=False))
+    out: dict[tuple[str, date], Decimal] = {}
+    for key, value in pairs:
+        found = _RATE_DAY.fullmatch(key.strip())
+        rate = parse_typed_rate(value)
+        if found is None or rate is None or found.group(1) == LOCAL_CURRENCY:
+            continue
+        day = _day(found.group(2))
+        if day is None:
+            continue
+        out[found.group(1), day] = rate
+    return dict(list(out.items())[:MAX_TYPED_RATES])
+
+
+def format_entered_rates(entered: dict[tuple[str, date], Decimal]) -> str:
+    """The typed rates as a link carries them: the inverse of ``parse_entered_rates``."""
+    return ",".join(f"{c}:{d.isoformat()}:{r}" for (c, d), r in sorted(entered.items()))
 
 
 # --- the plan ---------------------------------------------------------------------------------
