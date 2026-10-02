@@ -688,16 +688,19 @@ def comment_anchors(docx: Path) -> dict[str, str]:
     return done
 
 
-def count_marked_places(source: Path, findings: Sequence[Finding], text: str | None) -> int | None:
-    """Annotate ``source`` with ``findings`` exactly as the product does (no ``text=``, like
-    ``api/checks.py``) into a temporary directory, and count the comments whose anchored text
-    contains ``text`` (every comment when ``text`` is None). None when it cannot annotate."""
+def count_marked_places(
+    source: Path, findings: Sequence[Finding], text: str | None, *, checked: str | None = None
+) -> int | None:
+    """Annotate ``source`` with ``findings`` exactly as the product does - ``checked`` is the text
+    the findings were read in, as ``api/checks.py`` passes it - into a temporary directory, and
+    count the comments whose anchored text contains ``text`` (every comment when ``text`` is
+    None). None when it cannot annotate."""
     if source.suffix.lower() != ".docx":
         return None
     with tempfile.TemporaryDirectory(prefix="eval-annotate-") as tmp:
         out = Path(tmp) / "annotated.docx"
         try:
-            annotate_docx(source, findings, out)
+            annotate_docx(source, findings, out, text=checked)
         except UnsupportedDocumentError:
             return None
         anchors = comment_anchors(out)

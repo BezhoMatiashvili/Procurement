@@ -462,7 +462,14 @@ def annotated_docx(settings: Settings, aoa: Document, report: CheckReport) -> Re
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "annotated.docx"
         try:
-            annotate_docx(source, report.findings, out, summary=summary_comment(report))
+            annotate_docx(
+                source,
+                report.findings,
+                out,
+                # the text the findings were read in: a chosen place is found by its words
+                text=load_document_text(settings, aoa.id, aoa.kind),
+                summary=summary_comment(report),
+            )
         except UnsupportedDocumentError as e:
             raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, str(e)) from e
         data = out.read_bytes()

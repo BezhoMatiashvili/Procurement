@@ -4536,7 +4536,9 @@ class AoaChecker:
                 f"'{reg_form}' ({written}){note[1]}",
                 expected=f"{reg_form} {act_bare}",
                 actual=p.name,
-                span=self._find_span(act_form),
+                # the party's own name, where the form is written wrong - never the first
+                # "შპს" of the act, which may be the other party's, written right (red team R6)
+                span=self._find_span(p.name),
                 replaces=True,
             )
         if not reg_bare:

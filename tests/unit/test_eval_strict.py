@@ -336,7 +336,7 @@ class TestWordComments:
         Document().save(str(source))
 
         def fake_annotate(
-            src: Path, findings: list[Finding], out: Path
+            src: Path, findings: list[Finding], out: Path, *, text: str | None = None
         ) -> tuple[Path, list[Finding]]:
             _docx_with_comment_ranges(out, [("ას ლარი", "1"), ("სხვა", "2"), ("ას ლარი", "3")])
             return out, []

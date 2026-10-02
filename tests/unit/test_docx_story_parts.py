@@ -113,12 +113,14 @@ def test_a_text_box_written_twice_is_marked_once_in_the_copy_word_shows(tmp_path
     assert any(a.tag == f"{{{_MC}}}Choice" for a in start.iterancestors())
 
 
-def test_reading_order_takes_a_control_where_it_stands_and_a_box_after_its_anchor(
+def test_reading_order_takes_a_control_where_it_stands_and_a_box_before_its_anchor(
     tmp_path: Path,
 ) -> None:
+    """A text box is read before the paragraph that anchors it, as Docling reads it: a place's
+    number must be the one the check counted (red team R6-02)."""
     src = _act(tmp_path, control="კონტროლი", box=_both_boxes("ველი"))
     texts = [p.text for p in paragraphs_in_order(Document(str(src)))]
-    assert texts == ["მიღება-ჩაბარების აქტი", "კონტროლი", "ხელმოწერა", "ველი", "ბოლო აბზაცი."]
+    assert texts == ["მიღება-ჩაბარების აქტი", "კონტროლი", "ველი", "ხელმოწერა", "ბოლო აბზაცი."]
 
 
 @pytest.mark.skipif(shutil.which("soffice") is None, reason="LibreOffice is not installed")

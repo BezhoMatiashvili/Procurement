@@ -77,11 +77,68 @@ def comment_text(finding: Finding) -> str:
 
 #: Run children ``Run.text``'s setter recreates. Anything else in a run - ``w:drawing``,
 #: ``w:fldChar``, ``w:footnoteReference`` - is deleted by it, so only runs made of these split.
-_TEXT_RUN_CHILDREN = frozenset({"rPr", "t", "tab", "br", "cr"})
+#: A carriage return comes back as a line break, so a run with one is not split either.
+_TEXT_RUN_CHILDREN = frozenset({"rPr", "t", "tab", "br"})
 
 
 def _splittable(run: Run) -> bool:
-    return {child.tag.split("}")[-1] for child in run._r} <= _TEXT_RUN_CHILDREN
+    """Whether ``Run.text`` can rewrite this run without losing anything: only text, tabs and
+    line breaks - a page or column break comes back as a line break (red team R6)."""
+    for child in run._r:
+        tag = child.tag.split("}")[-1]
+        if tag not in _TEXT_RUN_CHILDREN:
+            return False
+        if tag == "br" and child.get(qn("w:type")) not in (None, "textWrapping"):
+            return False
+    return True
+
+
+#: What a run of a paragraph's own text may sit in: a link, an inline content control, a smart
+#: tag, custom markup, a simple field, an earlier reviewer's insertion. A run in a deletion is
+#: no text of the paragraph, and one in a text box is the box's paragraph's.
+_RUN_CONTAINERS = frozenset(
+    qn(tag)
+    for tag in (
+        "w:hyperlink",
+        "w:sdt",
+        "w:sdtContent",
+        "w:smartTag",
+        "w:customXml",
+        "w:fldSimple",
+        "w:ins",
+    )
+)
+
+
+def _text_runs(paragraph: Paragraph) -> list[Run]:
+    """The runs of a paragraph's own text, in order, those nested in a link or an inline content
+    control among them: Docling reads their text, and ``Paragraph.runs`` does not."""
+    out: list[Run] = []
+    p = paragraph._p
+    for r in p.iter(qn("w:r")):
+        parent = r.getparent()
+        while parent is not None and parent is not p and parent.tag in _RUN_CONTAINERS:
+            parent = parent.getparent()
+        if parent is p:
+            out.append(Run(r, paragraph))
+    return out
+
+
+def _field_runs(runs: Sequence[Run]) -> list[Any]:
+    """The run elements of ``runs`` that belong to a field - a simple field's, or a complex
+    field's from its ``begin`` to its ``end``: what Word computes, never to be rewritten."""
+    inside: list[Any] = []
+    depth = 0
+    for run in runs:
+        r = run._r
+        kinds = [c.get(qn("w:fldCharType")) for c in r.findall(qn("w:fldChar"))]
+        if "begin" in kinds:
+            depth += 1
+        if depth > 0 or any(a.tag == qn("w:fldSimple") for a in r.iterancestors()):
+            inside.append(r)
+        if "end" in kinds and depth > 0:
+            depth -= 1
+    return inside
 
 
 def _split_run(run: Run, offset: int) -> Run:
@@ -186,8 +243,11 @@ def _cover_next(
     needle = needle.strip()
     if not needle:
         return None
-    text = "".join(r.text for r in paragraph.runs)
+    text = "".join(r.text for r in _text_runs(paragraph))
     located = _locate(text, needle, start_at, whole=whole)
+    while located is not None and _in_simple_field(paragraph, *located):
+        # a simple field holds its result inside itself: no comment can mark it there
+        located = _locate(text, needle, located[1], whole=whole)
     if located is None:
         return None
     start, end = located
@@ -196,7 +256,7 @@ def _cover_next(
     # a run that is more than text is left whole and marked as a whole (see the module docs)
     for boundary in (start, end):
         pos = 0
-        for run in list(paragraph.runs):
+        for run in _text_runs(paragraph):
             length = len(run.text)
             if pos < boundary < pos + length:
                 if _splittable(run):
@@ -206,13 +266,58 @@ def _cover_next(
 
     covered: list[Run] = []
     pos = 0
-    for run in paragraph.runs:
+    for run in _text_runs(paragraph):
         run_end = pos + len(run.text)
         if pos < end and run_end > start and run.text:
             covered.append(run)
         pos = run_end
     _drop_empty_runs(paragraph)
+    if covered:
+        covered = _whole_fields(paragraph, covered)
     return (covered, start, end) if covered else None
+
+
+def _in_simple_field(paragraph: Paragraph, start: int, end: int) -> bool:
+    pos = 0
+    for run in _text_runs(paragraph):
+        run_end = pos + len(run.text)
+        if (
+            pos < end
+            and run_end > start
+            and run.text
+            and any(a.tag == qn("w:fldSimple") for a in run._r.iterancestors())
+        ):
+            return True
+        pos = run_end
+    return False
+
+
+def _whole_fields(paragraph: Paragraph, covered: list[Run]) -> list[Run]:
+    """``covered``, widened to the whole of any complex field it reaches into: a comment marks
+    a field from its ``begin`` to its ``end``, never inside the result Word computes - Word
+    and LibreOffice show markers there as text, and an update of the field drops them."""
+    runs = _text_runs(paragraph)
+    elements = [r._r for r in runs]
+    groups: list[list[int]] = []
+    depth = 0
+    for i, r in enumerate(elements):
+        kinds = [c.get(qn("w:fldCharType")) for c in r.findall(qn("w:fldChar"))]
+        if "begin" in kinds:
+            if depth == 0:
+                groups.append([])
+            depth += 1
+        if depth > 0:
+            groups[-1].append(i)
+        if "end" in kinds and depth > 0:
+            depth -= 1
+    mine = {i for i, r in enumerate(elements) if any(r is c._r for c in covered)}
+    wanted = set(mine)
+    for group in groups:
+        if mine & set(group):
+            wanted |= set(group)
+    if wanted == mine:
+        return covered
+    return [runs[i] for i in sorted(wanted)]
 
 
 #: Children a run may have and still count as "empty text with nothing else in it".
@@ -226,7 +331,7 @@ def _drop_empty_runs(paragraph: Paragraph) -> None:
     comment that is already anchored in this paragraph - so a run is only removed when it
     carries nothing but formatting and empty text.
     """
-    for run in list(paragraph.runs):
+    for run in _text_runs(paragraph):
         if run.text:
             continue
         tags = {child.tag.split("}")[-1] for child in run._r}
@@ -317,8 +422,9 @@ def _text_boxes(paragraph: Any) -> Iterator[Any]:
 
 
 def _with_text_boxes(block: Any, parent: Any) -> Iterator[Paragraph]:
-    """A paragraph, then the paragraphs of the text boxes it anchors (and of their tables)."""
-    yield Paragraph(block, parent)
+    """The paragraphs of the text boxes a paragraph anchors (and of their tables), then the
+    paragraph itself: Docling reads a text box before the paragraph it stands in, and a place's
+    order must be the order the check counted it in (red team R6)."""
     for box in _text_boxes(block):
         for inner in _blocks(box):
             if inner.tag == qn("w:p"):
@@ -327,6 +433,7 @@ def _with_text_boxes(block: Any, parent: Any) -> Iterator[Paragraph]:
             for row in Table(inner, parent).rows:
                 for cell in row.cells:
                     yield from all_paragraphs(cell)
+    yield Paragraph(block, parent)
 
 
 def all_paragraphs(container: object) -> Iterator[Paragraph]:
@@ -360,12 +467,15 @@ def _anchor_for(
     document: DocumentType, finding: Finding, text: str | None = None
 ) -> list[Run] | None:
     """Find the runs a finding should be attached to, most specific candidate first."""
-    places = _places_for(document, finding, text)
+    places, _trusted = _places_for(document, finding, text)
     return places[0][3] if places else None
 
 
-def _places_for(document: DocumentType, finding: Finding, text: str | None = None) -> list[_Place]:
-    """Every place a finding should be marked.
+def _places_for(
+    document: DocumentType, finding: Finding, text: str | None = None
+) -> tuple[list[_Place], bool]:
+    """Every place a finding should be marked, and whether they are surely its own words - the
+    places a tracked change may rewrite (``_chosen_places``).
 
     A wrong value written in several places is wrong in each - a misspelled director in the
     preamble, the signature block and the annex - and a reviewer who corrects the one marked
@@ -375,9 +485,9 @@ def _places_for(document: DocumentType, finding: Finding, text: str | None = Non
     """
     offending = _offending(finding, text)
     if finding.places is not None and finding.quote and finding.quote.strip():
-        chosen = _chosen_places(document, finding.quote.strip(), finding.places)
+        chosen, trusted = _chosen_places(document, finding.quote.strip(), finding.places, text)
         if chosen:
-            return chosen
+            return chosen, trusted
     for needle in _candidates(finding, text):
         # where the words stand as words first: a typo "ივნის" is not inside "ივნისიდან", and
         # the nominative of a name is not inside its genitive. A needle found only inside
@@ -386,28 +496,75 @@ def _places_for(document: DocumentType, finding: Finding, text: str | None = Non
         if not found:
             found = _places_of(document, needle, whole=False, every=needle in offending)
         if found:
-            return found
-    return []
+            return found, needle in offending
+    return [], False
+
+
+#: How many words on each side of a place say which place it is.
+_CONTEXT_WORDS = 3
+
+
+def _context(text: str, start: int, end: int) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The words before and after ``text[start:end]`` on its own line, look-alike letters
+    folded: the lines around it are what a file may order otherwise than the check read them."""
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", end)
+    line_end = len(text) if line_end < 0 else line_end
+    before = _TOKEN.findall(text[line_start:start])[-_CONTEXT_WORDS:]
+    after = _TOKEN.findall(text[end:line_end])[:_CONTEXT_WORDS]
+    return tuple(fold_look_alikes(w) for w in before), tuple(fold_look_alikes(w) for w in after)
 
 
 def _chosen_places(
-    document: DocumentType, quote: str, places: tuple[tuple[int, ...], int]
-) -> list[_Place]:
-    """The places of ``quote`` a finding names (``Finding.places``): its whole-word places in
-    reading order, the chosen ordinals of them. The document must show as many places as the
-    checked text did; when it shows another number - a table cell the parser read twice, a
-    header - the ordinals cannot be trusted, and every place is marked."""
+    document: DocumentType,
+    quote: str,
+    places: tuple[tuple[int, ...], int],
+    text: str | None = None,
+) -> tuple[list[_Place], bool]:
+    """The places of ``quote`` a finding names (``Finding.places``: ordinals among its
+    whole-word places in the checked text), and whether they are surely those places.
+
+    With the checked ``text``, each chosen place is found by the words around it there, in the
+    file: the order the file shows its parts in is not always the order the check read them in
+    (a header the parser appends, a table read by columns), and a tracked change must never
+    rewrite another copy of the words, written right (red team R6). Without it, or when the
+    words around a place do not single one out, the ordinals are taken when the file shows as
+    many places as the checked text did - then surely those places only without the text to
+    say otherwise - and every place is marked, none surely, when it shows another number."""
     wanted, total = places
     found: list[_Place] = []
+    bounds: list[tuple[int, int]] = []  # each place in the file's text, its paragraphs joined
+    texts: list[str] = []
+    base = 0
     for paragraph in paragraphs_in_order(document):
         at = 0
         while (hit := _cover_next(paragraph, quote, at, whole=True)) is not None:
             runs, start, end = hit
             found.append((paragraph, start, end, runs))
+            bounds.append((base + start, base + end))
             at = end
+        own = "".join(r.text for r in _text_runs(paragraph))
+        texts.append(own)
+        base += len(own) + 1
+    if text is not None:
+        file_text = "\n".join(texts)
+        occurrences = whole_word_spans(text, quote)
+        contexts = [_context(file_text, *b) for b in bounds]
+        chosen: list[_Place] = []
+        for i in wanted:
+            if not 0 <= i < len(occurrences):
+                break
+            want = _context(text, *occurrences[i])
+            matches = [k for k, c in enumerate(contexts) if c == want]
+            if len(matches) != 1:
+                break
+            chosen.append(found[matches[0]])
+        else:
+            if chosen:
+                return chosen, True
     if len(found) != total:
-        return found
-    return [found[i] for i in wanted if 0 <= i < len(found)]
+        return found, False
+    return [found[i] for i in wanted if 0 <= i < len(found)], text is None
 
 
 def paragraphs_in_order(container: object) -> Iterator[Paragraph]:
@@ -420,9 +577,9 @@ def paragraphs_in_order(container: object) -> Iterator[Paragraph]:
     def walk(element: Any, parent: Any) -> Iterator[Paragraph]:
         for block in _blocks(element):
             if block.tag == qn("w:p"):
-                yield Paragraph(block, parent)
-                for box in _text_boxes(block):
+                for box in _text_boxes(block):  # read before the paragraph, as Docling does
                     yield from walk(box, parent)
+                yield Paragraph(block, parent)
                 continue
             for row in Table(block, parent).rows:
                 for cell in row.cells:
@@ -456,6 +613,9 @@ def _places_of(document: DocumentType, needle: str, *, whole: bool, every: bool)
 _TOKEN = re.compile(r"\w+")
 #: Spaces and quotes, no part of what a correction says: "შპს „ბეტა“" is "შპს ბეტა".
 _SPACES_AND_QUOTES = re.compile(rf"[\s{re.escape(QUOTE_CHARS)}]+")
+#: A value, not words: Latin letters and digits in groups - a code, an account, a bank code -
+#: written whole or grouped by spaces, hyphens, dots or slashes.
+_VALUE = re.compile(r"[0-9A-Za-z]+(?:[ .\-/]{1,3}[0-9A-Za-z]+)*")
 
 
 def tracked_edits(written: str, replacement: str) -> list[tuple[int, int, str]] | None:
@@ -489,6 +649,10 @@ def tracked_edits(written: str, replacement: str) -> list[tuple[int, int, str]] 
             if m.group() != t.group()
         ]
     if len(mine) == 1 or len(theirs) == 1:
+        # one value for another - a code, an account, grouped or not - is replaced whole; a
+        # word for a phrase is no value: "შპს" is not to be written over with a whole name
+        if not (_VALUE.fullmatch(written.strip()) and _VALUE.fullmatch(replacement.strip())):
+            return None
         return [
             (mine[0].start(), mine[-1].end(), replacement[theirs[0].start() : theirs[-1].end()])
         ]
@@ -514,8 +678,9 @@ def _plan_edits(edits: list[_Edit], paragraph: Paragraph, start: int, end: int, 
     """Plan the tracked change that puts ``new`` in place of the words at ``start:end``, unless
     the words cannot be lined up with it or another finding's change already holds any of them:
     the first finding to claim words writes them, the others keep their comments."""
-    written = "".join(r.text for r in paragraph.runs)[start:end]
-    planned = tracked_edits(written, new)
+    written = "".join(r.text for r in _text_runs(paragraph))[start:end]
+    # what XML cannot carry is dropped before the words are lined up, not after
+    planned = tracked_edits(written, _XML_ILLEGAL.sub("", new))
     if not planned:
         return
     mine = [(paragraph, start + a, start + b, text) for a, b, text in planned]
@@ -530,7 +695,7 @@ def _runs_between(paragraph: Paragraph, start: int, end: int) -> list[Run] | Non
     None when a boundary falls inside a run that is more than text (``_splittable``)."""
     for boundary in (start, end):
         pos = 0
-        for run in list(paragraph.runs):
+        for run in _text_runs(paragraph):
             length = len(run.text)
             if pos < boundary < pos + length:
                 if not _splittable(run):
@@ -540,20 +705,54 @@ def _runs_between(paragraph: Paragraph, start: int, end: int) -> list[Run] | Non
             pos += length
     covered: list[Run] = []
     pos = 0
-    for run in paragraph.runs:
+    for run in _text_runs(paragraph):
         run_end = pos + len(run.text)
         if pos >= start and run_end <= end and run.text:
             covered.append(run)
         pos = run_end
-    whole = "".join(r.text for r in paragraph.runs)[start:end]
+    whole = "".join(r.text for r in _text_runs(paragraph))[start:end]
     if not covered or "".join(r.text for r in covered) != whole:
         return None
     if not all(_splittable(r) for r in covered):
         return None
+    fields = _field_runs(_text_runs(paragraph))
+    if any(any(r._r is f for f in fields) for r in covered):
+        return None  # what a field shows is Word's to compute (red team R6)
+    first, last = covered[0]._r, covered[-1]._r
+    parent = first.getparent()
+    if any(r._r.getparent() is not parent for r in covered):
+        return None  # the words cross a link or a content control's edge
+    element = first.getnext() if first is not last else None
+    while element is not None and element is not last:
+        if element.tag in _BLOCKING:
+            return None  # another reviewer's change or comment between the words
+        element = element.getnext()
     return covered
 
 
+#: What may not stand between the runs a tracked change rewrites: an earlier reviewer's change
+#: or comment, a field, a link or a content control - moving the runs past it would reorder
+#: the document's own words or detach the comment (red team R6).
+_BLOCKING = frozenset(
+    qn(tag)
+    for tag in (
+        "w:del",
+        "w:ins",
+        "w:moveFrom",
+        "w:moveTo",
+        "w:commentRangeStart",
+        "w:commentRangeEnd",
+        "w:fldSimple",
+        "w:hyperlink",
+        "w:sdt",
+        "w:smartTag",
+        "w:customXml",
+    )
+)
+
+
 _XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
+_REVISION_ID = re.compile(r"[0-9]{1,9}")
 
 
 def _wrap(runs: list[Run], new: str, author: str, stamp: str, revision: int) -> int:
@@ -593,7 +792,8 @@ def _track(document: DocumentType, edits: Sequence[_Edit], author: str, when: da
     runs into a ``w:del`` does. Revision ids start above every id the document already uses."""
     if not edits:
         return 0
-    used = [int(v) for v in document.element.xpath("//@w:id") if str(v).isdigit()]
+    # ASCII digits only: "²" is a digit to str.isdigit and none to int (red team R6)
+    used = [int(v) for v in document.element.xpath("//@w:id") if _REVISION_ID.fullmatch(str(v))]
     revision = max(used, default=0) + 1
     stamp = when.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     targets = [
@@ -611,7 +811,10 @@ def paragraph_text(paragraph: Paragraph, *, accepted: bool = False) -> str:
     deleted text in and inserted text out - or, ``accepted``, as a reviewer who accepts them
     all reads it. ``Paragraph.text`` sees neither: it reads only a paragraph's own runs."""
     parts: list[str] = []
-    for el in paragraph._p.iter(qn("w:t"), qn("w:delText")):
+    p = paragraph._p
+    for el in p.iter(qn("w:t"), qn("w:delText")):
+        if next(el.iterancestors(qn("w:p")), None) is not p:
+            continue  # a text box's words are its own paragraph's
         inserted = any(a.tag == qn("w:ins") for a in el.iterancestors())
         deleted = el.tag == qn("w:delText")
         if (deleted and accepted) or (inserted and not accepted):
@@ -637,7 +840,7 @@ def _add_note(document: DocumentType, text: str, author: str) -> None:
     document stand for. The body's text is left as it was; a document with no text at all gets
     a paragraph to carry it."""
     for paragraph in paragraphs_in_order(document):
-        first = _TOKEN.search("".join(r.text for r in paragraph.runs))
+        first = _TOKEN.search("".join(r.text for r in _text_runs(paragraph)))
         if first is None:
             continue
         found = _cover_next(paragraph, first.group(), 0)
@@ -697,12 +900,12 @@ def annotate_docx(
     comments: dict[tuple[object, int, int], Comment] = {}
     edits: list[_Edit] = []
     for finding in findings:
-        places = _places_for(document, finding, text)
+        places, trusted = _places_for(document, finding, text)
         if not places:
             unanchored.append(finding)
             continue
         for paragraph, start, end, runs in places:
-            if finding.replacement:
+            if finding.replacement and trusted:
                 _plan_edits(edits, paragraph, start, end, finding.replacement)
             key = (paragraph._p, start, end)
             if (existing := comments.get(key)) is not None:

@@ -330,10 +330,10 @@ def compare_label(finding: Finding, report: ComparisonReport | None = None) -> s
 
 
 def _occurrence_counter(
-    source: Path,
+    source: Path, checked: str | None = None
 ) -> Callable[[ExpectedFinding, Finding], int | None]:
     def count(entry: ExpectedFinding, finding: Finding) -> int | None:
-        return count_marked_places(source, [finding], entry.text)
+        return count_marked_places(source, [finding], entry.text, checked=checked)
 
     return count
 
@@ -473,7 +473,7 @@ def run_document(
             labels=labels,
             strict=gold.strict_findings,
             allowed=gold.allowed_findings,
-            count_occurrences=_occurrence_counter(gold.document),
+            count_occurrences=_occurrence_counter(gold.document, chunks_text(chunks)),
         )
     return score, result
 

@@ -110,9 +110,9 @@ MUTATIONS = [
     Mutation(
         "tracked_change_text_unsanitised",
         "src/procurement_agent/report/docx_annotate.py",
-        'text = _XML_ILLEGAL.sub("", new)',
-        "text = new",
-        "a correction's characters XML cannot carry break the annotated act",
+        'planned = tracked_edits(written, _XML_ILLEGAL.sub("", new))',
+        "planned = tracked_edits(written, new)",
+        "a correction's characters XML cannot carry reach the annotated act",
         ("tests/unit/test_docx_tracked_changes.py",),
     ),
     Mutation(
