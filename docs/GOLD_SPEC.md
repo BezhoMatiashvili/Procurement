@@ -541,6 +541,15 @@ strict_findings: true             # anything else reported (any severity) is a f
   figure's own. It adds up with the advance's figure, or - when the act or the contract states
   the advance only as a share - as the fee less that share. A remainder that adds up is not
   compared; one that does not is compared like a fee.
+* The registry (client rule 1, `AOA.REGISTRY_*`): the extract a user uploads for a party wins over
+  the operator's snapshot. A name differs only in its words or its legal form (folded to the
+  abbreviation); an address only in its place names (in their own forms - the name, its genitive,
+  its locative) or its numbers, in order - country, district and the words for a kind of place
+  are not compared - and one that keeps the registry's in order with parts left out is a warning
+  ("omits"); a signatory is any person the registry authorises, in any case, surname first or
+  last, with or without a patronymic. `AOA.REGISTRY_STATUS` (warning) is a liquidation,
+  reorganisation or insolvency under way; an extract printed over 30 days before the act is an
+  `AOA.REGISTRY` info note.
 * Which rule owns which mistake:
   * wrong digits and/or words of the fee → `AOA.FEE` (+ `AOA.AMOUNT_WORDS` when digits and words
     disagree); words misspelled (`ასოი`) → `AOA.AMOUNT_WORDS`, an error, with the correct words
@@ -645,14 +654,15 @@ strict_findings: true             # anything else reported (any severity) is a f
   corrected in English (`5 July 2026` -> `30 June 2026`); an act not in Georgian whose date is
   not read gets an `AOA.ACT_DATE` skip note saying so, never the "date could not be found"
   warning, which stays for a Georgian act;
-* **open question for the client** (red team R5, AOA-R5-12): a billing cycle across two months
-  (`15.06.2026-დან 14.07.2026-ის ჩათვლით`) signed on its last day is now an `AOA.ACT_DATE` error
-  corrected to the end of the second month (31 July), after the work ended. Client rule 4's
-  example is a whole month; whether a cycle that crosses a month boundary is signed on its last
-  day (clean, or at most an info note) or on the month's end is not decided, and the rule is
-  unchanged until the client says. The two candidates: (a) the period's last day when the period
-  crosses a month boundary, the month's end for a period inside one month; (b) either day
-  accepted;
+* **decided 2026-10-02** (red team R5, AOA-R5-12, the user for the client): the act's date must
+  match the work's - one completion date: that day, else an `AOA.ACT_DATE` error corrected to it;
+  a period (a whole month, part of one, or a billing cycle across two): its own last day or the
+  last day of the month it ends in are both right, any other day an error corrected to the
+  month's end. "აქტის თარიღი:" dates the act like "გაფორმების თარიღი:"; a bare "თარიღი:" does
+  not. Rule 3: a project named after its label without quotes is named; a cadastral code written
+  with other separators is an `AOA.CADASTRAL_PRESENT` warning corrected to the dotted code, and a
+  code whose digit groups are no cadastral code's a warning with no correction; a missing
+  project or code is marked on the act's title;
 * The legacy `expected_findings:` / `forbidden_findings:` (rule ids only, `"*"` = must be
   completely clean) keep working and are checked as well.
 

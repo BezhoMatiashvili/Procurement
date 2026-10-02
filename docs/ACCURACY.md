@@ -138,6 +138,46 @@ What the harness does not vary: the act's layout (one template), and acts in two
 currencies (a skip by design). Several layouts are measured with the synthetic families
 (`scripts/gen_aoa_families.py`) and the held-out set.
 
+### Rule 1: the parties against the business registry (`scripts/registry_accuracy.py`)
+
+Random cases, written from scratch: two invented companies, each one's registry extract written
+in the 2011 or the 2025 layout and read back with the application's own reader, and an act in an
+act's style (form abbreviated, name quoted, address without country or district, the director in
+the genitive and the nominative). Ten classes: clean, signature surname first, the second
+authorised person signing (no finding allowed); a name slip, another legal form, another house
+number, a street slip, the registry's flat left out (a warning), a director slip in every place,
+a liquidation in the registry (a warning).
+
+* First run (seed 1): a harness mistake - the act never wrote the flat the registry lists, so
+  "clean" acts were short. Fixed in the harness, not the checker.
+* **First honest runs (fresh seeds 2 and 3, 300 a class): 2,989 and 2,991 of 3,000 right
+  (99.63%, 99.70%).** Three general causes: a vowel changed in a street's last syllable passed as
+  a case form ("რუსთაველას" for "რუსთაველის"), so a place name now matches only its real
+  alternations (X/X-ს, -ე/-ის, -ი/-ში); two directors one letter apart in the two parties ("ეკა
+  მელაშვილი", "ეკა გელაშვილი") had one "corrected" into the other - a false error on a correct
+  act - so a place that is another party's own director, written right, is never this party's
+  slip, with or without a contract; and the same false error behind the few name misses.
+* **After the fixes: fresh seeds 4 and 5, 3,000 cases each: 6,000 of 6,000 right (100%).**
+* The reader on the two public extracts: code, name, legal form, full address (its wrapped
+  line too), the director and position, sole representation, preparation date, no status - and
+  neither the founders' nor the partners' persons taken for representatives.
+
+### Rules 3 and 4: the project, the cadastral code, the act's date (`scripts/act_rules_accuracy.py`)
+
+Acts written from scratch in three layouts (prose, "label: value" lines, numbered sections), three
+date styles and five ways of saying the work was done (შესრულდა, დასრულდა, გაიწია, ჩაბარდა,
+გაწეულია); fourteen classes: the project quoted, labelled without quotes, missing; the cadastral
+code dotted, dashed, with a digit group wrong, missing; one completion date with the act on it or
+off it; a whole month with the act on its end or off it; part of a month with the act on the
+period's end, on the month's end, or off both.
+
+* **First run (seed 1, 60 a class): 576 of 840 (68.6%).** Every miss was one general gap: the
+  label "აქტის თარიღი:" (the act's date) did not date the act, so the check said the date could
+  not be found. It now does, like "გაფორმების თარიღი:" (a bare "თარიღი:" still does not).
+* **After the fix: seed 1 840/840; fresh seeds 2 and 3, 200 a class: 2,800 of 2,800 each
+  (100%)**, with every correction read back as the expected date in the act's own style, and the
+  gold sets unchanged.
+
 ### Scanned PDFs (OCR inside the Docker image, Tesseract `kat+eng`, 216 dpi)
 
 The client's 7 scans, each paired with its Word twin by content: character error rate 0.16-0.40
@@ -214,8 +254,7 @@ image-size issue, not an accuracy one, left for its own change.
   reported in the comparison with its value read off its genitive ("მერგანძიი").
 * **A bare "თარიღი:" label** is not read as the act's date (it may be the contract's), and
   English act and contract wording is out of scope.
-* **Open policy questions** for the client: an act whose billing cycle crosses two months
-  (dated at the cycle's end or the month's end), resource-based estimates in BOQs (a work row
+* **Open policy questions** for the client: resource-based estimates in BOQs (a work row
   whose resource rows carry the amounts), a sweep-up "any other works" line every bidder prices,
   a fixed coefficient cell in every amount formula, which total a bid offers when it gives a
   discount below its total incl. VAT, pairing a contract's and an act's parties by role in the
@@ -605,8 +644,8 @@ unit test and a near miss beside it (`tests/unit/test_r5_dates_and_terms.py`):
 * **A staged delivery** (COMPARE-R5-11, policy): each batch's date is a delivery deadline.
 * **A preamble date on one side** (COMPARE-R5-10): a draft's date filled in or deleted was "Date
   (unclassified)"; it is "Contract date", when the other version writes no date of that value.
-* **Not changed: a billing cycle across two months** (AOA-R5-12) is corrected to the month's end
-  after the work ended; it is an open question for the client (GOLD_SPEC 3).
+* **A billing cycle across two months** (AOA-R5-12): decided 2026-10-02 - an act on the period's
+  last day or on the month's end is right (GOLD_SPEC 3).
 
 ### Scanned PDFs cannot carry Word comments
 
@@ -2041,8 +2080,10 @@ Left as they are:
   reads such a note rightly (see "The act review"). The shares and the stemmer are fitted to the
   client's one template. A list of services is read from list lines (`- `, `•`, `ა)`) under a
   lead-in; a spreadsheet, or a table holding the list, has none, and the rule says it did not run.
-* The registry rules run only against a snapshot the client exports (`cli load-registry`); with
-  no snapshot they are reported as skipped, never as passed.
+* The registry rules run against the parties' uploaded extracts and the snapshot the client
+  exports (`cli load-registry`); a party with neither is reported as skipped, never as passed.
+  The extract reader was built from two public extracts (2011 and 2025 layouts); an extract of a
+  third layout would fail loudly ("not an extract", or fields left out), not quietly.
 * Docling promotes the first row of a table with no header row to the column header. A
   two-column table whose first row is data - a digit in either cell, or a label alone (a
   title) - is written row by row as `label: value;` (red team R3). A first row of two cells

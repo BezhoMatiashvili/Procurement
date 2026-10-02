@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Sequence
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -633,6 +634,7 @@ def aoa_report(
     advance_amount: Annotated[str | None, Query(max_length=40)] = None,
     advance_date: Annotated[str | None, Query(max_length=40)] = None,
     review: str | None = None,
+    registry: Annotated[str | None, Query(max_length=600)] = None,
 ) -> Response:
     """The rules' report, recomputed on every view. A finished model review rides in
     ``review`` and is applied to the notes the rules could not decide; its absence means
@@ -643,6 +645,7 @@ def aoa_report(
         )
         advance = parse_advance(advance_amount, advance_date)
         typed, typed_link = _typed_rates(request)
+        extracts = _extracts(session, principal, registry)
         review_row = owned_review_job(session, principal, review, aoa_doc, contract_doc)
         report = run_aoa(
             settings,
@@ -652,6 +655,7 @@ def aoa_report(
             advance,
             review_job_id=review_row.id if review_row is not None else None,
             entered_rates=typed,
+            registry_docs=extracts,
         )
     except HTTPException as e:
         return _http_error(request, principal, e, "/ui/start/aoa")
@@ -664,6 +668,7 @@ def aoa_report(
         (advance_amount, advance_date),
         review_row,
         typed_link,
+        extracts,
     )
     audit(
         session,
@@ -686,6 +691,7 @@ def aoa_report(
         query=request.url.query,
         groups=_by_severity(report.findings),
         fx_days=_fx_days(report),
+        registry_ids=",".join(d.id for d in extracts),
         # the model review: offered only where it can run, and only for notes left open
         can_review=settings.aoa_llm_enabled
         and get_llm(request) is not None
@@ -713,6 +719,7 @@ def aoa_annotated(
     advance_amount: Annotated[str | None, Query(max_length=40)] = None,
     advance_date: Annotated[str | None, Query(max_length=40)] = None,
     review: str | None = None,
+    registry: Annotated[str | None, Query(max_length=600)] = None,
 ) -> Response:
     """A plain link, not a JS blob: works with JavaScript off and needs no CSP argument. The
     report's own query rides along, so the Word file carries the model's reading when the page
@@ -731,6 +738,7 @@ def aoa_annotated(
             advance,
             review_job_id=review_row.id if review_row is not None else None,
             entered_rates=_typed_rates(request)[0],
+            registry_docs=_extracts(session, principal, registry),
         )
         # 415 for a scan or a spreadsheet: an HTML navigation must not land on raw JSON.
         resp = annotated_docx(settings, aoa_doc, report)
@@ -797,6 +805,8 @@ def aoa_review(
             params[name] = value.strip()
     if typed_link := _typed_rates(request)[1]:
         params["rates"] = typed_link
+    if registry_ids := ",".join(_ids(request.query_params.get("registry"), _MAX_EXTRACTS)):
+        params["registry"] = registry_ids
     if queued is not None and queued.job is not None:
         params["review"] = queued.job.id
     return RedirectResponse(
@@ -1265,6 +1275,15 @@ def _aoa_inputs(
     return aoa_doc, contract_doc, cast("ContractorType | None", valid)
 
 
+#: The most registry extracts one act check takes: a party each, and room for a few more.
+_MAX_EXTRACTS = 6
+
+
+def _extracts(session: Session, principal: Principal, raw: str | None) -> list[Document]:
+    """The caller's uploaded registry extracts a report's link names (``registry=<ids>``)."""
+    return [owned_document(session, principal, i) for i in _ids(raw, _MAX_EXTRACTS)]
+
+
 def _typed_rates(request: Request) -> tuple[dict[tuple[str, date], Decimal], str]:
     """The exchange rates typed in for rule 9's invoice, from the link (``rates``) and from the
     report form's fields (``rate_day`` / ``rate_value`` pairs, which win), and the same rates
@@ -1341,6 +1360,7 @@ _RUN_OPTIONS: dict[str, tuple[str, ...]] = {
         "advance_amount",
         "advance_date",
         "rates",
+        "registry",
         "review",
     ),
     "compare": ("left", "right", "job"),
@@ -1356,6 +1376,7 @@ def _remember_aoa(
     advance: tuple[str | None, str | None],
     review: Job | None,
     rates: str = "",
+    extracts: Sequence[Document] = (),
 ) -> None:
     """Record the act check that was just opened, with the options its URL carried."""
     params: dict[str, object] = {"act": act.id}
@@ -1370,6 +1391,9 @@ def _remember_aoa(
             params[name] = value.strip()[:64]  # as typed: the report reads it leniently
     if rates:
         params["rates"] = rates  # already read and written back (``_typed_rates``)
+    if extracts:
+        params["registry"] = ",".join(d.id for d in extracts)
+        documents.extend((d.id, "registry") for d in extracts)
     if review is not None:
         params["review"] = review.id
     history.record_run(

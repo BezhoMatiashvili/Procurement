@@ -481,3 +481,71 @@ def test_the_rate_limiter_is_actually_wired(tmp_path: Path) -> None:
         codes = [client.get("/api/v1/status", headers=H).status_code for _ in range(6)]
         assert 429 in codes, codes
         break
+
+
+def _upload_docx(client: TestClient, name: str, lines: list[str]) -> str:
+    from docx import Document as WordDocument
+
+    doc = WordDocument()
+    for line in lines:
+        doc.add_paragraph(line)
+    buf = io.BytesIO()
+    doc.save(buf)
+    r = client.post(
+        "/api/v1/documents",
+        headers=H,
+        files={
+            "file": (
+                name,
+                buf.getvalue(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        job = client.get(f"/api/v1/jobs/{body['parse_job_id']}", headers=H).json()
+        if job["status"] in ("done", "failed"):
+            break
+        time.sleep(0.2)
+    return str(body["document"]["id"])
+
+
+def test_an_uploaded_registry_extract_is_checked_and_a_stray_file_is_said(
+    client: TestClient,
+) -> None:
+    from tests.unit.test_aoa_check import ACT
+    from tests.unit.test_registry_extract import LAYOUT_2011
+
+    act = _upload(client, "act.xlsx", ACT.split("\n"))
+    # the contractor's extract, naming another director than the act's
+    extract = (
+        LAYOUT_2011.replace("შპს ნიმუშის ჯგუფი", "შპს ბეტა სერვისი")
+        .replace("400000017", "987654321")
+        .replace("ნიკა სამხარაძე", "ლევან მელაძე")
+    )
+    good = _upload_docx(client, "extract.docx", extract.split("\n"))
+    stray = _upload_docx(client, "letter.docx", ["ძვირფასო კოლეგა,", "გიგზავნით ინფორმაციას."])
+    r = client.post(
+        "/api/v1/checks/aoa",
+        headers=H,
+        json={"aoa_document_id": act, "registry_document_ids": [good, stray]},
+    )
+    assert r.status_code == 200, r.text
+    report = r.json()
+    directors = [f for f in report["findings"] if f["rule_id"] == "AOA.REGISTRY_DIRECTOR"]
+    assert directors and all("ლევან მელაძე" in f["message_en"] for f in directors)
+    skips = [s["reason_en"] for s in report["skipped"] if s["rule_id"] == "AOA.REGISTRY"]
+    assert any(
+        s.startswith("letter.docx: the file could not be read as a registry extract") for s in skips
+    )
+    # the customer has no extract and there is no snapshot: a skip, not a warning
+    assert any("no registry extract was uploaded for code 123456789" in s for s in skips)
+    too_many = client.post(
+        "/api/v1/checks/aoa",
+        headers=H,
+        json={"aoa_document_id": act, "registry_document_ids": [good] * 7},
+    )
+    assert too_many.status_code == 422

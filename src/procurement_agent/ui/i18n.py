@@ -193,6 +193,19 @@ STRINGS: dict[str, tuple[str, str]] = {
         "The advance was read from the act — confirm or correct it.",
         "ავანსი ამოღებულია აქტიდან — დაადასტურეთ ან შეასწორეთ.",
     ),
+    "upload.registry": ("Registry extracts", "რეესტრის ამონაწერები"),
+    "upload.registry.hint": (
+        "The parties' extracts from the business registry (napr.gov.ge), as PDF: each party's "
+        "name, signatories and legal address are checked against its own extract.",
+        "მხარეების ამონაწერები სამეწარმეო რეესტრიდან (napr.gov.ge), PDF ფორმატში: თითოეული "
+        "მხარის დასახელება, ხელმომწერები და იურიდიული მისამართი მის ამონაწერს შედარდება.",
+    ),
+    "upload.registry.nojs": (
+        "Registry extracts are uploaded with JavaScript on; without it the act is checked "
+        "against the registry snapshot only.",
+        "რეესტრის ამონაწერების ატვირთვას JavaScript სჭირდება; მის გარეშე აქტი მხოლოდ "
+        "რეესტრის ჩამონატვირთს შედარდება.",
+    ),
     "aoa.rate.label": (
         "Exchange rate, GEL per 1 {currency}, {day}",
         "კურსი, ლარი 1 {currency}-ზე, {day}",

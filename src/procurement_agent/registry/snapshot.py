@@ -15,6 +15,7 @@ silently passed - see ``AoaChecker.rule_registry``.
 from __future__ import annotations
 
 import csv
+import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import closing
@@ -26,7 +27,7 @@ from procurement_agent.extraction.normalize import normalize_spaces
 
 #: Columns the export must provide. "directors" holds one or more names separated by ';'.
 REQUIRED_COLUMNS = ("id_code", "name")
-OPTIONAL_COLUMNS = ("address", "directors", "status", "as_of")
+OPTIONAL_COLUMNS = ("address", "directors", "status", "as_of", "legal_form")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS registry_company (
@@ -35,10 +36,26 @@ CREATE TABLE IF NOT EXISTS registry_company (
     address   TEXT,
     directors TEXT,
     status    TEXT,
-    as_of     TEXT
+    as_of     TEXT,
+    legal_form TEXT
 );
 CREATE TABLE IF NOT EXISTS registry_meta (key TEXT PRIMARY KEY, value TEXT);
 """
+
+_NOT_DIGIT = re.compile(r"\D")
+
+
+def normalize_code(value: str, *, restore_zero: bool = False) -> str:
+    """An identification code as digits only: "406-444-789" and "406 444 789" are 406444789.
+
+    ``restore_zero`` puts back the leading zero a spreadsheet drops from a code it took for a
+    number: a company's code has nine digits and a person's eleven, so eight or ten digits are
+    that code with its "0" lost. Only an export does that; a code read from a document is kept.
+    """
+    digits = _NOT_DIGIT.sub("", value or "")
+    if restore_zero and len(digits) in (8, 10):
+        digits = "0" + digits
+    return digits
 
 
 class RegistryFormatError(ValueError):
@@ -53,6 +70,12 @@ class RegistryEntry:
     directors: tuple[str, ...] = ()
     status: str | None = None
     as_of: str | None = None
+    #: the legal form as the registry writes it ("შეზღუდული პასუხისმგებლობის საზოგადოება")
+    legal_form: str | None = None
+    #: where the entry comes from: the operator's "snapshot", or a party's uploaded "extract"
+    source: str = "snapshot"
+    #: each director's position where the registry gives it, in ``directors``' order
+    positions: tuple[str, ...] = ()
 
 
 def _split_directors(value: str | None) -> tuple[str, ...]:
@@ -80,7 +103,7 @@ class RegistrySnapshot:
 
     def lookup(self, id_code: str) -> RegistryEntry | None:
         row = self._conn.execute(
-            "SELECT * FROM registry_company WHERE id_code = ?", (id_code.strip(),)
+            "SELECT * FROM registry_company WHERE id_code = ?", (normalize_code(id_code),)
         ).fetchone()
         if row is None:
             return None
@@ -91,6 +114,7 @@ class RegistrySnapshot:
             directors=_split_directors(row["directors"]),
             status=row["status"],
             as_of=row["as_of"] or self.as_of,
+            legal_form=row["legal_form"] if "legal_form" in row.keys() else None,  # noqa: SIM118
         )
 
     def close(self) -> None:
@@ -163,13 +187,14 @@ def _write_snapshot(csv_path: Path, tmp_path: Path, stamp: str) -> None:
     try:
         conn.executescript(_SCHEMA)
         for row in _rows(csv_path):
-            code = normalize_spaces(row.get("id_code") or "")
+            code = normalize_code(row.get("id_code") or "", restore_zero=True)
             name = normalize_spaces(row.get("name") or "")
             if not code or not name:
                 continue
             conn.execute(
                 "INSERT OR REPLACE INTO registry_company"
-                " (id_code, name, address, directors, status, as_of) VALUES (?, ?, ?, ?, ?, ?)",
+                " (id_code, name, address, directors, status, as_of, legal_form)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     code,
                     name,
@@ -177,6 +202,7 @@ def _write_snapshot(csv_path: Path, tmp_path: Path, stamp: str) -> None:
                     (row.get("directors") or "").strip() or None,
                     normalize_spaces(row.get("status") or "") or None,
                     (row.get("as_of") or "").strip() or None,
+                    normalize_spaces(row.get("legal_form") or "") or None,
                 ),
             )
         conn.execute(

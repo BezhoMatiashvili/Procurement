@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import functools
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -66,7 +66,9 @@ from procurement_agent.ingestion.xlsx_size import WorkbookTooLargeError
 from procurement_agent.jobs.worker import Worker
 from procurement_agent.llm.base import LLMClient
 from procurement_agent.models import Document, DocumentStatus, Job
-from procurement_agent.registry.snapshot import open_snapshot
+from procurement_agent.registry.extract import NotAnExtractError, read_extract
+from procurement_agent.registry.snapshot import RegistryEntry, open_snapshot
+from procurement_agent.registry.source import RefusedExtract, RegistrySource
 from procurement_agent.report.compare_xlsx import to_xlsx as compare_to_xlsx
 from procurement_agent.report.docx_annotate import UnsupportedDocumentError, annotate_docx
 from procurement_agent.security.audit import audit
@@ -114,6 +116,11 @@ class AoaCheckRequest(BaseModel):
     #: Exchange rates typed in for the foreign-currency invoice (rule 9), one per currency and
     #: day; each wins over the imported NBG rate of its day.
     rates: list[EnteredRate] = Field(default_factory=list, max_length=20)
+    #: Uploaded business-registry extracts of the act's parties (rule 1), checked before the
+    #: operator's snapshot.
+    registry_document_ids: list[Annotated[str, Field(max_length=64)]] = Field(
+        default_factory=list, max_length=6
+    )
 
     @model_validator(mode="after")
     def _one_rate_a_day(self) -> AoaCheckRequest:
@@ -135,6 +142,27 @@ class AoaCheckRequest(BaseModel):
 
     def entered_rates(self) -> dict[tuple[str, date], Decimal]:
         return {(r.currency, r.on): r.rate for r in self.rates}
+
+
+def _read_extracts(
+    settings: Settings, docs: Sequence[Document]
+) -> tuple[list[RegistryEntry], list[RefusedExtract]]:
+    """Each uploaded registry extract read, or the reason it could not be: a file of another
+    kind, one with no extract in it, or one pdfium cannot open - a note in the report, never an
+    error that stops the check."""
+    entries: list[RegistryEntry] = []
+    refused: list[RefusedExtract] = []
+    for doc in docs:
+        if doc.kind not in ("pdf", "docx"):
+            refused.append(RefusedExtract(doc.display_name, "not a PDF or a Word file"))
+            continue
+        try:
+            entries.append(read_extract(upload_path(settings, doc.id, doc.kind), doc.kind))
+        except NotAnExtractError as e:
+            refused.append(RefusedExtract(doc.display_name, str(e)))
+        except (OSError, RuntimeError, ValueError):
+            refused.append(RefusedExtract(doc.display_name, "the file could not be read"))
+    return entries, refused
 
 
 def _document_text(settings: Settings, doc: Document) -> str:
@@ -171,6 +199,7 @@ def run_aoa(
     *,
     review_job_id: str | None = None,
     entered_rates: Mapping[tuple[str, date], Decimal] | None = None,
+    registry_docs: Sequence[Document] = (),
 ) -> CheckReport:
     """The whole act check. Shared by the JSON API, the DOCX download and the UI page, so the
     registry snapshot and the exchange-rate source are opened and closed in exactly one place.
@@ -178,13 +207,19 @@ def run_aoa(
     ``review_job_id`` names a model review to apply, already resolved through
     ``owned_review_job``; its answers are checked again against the notes this run leaves open.
     ``entered_rates`` are the exchange rates the user typed in, by (currency, day), lari per unit.
+    ``registry_docs`` are the parties' uploaded registry extracts, read before the snapshot.
     """
     review = (
         load_review(settings, aoa.id, review_job_id)
         if review_job_id and contract is not None
         else None
     )
-    registry = open_snapshot(settings.registry_db) if settings.registry_db else None
+    snapshot = open_snapshot(settings.registry_db) if settings.registry_db else None
+    registry = (
+        RegistrySource.of(snapshot, *_read_extracts(settings, registry_docs))
+        if snapshot is not None or registry_docs
+        else None
+    )
     try:
         rates = open_rate_provider(settings, entered_rates)
         try:
@@ -384,6 +419,7 @@ def check_acceptance_act(
         else None
     )
     review = owned_review_job(session, principal, body.review_job_id, aoa, contract)
+    extracts = [owned_document(session, principal, i) for i in body.registry_document_ids]
     report = run_aoa(
         settings,
         aoa,
@@ -392,6 +428,7 @@ def check_acceptance_act(
         body.advance(),
         review_job_id=review.id if review is not None else None,
         entered_rates=body.entered_rates(),
+        registry_docs=extracts,
     )
 
     audit(

@@ -124,6 +124,7 @@
   {% if contract %}<input type="hidden" name="contract" value="{{ contract.id }}">{% endif %}
   {# the contractor type and the advance change nothing the model was asked, so its review stays #}
   {% if review_job %}<input type="hidden" name="review" value="{{ review_job }}">{% endif %}
+  {% if registry_ids %}<input type="hidden" name="registry" value="{{ registry_ids }}">{% endif %}
   <label for="rerun-type">{{ t("upload.contractor_type") }}
     {# a blank first choice, so a re-run never submits whichever type happens to be listed
        first. Not required: left blank, the check runs as before with the wording rule skipped #}

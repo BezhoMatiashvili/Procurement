@@ -185,6 +185,8 @@ _NO_REVIEW: dict[str, object] = {
     "review_auto": False,
     # and no foreign-currency invoice whose days could take a typed rate
     "fx_days": [],
+    # nor registry extracts riding along
+    "registry_ids": "",
 }
 
 

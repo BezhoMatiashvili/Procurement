@@ -13,6 +13,8 @@
       method="post" enctype="multipart/form-data">
   {{ up.slot(1, "act", t("upload.act"), t("upload.act.hint"), ".pdf,.docx", "PDF · DOCX") }}
   {{ up.slot(2, "contract", t("upload.contract"), t("upload.contract.hint"), ".pdf,.docx", "PDF · DOCX", required=False) }}
+  {{ up.slot(3, "registry", t("upload.registry"), t("upload.registry.hint"), ".pdf,.docx", "PDF · DOCX", required=False, multiple=True) }}
+  <noscript><p class="muted small">{{ t("upload.registry.nojs") }}</p></noscript>
 
   <div class="options">
     <label for="contractor_type">{{ t("upload.contractor_type") }}

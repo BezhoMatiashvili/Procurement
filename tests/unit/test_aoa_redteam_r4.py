@@ -130,13 +130,23 @@ class TestActDateMarkedOnlyWhereTheActIsDated:
         assert f.places == ((1,), 2)
         assert _commented_lines(tmp_path, act, [f]) == ["აქტი გაფორმდა 2026 წლის 1 მარტს"]
 
-    def test_the_period_s_end_is_not_marked(self, tmp_path: Path) -> None:
+    def test_the_period_s_start_is_not_marked(self, tmp_path: Path) -> None:
+        """The act dated on a day the period also writes - its first - is wrong where it dates
+        the act, and only there."""
+        act = ACT.replace(
+            _PERIOD, "მომსახურება შესრულდა 01.04.2026-დან 29.04.2026-ის ჩათვლით."
+        ).replace(_SIGNED, "აქტი გაფორმდა 01.04.2026")
+        [f] = _of(_check(act), "AOA.ACT_DATE")
+        assert (f.quote, f.expected) == ("01.04.2026", "30.04.2026")
+        assert _commented_lines(tmp_path, act, [f]) == ["აქტი გაფორმდა 01.04.2026"]
+
+    def test_an_act_on_the_period_s_own_last_day_is_right(self) -> None:
+        """Client rule 4, decided 2026-10-02: the act's date matches the work's - the period's
+        last day - or is the month's last day; both are right."""
         act = ACT.replace(
             _PERIOD, "მომსახურება შესრულდა 01.04.2026-დან 29.04.2026-ის ჩათვლით."
         ).replace(_SIGNED, "აქტი გაფორმდა 29.04.2026")
-        [f] = _of(_check(act), "AOA.ACT_DATE")
-        assert (f.quote, f.expected) == ("29.04.2026", "30.04.2026")
-        assert _commented_lines(tmp_path, act, [f]) == ["აქტი გაფორმდა 29.04.2026"]
+        assert _of(_check(act), "AOA.ACT_DATE") == []
 
     def test_the_act_dated_twice_is_marked_twice(self, tmp_path: Path) -> None:
         """Near miss: an act that writes its own date in its heading and again where it is

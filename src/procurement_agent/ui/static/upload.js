@@ -349,6 +349,8 @@
     if (flow === "aoa") {
       var params = new URLSearchParams({ act: ids.act[0] });
       if (ids.contract) params.set("contract", ids.contract[0]);
+      // the parties' registry extracts (rule 1), each uploaded on its own
+      if (ids.registry) params.set("registry", ids.registry.slice(0, 6).join(","));
       var type = form.querySelector("[name=contractor_type]");
       if (type && type.value) params.set("contractor_type", type.value);
       // the advance for a foreign-currency act (rule 9); left blank, the report reads the act's

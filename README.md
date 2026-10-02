@@ -152,6 +152,19 @@ where the one read from the act comes back to be confirmed; a contract's advance
 for a payment, since a contract only plans one. A small business or a foreign organisation needs
 no such invoice, and the report says the rule does not apply.
 
+The parties are checked against the business registry by their identification codes (rule 1):
+against each party's own extract, uploaded with the act - the PDF a user downloads from the
+National Agency of Public Registry, read from its text layer in either of the agency's layouts
+(2011, 2025) - and against a snapshot the operator loads (`cli load-registry`), the extract
+first. A name is compared by its legal form, folded to its abbreviation ("შეზღუდული
+პასუხისმგებლობის საზოგადოება" is "შპს"), and its words; a legal address by its place names and
+numbers in order, so the country, the district, "ქ."/"ქალაქი" and "№"/"N" never make an error,
+and an address that leaves out the registry's flat or floor is a warning; a signatory by every
+person the registry authorises, in any case, surname first or last, with or without a
+patronymic - the correction is the registry's nearest person in the act's own case. A company
+being wound up is a warning (`AOA.REGISTRY_STATUS`), an extract printed more than 30 days before
+the act a note, and each finding names the extract or snapshot and its date.
+
 The parties are matched by identification code, and by name where the act gives none. A party
 written with the other party's code is reported as a code on the wrong party
 (`AOA.ID_CODE_PARTY`), not as a party with a wrong name, address and director. Each party must be

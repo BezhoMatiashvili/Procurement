@@ -165,6 +165,8 @@ from procurement_agent.extraction.rules import (
 from procurement_agent.extraction.schemas import FactType
 from procurement_agent.extraction.spellcheck import Difference, best_match, classify_difference
 from procurement_agent.fx.provider import ENTERED, NullRateProvider, RateProvider
+from procurement_agent.registry.fields import compare_addresses, split_legal_form
+from procurement_agent.registry.snapshot import RegistryEntry, normalize_code
 from procurement_agent.report.docx_annotate import whole_word_spans
 
 ContractorType = Literal[
@@ -318,7 +320,9 @@ _NOT_APPLICABLE: tuple[tuple[str, frozenset[str]], ...] = (
 #: signature ("ხელმოწერის") "თარიღი", also with its copula ("აქტის გაფორმების თარიღია ...", red
 #: team R4). The label must stand as a word: "ხელმოწერის თარიღიდან 5 დღეში" counts a deadline
 #: from the date instead.
-_ACT_DATE_LABEL = r"(?:გაფორმების|შედგენის|ხელმოწერის)\s+თარიღია?(?![ა-ჰ])"
+#: ... and "აქტის თარიღი:", the act's date by name - not a bare "თარიღი:", which may be the
+#: contract's.
+_ACT_DATE_LABEL = r"(?:გაფორმების|შედგენის|ხელმოწერის|აქტის)\s+თარიღია?(?![ა-ჰ])"
 #: The verbs that say the act was signed or drawn up, with the act named before them: the
 #: signing in the aorist and the perfect ("გაფორმდა", "გაფორმებულია"), the drawing up
 #: ("შედგა", "შედგენილია"), the signature ("ხელმოწერილია"; "აქტს ხელი მოეწერა"). Each a whole
@@ -360,6 +364,8 @@ _ADVANCE_WORDS = re.compile(r"ავანს|წინასწარ|advance|p
 #: გაწევის პერიოდი:", "მიწოდების პერიოდი:", red team R4).
 _PERIOD_KEYS = (
     "შესრულდა",
+    "დასრულდა",
+    "ჩაბარდა",
     "შესრულების თარიღი",
     "შესრულების პერიოდი",
     "გაწეულია",
@@ -385,8 +391,9 @@ _LINE_LEAD = re.compile(r"[\s\d.)]*")
 #: (``_CONTRACT_WINDOW``). A date after one of these is the period's only in its sentence:
 #: "მომსახურება შესრულებულია სრულად." dates nothing after it (red team R4, AOA-R4-03).
 _PERFORMED = re.compile(
-    r"(?<![ა-ჰ])(?:(?:შესრულებულ|გაწეულ|განხორციელებულ|ჩატარებულ|მიწოდებულ)(?:ია|\s+იქნა)"
-    r"|შესრულდა|გაიწია|განხორციელდა|ჩატარდა|მიეწოდა"
+    r"(?<![ა-ჰ])(?:(?:შესრულებულ|გაწეულ|განხორციელებულ|ჩატარებულ|მიწოდებულ|დასრულებულ|ჩაბარებულ)"
+    r"(?:ია|\s+იქნა)"
+    r"|შესრულდა|გაიწია|განხორციელდა|ჩატარდა|მიეწოდა|დასრულდა|ჩაბარდა"
     r"|შეასრულა|გასწია|განახორციელა|ჩაატარა|მიაწოდა)(?![ა-ჰ])"
 )
 #: The work as a duty still to be done: a recital restating the contract's window ("…
@@ -1792,23 +1799,74 @@ class AoaChecker:
         return rates
 
     def rule_required_fields(self) -> None:
-        """Client rule 3: the act must name the project and the cadastral code."""
-        if not self.aoa.anchors(FactType.project_name) and not self._unread(
-            "AOA.PROJECT_PRESENT", "პროექტის დასახელება", "the project name"
+        """Client rule 3: the act must name the project and the cadastral code.
+
+        A project named after its label - "პროექტის დასახელება: …", quoted or not - is named;
+        only an act with neither a quoted project name nor a labelled one is missing it. A
+        cadastral code written another way than the dotted one ("01-10-14-003") is there, written
+        wrong: the note says how it is written, not that it is missing. A missing field's note is
+        marked on the act's title, where a reviewer opening the file sees it first.
+        """
+        title = self._title_span()
+        if (
+            not self.aoa.anchors(FactType.project_name)
+            and not _PROJECT_LABELLED.search(self.aoa.text)
+            and not self._unread("AOA.PROJECT_PRESENT", "პროექტის დასახელება", "the project name")
         ):
             self._add(
                 "AOA.PROJECT_PRESENT",
                 "warning",
                 "აქტში არ წერია პროექტის დასახელება",
                 "the act does not state the project name",
+                span=title,
             )
-        if not self.aoa.anchors(FactType.cadastral_code):
+        if self.aoa.anchors(FactType.cadastral_code):
+            return
+        written = _CADASTRAL_LABELLED.search(self.aoa.text)
+        if written is None:
             self._add(
                 "AOA.CADASTRAL_PRESENT",
                 "warning",
                 "აქტში არ წერია საკადასტრო კოდი",
                 "the act does not state the cadastral code",
+                span=title,
             )
+            return
+        group = "code" if written.group("code") is not None else "code2"
+        token = written.group(group).strip()
+        span = (written.start(group), written.start(group) + len(token))
+        dotted = _dotted_cadastral(token)
+        if dotted is not None:
+            self._add(
+                "AOA.CADASTRAL_PRESENT",
+                "warning",
+                f"საკადასტრო კოდი წერია „{token}“ — საკადასტრო კოდი წერტილებით იწერება: {dotted}",
+                f"the cadastral code is written '{token}' - a cadastral code is written with "
+                f"dots: {dotted}",
+                expected=dotted,
+                actual=token,
+                span=span,
+            )
+        else:
+            self._add(
+                "AOA.CADASTRAL_PRESENT",
+                "warning",
+                f"„{token}“ საკადასტრო კოდის ფორმატს არ შეესაბამება (NN.NN.NN.NNN…) — შეამოწმეთ",
+                f"'{token}' is not in a cadastral code's form (NN.NN.NN.NNN...) - check it",
+                actual=token,
+                span=span,
+            )
+
+    def _title_span(self) -> tuple[int, int] | None:
+        """Where the act names itself ("მიღება-ჩაბარების აქტი"), or its first line."""
+        m = _ACT_TITLE.search(self.aoa.text)
+        if m is not None:
+            return m.start(), m.end()
+        first = self.aoa.text.strip().split("\n", 1)[0].strip()
+        if not first:
+            return None
+        i = self.aoa.text.find(first)
+        return (i, i + len(first)) if i >= 0 else None
 
     def rule_act_date(self) -> None:
         """Client rule 4: when the service period is a period, the act is dated month-end.
@@ -1853,8 +1911,11 @@ class AoaChecker:
             return
         act_date, act_hit = act
         end = max(period)
-        expected = _last_day(end) if len(period) > 1 else end
-        if act_date == expected:
+        whole_period = len(period) > 1
+        expected = _last_day(end) if whole_period else end
+        # The two dates are to match: a period's own last day is its completion date, and the
+        # month's last day the date the client asks for where they do not (2026-10-02).
+        if act_date == expected or (whole_period and act_date == end):
             return
         window = _term_window(self.contract.term()) if self.contract is not None else None
         if window is None and (act_date.month, act_date.day) == (expected.month, expected.day):
@@ -1880,13 +1941,29 @@ class AoaChecker:
             # act to the period's month would move it out of the term - a correction that
             # breaks another rule is no correction.
             return
+        if whole_period:
+            ka = (
+                f"აქტი დათარიღებულია {act_date}-ით, მომსახურების პერიოდი მთავრდება {end}-ს — "
+                f"აქტი უნდა გაფორმდეს იმ თვის ბოლო დღეს, როდესაც პერიოდი მთავრდება ({expected})"
+            )
+            en = (
+                f"act dated {act_date} but the service period ends {end}; it should be dated "
+                f"the last day of the month the period ends in ({expected})"
+            )
+        else:
+            ka = (
+                f"აქტი დათარიღებულია {act_date}-ით, მომსახურება კი შესრულდა {end}-ს — აქტის "
+                f"თარიღი შესრულების თარიღს უნდა ემთხვეოდეს ({expected})"
+            )
+            en = (
+                f"act dated {act_date} but the work was done on {end}; the act should carry "
+                f"the date the work was done ({expected})"
+            )
         self._add(
             "AOA.ACT_DATE",
             "error",
-            f"აქტი დათარიღებულია {act_date}-ით, მომსახურების პერიოდი მთავრდება {end}-ს — "
-            f"აქტი უნდა გაფორმდეს იმ თვის ბოლო დღეს, როდესაც პერიოდი მთავრდება ({expected})",
-            f"act dated {act_date} but the service period ends {end}; it should be dated "
-            f"the last day of the month the period ends in ({expected})",
+            ka,
+            en,
             # written the way the act writes its date: "2026 წლის 31 აგვისტო", not ISO
             expected=render_date_like(
                 expected, act_hit.raw_text, following=self.aoa.text[act_hit.end : act_hit.end + 40]
@@ -2463,8 +2540,14 @@ class AoaChecker:
             owner = self._owner_at(start)
             if owner is None or owner is p:
                 continue
-            owned = next((m.match for m in self._matched_parties() if m.party is owner), None)
-            if owned is not None and any(_same_person(form, cd) for cd in owned.directors):
+            if self.contract is not None:
+                owned = next((m.match for m in self._matched_parties() if m.party is owner), None)
+                theirs = owned.directors if owned is not None else []
+            else:
+                # with no contract (the registry check), that party's signatory as the act writes
+                # it: two directors one letter apart are two people, not a slip of either
+                theirs = owner.directors
+            if any(_same_person(form, cd) for cd in theirs):
                 others.append(i)
         mine = [i for i in range(len(spans)) if i not in others]
         if not mine and others:
@@ -2890,6 +2973,7 @@ class AoaChecker:
         expected: str | None,
         *,
         against: Literal["contract", "registry"] = "contract",
+        note: tuple[str, str] = ("", ""),
     ) -> None:
         # A side with no value is not compared: a signature block restates a party's name
         # without its address, and that is how acts are written, not a gap in the act.
@@ -2909,8 +2993,10 @@ class AoaChecker:
         self._add(
             rule_id,
             "error",
-            f"{ka_label} არ ემთხვევა {source_ka}: „{actual}“, უნდა იყოს „{expected}“{hint_ka}",
-            f"{en_label} does not match {source_en}: '{actual}', expected '{expected}'{hint_en}",
+            f"{ka_label} არ ემთხვევა {source_ka}: „{actual}“, უნდა იყოს „{expected}“{hint_ka}"
+            f"{note[0]}",
+            f"{en_label} does not match {source_en}: '{actual}', expected '{expected}'{hint_en}"
+            f"{note[1]}",
             expected=expected,
             actual=actual,
             span=self._find_span(actual),
@@ -4123,11 +4209,13 @@ class AoaChecker:
             )
 
     def rule_registry(self) -> None:
-        """Client rule 1: verify name / address / directors against the business registry.
+        """Client rule 1: verify name / address / signatories against the business registry.
 
-        Each party, and each of its fields, is either compared or named in a skip note saying
-        why not - a party with no identification code cannot be looked up, and a field missing
-        from the act or from the registry export has nothing to be compared with.
+        The registry is what the user uploaded and the operator loaded (``registry.source``): a
+        party's extract, as of the day it was printed, before the client's snapshot. Each party,
+        and each of its fields, is either compared or named in a skip note saying why not - a
+        party with no identification code cannot be looked up, a party the snapshot does not
+        hold is reported, and with no snapshot one without an uploaded extract is a skip.
         """
         if self.registry is None:
             if self.contract is not None:
@@ -4147,6 +4235,13 @@ class AoaChecker:
                     "details were not verified",
                 )
             return
+        for refused in getattr(self.registry, "refused", []):
+            self._skip(
+                "AOA.REGISTRY",
+                f"{refused.name}: ფაილი რეესტრის ამონაწერად ვერ წავიკითხეთ ({refused.reason})",
+                f"{refused.name}: the file could not be read as a registry extract "
+                f"({refused.reason})",
+            )
         if not self.aoa.parties:
             self._skip(
                 "AOA.REGISTRY",
@@ -4163,6 +4258,8 @@ class AoaChecker:
             if self.contract is not None
             else []
         )
+        has_snapshot = getattr(self.registry, "has_snapshot", True)
+        looked_up: set[str] = set()
         for p in self.aoa.parties:
             if not p.id_code:
                 self._skip(
@@ -4183,47 +4280,127 @@ class AoaChecker:
                     "registry entry",
                 )
                 continue
-            entry = self.registry.lookup(p.id_code)  # type: ignore[attr-defined]
+            entry: RegistryEntry | None = self.registry.lookup(p.id_code)  # type: ignore[attr-defined]
             if entry is None:
-                self._add(
-                    "AOA.REGISTRY",
-                    "warning",
-                    f"საიდენტიფიკაციო კოდი {p.id_code} რეესტრში ვერ მოიძებნა",
-                    f"identification code {p.id_code} not found in the registry snapshot",
-                    actual=p.id_code,
-                )
+                if has_snapshot:
+                    self._add(
+                        "AOA.REGISTRY",
+                        "warning",
+                        f"საიდენტიფიკაციო კოდი {p.id_code} რეესტრში ვერ მოიძებნა",
+                        f"identification code {p.id_code} not found in the registry snapshot",
+                        actual=p.id_code,
+                    )
+                else:
+                    self._skip(
+                        "AOA.REGISTRY",
+                        f"{p.name}: {p.id_code} კოდის რეესტრის ამონაწერი ატვირთული არ არის, "
+                        "ამიტომ მხარე რეესტრს არ შედარდა",
+                        f"{p.name}: no registry extract was uploaded for code {p.id_code}, so "
+                        "the party was not checked against the registry",
+                    )
                 continue
-            self._compare_field(
-                "AOA.REGISTRY_NAME", "დასახელება", "name", p.name, entry.name, against="registry"
-            )
-            if not p.address:
+            looked_up.add(normalize_code(entry.id_code))
+            note = _registry_note(entry)
+            self._registry_name(p, entry, note)
+            self._registry_address(p, entry, note)
+            self._registry_directors(p, entry, note)
+            self._registry_status(p, entry, note)
+            self._registry_age(entry)
+        for code, extract in getattr(self.registry, "extracts", {}).items():
+            if code not in looked_up:
                 self._skip(
-                    "AOA.REGISTRY_ADDRESS",
-                    f"{p.name}: აქტში იურიდიული მისამართი არ წერია, ამიტომ რეესტრს არ შედარდა",
-                    f"{p.name}: the act states no legal address, so none was compared with the "
-                    "registry",
+                    "AOA.REGISTRY",
+                    f"ატვირთული ამონაწერი ({extract.name}, {code}) აქტის არცერთ მხარეს არ ეკუთვნის",
+                    f"the uploaded extract ({extract.name}, {code}) is of no party of the act",
                 )
-            elif not entry.address:
-                self._skip(
-                    "AOA.REGISTRY_ADDRESS",
-                    f"{p.name}: რეესტრის ამონაწერში მისამართი არ არის, ამიტომ აქტის მისამართი "
-                    "არ შემოწმებულა",
-                    f"{p.name}: the registry snapshot has no address for this company, so the "
-                    "act's address was not checked",
-                )
-            else:
-                self._compare_field(
-                    "AOA.REGISTRY_ADDRESS",
-                    "მისამართი",
-                    "address",
-                    p.address,
-                    entry.address,
-                    against="registry",
-                )
-            self._registry_directors(p, entry.directors)
 
-    def _registry_directors(self, p: Party, registered: tuple[str, ...]) -> None:
-        """The act's signatories for ``p`` against the registry's directors, or why not."""
+    def _registry_name(self, p: Party, entry: RegistryEntry, note: tuple[str, str]) -> None:
+        """The party's name against the registry's: the legal form, folded to its abbreviation
+        ("შეზღუდული პასუხისმგებლობის საზოგადოება" is "შპს"), and the name without it. The
+        correction keeps the act's form and case."""
+        if not p.name:
+            return
+        act_form, act_bare = split_legal_form(p.name)
+        reg_form, reg_bare = split_legal_form(entry.name)
+        if reg_form is None and entry.legal_form:
+            reg_form = split_legal_form(entry.legal_form)[0]
+        if act_form and reg_form and act_form != reg_form:
+            written = entry.legal_form or reg_form
+            self._add(
+                "AOA.REGISTRY_NAME",
+                "error",
+                f"სამართლებრივი ფორმა არ ემთხვევა რეესტრის მონაცემებს: „{act_form}“, უნდა "
+                f"იყოს „{reg_form}“ ({written}){note[0]}",
+                f"the legal form does not match the registry: '{act_form}', expected "
+                f"'{reg_form}' ({written}){note[1]}",
+                expected=f"{reg_form} {act_bare}",
+                actual=p.name,
+                span=self._find_span(act_form),
+            )
+        if not reg_bare:
+            return
+        self._compare_field(
+            "AOA.REGISTRY_NAME",
+            "დასახელება",
+            "name",
+            p.name if act_form else act_bare,
+            f"{act_form} {reg_bare}" if act_form else reg_bare,
+            against="registry",
+            note=note,
+        )
+
+    def _registry_address(self, p: Party, entry: RegistryEntry, note: tuple[str, str]) -> None:
+        """The act's legal address against the registry's: the same place names and numbers in
+        order is the same address however each is written (``registry.fields``); an address
+        that keeps the registry's in order but leaves part out is a warning; any other an error."""
+        if not p.address:
+            self._skip(
+                "AOA.REGISTRY_ADDRESS",
+                f"{p.name}: აქტში იურიდიული მისამართი არ წერია, ამიტომ რეესტრს არ შედარდა",
+                f"{p.name}: the act states no legal address, so none was compared with the "
+                "registry",
+            )
+            return
+        if not entry.address:
+            self._skip(
+                "AOA.REGISTRY_ADDRESS",
+                f"{p.name}: რეესტრის ამონაწერში მისამართი არ არის, ამიტომ აქტის მისამართი "
+                "არ შემოწმებულა",
+                f"{p.name}: the registry snapshot has no address for this company, so the "
+                "act's address was not checked",
+            )
+            return
+        verdict = compare_addresses(p.address, entry.address)
+        if verdict == "same":
+            return
+        if verdict == "omits":
+            self._add(
+                "AOA.REGISTRY_ADDRESS",
+                "warning",
+                f"იურიდიული მისამართი არასრულია რეესტრის მონაცემებთან შედარებით: „{p.address}“, "
+                f"რეესტრში: „{entry.address}“{note[0]}",
+                f"the legal address leaves out part of the registry's: '{p.address}', the "
+                f"registry has '{entry.address}'{note[1]}",
+                expected=entry.address,
+                actual=p.address,
+                span=self._find_span(p.address),
+            )
+            return
+        self._compare_field(
+            "AOA.REGISTRY_ADDRESS",
+            "მისამართი",
+            "address",
+            p.address,
+            entry.address,
+            against="registry",
+            note=note,
+        )
+
+    def _registry_directors(self, p: Party, entry: RegistryEntry, note: tuple[str, str]) -> None:
+        """The act's signatories for ``p`` against every person the registry authorises to
+        manage or represent it, or why not. A signatory is theirs in any case, with or without a
+        patronymic and with the surname first or last; one who is not is corrected to the
+        registry's nearest person, in the act's own case, at every place it is written."""
         if not p.directors:
             self._skip(
                 "AOA.REGISTRY_DIRECTOR",
@@ -4233,7 +4410,8 @@ class AoaChecker:
                 "registry",
             )
             return
-        if not registered:
+        theirs = list(entry.directors)
+        if not theirs:
             self._skip(
                 "AOA.REGISTRY_DIRECTOR",
                 f"{p.name}: რეესტრის ამონაწერში დირექტორი მითითებული არ არის, ამიტომ ხელმომწერი "
@@ -4242,18 +4420,102 @@ class AoaChecker:
                 "signatory was not checked",
             )
             return
+        positions = list(entry.positions) + [""] * (len(theirs) - len(entry.positions))
+        listed = ", ".join(
+            f"{n} ({pos})" if pos else n for n, pos in zip(theirs, positions, strict=False)
+        )
         for d in p.directors:
-            if not any(_same_person(d, x) for x in registered):
+            forms = self._person_forms(d)
+            if not forms:
+                found = self._find_span(d)
+                forms = [(d, [found] if found else [])]
+            for written, spans in forms:
+                form, patronymic = split_patronymic(written)
+                if any(_same_person(form, x) or _same_person(_swapped(form), x) for x in theirs):
+                    continue
+                where = self._places_of_director(p, form, spans)
+                if where is None:
+                    continue  # every place of it is another party's own director
+                span, places = where
+                guess = best_match(lemma(form), attested_nominatives(theirs))
+                expected = (
+                    keep_initial(form, in_case_of(form, guess[0], written=theirs))
+                    if guess
+                    else None
+                )
+                if expected is not None:
+                    expected = with_patronymic(expected, patronymic)
                 self._add(
                     "AOA.REGISTRY_DIRECTOR",
                     "error",
-                    f"ხელმომწერი რეესტრის მონაცემებს არ ემთხვევა: „{d}“ "
-                    f"(რეესტრი: {', '.join(registered)})",
-                    f"signatory does not match the registry: '{d}' "
-                    f"(registry: {', '.join(registered)})",
-                    expected=", ".join(registered),
-                    actual=d,
+                    f"ხელმომწერი რეესტრის მონაცემებს არ ემთხვევა: „{written}“, უნდა იყოს "
+                    f"„{expected}“ (რეესტრი: {listed}){note[0]}",
+                    f"signatory does not match the registry: '{written}', expected "
+                    f"'{expected}' (registry: {listed}){note[1]}",
+                    expected=expected,
+                    actual=written,
+                    span=span,
+                    places=places,
                 )
+
+    def _registry_status(self, p: Party, entry: RegistryEntry, note: tuple[str, str]) -> None:
+        """A party the registry records as being wound up, reorganised or insolvent: a warning,
+        since an act with it may need more than a signature."""
+        if entry.status and not _ACTIVE_STATUS.fullmatch(entry.status.strip()):
+            self._add(
+                "AOA.REGISTRY_STATUS",
+                "warning",
+                f"{p.name}: რეესტრის მიხედვით „{entry.status}“{note[0]}",
+                f"{p.name}: the registry records '{entry.status}'{note[1]}",
+                actual=p.name,
+                span=p.span,
+            )
+
+    def _registry_age(self, entry: RegistryEntry) -> None:
+        """An extract printed long before the act: the registry may have changed since."""
+        if entry.source != "extract" or not entry.as_of:
+            return
+        act = self._act_date()
+        if act is None:
+            return
+        try:
+            printed = date.fromisoformat(entry.as_of)
+        except ValueError:
+            return
+        age = (act[0] - printed).days
+        if age > _EXTRACT_MAX_AGE_DAYS:
+            self._add(
+                "AOA.REGISTRY",
+                "info",
+                f"{entry.name} ({entry.id_code}): რეესტრის ამონაწერი მომზადებულია {entry.as_of}-ს, "
+                f"აქტამდე {age} დღით ადრე — რეესტრის მონაცემები შეიძლება შეიცვალა; გადაამოწმეთ "
+                "ახალი ამონაწერით",
+                f"{entry.name} ({entry.id_code}): the registry extract was printed on "
+                f"{entry.as_of}, {age} days before the act - the registry may have changed "
+                "since; check against a recent extract",
+            )
+
+
+#: A registry status that is no news: the company is active, or nothing is under way.
+_ACTIVE_STATUS = re.compile(
+    r"(?:active|registered|აქტიურ[ა-ჰ]*|რეგისტრირებულ[ა-ჰ]*|მოქმედ[ა-ჰ]*)", re.IGNORECASE
+)
+#: How old an extract may be at the act's date before the report says so.
+_EXTRACT_MAX_AGE_DAYS = 30
+
+
+def _registry_note(entry: RegistryEntry) -> tuple[str, str]:
+    """Which registry a finding was checked against, and as of when, for its message."""
+    day = f", {entry.as_of}" if entry.as_of else ""
+    if entry.source == "extract":
+        return f" (რეესტრის ამონაწერი{day})", f" (registry extract{day})"
+    return f" (რეესტრის ჩამონატვირთი{day})", f" (registry snapshot{day})"
+
+
+def _swapped(name: str) -> str:
+    """A two-word name with its words the other way round: "ბერიძე დავით" for "დავით ბერიძე"."""
+    words = name.split()
+    return " ".join(reversed(words)) if len(words) == 2 else name
 
 
 #: How far apart an account and its bank code may be and still be read as one block.
@@ -4642,6 +4904,39 @@ def _fx_term_en(p: PricedTerm, currency: str, *, priced: bool) -> str:
     if priced and p.quote is not None and p.gel is not None:
         return f"{head} ({p.quote.rate:f}) = {p.gel:,.2f} {LOCAL_CURRENCY}"
     return head
+
+
+#: A project named after its label, quoted or not: "პროექტის დასახელება: მზის ქალაქი",
+#: "პროექტი - ზღვის ხედი". The label's colon or dash and a word after it are what make it a name;
+#: "პროექტის ფარგლებში" (within the project) names none.
+_PROJECT_LABELLED = re.compile(
+    r"(?<![ა-ჰ])პრო[ეა]{1,3}ქტ[ა-ჰ]*(?:\s+(?:დასახელება|სახელწოდება|სახელი)[ა-ჰ]{0,2})?"
+    r"[ \t]*[:\u2013\u2014-][ \t]*[„“\"«']?[ა-ჰA-Za-z0-9]"
+)
+#: A cadastral code behind its label, however it is written: the label "საკადასტრო კოდი" (or
+#: "ნომერი"), or "ს/კ" before a token with separators - "ს/კ" before nine plain digits is an
+#: identification code.
+_CADASTRAL_LABELLED = re.compile(
+    r"(?:საკადასტრო\s+(?:კოდ|ნომ(?:ერ|რ))[ა-ჰ]*\s*(?:№|N)?\s*[:\u2013-]?\s*"
+    r"(?P<code>\d[\d.\-/ ]{4,28}\d)"
+    r"|(?<![ა-ჰ])ს\s*[/.]\s*კ\.?\s*[:\u2013-]?\s*(?P<code2>\d{1,3}[.\-/]\d[\d.\-/ ]{3,26}\d))"
+)
+#: The digit groups of a cadastral code: zone, sector, quarter, plot, then building, entrance,
+#: flat.
+_CADASTRAL_GROUPS = (2, 2, 2, 3, 3, 2, 3)
+#: The act's own title.
+_ACT_TITLE = re.compile(r"მიღება\s*-?\s*ჩაბარების\s+აქტ[ა-ჰ]*")
+
+
+def _dotted_cadastral(token: str) -> str | None:
+    """A cadastral code written with other separators, rewritten with dots - or None when its
+    digit groups are no cadastral code's."""
+    groups = [g for g in re.split(r"[.\-/ ]+", token) if g]
+    if not 4 <= len(groups) <= len(_CADASTRAL_GROUPS):
+        return None
+    if any(len(g) != n or not g.isdigit() for g, n in zip(groups, _CADASTRAL_GROUPS, strict=False)):
+        return None
+    return ".".join(groups)
 
 
 #: A date the act writes in ISO, which a correction may then write in ISO too.
