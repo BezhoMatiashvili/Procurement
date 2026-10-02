@@ -128,7 +128,7 @@ class TestInCaseOfKeepsTheActsWords:
         assert in_case_of("ბეტის სერვისი", "ბეტა სერვისი") == "ბეტა სერვისი"
         assert in_case_of("ალფო ჯგუფის", "ალფა ჯგუფი") == "ალფა ჯგუფის"
         # a fixed genitive before a nominative is the name's own word, not a declined one
-        assert in_case_of("საქართველო ბანკი", "საქართველოს ბანკი") == "საქართველოს ბანკი"
+        assert in_case_of("ზღვა ბანკი", "ზღვის ბანკი") == "ზღვის ბანკი"
 
     def test_another_name_is_given_as_written(self) -> None:
         assert in_case_of("გელა ხარაბაძე", "დავით მელაძის") == "დავით მელაძე"

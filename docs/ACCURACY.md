@@ -223,7 +223,7 @@ contract's value in the act's own form (a director's name in the case the act wr
   correction kept the contract's genitive first name ("ლევანის მელაშვილი"). A correction now
   keeps the words the act writes as forms of the right ones and puts only a misspelled word
   right, in the case the act writes the name in; a word the documents never decline (the first
-  word of a company's name, the fixed genitive of "საქართველოს ბანკი") is given as the contract
+  word of a company's name, the fixed genitive of "ზღვის ბანკი", an invented bank) is given as the contract
   writes it - the first version of the fix changed one such word in the held-out set into a
   case form, which the strict gold caught. A name whose ending the act writes right is no longer
   read as meant in another case.

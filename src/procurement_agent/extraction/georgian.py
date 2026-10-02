@@ -358,7 +358,7 @@ def _declined_words(shown: Collection[str], count: int) -> set[int]:
     """Which of a ``count``-word name's words before the last the documents decline with it:
     in one of the ``shown`` forms, written in the case of its last word, other than the
     nominative ("ლევანის მელაშვილის"). Not a word whose case differs from the last word's - the
-    fixed genitive of "საქართველოს ბანკი"."""
+    fixed genitive of "ზღვის ბანკი"."""
     out: set[int] = set()
     for form in shown:
         _, core, _ = _split_quotes(normalize_spaces(form))
@@ -377,7 +377,7 @@ def _in_own_words(wrong: str, corrected: str, shown: Collection[str]) -> str:
     write of the right name, ``shown``, tell which (``_declined_words``). Such a word is given
     as ``wrong`` writes it when that is a form of it ("ლევან" for "ლევანის": the act's own
     grammar), and a misspelled one in its form nearest the slip (``_nearest_form``). Any other
-    word - the nominative "ბეტა" of "ბეტა სერვისი", the fixed genitive of "საქართველოს ბანკი"
+    word - the nominative "ბეტა" of "ბეტა სერვისი", the fixed genitive of "ზღვის ბანკი"
     - is the right word as written."""
     _, wrong_core, _ = _split_quotes(normalize_spaces(wrong))
     lead, core, trail = _split_quotes(normalize_spaces(corrected))
