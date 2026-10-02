@@ -54,6 +54,8 @@ GOLD_DIRS = {
     "client_v2": ROOT / "samples" / "gold_v2" / "client",
     "ts2": ROOT / "samples" / "gold_v2" / "ts2",
     "ts3": ROOT / "samples" / "gold_v2" / "ts3",
+    # written by an agent that read the client's rules and docs/GOLD_SPEC.md, not the rules' code
+    "ts4": ROOT / "samples" / "gold_v2" / "ts4",
 }
 
 

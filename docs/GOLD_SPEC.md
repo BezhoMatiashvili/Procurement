@@ -479,6 +479,11 @@ reference: samples/<set>/AOA and Contract/<contract>.docx
 check: aoa
 contractor_type: company          # optional: company | natural_person |
                                   # individual_entrepreneur_vat | small_business | foreign
+registry: [samples/<set>/registry/<extract>.docx]   # optional: the parties' registry extracts
+                                  # the user uploads (rule 1), read before the snapshot
+rates:                            # optional: rates the user types in (rule 9), lari per one unit
+  - {currency: USD, date: 2026-09-10, rate: "2.6104"}
+advance: {amount: "1000", date: 2026-09-10}   # optional: the advance the user enters (rule 9)
 fields: {...}                     # extraction gold of the act, section 2
 provisional: [subject]            # labelled, not derived
 findings:                         # every finding that must be reported

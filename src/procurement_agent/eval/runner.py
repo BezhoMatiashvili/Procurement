@@ -28,6 +28,7 @@ from procurement_agent.checks.aoa_spelling import open_speller
 from procurement_agent.checks.compare import ComparisonReport
 from procurement_agent.checks.compare import compare as compare_documents
 from procurement_agent.checks.findings import CheckReport, Finding
+from procurement_agent.checks.fx_invoice import AdvanceInput
 from procurement_agent.config import Settings
 from procurement_agent.eval.gold import ExpectedFinding, GoldDocument, GoldSet
 from procurement_agent.eval.score import (
@@ -44,6 +45,7 @@ from procurement_agent.eval.score import (
 )
 from procurement_agent.extraction.pipeline import chunks_text, run_extraction
 from procurement_agent.extraction.schemas import ExtractionResult, FactType
+from procurement_agent.fx.provider import EnteredRateProvider, NullRateProvider
 from procurement_agent.ingestion.chunker import Chunk, chunk_docling_document
 from procurement_agent.ingestion.docling_service import (
     conversion_fingerprint,
@@ -59,7 +61,9 @@ from procurement_agent.ingestion.segmenter import (
     segments_from_workbook,
 )
 from procurement_agent.llm.base import LLMClient
-from procurement_agent.registry.snapshot import open_snapshot
+from procurement_agent.registry.extract import NotAnExtractError, read_extract
+from procurement_agent.registry.snapshot import RegistryEntry, RegistrySnapshot, open_snapshot
+from procurement_agent.registry.source import RefusedExtract, RegistrySource
 
 
 @dataclass(slots=True)
@@ -347,7 +351,23 @@ def _aoa_report(
         if gold.reference
         else None
     )
-    registry = open_snapshot(settings.registry_db) if settings.registry_db else None
+    snapshot = open_snapshot(settings.registry_db) if settings.registry_db else None
+    # the extracts the gold says the user uploads, read as the product reads them, then the
+    # snapshot; with none, the snapshot as it always was
+    registry: RegistrySnapshot | RegistrySource | None = (
+        RegistrySource.of(snapshot, *_gold_extracts(gold)) if gold.registry else snapshot
+    )
+    # typed rates only - never a rates table that happens to be on the machine running this
+    rates = (
+        EnteredRateProvider({(r.currency, r.on): r.rate for r in gold.rates}, NullRateProvider())
+        if gold.rates
+        else None
+    )
+    advance = (
+        AdvanceInput(amount=gold.advance.amount, paid_on=gold.advance.paid_on)
+        if gold.advance is not None
+        else None
+    )
     try:
         return check_aoa(
             aoa_text=chunks_text(chunks),
@@ -355,6 +375,8 @@ def _aoa_report(
             contract_text=reference,
             registry=registry,
             contractor_type=gold.contractor_type,
+            rates=rates,
+            advance=advance,
             aoa_ocr=_scanned(gold.document),
             contract_ocr=gold.reference is not None and _scanned(gold.reference),
             speller=open_speller(settings),
@@ -362,6 +384,18 @@ def _aoa_report(
     finally:
         if registry is not None:
             registry.close()
+
+
+def _gold_extracts(gold: GoldDocument) -> tuple[list[RegistryEntry], list[RefusedExtract]]:
+    """The gold's registry extracts, each read or refused with its reason (``api/checks``)."""
+    entries: list[RegistryEntry] = []
+    refused: list[RefusedExtract] = []
+    for path in gold.registry:
+        try:
+            entries.append(read_extract(path, path.suffix.lower().lstrip(".")))
+        except NotAnExtractError as e:
+            refused.append(RefusedExtract(path.name, str(e)))
+    return entries, refused
 
 
 def run_document(

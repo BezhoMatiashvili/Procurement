@@ -12,6 +12,8 @@ can always say which corpus produced it.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import date
+from decimal import Decimal
 from pathlib import Path
 from typing import Literal
 
@@ -23,6 +25,24 @@ from procurement_agent.extraction.schemas import FactType
 
 #: Marks a document that must produce no findings at all.
 NO_FINDINGS = "*"
+
+
+class GoldRate(BaseModel):
+    """An exchange rate the user types in: lari per one unit of ``currency`` on ``on``."""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+    on: date = Field(alias="date")
+    rate: Decimal = Field(gt=0)
+
+
+class GoldAdvance(BaseModel):
+    """The advance the user enters: its amount in the act's currency (0: none was paid) and
+    the day it was paid. Either may be left to the act."""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    amount: Decimal | None = Field(default=None, ge=0)
+    paid_on: date | None = Field(default=None, alias="date")
 
 
 class ExpectedFinding(BaseModel):
@@ -84,6 +104,13 @@ class GoldDocument(BaseModel):
     allowed_findings: list[str] = Field(default_factory=list)
     #: Whether anything reported beyond ``findings`` and ``allowed_findings`` is a false positive.
     strict_findings: bool = False
+    #: The parties' registry extracts the user uploads with the act (rule 1), read before the
+    #: registry snapshot, as the product reads them.
+    registry: list[Path] = Field(default_factory=list)
+    #: Exchange rates the user types in (rule 9): lari per one unit, by currency and day.
+    rates: list[GoldRate] = Field(default_factory=list)
+    #: The advance the user enters (rule 9): its amount in the act's currency, and the day paid.
+    advance: GoldAdvance | None = None
     notes: str | None = None
 
     @field_validator("document", "reference")
@@ -92,6 +119,13 @@ class GoldDocument(BaseModel):
         if v is not None and not v.exists():
             msg = f"gold file points at a missing document: {v}"
             raise ValueError(msg)
+        return v
+
+    @field_validator("registry")
+    @classmethod
+    def _extracts_exist(cls, v: list[Path]) -> list[Path]:
+        for path in v:
+            cls._must_exist(path)
         return v
 
     @property
@@ -128,5 +162,9 @@ def load_gold_set(directory: Path, *, name: str | None = None, root: Path | None
             if raw.get(key):
                 candidate = Path(raw[key])
                 raw[key] = str(candidate if candidate.is_absolute() else root / candidate)
+        raw["registry"] = [
+            str(c if (c := Path(item)).is_absolute() else root / c)
+            for item in raw.get("registry") or []
+        ]
         documents.append(GoldDocument.model_validate(raw))
     return GoldSet(name=name or directory.name, documents=documents)
