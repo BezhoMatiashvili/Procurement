@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import io
+import random
+import string
+import warnings
 import zipfile
 
 import pytest
 
+from procurement_agent.security import upload_guard
 from procurement_agent.security.upload_guard import (
     UploadRejectedError,
     sanitize_filename,
@@ -182,3 +186,58 @@ def test_ooxml_encrypted_entry_rejected(min_docx: bytes) -> None:
     data[idx + 8] |= 0x1
     with pytest.raises(UploadRejectedError, match="encrypted"):
         validate_upload("x.docx", bytes(data), **LIMITS)
+
+
+# --- invisible characters, echoed extensions, part sizes, duplicate parts ---------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("inv‮oice‬.pdf", "invoice.pdf"),  # bidi overrides: "fdp.exe" reading as "exe.pdf"
+        ("a​b‌.pdf", "ab.pdf"),  # zero-width space and non-joiner
+        ("﻿offer.pdf", "offer.pdf"),  # byte-order mark
+        ("x\x85y z .pdf", "xyz.pdf"),  # a C1 control, line and paragraph separators
+        ("ხელშეკრულება.docx", "ხელშეკრულება.docx"),  # real Georgian text is untouched
+    ],
+)
+def test_sanitize_filename_drops_invisible_characters(raw: str, expected: str) -> None:
+    assert sanitize_filename(raw) == expected
+
+
+def test_an_extension_that_is_not_one_is_not_echoed(min_pdf: bytes) -> None:
+    """The message reaches the audit trail and the log; the caller's own text must not."""
+    with pytest.raises(UploadRejectedError) as raised:
+        validate_upload("project-alpha-draft.confidential-v2", min_pdf, **LIMITS)
+    assert "confidential" not in str(raised.value)
+    assert "unsupported file type (unrecognised)" in str(raised.value)
+
+
+def test_a_plausible_extension_is_still_shown(min_pdf: bytes) -> None:
+    with pytest.raises(UploadRejectedError, match=r"unsupported file type \.exe"):
+        validate_upload("x.exe", min_pdf, **LIMITS)
+
+
+def test_ooxml_duplicate_entries_rejected(min_docx: bytes) -> None:
+    buf = io.BytesIO(min_docx)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)  # zipfile warns about the very thing tested
+        with zipfile.ZipFile(buf, "a") as zf:
+            zf.writestr("word/document.xml", "<other/>")
+    with pytest.raises(UploadRejectedError, match="duplicate entries"):
+        validate_upload("x.docx", buf.getvalue(), **LIMITS)
+
+
+def test_ooxml_content_types_part_over_a_megabyte_rejected() -> None:
+    filler = "".join(random.Random(1).choices(string.ascii_letters, k=1024 * 1024 + 10))
+    data = make_ooxml("docx", content_types=f"<Types>{filler}</Types>")
+    with pytest.raises(UploadRejectedError, match="content-type list is too large"):
+        validate_upload("x.docx", data, max_bytes=8 * 1024 * 1024, max_pages=10)
+
+
+def test_ooxml_single_part_over_the_cap_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(upload_guard, "_MAX_MEMBER_BYTES", 1000)
+    blob = random.Random(2).randbytes(2000)  # incompressible, so the ratio check is not what fires
+    data = make_ooxml("docx", extra={"word/media/big.bin": blob})
+    with pytest.raises(UploadRejectedError, match="part is too large"):
+        validate_upload("x.docx", data, **LIMITS)

@@ -198,3 +198,48 @@ def test_the_contract_value_in_a_headerless_key_terms_table_is_the_total() -> No
     )
     totals = [f.normalized for f in result.facts if f.type == FactType.total_amount]
     assert totals == [9100.0]
+
+
+# --- one paragraph longer than the budget ------------------------------------------------------
+
+
+def _long_paragraph_document(text: str) -> DoclingDocument:
+    doc = DoclingDocument(name="synthetic")
+    doc.add_text(label=DocItemLabel.TEXT, text="შესავალი აბზაცი.")
+    doc.add_text(label=DocItemLabel.TEXT, text=text)
+    doc.add_text(label=DocItemLabel.TEXT, text="ბოლო აბზაცი.")
+    return doc
+
+
+def test_a_paragraph_longer_than_the_budget_is_split_not_a_crash() -> None:
+    """``get_tokenizer()`` used to return None, which ``semchunk`` rejects with a TypeError the
+    moment Docling had to split a single item: one long clause failed extraction and every check
+    that reads the document's text."""
+    from procurement_agent.ingestion.chunker import MAX_CHUNK_TOKENS
+    from procurement_agent.tokens import estimate_tokens
+
+    sentence = (
+        "ხელშეკრულების მხარეები თანხმდებიან, რომ შესრულებული სამუშაოს ღირებულება გადახდილი იქნება. "
+    )
+    long = sentence * 400  # a single paragraph of about 36,000 characters
+    chunks = chunk_docling_document(_long_paragraph_document(long), doc_id="d" * 32)
+    assert len(chunks) >= 3
+    assert all(estimate_tokens(c.body) <= MAX_CHUNK_TOKENS * 1.3 for c in chunks)
+    body = " ".join(chunks_text(chunks).split())
+    assert body.count("ღირებულება გადახდილი იქნება") == 400  # nothing lost, nothing repeated
+    assert body.startswith("შესავალი აბზაცი.") and body.endswith("ბოლო აბზაცი.")
+
+
+def test_a_long_run_of_whitespace_inside_a_paragraph_does_not_crash_either() -> None:
+    text = "ღირებულება 100" + "\n" * 8000 + "თეთრი და სხვა ტექსტი"
+    chunks = chunk_docling_document(_long_paragraph_document(text), doc_id="d" * 32)
+    assert chunks
+    assert "თეთრი და სხვა ტექსტი" in chunks_text(chunks)
+
+
+def test_the_heuristic_tokenizer_hands_semchunk_a_callable_counter() -> None:
+    from procurement_agent.ingestion.chunker import HeuristicTokenizer
+
+    counter = HeuristicTokenizer().get_tokenizer()
+    assert callable(counter)
+    assert counter("ორი სიტყვა") == HeuristicTokenizer().count_tokens("ორი სიტყვა")

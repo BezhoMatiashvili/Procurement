@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
@@ -19,10 +22,91 @@ _engine: Engine | None = None
 _SessionLocal: sessionmaker[Session] | None = None
 
 
+#: The audit trail is append-only. The application only ever inserts into it; a trigger makes SQLite
+#: refuse anything else, so a bug, a stray ``DELETE`` or an injection through the ORM cannot rewrite
+#: history. Someone with write access to the file can drop the triggers - this guards against
+#: mistakes and application-level tampering, not against the owner of the disk - which is why the
+#: one deliberate way to shorten the trail (``prune_audit``) does it inside a transaction that puts
+#: them back, and the file itself is owner-only.
+_AUDIT_TRIGGERS = {
+    "audit_log_no_update": (
+        "CREATE TRIGGER IF NOT EXISTS audit_log_no_update BEFORE UPDATE ON audit_log "
+        "BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END"
+    ),
+    "audit_log_no_delete": (
+        "CREATE TRIGGER IF NOT EXISTS audit_log_no_delete BEFORE DELETE ON audit_log "
+        "BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END"
+    ),
+}
+
+
+def install_audit_triggers(engine: Engine) -> None:
+    with engine.begin() as conn:
+        for ddl in _AUDIT_TRIGGERS.values():
+            conn.exec_driver_sql(ddl)
+
+
+def prune_audit(older_than: datetime) -> int:
+    """Delete audit rows from before ``older_than``; the one sanctioned way to shorten the trail.
+
+    The delete trigger is dropped, the rows deleted and the trigger recreated inside ONE
+    transaction, begun explicitly: Python's ``sqlite3`` only opens a transaction before an
+    INSERT/UPDATE/DELETE, so a bare ``DROP TRIGGER`` ahead of the delete would be committed on its
+    own - and a failure afterwards would leave the trail without its protection. SQLite's DDL is
+    transactional, so a failure anywhere rolls the drop back with the rest.
+    """
+    raw = get_engine().raw_connection()
+    connection: Any = raw.driver_connection  # the sqlite3 connection itself
+    previous = connection.isolation_level
+    # SQLAlchemy stores a DateTime as this text, and the raw connection has no adapter for it
+    cutoff = older_than.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S.%f")
+    try:
+        connection.isolation_level = None  # statements run as written; we say BEGIN and COMMIT
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            connection.execute("DROP TRIGGER IF EXISTS audit_log_no_delete")
+            removed = connection.execute("DELETE FROM audit_log WHERE at < ?", (cutoff,)).rowcount
+            connection.execute(_AUDIT_TRIGGERS["audit_log_no_delete"])
+            connection.execute("COMMIT")
+        except BaseException:
+            connection.execute("ROLLBACK")
+            raise
+        return int(removed)
+    finally:
+        connection.isolation_level = previous
+        raw.close()
+
+
+def secure_database_files(db_path: Path) -> None:
+    """Owner-only on the database and the files SQLite keeps beside it.
+
+    ``app.db-wal`` and ``app.db-shm`` hold recently written pages - the same content as the
+    database - and SQLite creates them with the process's umask, after ``init_db`` has already
+    tightened the main file. Best effort: a file that does not exist yet is skipped.
+    """
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        with contextlib.suppress(OSError):
+            Path(f"{db_path}{suffix}").chmod(0o600)
+
+
+def checkpoint(truncate: bool = True) -> None:
+    """Write the write-ahead log back into the database and empty it.
+
+    Deleted rows (a retention sweep, a scrubbed job) would otherwise stay readable in the WAL file
+    until SQLite next recycles it, which on a quiet server can be a long time.
+    """
+    if _engine is None:
+        return
+    with contextlib.suppress(Exception), _engine.connect() as conn:
+        conn.exec_driver_sql(f"PRAGMA wal_checkpoint({'TRUNCATE' if truncate else 'PASSIVE'})")
+
+
 def init_db(db_path: Path) -> Engine:
     """Create the engine, enable WAL + foreign keys, create tables, lock down file perms."""
     global _engine, _SessionLocal
     db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with contextlib.suppress(OSError):
+        db_path.parent.chmod(0o700)  # a directory that already existed keeps its old mode
     engine = create_engine(
         f"sqlite:///{db_path}",
         connect_args={"check_same_thread": False, "timeout": 30},
@@ -35,13 +119,20 @@ def init_db(db_path: Path) -> Engine:
         cur.execute("PRAGMA journal_mode=WAL")
         cur.execute("PRAGMA foreign_keys=ON")
         cur.execute("PRAGMA synchronous=NORMAL")
+        # A deleted value is overwritten with zeros instead of left in the page: a retention sweep
+        # that removes a row should not leave its text in the file for a later read.
+        cur.execute("PRAGMA secure_delete=ON")
+        # A database file is data, not a program: no function or view it defines may run.
+        cur.execute("PRAGMA trusted_schema=OFF")
+        cur.execute("PRAGMA cell_size_check=ON")
         cur.close()
+        secure_database_files(db_path)
 
     from procurement_agent import models  # noqa: F401  (register tables)
 
     Base.metadata.create_all(engine)
-    if db_path.exists():
-        db_path.chmod(0o600)
+    install_audit_triggers(engine)
+    secure_database_files(db_path)
     _engine = engine
     _SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
     return engine

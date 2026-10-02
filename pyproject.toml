@@ -28,6 +28,18 @@ dependencies = [
     "sqlalchemy>=2.0",
     "structlog>=24.4",
     "pyyaml>=6.0.3",
+    # XML parsers that refuse external entities: openpyxl uses it when it is importable and silently
+    # falls back to the standard library's expat when it is not (tests/unit/test_xml_safety.py)
+    "defusedxml>=0.7.1",
+    # --- ML runtime ---
+    # Named here so that [tool.uv.sources] applies: it covers only the dependencies pyproject.toml
+    # lists, and torch used to arrive through docling alone - resolving to the CUDA build from PyPI
+    # (19 NVIDIA wheels, about 2.5 GB, on servers with no GPU). The headless OpenCV replaces the
+    # GUI build that rapidocr asks for (see [tool.uv] override-dependencies): no Qt and no window
+    # system libraries; this application never opens a window.
+    "torch>=2.5",
+    "torchvision>=0.20",
+    "opencv-python-headless>=4.8",
     # --- spelling ---
     # hunspell in pure Python, for the act's prose spelling (checks/aoa_spelling.py). Capped below
     # 0.2 because that module indexes spylls' affix lookup from the inside.
@@ -69,6 +81,12 @@ explicit = true
 [tool.uv.sources]
 torch = { index = "pytorch-cpu" }
 torchvision = { index = "pytorch-cpu" }
+
+[tool.uv]
+# rapidocr (an OCR engine Docling can use; this application selects Tesseract) depends on the GUI
+# build of OpenCV. `cv2` is the same module in both packages, so the dependency is satisfied by
+# opencv-python-headless above and the GUI wheel is never installed.
+override-dependencies = ["opencv-python; sys_platform == 'never'"]
 
 [tool.ruff]
 target-version = "py312"

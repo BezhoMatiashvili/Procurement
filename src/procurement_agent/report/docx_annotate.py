@@ -33,6 +33,9 @@ from docx.text.run import Run
 
 from procurement_agent.checks.findings import Finding
 from procurement_agent.extraction.normalize import QUOTE_CHARS, fold_look_alikes, normalize_spaces
+from procurement_agent.report.docx_sanitize import neutralise_package
+from procurement_agent.security.audit import log
+from procurement_agent.security.safe_errors import ContentFree
 
 AUTHOR = "Procurement Agent"
 INITIALS = "PA"
@@ -47,7 +50,7 @@ _SEVERITY_PREFIX = {
 NEEDS_REVIEW_PREFIX = "გადასამოწმებელი / Needs review:"
 
 
-class UnsupportedDocumentError(RuntimeError):
+class UnsupportedDocumentError(ContentFree, RuntimeError):
     """Raised for inputs Word comments cannot be attached to, e.g. a scanned PDF."""
 
 
@@ -416,9 +419,13 @@ def annotate_docx(
         raise UnsupportedDocumentError(msg)
 
     try:
+        # SyntaxError: lxml's XMLSyntaxError, for a package whose document part is not well-formed
         document = Document(str(source))
-    except (ValueError, KeyError, PackageNotFoundError, zipfile.BadZipFile) as e:
-        msg = f"the file is not a Word document that comments can be written into: {e}"
+    except (ValueError, KeyError, PackageNotFoundError, zipfile.BadZipFile, SyntaxError) as e:
+        msg = (
+            "the file is not a Word document that comments can be written into "
+            f"({type(e).__name__})"
+        )
         raise UnsupportedDocumentError(msg) from e
     unanchored: list[Finding] = []
     # Findings that land on exactly the same words share one comment: a bank code that is both
@@ -448,6 +455,18 @@ def annotate_docx(
             text="\n\n".join(comment_text(f) for f in unanchored),
             author=author,
             initials=INITIALS,
+        )
+    # The file goes back to a reviewer as something this system produced: nothing the upload used
+    # to reach out or to run (see docx_sanitize) goes with it.
+    removed = neutralise_package(document)
+    if removed.total:
+        log.info(
+            "docx_sanitised",
+            relationships=removed.relationships,
+            elements=removed.elements,
+            fields=removed.fields,
+            settings=removed.settings,
+            references=removed.references,
         )
     document.save(str(out_path))
     return out_path, unanchored

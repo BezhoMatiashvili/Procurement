@@ -60,3 +60,12 @@ eval_runs/
 
 # a copy of the client documents at the top level
 /AI Test/
+
+# The same directories as SYMLINKS (a git worktree links them in from the main checkout): the
+# patterns above end in a slash, which matches a directory and not a link to one, so without these
+# `git add -A` in such a checkout would stage the links.
+/data
+/samples
+/models
+/.eval_cache
+/eval_runs

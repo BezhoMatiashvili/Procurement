@@ -77,6 +77,32 @@ def test_a_job_result_is_fetched_with_the_api_key() -> None:
     assert seen[0].url.path == "/api/v1/jobs/job-1/result"
 
 
+def test_the_api_key_is_never_sent_beyond_this_machine() -> None:
+    """``--base`` receives the key: a typo or a pasted public URL must not."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"facts": []})
+
+    transport = httpx.MockTransport(handler)
+    for base in ("http://example.com", "http://8.8.8.8:8001", "https://tasks.company.example"):
+        with pytest.raises(SystemExit, match="--base"):
+            aoa_check.load_result("job-1", base=base, key="k", transport=transport)
+    # a private host on the company network needs the explicit flag; a public one never passes
+    with pytest.raises(SystemExit, match="--allow-lan"):
+        aoa_check.load_result("job-1", base="http://10.1.2.3:8001", key="k", transport=transport)
+    with pytest.raises(SystemExit, match="internal host"):
+        aoa_check.load_result(
+            "job-1", base="http://example.com", key="k", allow_lan=True, transport=transport
+        )
+    assert seen == []
+    aoa_check.load_result(
+        "job-1", base="http://10.1.2.3:8001", key="k", allow_lan=True, transport=transport
+    )
+    assert len(seen) == 1
+
+
 # --- boq_compare ---------------------------------------------------------------------------------
 
 

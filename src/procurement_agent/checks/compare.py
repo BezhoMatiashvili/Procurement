@@ -91,6 +91,7 @@ from procurement_agent.extraction.rules import (
 from procurement_agent.extraction.schemas import FactType
 from procurement_agent.extraction.spellcheck import classify_difference
 from procurement_agent.ingestion.segmenter import Segment, document_text, key_of
+from procurement_agent.security.safe_errors import ContentFree
 
 if TYPE_CHECKING:  # contract_terms imports compare_llm, which imports this module
     from procurement_agent.checks.contract_terms import TaxPhrase
@@ -2708,7 +2709,7 @@ def _kind_of_change(delta: ValueDelta) -> str:
 _Pair = tuple[Segment | None, Segment | None, str | None]
 
 
-class DocumentTooLargeError(RuntimeError):
+class DocumentTooLargeError(ContentFree, RuntimeError):
     """Raised when a document has more segments than the comparison is configured to align."""
 
 

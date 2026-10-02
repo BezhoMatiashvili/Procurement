@@ -14,6 +14,9 @@ HF_HUB_OFFLINE=0 uv run docling-tools models download --output-dir "$MODELS_DIR"
 echo ">> Spelling dictionary (hunspell ka_GE, pinned and hash-checked) -> ${PA_SPELLING_DICTIONARY_PATH:-./models/hunspell}"
 uv run python scripts/fetch_spelling_dictionary.py --dest "${PA_SPELLING_DICTIONARY_PATH:-./models/hunspell}"
 
+echo ">> Checksum manifest of the model files (production verifies it at every start)"
+PA_DOCLING_ARTIFACTS_PATH="$MODELS_DIR" uv run python -m procurement_agent.cli models-manifest write
+
 echo ">> Ollama models"
 LLM="${PA_LLM_MODEL:-gemma3:12b}"
 FAST="${PA_LLM_FAST_MODEL:-gemma3:4b}"

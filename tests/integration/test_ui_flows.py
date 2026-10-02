@@ -31,7 +31,7 @@ from procurement_agent.main import create_app
 from procurement_agent.models import Job
 from procurement_agent.ui import reading
 from procurement_agent.ui.routes import _env
-from tests.boq_factory import DOORS, LINES, Bid, blank, build_boq, build_real_boq
+from tests.boq_factory import DOORS, LINES, Bid, blank, build_boq, build_real_boq, pad_workbook
 from tests.unit.test_aoa_llm import ReadingLLM
 from tests.unit.test_fx_invoice import USD_ACT
 
@@ -1222,10 +1222,10 @@ def test_the_boq_page_reports_an_unreadable_bid_and_ranks_the_rest(
 
     real_read = boq_module.read_boq
 
-    def read(path: Path, *, name: str | None = None) -> object:
+    def read(path: Path, *, name: str | None = None, **limits: object) -> object:
         if name == "Company-3":
             raise KeyError("a part of the workbook the reader expects is missing")
-        return real_read(path, name=name)
+        return real_read(path, name=name, **limits)
 
     monkeypatch.setattr(boq_module, "read_boq", read)
     template, bids = _boq_run(client, n=3)
@@ -1376,3 +1376,23 @@ def test_an_extraction_result_names_its_fields_in_georgian(client: TestClient) -
     assert '<table class="list facts">' in body
     assert "მხარის დასახელება" in body  # "Party name", in Georgian
     assert ">Party name<" not in body
+
+
+def test_a_boq_template_over_the_cell_limit_is_a_page_not_a_server_error(tmp_path: Path) -> None:
+    """The report and the merged workbook both read the template strictly; one over the cell
+    limit has to come back as a page that says so, not as a bare error response."""
+    for client in _make_ui_client(tmp_path, boq_max_cells=1000):
+        template = _upload(
+            client,
+            "Template.xlsx",
+            pad_workbook(build_boq(blank(), priced=False, stated_total=None), 1500),
+            XLSX,
+        )
+        bid = _upload(client, "Company-1.xlsx", build_boq(LINES), XLSX)
+        report = client.get(f"/ui/checks/boq?template={template}&bids={bid}")
+        assert report.status_code == 200
+        assert "text/html" in report.headers["content-type"]
+        assert "more than 1,000 cells" in report.text
+        merged = client.get(f"/ui/checks/boq/merged.xlsx?template={template}&bids={bid}")
+        assert merged.status_code == 200
+        assert "text/html" in merged.headers["content-type"]

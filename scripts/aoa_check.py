@@ -18,6 +18,8 @@ from pathlib import Path
 
 import httpx
 
+from procurement_agent.config import check_llm_url
+
 MONTHLY = "monthly"
 
 
@@ -58,6 +60,7 @@ def load_result(
     *,
     base: str | None,
     key: str | None,
+    allow_lan: bool = False,
     transport: httpx.BaseTransport | None = None,
 ) -> dict:
     """A job result from a local JSON file or from the running app's API.
@@ -69,6 +72,16 @@ def load_result(
         return json.loads(Path(ref).read_text(encoding="utf-8"))
     if not base or not key:
         raise SystemExit("--base and --key are required to fetch a job result from the API")
+    # The API key goes to this address: this machine, unless the company network is chosen.
+    try:
+        base = check_llm_url(
+            base,
+            allow_lan=allow_lan,
+            name="--base",
+            lan_hint="pass --allow-lan to use another host",
+        )
+    except ValueError as e:
+        raise SystemExit(str(e)) from e
     with httpx.Client(
         base_url=base, headers={"X-API-Key": key}, timeout=30, transport=transport
     ) as client:
@@ -187,14 +200,17 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", help="app base URL (API mode)")
     ap.add_argument("--key", help="API key (API mode)")
+    ap.add_argument(
+        "--allow-lan", action="store_true", help="let --base be another host on the company network"
+    )
     ap.add_argument("--contract", required=True, help="job id (API mode) or result .json path")
     ap.add_argument("--aoa", action="append", required=True, help="name=<job id | json path>")
     args = ap.parse_args()
 
-    contract = load_result(args.contract, base=args.base, key=args.key)
+    contract = load_result(args.contract, base=args.base, key=args.key, allow_lan=args.allow_lan)
     for spec in args.aoa:
         name, ref = spec.split("=", 1)
-        aoa = load_result(ref, base=args.base, key=args.key)
+        aoa = load_result(ref, base=args.base, key=args.key, allow_lan=args.allow_lan)
         issues = check(contract, aoa)
         print(f"\n== {name}: {'OK' if not issues else f'{len(issues)} issue(s)'}")
         for i in issues:

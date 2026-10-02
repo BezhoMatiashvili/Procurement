@@ -29,11 +29,18 @@ from openpyxl.utils import get_column_letter
 
 from procurement_agent.extraction.schemas import Provenance
 from procurement_agent.ingestion.chunker import MAX_CHUNK_TOKENS, Chunk, estimate_tokens
+from procurement_agent.ingestion.text_limits import bound_text
 from procurement_agent.security.audit import log
 
 _MAX_SHEETS = 50
 _MAX_ROWS = 20_000
 _MAX_COLS = 100
+#: The three caps above multiply: fifty sheets of twenty thousand rows of a hundred cells is a
+#: hundred million cells, and the upload guard admits a workbook of tens of millions. These bound
+#: the whole workbook. The largest real one measured has about ten thousand cells and well under a
+#: million characters; these are a hundred and ten times and eight times that.
+_MAX_CELLS = 1_000_000
+_MAX_TEXT_CHARS = 8_000_000
 
 
 @dataclass(slots=True)
@@ -55,6 +62,8 @@ class Sheet:
     #: data exists below ``_MAX_ROWS`` / right of ``_MAX_COLS`` and was not read
     truncated_rows: bool = False
     truncated_cols: bool = False
+    #: the workbook-wide ``_MAX_CELLS`` / ``_MAX_TEXT_CHARS`` ran out inside or before this sheet
+    truncated_size: bool = False
     notes: list[str] = field(default_factory=list)
 
 
@@ -78,7 +87,7 @@ def _fmt(v: Any) -> str:
         return text
     # Newlines fold to spaces; a pipe stays a pipe. Escaping it for the Markdown table is the
     # table's business (``_render``) - the comparison and its quotes show what the cell says.
-    return str(v).replace("\n", " ").strip()
+    return bound_text(str(v).replace("\n", " ").strip())
 
 
 def _number(v: Any) -> float | None:
@@ -88,8 +97,10 @@ def _number(v: Any) -> float | None:
     return float(v)
 
 
-def _note(notes: list[str] | None, sheet: Sheet | None, text: str) -> None:
-    log.warning("workbook_truncated", detail=text)
+def _note(notes: list[str] | None, sheet: Sheet | None, text: str, *, cap: str) -> None:
+    """Record a cap that was hit. The note names the sheet (it is shown to the user); the log
+    line says only which cap, because a sheet name is whatever the bidder called it."""
+    log.warning("workbook_truncated", cap=cap)
     if sheet is not None:
         sheet.notes.append(text)
     if notes is not None:
@@ -107,29 +118,48 @@ def read_workbook(data: bytes, *, notes: list[str] | None = None) -> list[Sheet]
                 notes,
                 None,
                 f"workbook has {len(worksheets)} sheets; only the first {_MAX_SHEETS} were read",
+                cap="sheets",
             )
+        budget = [_MAX_CELLS, _MAX_TEXT_CHARS]
         for ws in worksheets[:_MAX_SHEETS]:
-            sheet = _read_sheet(ws)
+            sheet = _read_sheet(ws, budget)
+            if sheet.truncated_size:
+                _note(
+                    notes,
+                    sheet,
+                    f"sheet {sheet.name!r}: the workbook is larger than the {_MAX_CELLS} cells or "
+                    f"{_MAX_TEXT_CHARS} characters that are read; the rest was left out",
+                    cap="size",
+                )
             if sheet.truncated_rows:
                 _note(
-                    notes, sheet, f"sheet {sheet.name!r}: only the first {_MAX_ROWS} rows were read"
+                    notes,
+                    sheet,
+                    f"sheet {sheet.name!r}: only the first {_MAX_ROWS} rows were read",
+                    cap="rows",
                 )
             if sheet.truncated_cols:
                 _note(
                     notes,
                     sheet,
                     f"sheet {sheet.name!r}: only the first {_MAX_COLS} columns were read",
+                    cap="columns",
                 )
             if sheet.cells:
                 sheets.append(sheet)
+            if sheet.truncated_size:
+                break  # nothing is left to read the next sheet with
     finally:
         wb.close()
     return sheets
 
 
-def _read_sheet(ws: Any) -> Sheet:
+def _read_sheet(ws: Any, budget: list[int]) -> Sheet:
+    """One sheet. ``budget`` is ``[cells, characters]`` left for the whole workbook; it is spent
+    here and the sheet is marked ``truncated_size`` when it runs out."""
     cells: list[Cell] = []
     n_rows = n_cols = 0
+    truncated_size = False
     # One row and one column past each cap are read, and data found there means the cap bit.
     # Never an unbounded scan: without max_row/max_col openpyxl pads every row out to the
     # declared width, so a two-cell sheet declaring A1:XFD1048576 cost minutes. Data beyond an
@@ -151,10 +181,17 @@ def _read_sheet(ws: Any) -> Sheet:
             if c_idx > _MAX_COLS:
                 truncated_cols = True
                 break
+            if budget[0] <= 0 or budget[1] < len(text):
+                truncated_size = True
+                break
+            budget[0] -= 1
+            budget[1] -= len(text)
             cells.append(Cell(f"{get_column_letter(c_idx)}{r_idx}", r_idx, c_idx, text, _number(v)))
             n_rows = max(n_rows, r_idx)
             n_cols = max(n_cols, c_idx)
-    return Sheet(ws.title, cells, n_rows, n_cols, truncated_rows, truncated_cols)
+        if truncated_size:
+            break
+    return Sheet(ws.title, cells, n_rows, n_cols, truncated_rows, truncated_cols, truncated_size)
 
 
 def read_formulas(data: bytes) -> dict[tuple[str, str], str]:
@@ -266,5 +303,6 @@ def _emit(
             provenance=Provenance(sheet=sheet.name, cell=ref, chunk_id=cid),
             headings=[sheet.name],
             token_estimate=estimate_tokens(text),
+            ordinal=len(chunks),
         )
     )

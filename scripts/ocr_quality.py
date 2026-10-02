@@ -3,11 +3,15 @@
 
 Runs where Tesseract is - inside the image, with the working tree mounted read-only:
 
-    docker run --rm --entrypoint python \\
+    docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp --entrypoint python \\
         -v "$PWD/src:/app/src:ro" -v "$PWD/scripts:/app/scripts:ro" \\
         -v "$PWD/samples:/app/samples:ro" -v "$PWD/models:/models:ro" -v "$OUT:/out" \\
         procurement-agent:0.1.0 /app/scripts/ocr_quality.py --mode full_page --scale 4.17 \\
         --out /out/ocr-full-300.json
+
+``--user`` because ``samples/`` is mode 0700 (it holds the client's documents) and the image's own
+``app`` user is uid 999: the container has to read it as you. ``HOME=/tmp`` because ``/app`` is not
+writable by another user and the libraries put their caches in ``$HOME``.
 
 Every scan (``samples/*/AOA and Contract/**/*.pdf``) is converted exactly as the product does -
 Docling, then the chunker - under the OCR configuration given, and matched to its born-digital

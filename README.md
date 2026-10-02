@@ -170,12 +170,20 @@ cp .env.example .env                      # set PA_DEV_API_KEY=pa_something for 
 ./scripts/prefetch_models.sh              # Docling + spelling dictionary (once, online) + Ollama
 docker run -d --name ollama -p 127.0.0.1:11434:11434 -v ollama:/root/.ollama ollama/ollama:0.34.2
 docker exec ollama ollama pull gemma3:12b && docker exec ollama ollama pull gemma3:4b
+```
 
+That `docker run` container sits on Docker's default network and can reach the internet. To run
+the same pinned Ollama with no route out (what production does), use `docker-compose.dev.yml`
+through `scripts/switch_dev_ollama.sh` (a dry run by default; pulling models then needs
+`--pull`, which uses a temporary connected container).
+
+```bash
 PA_OLLAMA_BASE_URL=http://127.0.0.1:11434 PA_DOCLING_ARTIFACTS_PATH=./models/docling \
   uv run uvicorn procurement_agent.main:app --reload
 ```
 
-Open <http://127.0.0.1:8000/ui/> (sign in with the dev key) or <http://127.0.0.1:8000/docs>.
+Open <http://127.0.0.1:8000/ui/> (sign in with the dev key); the API schema is at `/openapi.json`
+(there is no interactive docs page: it loaded its script from a public CDN).
 
 ### API in 30 seconds
 
@@ -202,6 +210,10 @@ uv run pytest -q -m "not e2e"                    # just the tests (no LLM needed
 uv run python scripts/gen_synthetic_samples.py   # regenerate synthetic fixtures
 uv run python scripts/benchmark.py [--llm]       # timings on this machine
 uv run python scripts/evaluate.py --set all      # accuracy against the gold sets
+scripts/security_audit.sh [--quick] [--online]   # one scorecard: static analysis, no-network run,
+                                                 # authorisation matrix, log canary, resource ceilings,
+                                                 # security mutation (docs/SECURITY.md section 11)
+scripts/verify_offline.sh                        # the whole product with only loopback up
 ```
 
 ### Measuring accuracy
@@ -219,14 +231,19 @@ uv run python scripts/evaluate.py --set client --compare eval_runs/baseline.json
 Gold files live in `tests/fixtures/gold/` (synthetic, committed) and `samples/gold/`
 (the client's documents, git-ignored — their expected values *are* the confidential data).
 
-All fixtures are synthetic. Real documents must never be committed (a pre-commit hook blocks
-them); keep client samples in `samples/` (git-ignored).
+All fixtures are synthetic. Real documents must never be committed (a pre-commit hook and a CI
+job block them; `scripts/client_canary.py install` adds a local hook that also refuses the
+client's own names, tax IDs and bank accounts, which it knows only as salted hashes); keep client
+samples in `samples/` (git-ignored). If an AI coding assistant works in this repository, it must
+not be able to read them: the `.claude/settings.json` deny rules and `.cursorignore` do that,
+as a guardrail rather than a boundary (docs/SECURITY.md section 10).
 
 ## Production deployment
 
 ```bash
 ./scripts/prefetch_models.sh          # on a connected machine; copy ./models + ollama volume
-cp .env.example .env                  # PA_ENV=prod, retention, limits
+cp .env.example .env                  # PA_ENV=prod, PA_ALLOWED_HOSTS (required), retention, limits
+python -m procurement_agent.cli models-manifest write   # on the connected machine, once, before copying ./models
 docker compose build && docker compose up -d
 docker compose ps                     # app, ollama and proxy should all turn "healthy"
 docker compose exec app python -m procurement_agent.cli create-key alice
@@ -241,8 +258,11 @@ encrypted disk. `/health` is liveness, `/ready` readiness (database + job worker
 checklist — proxy duties, backups, key rotation, upgrades — is in
 [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md).
 
-CI (`.github/workflows/ci.yml`) runs the same gate as `scripts/check.sh` plus pip-audit and a
-gitleaks scan of the full history.
+The app runs under `scripts/supervise.py`, which restarts the server when `/ready` stops
+answering (a request that wedges the process cannot be caught from inside it). CI
+(`.github/workflows/ci.yml`) runs the same gate as `scripts/check.sh` plus pip-audit, a gitleaks
+scan of the full history, the whole product in a network namespace with loopback only, and a
+harness that removes each security control in turn and requires a test to fail.
 
 ## Accuracy and performance (this dev box: 18-core CPU, 30 GB RAM, no GPU)
 

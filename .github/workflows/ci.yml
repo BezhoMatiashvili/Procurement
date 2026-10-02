@@ -1,8 +1,8 @@
 # Quality gate. scripts/check.sh runs the same steps locally; keep the two in step.
 #
-# Third-party actions are pinned to release tags. Before the first push to a real remote,
-# replace each tag with the commit SHA it points to (Dependabot or `gh api` can do it), so a
-# re-pointed tag cannot change what runs with repository access.
+# Third-party actions are pinned to the commit their major-version tag pointed at on 2026-10-02
+# (the tag is kept in the comment), so a re-pointed tag cannot change what runs with repository
+# access. To move one on purpose: `gh api repos/<owner>/<name>/commits/<tag> --jq .sha`.
 
 name: ci
 
@@ -27,13 +27,41 @@ env:
   TRANSFORMERS_OFFLINE: "1"
 
 jobs:
+  repo-guard:
+    name: no documents, databases, keys or env files in the repository
+    # The generic rule, in CI as well as in the pre-commit hook: a client document that reaches a
+    # remote cannot be taken back. Only synthetic fixtures under tests/fixtures/ may be documents.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - run: scripts/check_no_documents.sh
+
+  offline:
+    name: the product runs with no network (loopback-only namespace)
+    # scripts/verify_offline.sh runs the real application and a stub model server in a network
+    # namespace that has loopback and nothing else, so an attempt to leave the machine fails in
+    # the kernel. It exits 2 (a failure here) if the runner cannot create the namespace.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --locked --all-groups
+      # Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: scripts/verify_offline.sh --quick
+
   lint:
     name: lint, types, static security
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
@@ -50,8 +78,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
@@ -61,13 +89,29 @@ jobs:
       - run: >
           uv run pytest -q -m "not e2e and not docling"
           --cov=procurement_agent --cov-report=term --cov-report=xml
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         if: always()
         with:
           name: coverage-xml
           path: coverage.xml
           if-no-files-found: ignore
           retention-days: 14
+
+  mutation:
+    name: the security tests fail when the control they guard is removed
+    # scripts/mutate_security.py breaks one security property of a copy of src/ at a time
+    # (ownership not checked, a header dropped, an outbound lookup allowed, ...) and requires a
+    # test to fail. A guard test that cannot fail is not a guard; this is what keeps them honest.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --locked --all-groups
+      - run: uv run python scripts/mutate_security.py
 
   audit:
     name: dependency vulnerabilities (pip-audit)
@@ -76,17 +120,20 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
       - run: uv sync --locked --all-groups
-      # Audit exactly what uv.lock pins (not whatever pip would resolve). torch comes from
-      # the CPU wheel index but exports as its PyPI version, so it is audited like the rest.
+      # Audit exactly what uv.lock pins (not whatever pip would resolve). torch comes from the
+      # CPU wheel index and exports as `2.14.1+cpu`, a local version PyPI does not list: pip-audit
+      # --strict refuses it. The `+cpu` build is the PyPI release's code, so the advisories for
+      # `2.14.1` are the ones that apply, and that is what is audited.
       - run: >
           uv export --locked --all-groups --no-hashes --no-emit-project
           --format requirements-txt -o "$RUNNER_TEMP/requirements-audit.txt"
+      - run: sed -i -E 's/(==[0-9][^ ;+]*)\+[A-Za-z0-9.]+/\1/' "$RUNNER_TEMP/requirements-audit.txt"
       - run: >
           uv run pip-audit --strict --disable-pip --no-deps
           -r "$RUNNER_TEMP/requirements-audit.txt"
@@ -96,11 +143,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
           fetch-depth: 0          # scan the whole history, not only the last commit
       # The container image is used instead of gitleaks-action, which needs a paid licence
       # key on organisation accounts. Same version as .pre-commit-config.yaml.
       - run: >
-          docker run --rm -v "$GITHUB_WORKSPACE:/repo" zricethezav/gitleaks:v8.21.2
+          docker run --rm -v "$GITHUB_WORKSPACE:/repo" zricethezav/gitleaks:v8.21.2@sha256:0e99e8821643ea5b235718642b93bb32486af9c8162c8b8731f7cbdc951a7f46
           git /repo --redact --verbose --exit-code 1

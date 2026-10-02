@@ -34,6 +34,7 @@ from procurement_agent.extraction.normalize import normalize_spaces
 from procurement_agent.extraction.schemas import Provenance
 from procurement_agent.ingestion.chunker import provenance_of
 from procurement_agent.ingestion.excel_reader import Sheet
+from procurement_agent.ingestion.pdfium_lock import PDFIUM_LOCK
 
 __all__ = [
     "Segment",
@@ -389,22 +390,23 @@ def pdf_has_text_layer(path: Path) -> bool:
     in a born-digital one; this is what tells the two apart. Reading the text layer is not
     parsing the document again - pdfium only lists the characters the file already contains.
     """
-    try:
-        pdf = pypdfium2.PdfDocument(str(path))
-    except (pypdfium2.PdfiumError, OSError):
-        return False
-    try:
-        for i in range(len(pdf)):
-            page = pdf[i]
-            try:
-                textpage = page.get_textpage()
+    with PDFIUM_LOCK:  # pdfium is not thread-safe, not even across documents
+        try:
+            pdf = pypdfium2.PdfDocument(str(path))
+        except (pypdfium2.PdfiumError, OSError):
+            return False
+        try:
+            for i in range(len(pdf)):
+                page = pdf[i]
                 try:
-                    if textpage.get_text_range().strip():
-                        return True
+                    textpage = page.get_textpage()
+                    try:
+                        if textpage.get_text_range().strip():
+                            return True
+                    finally:
+                        textpage.close()
                 finally:
-                    textpage.close()
-            finally:
-                page.close()
-        return False
-    finally:
-        pdf.close()
+                    page.close()
+            return False
+        finally:
+            pdf.close()

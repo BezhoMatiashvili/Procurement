@@ -1,0 +1,104 @@
+# Development Ollama with the same network isolation as production.
+#
+# The Ollama container this machine has been running (`docker run ... -p 127.0.0.1:11434:11434
+# ollama/ollama`) sits on Docker's default bridge: it can reach the internet, it keeps every Linux
+# capability and it is not the pinned release. This file runs the pinned image on an INTERNAL
+# network - no route out - behind a small relay that publishes 127.0.0.1:11434 exactly as before,
+# so the dev server and every script keep working with PA_OLLAMA_BASE_URL=http://127.0.0.1:11434.
+# OLLAMA_NO_CLOUD switches off Ollama's own cloud features (remote inference and web search).
+#
+# Switching over cuts the model out from under the running dev server for about a minute; the
+# `ollama` volume (the pulled models) is kept. Use scripts/switch_dev_ollama.sh, which does it in
+# the right order and checks the result. Pulling a model needs the network: see its --pull.
+
+name: procurement-dev
+
+services:
+  ollama:
+    # The release and digest docker-compose.yml pins for production.
+    image: ollama/ollama:0.34.2@sha256:da6e0dc5651df159e45686fd663c4dbe1624a52c44d7280eeac1551d8f865532
+    restart: unless-stopped
+    init: true
+    volumes:
+      - ollama:/root/.ollama
+    networks: [llm]
+    environment:
+      OLLAMA_NO_CLOUD: "1"
+      OLLAMA_KEEP_ALIVE: "-1"
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    read_only: true
+    tmpfs:
+      - /tmp:size=1g,mode=1777,noexec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    ulimits:
+      core: 0
+    mem_limit: 16g
+    pids_limit: 1024
+    # no ports: reachable only through the relay
+
+  relay:
+    # Plain-HTTP relay from 127.0.0.1:11434 on the host to ollama:11434 on the internal network
+    # (Docker does not publish ports of a container whose only network is internal).
+    image: caddy:2.11.4-alpine@sha256:de23def33b17fb5d1290b0f6c2add1d70780e52341896c00a4c8a2a2fe9d355e
+    restart: unless-stopped
+    user: "65534:65534"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - printf '%s' "$$CADDYFILE" > /config/Caddyfile && exec caddy run --adapter caddyfile --config /config/Caddyfile
+    environment:
+      CADDYFILE: |
+        {
+          admin off
+          auto_https off
+        }
+        :11434 {
+          reverse_proxy ollama:11434 {
+            flush_interval -1
+          }
+        }
+    ports:
+      - "127.0.0.1:11434:11434"
+    networks: [edge, llm]
+    depends_on: [ollama]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:11434/api/version"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    read_only: true
+    tmpfs:
+      - /data:size=16m,uid=65534,gid=65534,noexec,nosuid,nodev
+      - /config:size=16m,uid=65534,gid=65534,noexec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    # the caddy binary carries a file capability for binding low ports; exec fails unless the
+    # capability is in the bounding set, even though :11434 does not need it
+    cap_add: [NET_BIND_SERVICE]
+    ulimits:
+      core: 0
+    mem_limit: 256m
+    pids_limit: 128
+
+networks:
+  llm:
+    internal: true          # no egress: the model server cannot reach the internet at all
+  edge:
+    # The relay's side only. Masquerading off: the published port still answers on 127.0.0.1, but
+    # the relay's own outbound traffic gets no NAT, so it cannot reach the internet either.
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"
+
+volumes:
+  ollama:
+    external: true          # the volume the current dev container already uses: models are kept
+    name: ollama

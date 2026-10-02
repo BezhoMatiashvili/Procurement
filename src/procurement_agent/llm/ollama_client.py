@@ -53,11 +53,12 @@ from typing import Any, TypeVar
 import httpx
 from pydantic import BaseModel, ValidationError
 
-from procurement_agent.config import Settings
+from procurement_agent.config import Settings, check_llm_url, check_model_name
 from procurement_agent.extraction.prompts import escape_untrusted
 from procurement_agent.extraction.schemas import ChoiceResult
 from procurement_agent.llm.base import LLMError, LLMUnavailableError
 from procurement_agent.security.audit import log
+from procurement_agent.security.safe_errors import safe_exc
 from procurement_agent.tokens import estimate_tokens
 
 T = TypeVar("T", bound=BaseModel)
@@ -94,6 +95,16 @@ CHOICE_OPTIONS: dict[str, Any] = {
 #: it against the real model. ``covered`` catches it at runtime if it is ever false.
 _MAX_OPTION_CHARS = 8
 
+#: The only requests this client ever sends. Ollama also has endpoints that download a model,
+#: copy, delete or push one, and sign in to its hosted service; none of them is reachable from
+#: here, and a change that tries is refused before the request leaves (``_only_ollama``).
+_ENDPOINTS = frozenset({("POST", "/api/chat"), ("GET", "/api/tags")})
+#: Fields Ollama puts on a model it forwards to a hosted service (a ``...-cloud`` model, or an
+#: alias created from one): the prompt - the document's text - would leave this machine.
+_REMOTE_MARKERS = ("remote_host", "remote_model")
+#: How long a model found to run here is trusted before the server is asked again.
+_LOCALITY_TTL_S = 600.0
+
 _RETRY_STATUS = frozenset({500, 502, 503, 504})
 _MAX_ATTEMPTS = 3
 _BACKOFF_S = 1.5
@@ -108,6 +119,11 @@ class PromptTooLongError(LLMError):
     Raised rather than letting Ollama truncate, because a truncated prompt produces an answer
     that looks normal and is wrong.
     """
+
+
+def _is_remote(entry: dict[str, Any]) -> bool:
+    """Does this ``/api/tags`` entry say the model is served by someone else?"""
+    return any(entry.get(marker) for marker in _REMOTE_MARKERS)
 
 
 def validate_options(options: Sequence[str]) -> tuple[str, ...]:
@@ -157,14 +173,26 @@ Answer with exactly one word:"""
 
 class OllamaClient:
     def __init__(self, settings: Settings) -> None:
+        # The settings validated these when they were built; ``model_copy(update=...)`` and
+        # ``construct`` skip validation, and this is the last place before document text is sent.
+        base = check_llm_url(settings.ollama_base_url, allow_lan=settings.llm_allow_lan)
+        check_model_name(settings.llm_model)
+        check_model_name(settings.llm_fast_model)
         self._s = settings
+        self._origin = httpx.URL(base)
         self._http = httpx.Client(
-            base_url=settings.ollama_base_url,
+            base_url=base,
             timeout=httpx.Timeout(
                 connect=5.0, read=float(settings.llm_timeout_s), write=30.0, pool=5.0
             ),
             trust_env=False,  # never pick up HTTP(S)_PROXY from the environment
+            follow_redirects=False,  # a redirect would carry the document to wherever it points
+            event_hooks={"request": [self._only_ollama]},
         )
+        #: model -> time until which it is known to run on this server
+        self._local_until: dict[str, float] = {}
+        #: (when, the answer) of the last ``health`` probe
+        self._health_cache: tuple[float, dict[str, object]] | None = None
 
     # --- public --------------------------------------------------------------------------------
 
@@ -182,7 +210,7 @@ class OllamaClient:
         try:
             return schema.model_validate_json(content)
         except ValidationError as first:
-            log.warning("llm_invalid_json_retry", model=payload["model"], error=str(first)[:200])
+            log.warning("llm_invalid_json_retry", model=payload["model"], error=safe_exc(first))
             payload["messages"].append({"role": "assistant", "content": content})
             payload["messages"].append({"role": "user", "content": _RETRY_INSTRUCTION})
             # The retry carries the first answer as well as the prompt, so the window sized
@@ -221,7 +249,19 @@ class OllamaClient:
             "num_ctx_max": self._s.llm_num_ctx,
         }
 
-    def health(self) -> dict[str, object]:
+    def health(self, max_age_s: float = 10.0) -> dict[str, object]:
+        """Is the model server answering, and does it have the models. Cached for ``max_age_s``:
+        the status endpoint asks on every call, and every caller asking made this process ask the
+        model server - a request per poll, from anyone who can sign in."""
+        now = time.monotonic()
+        cached = self._health_cache
+        if cached is not None and max_age_s > 0 and now - cached[0] < max_age_s:
+            return dict(cached[1])
+        result = self._probe()
+        self._health_cache = (now, result)
+        return dict(result)
+
+    def _probe(self) -> dict[str, object]:
         try:
             r = self._http.get("/api/tags", timeout=5.0)
             r.raise_for_status()
@@ -233,18 +273,64 @@ class OllamaClient:
         models = body.get("models") if isinstance(body, dict) else None
         if not isinstance(models, list):
             return {"ok": False, "error": "malformed response"}
-        names = {str(m.get("name", "")) for m in models if isinstance(m, dict)}
+        entries = [m for m in models if isinstance(m, dict)]
+        names = {str(m.get("name", "")) for m in entries}
+        remote = {str(m.get("name", "")) for m in entries if _is_remote(m)}
         wanted = {self._s.llm_model, self._s.llm_fast_model}
         return {
-            "ok": self._s.llm_model in names,
+            "ok": self._s.llm_model in names and not wanted & remote,
             "models_present": sorted(wanted & names),
             "models_missing": sorted(wanted - names),
+            "models_remote": sorted(wanted & remote),
         }
 
     def close(self) -> None:
         self._http.close()
 
     # --- internals -----------------------------------------------------------------------------
+
+    def _only_ollama(self, request: httpx.Request) -> None:
+        """Refuse any request that is not one of ours, to the server we were configured for."""
+        url = request.url
+        prefix = self._origin.path.rstrip("/")
+        allowed = {(method, prefix + path) for method, path in _ENDPOINTS}
+        same_server = (url.scheme, url.host, url.port) == (
+            self._origin.scheme,
+            self._origin.host,
+            self._origin.port,
+        )
+        if not same_server or (request.method, url.path) not in allowed:
+            msg = f"refusing {request.method} {url.path} on {url.host}: not an allowed LLM request"
+            raise LLMError(msg)
+
+    def _ensure_local(self, model: str) -> None:
+        """Refuse a model the server forwards to a hosted service, before any text is sent.
+
+        ``OLLAMA_NO_CLOUD`` switches that feature off on the server, and the settings refuse names
+        that say ``cloud``; this catches the rest - an alias made from a hosted model carries a
+        harmless name but a ``remote_host`` in the server's own model list. Asked once per model
+        per ``_LOCALITY_TTL_S``. When the server cannot be asked (down, or answering with
+        something else) nothing has been sent yet and the call that follows meets the same fault,
+        so that is left to it.
+        """
+        now = time.monotonic()
+        if self._local_until.get(model, 0.0) > now:
+            return
+        try:
+            r = self._http.get("/api/tags", timeout=5.0)
+            r.raise_for_status()
+            body = r.json()
+        except (httpx.HTTPError, ValueError):
+            return
+        models = body.get("models") if isinstance(body, dict) else None
+        for entry in models if isinstance(models, list) else []:
+            if not isinstance(entry, dict) or entry.get("name") not in (model, f"{model}:latest"):
+                continue
+            if _is_remote(entry):
+                msg = f"model {model!r} is served by a remote host; only local models are allowed"
+                raise LLMError(msg)
+            self._local_until[model] = now + _LOCALITY_TTL_S
+            return
 
     def _context_size(self, prompt: str, max_output_tokens: int) -> int:
         needed = estimate_tokens(prompt) + max_output_tokens + _CTX_HEADROOM
@@ -373,6 +459,8 @@ class OllamaClient:
 
     def _request(self, payload: dict[str, Any]) -> dict[str, Any]:
         """POST and return the parsed body. Shared by the structured and choice paths."""
+        model = check_model_name(str(payload["model"]))
+        self._ensure_local(model)
         r = self._post_with_retry(payload)
         if r.status_code == 404:
             msg = f"model {payload['model']!r} is not installed on the LLM service"

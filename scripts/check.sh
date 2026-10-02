@@ -71,6 +71,9 @@ else
   trap 'rm -f "$req"' EXIT
   uv export --locked --all-groups --no-hashes --no-emit-project \
     --format requirements-txt -o "$req" >/dev/null
+  # torch exports as `2.14.1+cpu` (the CPU wheel index), a local version PyPI does not list, and
+  # --strict refuses what it cannot look up: audit the release the build is made from.
+  sed -i -E 's/(==[0-9][^ ;+]*)\+[A-Za-z0-9.]+/\1/' "$req"
   uv run pip-audit --strict --disable-pip --no-deps -r "$req"
 fi
 

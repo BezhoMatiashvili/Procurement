@@ -158,7 +158,7 @@ def _stem_class(lemma: str) -> Literal["consonant", "bare", "truncating", "vowel
     if lemma.endswith("ი") and lemma not in _I_VOWEL_NAMES and len(lemma) > 2:
         return "consonant"
     if lemma[-1] not in _VOWELS:
-        return "bare"  # a loanword that ends in a consonant: "დეველოპმენტ", "ლოფთ"
+        return "bare"  # a loanword that ends in a consonant: "ტრანსფორმერ", "ლოფთ"
     return "vowel"
 
 

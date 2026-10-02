@@ -5,21 +5,20 @@ so it sailed past, and FastAPI spooled the whole multipart body to disk before a
 or the authentication dependency - ran. This middleware counts what ``receive`` delivers and
 stops the request once the count passes the cap, whatever the headers claimed.
 
-It also refuses a multipart body that carries no credential at all before reading it: body
-parsing happens before dependencies are solved, so without this an anonymous client could make
-the server spool up to the cap per request. A *wrong* credential still gets as far as the
-normal 401 - telling valid from invalid needs the database, which this layer does not touch.
+The cap depends on the route. Only the routes that take a file may carry a large body
+(``upload_max_bytes``: two files and framing); everything else - sign-in, the JSON of a check, a
+form of ids - is cut off at ``default_max_bytes``, a megabyte, so a 100 MB JSON post is refused
+after the first megabyte instead of being buffered, parsed and then answered with a 401. Who may
+send a large body is ``preauth``'s question and is answered before the body is read.
 """
 
 from __future__ import annotations
 
-import json
-
 from starlette.datastructures import Headers
-from starlette.requests import cookie_parser
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from procurement_agent.security.audit import log
+from procurement_agent.security.headers import error_reply
 
 _TOO_LARGE = "request body too large"
 
@@ -35,25 +34,34 @@ class BodySizeLimitMiddleware:
     "error parsing the body".
     """
 
-    def __init__(self, app: ASGIApp, *, max_bytes: int, session_cookie: str) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        default_max_bytes: int,
+        upload_max_bytes: int,
+        upload_routes: frozenset[tuple[str, str]],
+    ) -> None:
         self.app = app
-        self.max_bytes = max_bytes
-        self.session_cookie = session_cookie
+        self.default_max_bytes = default_max_bytes
+        self.upload_max_bytes = upload_max_bytes
+        self.upload_routes = upload_routes
+
+    def limit_for(self, method: str, path: str) -> int:
+        """The most bytes a request to this route may carry."""
+        if (method, path) in self.upload_routes:
+            return self.upload_max_bytes
+        return self.default_max_bytes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":  # lifespan, websocket: nothing to count
             await self.app(scope, receive, send)
             return
+        limit = self.limit_for(scope["method"], scope["path"])
         headers = Headers(scope=scope)
         declared = headers.get("content-length")
-        if declared is not None and declared.isdigit() and int(declared) > self.max_bytes:
-            await _reply(send, 413, _TOO_LARGE)
-            return
-        if headers.get("content-type", "").lower().startswith("multipart/") and not (
-            headers.get("x-api-key")
-            or self.session_cookie in cookie_parser(headers.get("cookie", ""))
-        ):
-            await _reply(send, 401, "missing API key")
+        if declared is not None and declared.isdigit() and int(declared) > limit:
+            await error_reply(send, 413, _TOO_LARGE)
             return
 
         received = 0
@@ -67,7 +75,7 @@ class BodySizeLimitMiddleware:
             message = await receive()
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
-                if received > self.max_bytes:
+                if received > limit:
                     exceeded = True
                     return {"type": "http.disconnect"}
             return message
@@ -77,7 +85,7 @@ class BodySizeLimitMiddleware:
             if exceeded:
                 if message["type"] == "http.response.start" and not started:
                     started = True
-                    await _reply(send, 413, _TOO_LARGE)
+                    await error_reply(send, 413, _TOO_LARGE)
                 return  # the app's own answer to a body it never fully saw is dropped
             if message["type"] == "http.response.start":
                 started = True
@@ -91,24 +99,6 @@ class BodySizeLimitMiddleware:
             # Layers above may treat the synthetic disconnect as an error; the 413 below is
             # the answer either way.
         if exceeded:
-            log.warning("request_body_too_large", path=scope.get("path", ""), limit=self.max_bytes)
+            log.warning("request_body_too_large", path=scope.get("path", ""), limit=limit)
             if not started:
-                await _reply(send, 413, _TOO_LARGE)
-
-
-async def _reply(send: Send, code: int, detail: str) -> None:
-    body = json.dumps({"detail": detail}).encode()
-    await send(
-        {
-            "type": "http.response.start",
-            "status": code,
-            "headers": [
-                (b"content-type", b"application/json"),
-                (b"content-length", str(len(body)).encode()),
-                (b"x-content-type-options", b"nosniff"),
-                (b"cache-control", b"no-store"),
-                (b"connection", b"close"),
-            ],
-        }
-    )
-    await send({"type": "http.response.body", "body": body})
+                await error_reply(send, 413, _TOO_LARGE)

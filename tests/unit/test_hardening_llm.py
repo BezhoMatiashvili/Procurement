@@ -35,6 +35,9 @@ def _client(handler: Handler, **overrides: object) -> OllamaClient:
     client._http = httpx.Client(
         base_url="http://127.0.0.1:11434", transport=httpx.MockTransport(handler)
     )
+    # These tests are about what happens to a request; the server-side check that a model runs
+    # here (one extra GET /api/tags) has its own tests in test_llm_policy.py.
+    client._local_until = dict.fromkeys((settings.llm_model, settings.llm_fast_model), math.inf)
     return client
 
 

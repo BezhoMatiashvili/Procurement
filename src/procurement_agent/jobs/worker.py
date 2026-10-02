@@ -22,7 +22,6 @@ transaction, so the read and the write are two separate moments.
 from __future__ import annotations
 
 import queue
-import shutil
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -36,7 +35,7 @@ from procurement_agent.checks.aoa import scope_review_items
 from procurement_agent.checks.aoa_llm import request_review
 from procurement_agent.checks.compare_llm import request_explanations
 from procurement_agent.config import Settings
-from procurement_agent.db import session_scope
+from procurement_agent.db import checkpoint, session_scope
 from procurement_agent.extraction.pipeline import (
     StoredDocument,
     compare_stored,
@@ -49,9 +48,12 @@ from procurement_agent.extraction.pipeline import (
 from procurement_agent.extraction.schemas import FactType
 from procurement_agent.history import forget_runs
 from procurement_agent.ingestion import docling_service
+from procurement_agent.jobs.retention import delete_document_files, reconcile
 from procurement_agent.llm.base import LLMClient
 from procurement_agent.models import Document, DocumentStatus, Job, JobStatus, UiSession
 from procurement_agent.security.audit import audit, log
+from procurement_agent.security.caches import forget_cached_text
+from procurement_agent.security.safe_errors import safe_exc
 
 _SWEEP_EVERY_S = 600
 #: How long the loop waits for work before it beats the heartbeat and checks the sweep timer.
@@ -174,7 +176,7 @@ class Worker:
                 try:
                     self.sweep_expired()
                 except Exception as e:
-                    log.error("sweep_failed", error=repr(e))
+                    log.error("sweep_failed", error=safe_exc(e))
 
     def _run_one(self, job_id: str) -> None:
         """One job, and nothing it raises - including the failure bookkeeping - kills the loop."""
@@ -184,10 +186,10 @@ class Worker:
             try:
                 self._process(job_id)
             except Exception as e:
-                log.error("job_crashed", job_id=job_id, error=repr(e))
+                log.error("job_crashed", job_id=job_id, error=safe_exc(e))
                 self._finish(job_id, JobStatus.failed, f"internal error: {type(e).__name__}")
         except Exception as e:  # e.g. "database is locked" while recording the failure
-            log.error("job_finish_failed", job_id=job_id, error=repr(e))
+            log.error("job_finish_failed", job_id=job_id, error=safe_exc(e))
         finally:
             self._busy_since = None
             self._beat()
@@ -329,8 +331,10 @@ class Worker:
                 page_count = len(result.document.pages) or None
                 self._set_progress(job_id, 90, "saved")
         except Exception as e:
-            log.warning("parse_failed", document_id=doc_id, error=repr(e))
-            error = str(e)
+            # The exception's own text may quote the document; only its kind is kept, in the log
+            # and in the rows the user and the audit trail read (see ``security.safe_errors``).
+            error = f"could not be read: {safe_exc(e)}"
+            log.warning("parse_failed", document_id=doc_id, error=error)
 
             def mark_failed(s: Session) -> None:
                 doc = s.get(Document, doc_id)
@@ -368,8 +372,9 @@ class Worker:
         try:
             chunks = load_chunks(self._s, doc_id, doc_kind, notes=notes)
         except Exception as e:  # reported to the user, never swallowed
-            log.warning("chunking_failed", job=job_id, document=doc_id, error=str(e)[:200])
-            self._finish(job_id, JobStatus.failed, f"could not read the document: {e}"[:200])
+            failure = safe_exc(e)
+            log.warning("chunking_failed", job=job_id, document=doc_id, error=failure)
+            self._finish(job_id, JobStatus.failed, f"could not read the document: {failure}"[:200])
             return
         result = run_extraction(
             document_id=doc_id,
@@ -431,8 +436,9 @@ class Worker:
                 StoredDocument(id=pair[1][0], kind=pair[1][1], name=pair[1][2]),
             )
         except Exception as e:
-            log.warning("compare_failed", job=job_id, error=str(e)[:200])
-            self._finish(job_id, JobStatus.failed, f"could not compare: {e}"[:200])
+            failure = safe_exc(e)
+            log.warning("compare_failed", job=job_id, error=failure)
+            self._finish(job_id, JobStatus.failed, f"could not compare: {failure}"[:200])
             return
 
         pending = len(report.unexplained)
@@ -486,8 +492,9 @@ class Worker:
                 contract_text=load_document_text(self._s, *pair[1]),
             )
         except Exception as e:
-            log.warning("aoa_review_read_failed", job=job_id, error=str(e)[:200])
-            self._finish(job_id, JobStatus.failed, f"could not read the documents: {e}"[:200])
+            failure = safe_exc(e)
+            log.warning("aoa_review_read_failed", job=job_id, error=failure)
+            self._finish(job_id, JobStatus.failed, f"could not read the documents: {failure}"[:200])
             return
 
         self._set_progress(job_id, 30, f"asking the model about {len(items)} note(s)")
@@ -508,10 +515,12 @@ class Worker:
     # --- retention -----------------------------------------------------------------------------
 
     def sweep_expired(self) -> int:
-        """Delete documents past retention, and forget expired sign-in sessions.
+        """Delete documents past retention, forget expired sign-in sessions, and remove what an
+        earlier deletion left behind.
 
         Status first, files second - the same order as DELETE, for the reason in the module
-        docstring.
+        docstring. A file that will not go does not stop the others, and is retried: the
+        reconciler removes the files of every deleted document, not only of those deleted now.
         """
         now = datetime.now(UTC)
         with session_scope() as s:
@@ -529,13 +538,18 @@ class Worker:
                 mark_deleted(d)
                 audit(s, actor="worker", action="document.retention_delete", document_id=d.id)
             s.execute(delete(UiSession).where(UiSession.expires_at < now))
+        incomplete = 0
         for doc_id, kind in ids:
             # Zeroing a large file takes a while and the sweep runs outside a job, so beat per
             # document: a big first sweep after downtime must not read as a stalled worker.
             self._beat()
-            delete_document_files(self._s, doc_id, kind)
+            if not delete_document_files(self._s, doc_id, kind):
+                incomplete += 1
         if ids:
-            log.info("retention_sweep", deleted=len(ids))
+            log.info("retention_sweep", deleted=len(ids), incomplete=incomplete)
+        self._beat()
+        reconcile(self._s)
+        checkpoint()  # a deleted row must not stay readable in the write-ahead log
         return len(ids)
 
 
@@ -548,34 +562,12 @@ def mark_deleted(doc: Document) -> None:
             j.status = JobStatus.cancelled
             j.message = "document deleted"
             j.finished_at = datetime.now(UTC)
+        j.params = {}  # a question the user typed about a document that no longer exists
+    forget_cached_text()
     # The checks it took part in cannot be reproduced without it, so their records go too.
     session = object_session(doc)
     if session is not None:
         forget_runs(session, doc.id)
-
-
-def delete_document_files(settings: Settings, doc_id: str, kind: str) -> None:
-    p = upload_path(settings, doc_id, kind)
-    if p.exists():
-        _overwrite(p)
-        p.unlink()
-    rd = result_dir(settings, doc_id)
-    if rd.exists():
-        for f in rd.rglob("*"):
-            if f.is_file():
-                _overwrite(f)
-        shutil.rmtree(rd, ignore_errors=True)
-
-
-def _overwrite(path: Path) -> None:
-    """Best-effort zeroing before unlink (real protection comes from full-disk encryption)."""
-    try:
-        size = path.stat().st_size
-        with path.open("r+b") as fh:
-            fh.write(b"\0" * min(size, 64 * 1024 * 1024))
-            fh.flush()
-    except OSError:
-        pass
 
 
 def retention_expiry(settings: Settings) -> datetime | None:

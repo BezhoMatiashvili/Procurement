@@ -47,6 +47,7 @@ from openpyxl.utils import get_column_letter
 
 from procurement_agent.checks.findings import CheckReport, Finding, Severity
 from procurement_agent.extraction.normalize import normalize_spaces, parse_number
+from procurement_agent.ingestion.xlsx_size import DEFAULT_MAX_CELLS, ensure_cell_count
 from procurement_agent.report.xlsx_safe import cell_safe
 
 #: Sheets that carry no priced lines.
@@ -401,8 +402,11 @@ _CURRENCY = r"(?:აშშ\s+)?(?:დოლარ[ა-ჰ]*|ლარ[ა-ჰ]*|
 #: დოლარი", "Amount (USD)", "Rate in GEL", "Amount EUR", "ღირებულება ლარში". Only at the end: a
 #: label that goes on after the currency ("Unit rates in USD (excl. VAT)", the group label over
 #: the component rates) is not the rate itself.
+#: Written as ``(?:\s*[,(]\s*|\s+in\s+|\s+)``, not ``\s*(?:[,(]\s*|\s+in\s+|\s+)``: the same text is
+#: matched, but the leading ``\s*`` beside an alternative that starts with ``\s+`` made a run of
+#: whitespace cost its length cubed (94 ms for 200 characters, against 1.5 ms now).
 _LABEL_CURRENCY = re.compile(
-    rf"\s*(?:[,(]\s*|\s+in\s+|\s+){_CURRENCY}\s*\)?\s*$|^\s*(?:\$|₾|€)\s*", re.IGNORECASE
+    rf"(?:\s*[,(]\s*|\s+in\s+|\s+){_CURRENCY}\s*\)?\s*$|^\s*(?:\$|₾|€)\s*", re.IGNORECASE
 )
 
 
@@ -1388,8 +1392,18 @@ def _line_kind(
     return "position" if has_measure else "heading"
 
 
-def read_boq(path: Path, *, name: str | None = None) -> BoqWorkbook:
-    """Read a BOQ workbook twice: cached values, and formulas, so tampering is visible."""
+def read_boq(
+    path: Path, *, name: str | None = None, max_cells: int = DEFAULT_MAX_CELLS
+) -> BoqWorkbook:
+    """Read a BOQ workbook twice: cached values, and formulas, so tampering is visible.
+
+    Both reads build every cell in memory (about 420 bytes each, twice over), and the upload
+    guard admits an archive of a few megabytes that inflates to 512 MiB of cells. So the cells
+    are counted first, from the archive, and a workbook over ``max_cells`` is refused with
+    ``WorkbookTooLargeError`` - for a bid that is its ``BOQ.UNREADABLE``, not an out-of-memory kill
+    of the process every other user is on.
+    """
+    ensure_cell_count(path, max_cells)
     values = load_workbook(path, data_only=True)
     try:
         formulas = load_workbook(path, data_only=False)
@@ -1401,12 +1415,12 @@ def read_boq(path: Path, *, name: str | None = None) -> BoqWorkbook:
         values.close()
 
 
-def read_bid(path: Path, *, name: str) -> BoqWorkbook:
+def read_bid(path: Path, *, name: str, max_cells: int = DEFAULT_MAX_CELLS) -> BoqWorkbook:
     """``read_boq`` for one bidder's upload: a workbook that cannot be read at all is that
     bidder's problem, reported on that bidder (``BOQ.UNREADABLE``), never the end of the whole
     comparison for every other bidder."""
     try:
-        return read_boq(path, name=name)
+        return read_boq(path, name=name, max_cells=max_cells)
     except Exception as exc:  # any failure to parse the upload - reported, not raised
         return BoqWorkbook(name=name, read_error=type(exc).__name__)
 

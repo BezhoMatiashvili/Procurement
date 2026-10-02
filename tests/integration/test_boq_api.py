@@ -27,6 +27,7 @@ from tests.boq_factory import (
     blank,
     build_boq,
     build_real_boq,
+    pad_workbook,
     real_positions,
 )
 
@@ -333,10 +334,10 @@ def test_an_unreadable_bid_is_reported_on_that_bidder_and_the_rest_are_compared(
 
     real_read = boq_module.read_boq
 
-    def read(path: Path, *, name: str | None = None) -> object:
+    def read(path: Path, *, name: str | None = None, **limits: object) -> object:
         if name == "Broken Co":
             raise KeyError("a part of the workbook the reader expects is missing")
-        return real_read(path, name=name)
+        return real_read(path, name=name, **limits)
 
     monkeypatch.setattr(boq_module, "read_boq", read)
     template = _template(client)
@@ -417,3 +418,58 @@ def test_the_new_bid_findings_reach_the_report_the_page_and_the_workbook(
     cells = [str(c.value) for ws in wb.worksheets for row in ws.iter_rows() for c in row]
     assert any("EXCLUDED: a negative rate" in v for v in cells)
     assert any("Company-4" in v for v in cells)
+
+
+# --- a workbook with more cells than a full read may hold --------------------------------------
+
+
+@pytest.fixture
+def capped_client(tmp_path: Path) -> Iterator[TestClient]:
+    """A server whose BOQ cell limit (the setting's floor, 1 000) sits between a normal workbook
+    (under a hundred cells) and a padded one (1 500 more)."""
+    settings = Settings(
+        env="dev",
+        data_dir=tmp_path / "data",
+        dev_api_key="pa_devkey_for_tests_only",
+        ollama_base_url="http://127.0.0.1:1",
+        retention_days=1,
+        boq_max_cells=1000,
+    )
+    get_settings.cache_clear()
+    app = create_app(settings)
+    app.dependency_overrides[get_settings] = lambda: settings
+    with TestClient(app) as c:
+        yield c
+    dbmod._engine = None
+    dbmod._SessionLocal = None
+    get_settings.cache_clear()
+
+
+def test_a_bid_over_the_cell_limit_is_that_bidders_finding(capped_client: TestClient) -> None:
+    """A few megabytes of archive can hold gigabytes of cells, and the check builds every cell
+    twice: the bid is refused up front and reported, the other bidders are compared."""
+    template = _template(capped_client)
+    fine = _bid(capped_client, "Company-1")
+    big = _upload(capped_client, "Big Co.xlsx", pad_workbook(build_boq(LINES), 1500))
+    report = _check(capped_client, template, [fine, big])
+    by_name = {b["bidder"]: b for b in report["bidders"]}
+    assert [f["rule_id"] for f in by_name["Big Co"]["findings"]] == ["BOQ.UNREADABLE"]
+    assert "WorkbookTooLargeError" in by_name["Big Co"]["findings"][0]["message_en"]
+    assert by_name["Big Co"]["comparable"] is False
+    assert by_name["Company-1"]["comparable"]
+
+
+def test_a_template_over_the_cell_limit_is_refused(capped_client: TestClient) -> None:
+    big = _upload(
+        capped_client,
+        "Template.xlsx",
+        pad_workbook(build_boq(blank(), priced=False, stated_total=None), 1500),
+    )
+    bid = _bid(capped_client, "Company-1")
+    r = capped_client.post(
+        "/api/v1/checks/boq",
+        headers=H,
+        json={"template_document_id": big, "bid_document_ids": [bid]},
+    )
+    assert r.status_code == 422
+    assert "template" in r.json()["detail"] and "more than 1,000 cells" in r.json()["detail"]

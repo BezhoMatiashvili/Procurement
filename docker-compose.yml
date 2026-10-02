@@ -1,7 +1,12 @@
-# Production-style deployment. The app and Ollama share an INTERNAL network with no route to the
-# outside world. A small relay (`proxy`) is the only container with a published port, and only
-# on 127.0.0.1: put the TLS reverse proxy (Caddy/nginx with the company CA) in front of
-# 127.0.0.1:8000 on the host. See docs/PRODUCTION_READINESS.md.
+# Production-style deployment. Three containers, two INTERNAL networks (no route to the outside
+# world) and no more connectivity than each pair needs:
+#
+#     host reverse proxy -> 127.0.0.1:8000 -> proxy --[internal]--> app --[llm]--> ollama
+#
+# The proxy cannot reach Ollama, and Ollama cannot reach the proxy. A small relay (`proxy`) is the
+# only container with a published port, and only on 127.0.0.1: put the TLS reverse proxy
+# (Caddy/nginx with the company CA) in front of 127.0.0.1:8000 on the host. The app answers only to
+# the names in PA_ALLOWED_HOSTS (set it in .env). See docs/PRODUCTION_READINESS.md.
 #
 # Why the relay exists: Docker does not publish ports of a container whose only network is
 # `internal: true` (verified on Docker 29: the port mapping is silently dropped). The app used
@@ -20,10 +25,19 @@ services:
     image: procurement-agent:0.1.0
     restart: unless-stopped
     init: true                               # reap tesseract children, forward SIGTERM
+    # Not `uvicorn ...` directly: a request that wedges the process (a regex or a native parser
+    # holding the GIL) leaves it running and unhealthy, and Docker restarts on exit, not on a failed
+    # health check. The supervisor probes /ready over loopback and restarts the server when it stops
+    # answering (scripts/supervise.py). It runs the same command as the image's CMD.
+    command: ["python", "/app/scripts/supervise.py"]
     env_file: .env
     environment:
       PA_ENV: prod
       PA_OLLAMA_BASE_URL: http://ollama:11434
+      # The names users type in the browser, comma separated (tasks.company.example). Compose
+      # refuses to start without it, and so does the app: a request that names any other host -
+      # a tunnel, a DNS-rebinding page - is refused. Forward the original Host from the TLS proxy.
+      PA_ALLOWED_HOSTS: ${PA_ALLOWED_HOSTS:?set PA_ALLOWED_HOSTS in .env to the host names users type}
       PA_DATA_DIR: /data
       PA_DOCLING_ARTIFACTS_PATH: /models/docling
       # Baked into the image (Dockerfile), so a development path copied into .env cannot point
@@ -35,7 +49,7 @@ services:
     volumes:
       - app-data:/data                       # uploads, results, SQLite — put this on an encrypted disk
       - ./models:/models:ro
-    networks: [internal]
+    networks: [internal, llm]                # proxy -> app on `internal`; app -> ollama on `llm`
     depends_on:
       ollama:
         condition: service_healthy
@@ -51,22 +65,33 @@ services:
     stop_grace_period: 60s
     read_only: true
     tmpfs:
-      - /tmp:size=2g,mode=1777
+      # Docker mounts a tmpfs noexec,nosuid,nodev anyway (verified); written out so the policy is
+      # visible, and so a different runtime's default cannot loosen it.
+      - /tmp:size=2g,mode=1777,noexec,nosuid,nodev
     security_opt:
       - no-new-privileges:true
     cap_drop: [ALL]
+    ulimits:
+      core: 0                                # a crash must not leave a core file of document text
     mem_limit: 12g
     pids_limit: 512
+    # 0 = no cap. Set PA_APP_CPUS (below the host's core count) so one runaway parse cannot
+    # starve the host; Docker refuses a number above the host's cores, so there is no default.
+    cpus: ${PA_APP_CPUS:-0}
 
   ollama:
     # Pinned by version AND digest: `latest` would change the model runtime (and therefore the
     # extraction output) on the next pull. Upgrade deliberately and re-run scripts/evaluate.py.
     image: ollama/ollama:0.34.2@sha256:da6e0dc5651df159e45686fd663c4dbe1624a52c44d7280eeac1551d8f865532
     restart: unless-stopped
+    init: true
     volumes:
       - ollama:/root/.ollama
-    networks: [internal]
+    networks: [llm]
     environment:
+      # Ollama's own cloud features (remote inference, web search): off. A model whose name ends in
+      # "-cloud" would otherwise send the prompt - the document - to ollama.com through this server.
+      OLLAMA_NO_CLOUD: "1"
       OLLAMA_KEEP_ALIVE: "-1"
       OLLAMA_NUM_PARALLEL: "1"
       OLLAMA_MAX_LOADED_MODELS: "1"
@@ -78,12 +103,19 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+    # Read-only root, noexec /tmp, no capabilities, no network: verified with a real generation.
+    read_only: true
+    tmpfs:
+      - /tmp:size=1g,mode=1777,noexec,nosuid,nodev
     security_opt:
       - no-new-privileges:true
     cap_drop: [ALL]
+    ulimits:
+      core: 0
     mem_limit: 16g
     pids_limit: 1024
-    # no ports: reachable only from the app on the internal network
+    cpus: ${PA_OLLAMA_CPUS:-0}
+    # no ports: reachable only from the app on the `llm` network
 
   proxy:
     # Plain-HTTP relay from 127.0.0.1:8000 on the host to app:8000 on the internal network.
@@ -112,6 +144,15 @@ services:
             trusted_proxies static ${PA_EDGE_GATEWAY:-172.30.232.1}/32
             trusted_proxies_strict
             client_ip_headers X-Forwarded-For
+            timeouts {
+              # A client that opens a connection and then says nothing holds a slot. Headers
+              # must arrive in 10 s; a 100 MB upload has 5 minutes (about 3 Mbit/s); an idle
+              # keep-alive connection is dropped after 2 minutes. No write timeout: a report
+              # that takes minutes to compute is answered when it is ready.
+              read_header 10s
+              read_body 5m
+              idle 2m
+            }
           }
         }
         :8080 {
@@ -124,7 +165,7 @@ services:
       - "127.0.0.1:8000:8080"
     networks:
       edge: {}
-      internal:
+      internal:                              # the app is on this one; Ollama is not
         ipv4_address: ${PA_PROXY_IP:-172.30.231.10}
     depends_on: [app]
     healthcheck:
@@ -134,20 +175,25 @@ services:
       retries: 3
     read_only: true
     tmpfs:
-      - /data:size=16m,uid=65534,gid=65534
-      - /config:size=16m,uid=65534,gid=65534
+      - /data:size=16m,uid=65534,gid=65534,noexec,nosuid,nodev
+      - /config:size=16m,uid=65534,gid=65534,noexec,nosuid,nodev
     security_opt:
       - no-new-privileges:true
     cap_drop: [ALL]
     # The caddy binary carries a file capability for binding low ports; exec fails unless the
     # capability is in the bounding set, even though :8080 does not need it.
     cap_add: [NET_BIND_SERVICE]
+    ulimits:
+      core: 0
     mem_limit: 256m
     pids_limit: 128
+    cpus: 1
 
 networks:
+  llm:
+    internal: true          # app <-> ollama only; no egress, and the proxy is not on it
   internal:
-    internal: true          # no egress: containers cannot reach the internet at all
+    internal: true          # proxy <-> app only; no egress, and ollama is not on it
     ipam:
       config:
         # Fixed so the relay has a known address the app can trust. Change PA_INTERNAL_SUBNET
