@@ -23,6 +23,7 @@ proxy the address is only meaningful once uvicorn trusts ``X-Forwarded-For`` fro
 
 from __future__ import annotations
 
+import ipaddress
 import re
 import threading
 import time
@@ -31,6 +32,8 @@ from collections.abc import Awaitable, Callable
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
+
+from procurement_agent.security.audit import log
 
 _LIMIT_RE = re.compile(r"^\s*(\d+)\s*/\s*(second|minute|hour|day)s?\s*$", re.IGNORECASE)
 _WINDOW_SECONDS = {"second": 1, "minute": 60, "hour": 3600, "day": 86400}
@@ -60,9 +63,21 @@ class RateLimitConfig:
 def client_key(request: Request) -> str:
     """Identify the caller by address - the one thing about a request it cannot invent.
 
-    See the module docstring for why the API key and session cookie are not used here.
+    See the module docstring for why the API key and session cookie are not used here. An IPv6
+    caller is identified by its /64: a host is normally given the whole of one (and a client's
+    privacy extensions rotate the lower half at will), so the full address would hand it a new
+    bucket per request.
     """
-    return f"ip:{request.client.host if request.client else 'unknown'}"
+    host = request.client.host if request.client else "unknown"
+    try:
+        ip = ipaddress.ip_address(host.split("%", 1)[0])
+    except ValueError:
+        return f"ip:{host}"
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            return f"ip:{ip.ipv4_mapped}"
+        return f"ip:{ipaddress.ip_network(f'{ip}/64', strict=False)}"
+    return f"ip:{ip}"
 
 
 class RateLimiter:
@@ -81,6 +96,8 @@ class RateLimiter:
         self._max_buckets = max_buckets
         self._lock = threading.Lock()
         self._buckets: OrderedDict[str, tuple[float, int]] = OrderedDict()
+        #: caller -> the window in which a refusal was last reported
+        self._reported: OrderedDict[str, float] = OrderedDict()
 
     def check(self, key: str, now: float | None = None) -> float | None:
         """Return None when allowed, or the seconds until the window resets when not."""
@@ -100,6 +117,22 @@ class RateLimiter:
                 self._buckets.popitem(last=False)
         return None
 
+    def first_refusal(self, key: str, now: float | None = None) -> bool:
+        """True the first time ``key`` is refused in the current window: one log line per caller
+        per window says someone is over the limit, without a line per refused request - the flood
+        the limit exists to absorb is not allowed to flood the log."""
+        now = time.monotonic() if now is None else now
+        window = self._config.window_s
+        start = now - (now % window)
+        with self._lock:
+            if self._reported.get(key) == start:
+                return False
+            self._reported[key] = start
+            self._reported.move_to_end(key)
+            if len(self._reported) > self._max_buckets:
+                self._reported.popitem(last=False)
+        return True
+
 
 def rate_limit_middleware(
     limiter: RateLimiter,
@@ -109,8 +142,11 @@ def rate_limit_middleware(
     ) -> Response:
         if request.url.path.startswith(EXEMPT_PREFIXES):
             return await call_next(request)
-        retry_after = limiter.check(client_key(request))
+        key = client_key(request)
+        retry_after = limiter.check(key)
         if retry_after is not None:
+            if limiter.first_refusal(key):
+                log.warning("rate_limited", caller=key, retry_after_s=int(retry_after) + 1)
             return JSONResponse(
                 {"detail": "rate limit exceeded"},
                 status_code=429,

@@ -8,12 +8,13 @@ from typing import Protocol, TypeVar
 from pydantic import BaseModel
 
 from procurement_agent.extraction.schemas import ChoiceResult
+from procurement_agent.security.safe_errors import ContentFree
 
 T = TypeVar("T", bound=BaseModel)
 
 
-class LLMError(RuntimeError):
-    pass
+class LLMError(ContentFree, RuntimeError):
+    """Raised with messages made of our own words (a status code, a model name, a token count)."""
 
 
 class LLMUnavailableError(LLMError):

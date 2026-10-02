@@ -8,6 +8,7 @@ mid-job. Racing the real thread would make these tests flaky and prove nothing.
 from __future__ import annotations
 
 import io
+import re
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -16,6 +17,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
+from PIL import Image
 from sqlalchemy import select
 
 import procurement_agent.db as dbmod
@@ -25,6 +27,7 @@ from procurement_agent.jobs import worker as worker_mod
 from procurement_agent.jobs.worker import Worker
 from procurement_agent.main import create_app
 from procurement_agent.models import AuditLog, Document, DocumentStatus, Job, JobStatus
+from tests.conftest import make_pdf
 
 KEY = "pa_devkey_for_tests_only"
 H = {"X-API-Key": KEY}
@@ -278,7 +281,9 @@ def test_a_deleted_documents_result_is_not_served(client: TestClient) -> None:
     assert client.get(f"/api/v1/jobs/{job_id}/result", headers=H).status_code == 404
     client.post("/ui/login", data={"api_key": KEY}, headers=SAME_ORIGIN)
     page = client.get(f"/ui/jobs/{job_id}")
-    assert "BOQ" not in page.text and "660" not in page.text
+    # "660" is the document's total; as a standalone number, not as a run inside a random hex id
+    assert "BOQ" not in page.text
+    assert re.search(r"(?<![0-9a-f])660(?![0-9a-f])", page.text) is None
 
 
 def test_delete_commits_before_it_removes_files(
@@ -613,6 +618,45 @@ def test_viewing_a_page_image_is_audited_and_not_cached(client: TestClient, min_
     assert "no-store" in page.headers["cache-control"]
     views = _audits("document.page_view")
     assert [(a.document_id, a.detail) for a in views] == [(doc_id, "page 1")]
+
+
+def _uploaded_pdf(client: TestClient, pdf: bytes) -> str:
+    _worker(client).stop()  # no Docling needed: the page renders from the upload itself
+    r = client.post("/api/v1/documents", headers=H, files={"file": ("a.pdf", pdf)})
+    assert r.status_code == 201, r.text
+    return str(r.json()["document"]["id"])
+
+
+@pytest.mark.parametrize("box", ["nan,0,10,10", "0,inf,10,10", "0,0,-inf,10", "1e999,0,10,10"])
+def test_a_page_image_refuses_a_bbox_that_is_no_place_on_a_page(
+    client: TestClient, min_pdf: bytes, box: str
+) -> None:
+    doc_id = _uploaded_pdf(client, min_pdf)
+    page = client.get(f"/api/v1/documents/{doc_id}/pages/1.png", params={"bbox": box}, headers=H)
+    assert page.status_code == 400
+
+
+def test_a_page_image_with_extreme_boxes_is_quick(client: TestClient, min_pdf: bytes) -> None:
+    """One box with an edge at 7e8 held the GIL for five seconds, and twenty are accepted."""
+    doc_id = _uploaded_pdf(client, min_pdf)
+    started = time.perf_counter()
+    page = client.get(
+        f"/api/v1/documents/{doc_id}/pages/1.png",
+        params=[("bbox", "50,-7e8,60,7e8")] * 20,
+        headers=H,
+    )
+    assert page.status_code == 200
+    assert time.perf_counter() - started < 3.0
+
+
+def test_a_page_the_pdf_makes_enormous_is_rendered_inside_the_pixel_cap(client: TestClient) -> None:
+    from procurement_agent.ingestion.render import MAX_PIXELS
+
+    doc_id = _uploaded_pdf(client, make_pdf(14400, 14400))
+    page = client.get(f"/api/v1/documents/{doc_id}/pages/1.png", headers=H)
+    assert page.status_code == 200
+    width, height = Image.open(io.BytesIO(page.content)).size
+    assert width * height <= MAX_PIXELS * 1.01
 
 
 # --- 13. last-used bookkeeping -------------------------------------------------------------

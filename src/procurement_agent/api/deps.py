@@ -13,6 +13,7 @@ from procurement_agent.config import Settings
 from procurement_agent.jobs.worker import Worker
 from procurement_agent.llm.base import LLMClient
 from procurement_agent.models import Document, DocumentStatus, Job, JobStatus
+from procurement_agent.security.audit import audit_denied_access
 from procurement_agent.security.auth import Principal
 
 #: What a 429 for a full job queue tells the client to wait. Jobs take seconds (a workbook) to
@@ -38,6 +39,7 @@ def owned_document(session: Session, principal: Principal, doc_id: str) -> Docum
     """Fetch a document the caller owns. Unknown and foreign ids both yield 404 (no enumeration)."""
     doc = session.get(Document, doc_id)
     if doc is None or doc.owner != principal.user or doc.status == DocumentStatus.deleted:
+        audit_denied_access(principal.user, "document", doc_id)
         raise HTTPException(status.HTTP_404_NOT_FOUND, "document not found")
     return doc
 
@@ -62,8 +64,10 @@ def owned_job(
     """
     job = session.get(Job, job_id) if len(job_id) <= 64 else None
     if job is None or job.owner != principal.user:
+        audit_denied_access(principal.user, "job", job_id)
         raise HTTPException(status.HTTP_404_NOT_FOUND, "job not found")
     if live_document and job.document.status == DocumentStatus.deleted:
+        audit_denied_access(principal.user, "job", job_id)
         raise HTTPException(status.HTTP_404_NOT_FOUND, "job not found")
     return job
 

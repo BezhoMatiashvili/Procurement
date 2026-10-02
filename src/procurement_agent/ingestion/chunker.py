@@ -62,7 +62,12 @@ class HeuristicTokenizer(BaseTokenizer):
         return self.max_tokens
 
     def get_tokenizer(self) -> Any:
-        return None
+        """What Docling hands to ``semchunk`` when ONE item is longer than the budget and has to be
+        split. ``None`` here - what this returned until now - made ``semchunk`` raise ``TypeError``
+        ("the first argument must be callable"), so a single paragraph of a few thousand
+        characters failed extraction and every check that reads the document's text. ``semchunk``
+        takes a token counter as it takes a tokenizer: a callable from text to a count."""
+        return self.count_tokens
 
 
 # Docling's default export drops footnotes, captions and page headers/footers. Its layout model
@@ -309,6 +314,14 @@ class Chunk:
     provenance: Provenance
     headings: list[str] = field(default_factory=list)
     token_estimate: int = 0
+    #: Position among the document's chunks. ``id`` of a workbook chunk carries the sheet's name,
+    #: which is whatever the bidder called it; ``ref`` is the form that may go in a log line.
+    ordinal: int = 0
+
+    @property
+    def ref(self) -> str:
+        """The document and the position: opaque, and never derived from what the chunk says."""
+        return f"{self.id.split(':', 1)[0]}:{self.ordinal}"
 
 
 def _to_top_left(bbox: BoundingBox, page_height: float | None) -> tuple[float, float, float, float]:
@@ -477,5 +490,6 @@ def _append(
             provenance=provenance_of(doc, items, chunk_id=cid),
             headings=headings,
             token_estimate=estimate_tokens(text),
+            ordinal=len(chunks),
         )
     )

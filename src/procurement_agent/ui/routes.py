@@ -13,6 +13,7 @@ from fastapi.templating import Jinja2Templates
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
 from markupsafe import Markup
 from pydantic import ValidationError
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from procurement_agent import history
@@ -54,9 +55,9 @@ from procurement_agent.jobs.worker import Worker
 from procurement_agent.models import CheckRun, Document, DocumentStatus, Job, JobStatus
 from procurement_agent.security.audit import audit, audit_now, log
 from procurement_agent.security.auth import (
-    COOKIE_NAME,
     Principal,
     authenticate,
+    cookie_name,
     create_ui_session,
     is_dev_key,
     is_same_origin,
@@ -154,6 +155,7 @@ def root(
 def set_language(
     request: Request,
     lang: Annotated[str, Form(max_length=8)],
+    settings: Annotated[Settings, Depends(get_settings)],
     next_: Annotated[str | None, Form(alias="next", max_length=500)] = None,
 ) -> Response:
     """A form post, so the toggle works without JavaScript.
@@ -163,6 +165,13 @@ def set_language(
     redirects inside the UI only, so the same-origin check is the whole guard it needs.
     """
     if not is_same_origin(request):
+        audit_now(
+            actor="anonymous",
+            action="auth.csrf",
+            outcome="denied",
+            ip=client_ip(request),
+            detail="POST /ui/lang",
+        )
         raise HTTPException(status.HTTP_403_FORBIDDEN, "cross-site request refused")
     resp = RedirectResponse(_safe_next(next_), status_code=status.HTTP_303_SEE_OTHER)
     resp.set_cookie(
@@ -171,6 +180,7 @@ def set_language(
         max_age=365 * 24 * 3600,
         httponly=False,  # a display preference, not a credential
         samesite="strict",
+        secure=settings.env == "prod",
         path="/",
     )
     return resp
@@ -227,7 +237,7 @@ def login(
         )
     # A cookie from an earlier sign-in in this browser is retired, not left valid beside the
     # new one.
-    old = request.cookies.get(COOKIE_NAME)
+    old = request.cookies.get(cookie_name(settings))
     if old and (previous := lookup_ui_session(session, settings, old)) is not None:
         revoke_ui_session(session, previous.id)
     user = "dev" if row is None else row.user
@@ -236,7 +246,7 @@ def login(
     )
     resp = RedirectResponse(_safe_next(next_), status_code=status.HTTP_303_SEE_OTHER)
     resp.set_cookie(
-        COOKIE_NAME,
+        cookie_name(settings),
         token,
         httponly=True,
         samesite="strict",
@@ -256,6 +266,7 @@ def logout(
     request: Request,
     principal: Annotated[Principal, Depends(authenticate)],
     session: Annotated[Session, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> Response:
     """Revoke the session on the server; deleting the cookie alone left a copy of it valid."""
     if principal.session_id is not None:
@@ -263,7 +274,13 @@ def logout(
     audit(session, actor=principal.user, action="ui.logout", ip=client_ip(request))
     session.commit()  # revoked before the browser is told it has signed out
     resp = RedirectResponse("/ui/login", status_code=status.HTTP_303_SEE_OTHER)
-    resp.delete_cookie(COOKIE_NAME, path="/")
+    resp.delete_cookie(
+        cookie_name(settings),
+        path="/",
+        secure=settings.env == "prod",
+        httponly=True,
+        samesite="strict",
+    )
     return resp
 
 
@@ -406,6 +423,17 @@ def job_page(
             result = ExtractionResult.model_validate_json(path.read_text())
         except (OSError, ValueError):
             gone = True  # swept or damaged: say so, rather than a header and nothing under it
+        else:
+            # Showing the extracted values is reading the document's content, like the API's
+            # ``result.read.*`` and the reading page's ``document.content_view``.
+            audit(
+                session,
+                actor=principal.user,
+                action="result.read.ui",
+                document_id=job.document_id,
+                job_id=job.id,
+                ip=client_ip(request),
+            )
     return _render(
         request,
         "job.html",
@@ -538,9 +566,9 @@ async def start_aoa_without_js(
     worker: Annotated[Worker, Depends(get_worker)],
     act: UploadFile,
     contract: UploadFile | None = None,
-    contractor_type: Annotated[str | None, Form()] = None,
-    advance_amount: Annotated[str | None, Form()] = None,
-    advance_date: Annotated[str | None, Form()] = None,
+    contractor_type: Annotated[str | None, Form(max_length=32)] = None,
+    advance_amount: Annotated[str | None, Form(max_length=40)] = None,
+    advance_date: Annotated[str | None, Form(max_length=40)] = None,
 ) -> Response:
     """The same flow without JavaScript: two uploads server-side, then the result URL.
 
@@ -582,7 +610,9 @@ def _ids(raw: str | None, limit: int) -> list[str]:
         token = token.strip()
         if token and len(token) <= 64 and token.isalnum() and token not in out:
             out.append(token)
-    return out[:limit]
+            if len(out) >= limit:
+                break  # the rest would be dropped anyway, and checking each against ``out`` grows
+    return out
 
 
 @router.get("/checks/aoa")
@@ -593,9 +623,9 @@ def aoa_report(
     settings: Annotated[Settings, Depends(get_settings)],
     act: str,
     contract: str | None = None,
-    contractor_type: str | None = None,
-    advance_amount: str | None = None,
-    advance_date: str | None = None,
+    contractor_type: Annotated[str | None, Query(max_length=32)] = None,
+    advance_amount: Annotated[str | None, Query(max_length=40)] = None,
+    advance_date: Annotated[str | None, Query(max_length=40)] = None,
     review: str | None = None,
 ) -> Response:
     """The rules' report, recomputed on every view. A finished model review rides in
@@ -663,9 +693,9 @@ def aoa_annotated(
     settings: Annotated[Settings, Depends(get_settings)],
     act: str,
     contract: str | None = None,
-    contractor_type: str | None = None,
-    advance_amount: str | None = None,
-    advance_date: str | None = None,
+    contractor_type: Annotated[str | None, Query(max_length=32)] = None,
+    advance_amount: Annotated[str | None, Query(max_length=40)] = None,
+    advance_date: Annotated[str | None, Query(max_length=40)] = None,
     review: str | None = None,
 ) -> Response:
     """A plain link, not a JS blob: works with JavaScript off and needs no CSP argument. The
@@ -709,9 +739,9 @@ def aoa_review(
     worker: Annotated[Worker, Depends(get_worker)],
     act: str,
     contract: str | None = None,
-    contractor_type: str | None = None,
-    advance_amount: str | None = None,
-    advance_date: str | None = None,
+    contractor_type: Annotated[str | None, Query(max_length=32)] = None,
+    advance_amount: Annotated[str | None, Query(max_length=40)] = None,
+    advance_date: Annotated[str | None, Query(max_length=40)] = None,
 ) -> Response:
     """Queue the model review of the notes the rules could not decide, then go back to the
     report. Nothing else on the act's report ever calls the model.
@@ -773,7 +803,10 @@ def boq_report(
     except HTTPException as e:
         return _http_error(request, principal, e, "/ui/start/boq")
 
-    report, _, _, _ = run_boq(settings, template_doc, bid_docs)
+    try:
+        report, _, _, _ = run_boq(settings, template_doc, bid_docs)
+    except HTTPException as e:  # a template over the cell limit: a page that says so
+        return _http_error(request, principal, e, "/ui/start/boq")
     history.record_run(
         session,
         owner=principal.user,
@@ -822,7 +855,10 @@ def boq_merged(
     except HTTPException as e:
         return _http_error(request, principal, e, "/ui/start/boq")
 
-    report, book, books, comparisons = run_boq(settings, template_doc, bid_docs)
+    try:
+        report, book, books, comparisons = run_boq(settings, template_doc, bid_docs)
+    except HTTPException as e:
+        return _http_error(request, principal, e, "/ui/start/boq")
     audit(
         session,
         actor=principal.user,
@@ -1087,6 +1123,30 @@ def compare_explain(
         return _error(request, principal, t("error.llm_disabled", _lang(request)))
     try:
         left_doc, right_doc = _compare_inputs(session, principal, left, right)
+        # The same pair asked about again - a double click, a reload of the page that posted -
+        # is the same job, not another queued behind the first: the model pass is the one costly
+        # thing on this screen, and the queue is a single thread.
+        same_pair = session.scalars(
+            select(Job).where(
+                Job.owner == principal.user,
+                Job.kind == "compare_explain",
+                Job.document_id == right_doc.id,
+                Job.status.in_((JobStatus.queued, JobStatus.running, JobStatus.done)),
+            )
+        ).all()
+        existing = next(
+            (
+                j
+                for j in same_pair
+                if j.params.get("left") == left_doc.id and j.params.get("right") == right_doc.id
+            ),
+            None,
+        )
+        if existing is not None:
+            params = urlencode({"left": left_doc.id, "right": right_doc.id, "job": existing.id})
+            return RedirectResponse(
+                f"/ui/checks/compare?{params}", status_code=status.HTTP_303_SEE_OTHER
+            )
         ensure_job_capacity(session, settings, principal)
     except HTTPException as e:
         return _http_error(request, principal, e, "/ui/start/compare")

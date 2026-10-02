@@ -2409,10 +2409,23 @@ _NUMBER_MARKER = r"(?:№|#|(?<![A-Za-z])N(?:[oº°]\.?|\.|:)?(?![A-Za-z]))"
 #: (nominative) at its end, which are case endings too.
 _KA_LETTER_GROUP = r"(?<![ა-ჰ])[ა-ჰ](?![ა-ჰ])"
 _KA_LETTER_LAST = r"(?<![ა-ჰ])(?![სი])[ა-ჰ](?![ა-ჰ])"
+#: Atomic, and that is a security property. The inner class contains "/", and so does the
+#: separator between groups, so "1/1/1/..." could be cut into groups in exponentially many ways;
+#: when the pattern then failed after the reference (no contract word, no signing word) the
+#: regex engine tried every cut, holding the GIL, and about sixty characters in a document froze
+#: the whole service. An atomic group keeps the first - longest - match of each group and never
+#: re-cuts it, so a failure costs a linear walk. Measured against the unfixed pattern (60 000
+#: fuzz strings, every paragraph and document of the client set, 4 000 long chains): identical
+#: for every reference up to one group's 32-character reach, which is all a contract number is.
+#: A chain longer than that, which the old pattern read only by re-cutting its first group and
+#: only when something followed it, can now go unread; nothing in the client set has one.
+#: tests/unit/test_regex_redos.py runs the failing case against a hard time limit.
 _REFERENCE_GROUP = (
+    r"(?>"
     rf"(?:{_KA_LETTER_GROUP}[\-/_.](?=[A-Za-z0-9]))?"
     r"[A-Za-z0-9](?:[A-Za-z0-9\-/_.]{0,30}[A-Za-z0-9])?"
     rf"(?:[\-/_.]{_KA_LETTER_LAST})?"
+    r")"
 )
 _REFERENCE = rf"(?=[A-Za-z0-9ა-ჰ\-/_.]*\d){_REFERENCE_GROUP}(?:\s*/\s*{_REFERENCE_GROUP})*"
 _SPACED_SLASH = re.compile(r"\s*/\s*")

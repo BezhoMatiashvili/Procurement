@@ -60,6 +60,7 @@ from procurement_agent.extraction.prompts import (
 )
 from procurement_agent.llm.base import LLMClient, LLMError
 from procurement_agent.security.audit import log
+from procurement_agent.security.safe_errors import safe_exc
 
 ModelVerdict = Literal["same", "different", "unclear"]
 
@@ -270,7 +271,7 @@ def request_review(
             max_output_tokens=_output_budget(len(rows)),
         )
     except LLMError as e:
-        log.warning("aoa_review_failed", error=repr(e), items=len(rows))
+        log.warning("aoa_review_failed", error=safe_exc(e), items=len(rows))
         notes.append(
             SkipNote(
                 rule_id="AOA.REVIEW",

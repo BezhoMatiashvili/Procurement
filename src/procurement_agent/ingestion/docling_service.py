@@ -25,11 +25,13 @@ from docling.document_converter import DocumentConverter, PdfFormatOption, WordF
 from docling_core.types.doc.document import DoclingDocument
 
 from procurement_agent.config import Settings
+from procurement_agent.ingestion.text_limits import compact_document, text_size
 from procurement_agent.security.audit import log
+from procurement_agent.security.safe_errors import ContentFree
 
 
-class ConversionError(RuntimeError):
-    pass
+class ConversionError(ContentFree, RuntimeError):
+    """Raised with a message made of Docling's status and component names, never its error text."""
 
 
 class WholeParagraphWordBackend(MsWordDocumentBackend):
@@ -156,10 +158,17 @@ def convert(path: Path, settings: Settings) -> ConversionResult:
     except Exception as e:  # docling can raise from native backends
         msg = f"conversion crashed: {type(e).__name__}"
         raise ConversionError(msg) from e
-    if result.status not in (ConversionStatus.SUCCESS, ConversionStatus.PARTIAL_SUCCESS):
-        errs = "; ".join(str(e.error_message) for e in result.errors[:3]) or str(result.status)
-        msg = f"conversion failed: {errs}"
+    n = text_size(result.document)
+    limit = settings.max_text_chars
+    if n > limit:
+        msg = f"the document holds {n} characters of text, more than the limit of {limit}"
         raise ConversionError(msg)
+    if result.status not in (ConversionStatus.SUCCESS, ConversionStatus.PARTIAL_SUCCESS):
+        # Docling's error_message may quote the page it choked on: the status and the components
+        # that failed say enough, and are all that is kept.
+        parts = sorted({f"{e.component_type.value}/{e.module_name}" for e in result.errors})
+        msg = f"conversion failed: {result.status.value} ({len(result.errors)} error(s)"
+        raise ConversionError(msg + (f" in {', '.join(parts[:3])})" if parts else ")"))
     return result
 
 
@@ -187,4 +196,9 @@ def save_document(doc: DoclingDocument, out_dir: Path) -> Path:
 
 
 def load_document(path: Path) -> DoclingDocument:
-    return DoclingDocument.load_from_json(path)
+    """A stored parse, with runs of separators cut to what the patterns can read in linear time
+    (``text_limits``). Applied on every load, so a parse stored before the limit existed is read
+    the same way as one stored after."""
+    doc = DoclingDocument.load_from_json(path)
+    compact_document(doc)
+    return doc

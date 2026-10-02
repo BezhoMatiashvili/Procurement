@@ -18,26 +18,34 @@ _HEADERS = [
 ]  # fmt: skip
 
 
+def _append(ws: Worksheet, values: list[object]) -> None:
+    """Every cell goes through ``cell_safe``: a sheet name, a unit or a label can all be text a
+    bidder (or a model reading a bidder's file) chose, and a leading ``=`` would make it a live
+    formula in a workbook people trust because this system produced it."""
+    ws.append([cell_safe(v) for v in values])
+
+
 def to_xlsx(result: ExtractionResult, document_name: str) -> bytes:
     wb = Workbook()
     ws = wb.active
     if not isinstance(ws, Worksheet):  # pragma: no cover - openpyxl always creates one
         raise TypeError("workbook has no active worksheet")
     ws.title = "Facts"
-    ws.append([cell_safe(f"Document: {document_name}")])
-    ws.append([f"Model: {result.model or 'rules only'}", f"LLM calls: {result.llm_calls}"])
+    _append(ws, [f"Document: {document_name}"])
+    _append(ws, [f"Model: {result.model or 'rules only'}", f"LLM calls: {result.llm_calls}"])
     ws.append([])
     ws.append(_HEADERS)
     for c in ws[4]:
         c.font = Font(bold=True)
         c.fill = PatternFill("solid", fgColor="DDDDDD")
     for f in result.facts:
-        ws.append(
+        _append(
+            ws,
             [
                 f.type.value,
                 f.label,
-                cell_safe(f.value),
-                cell_safe(f.normalized),
+                f.value,
+                f.normalized,
                 f.unit,
                 f.currency,
                 round(f.confidence, 2),
@@ -46,15 +54,15 @@ def to_xlsx(result: ExtractionResult, document_name: str) -> bytes:
                 f.provenance.page,
                 f.provenance.sheet,
                 f.provenance.cell,
-                cell_safe(f.raw_text),
-            ]
+                f.raw_text,
+            ],
         )
     for i, width in enumerate([18, 22, 30, 16, 8, 9, 11, 9, 8, 6, 12, 10, 60], 1):
         ws.column_dimensions[get_column_letter(i)].width = width
     if result.warnings:
         ws2 = wb.create_sheet("Warnings")
         for w in result.warnings:
-            ws2.append([cell_safe(w)])
+            _append(ws2, [w])
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()

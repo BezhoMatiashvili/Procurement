@@ -5,9 +5,9 @@ repos:
   - repo: local
     hooks:
       - id: block-documents
-        name: block real documents and archives (only tests/fixtures may contain pdf/docx/xlsx)
-        entry: bash -c 'bad=$(printf "%s\n" "$@" | grep -Ei "\.(pdf|docx?|docm|xlsx?|xlsm|xlsb|zip|rar|7z)$" | grep -v "^tests/fixtures/" || true); if [ -n "$bad" ]; then echo "refusing to commit documents:"; echo "$bad"; exit 1; fi' --
-        language: system
+        name: block documents, archives, databases and keys (only tests/fixtures may hold documents)
+        entry: scripts/check_no_documents.sh
+        language: script
         pass_filenames: true
       - id: ruff
         name: ruff

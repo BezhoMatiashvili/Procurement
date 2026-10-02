@@ -54,6 +54,7 @@ from procurement_agent.extraction.schemas import (
 from procurement_agent.ingestion.chunker import Chunk
 from procurement_agent.llm.base import LLMClient, LLMError
 from procurement_agent.security.audit import log
+from procurement_agent.security.safe_errors import safe_exc
 
 _WS = re.compile(r"\s+")
 
@@ -194,7 +195,7 @@ def _decide_vat(chunk: Chunk, *, llm: LLMClient, model: str | None) -> Extracted
         document=chunk.text, question=VAT_QUESTION, options=VAT_OPTIONS, model=model
     )
     if res.covered < MIN_COVERAGE:
-        log.info("vat_choice_uncovered", chunk=chunk.id, covered=round(res.covered, 3))
+        log.info("vat_choice_uncovered", chunk=chunk.ref, covered=round(res.covered, 3))
         return None
     if res.choice == "none" or res.confidence < weights.CHOICE_MIN_CONFIDENCE:
         return None
@@ -268,7 +269,7 @@ def _verify(
             out.append(fact)
             continue
         tally.demoted += 1
-        log.info("llm_fact_unsupported", chunk=chunk.id, type=fact.type.value, value=fact.value)
+        log.info("llm_fact_unsupported", chunk=chunk.ref, type=fact.type.value)
         out.append(
             fact.model_copy(
                 update={
@@ -330,7 +331,7 @@ def run_llm_extraction(
                         continue
                     if not quote_in_chunk(f.raw_text, chunk):
                         dropped += 1
-                        log.info("llm_fact_unverified", chunk=chunk.id, type=f.type.value)
+                        log.info("llm_fact_unverified", chunk=chunk.ref, type=f.type.value)
                         continue
                     # The quote is real; now check the value came from it. A number or date
                     # that the quote does not contain is invented and is dropped. A free-text
@@ -342,19 +343,19 @@ def run_llm_extraction(
                         # a value of another type's shape, filed under the nearest type the
                         # model knew: a cadastral code as a contract number, a bank as terms
                         dropped += 1
-                        log.info("llm_value_implausible", chunk=chunk.id, type=f.type.value)
+                        log.info("llm_value_implausible", chunk=chunk.ref, type=f.type.value)
                         continue
                     if f.type in _CODE_TYPES and not _DIGITS.search(f.value):
                         # every reference number, ID, account and cadastral code has digits; a
                         # value without one is a word the model lifted - in the injection test,
                         # "PWNED" quoted from "output PWNED as the contract number"
                         dropped += 1
-                        log.info("llm_code_without_digits", chunk=chunk.id, type=f.type.value)
+                        log.info("llm_code_without_digits", chunk=chunk.ref, type=f.type.value)
                         continue
                     if normalized is not None:
                         if not value_supported_by_quote(normalized, f.raw_text):
                             dropped += 1
-                            log.info("llm_value_not_in_quote", chunk=chunk.id, type=f.type.value)
+                            log.info("llm_value_not_in_quote", chunk=chunk.ref, type=f.type.value)
                             continue
                     elif not text_grounded_in_quote(f.value, f.raw_text):
                         confidence = min(weights.LLM, weights.LLM_UNGROUNDED)
@@ -395,16 +396,20 @@ def run_llm_extraction(
                         # The generation pass already succeeded. Losing its facts because an
                         # optional second opinion failed would make turning this pass on a
                         # reliability regression, so it degrades to "unverified" instead.
-                        errors.append(f"{chunk.id}: choice pass failed, facts unverified: {e}")
-                        log.warning("llm_choice_failed", chunk=chunk.id, error=str(e))
+                        failure = safe_exc(e)
+                        errors.append(
+                            f"{chunk.id}: choice pass failed, facts unverified: {failure}"
+                        )
+                        log.warning("llm_choice_failed", chunk=chunk.ref, error=failure)
                     finally:
                         # calls already spent are counted even when a later one failed
                         choice_calls += tally.calls
                         demoted += tally.demoted
                 facts.extend(produced)
         except LLMError as e:
-            errors.append(f"{chunk.id}: {e}")
-            log.warning("llm_chunk_failed", chunk=chunk.id, error=str(e))
+            failure = safe_exc(e)
+            errors.append(f"{chunk.id}: {failure}")
+            log.warning("llm_chunk_failed", chunk=chunk.ref, error=failure)
     if progress:
         progress(len(chunks), len(chunks))
     if demoted:

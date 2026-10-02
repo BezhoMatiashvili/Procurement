@@ -8,12 +8,14 @@ endpoints only ever *read* what that job stored.
 
 from __future__ import annotations
 
+import functools
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
-from typing import Annotated, Literal, get_args
+from typing import Annotated, Concatenate, Literal, get_args
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import Response
@@ -60,6 +62,7 @@ from procurement_agent.extraction.pipeline import (
     upload_path,
 )
 from procurement_agent.fx.provider import open_rate_provider
+from procurement_agent.ingestion.xlsx_size import WorkbookTooLargeError
 from procurement_agent.jobs.worker import Worker
 from procurement_agent.llm.base import LLMClient
 from procurement_agent.models import Document, DocumentStatus, Job
@@ -68,6 +71,7 @@ from procurement_agent.report.compare_xlsx import to_xlsx as compare_to_xlsx
 from procurement_agent.report.docx_annotate import UnsupportedDocumentError, annotate_docx
 from procurement_agent.security.audit import audit
 from procurement_agent.security.auth import Principal, authenticate
+from procurement_agent.security.capacity import report_capacity
 
 router = APIRouter(prefix="/api/v1/checks", tags=["checks"])
 
@@ -104,6 +108,24 @@ def _document_text(settings: Settings, doc: Document) -> str:
     return load_document_text(settings, doc.id, doc.kind)
 
 
+def reported[**P, R](
+    fn: Callable[Concatenate[Settings, P], R],
+) -> Callable[Concatenate[Settings, P], R]:
+    """Run a report computation inside one of ``max_concurrent_reports`` slots (503 when full).
+
+    Applied to the three functions the API, the downloads and the UI all call, so no route can
+    recompute a report outside the limit. ``settings`` is their first argument by convention.
+    """
+
+    @functools.wraps(fn)
+    def limited(settings: Settings, /, *args: P.args, **kwargs: P.kwargs) -> R:
+        with report_capacity(settings.max_concurrent_reports, settings.report_wait_s).slot():
+            return fn(settings, *args, **kwargs)
+
+    return limited
+
+
+@reported
 def run_aoa(
     settings: Settings,
     aoa: Document,
@@ -439,6 +461,7 @@ def _ready(doc: Document) -> StoredDocument:
     return StoredDocument(id=doc.id, kind=doc.kind, name=doc.display_name)
 
 
+@reported
 def run_compare(
     settings: Settings,
     left: Document,
@@ -754,16 +777,29 @@ def _read_book(settings: Settings, doc: Document) -> BoqWorkbook:
     which then appears inside every bilingual finding message and every cell of the merged
     workbook the client opens.
     """
-    return read_boq(upload_path(settings, doc.id, doc.kind), name=Path(doc.display_name).stem[:31])
+    try:
+        return read_boq(
+            upload_path(settings, doc.id, doc.kind),
+            name=Path(doc.display_name).stem[:31],
+            max_cells=settings.boq_max_cells,
+        )
+    except WorkbookTooLargeError as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"template: {e}") from e
 
 
 def _read_bid(settings: Settings, doc: Document) -> BoqWorkbook:
     """A bid, read so that one unreadable workbook is reported on its bidder (``BOQ.UNREADABLE``)
-    instead of failing the comparison for every bidder. The template is still read strictly:
-    without it there is nothing to compare against."""
-    return read_bid(upload_path(settings, doc.id, doc.kind), name=Path(doc.display_name).stem[:31])
+    instead of failing the comparison for every bidder - a workbook over ``boq_max_cells`` is one
+    of those. The template is still read strictly: without it there is nothing to compare
+    against."""
+    return read_bid(
+        upload_path(settings, doc.id, doc.kind),
+        name=Path(doc.display_name).stem[:31],
+        max_cells=settings.boq_max_cells,
+    )
 
 
+@reported
 def run_boq(
     settings: Settings, template_doc: Document, bid_docs: list[Document]
 ) -> tuple[BoqCheckReport, BoqWorkbook, list[BoqWorkbook], list[BidComparison]]:

@@ -537,3 +537,17 @@ def _with_cached_values(data: bytes, cache: dict[tuple[int, str], object]) -> by
                 content = _CELL.sub(fill, content.decode("utf-8")).encode("utf-8")
             dst.writestr(info, content)
     return out.getvalue()
+
+
+def pad_workbook(data: bytes, cells: int) -> bytes:
+    """``data`` with one more sheet of ``cells`` numbers - a workbook over a cell limit that the
+    reader would otherwise read without complaint."""
+    from openpyxl import load_workbook
+
+    wb = load_workbook(io.BytesIO(data))
+    ws = wb.create_sheet("Padding")
+    for i in range(cells):
+        ws.cell(row=i // 50 + 1, column=i % 50 + 1, value=i)
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()

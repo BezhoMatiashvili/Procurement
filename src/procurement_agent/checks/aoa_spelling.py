@@ -60,6 +60,7 @@ from procurement_agent.extraction.normalize import QUOTE_CHARS
 from procurement_agent.extraction.rules import find_dates
 from procurement_agent.extraction.schemas import FactType
 from procurement_agent.security.audit import log
+from procurement_agent.security.safe_errors import safe_exc
 
 if TYPE_CHECKING:
     from procurement_agent.checks.aoa import DocumentView
@@ -369,7 +370,7 @@ def load_speller(directory: Path) -> Speller | SpellingUnavailable:
         try:
             return _load(directory.resolve())
         except Exception as e:  # a broken dictionary must not fail the act check
-            error = repr(e)
+            error = safe_exc(e)
     log.warning("spelling_dictionary_unreadable", path=str(directory), error=error)
     return SpellingUnavailable(
         f"მართლწერის ლექსიკონი ვერ წაიკითხა ({directory}); ტექსტის მართლწერა არ შემოწმებულა",

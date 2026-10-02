@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
-from fastapi import Cookie, Depends, HTTPException, Request, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import APIKeyHeader
 from sqlalchemy import select, update
 from sqlalchemy.exc import SQLAlchemyError
@@ -41,7 +41,16 @@ _TOUCH_EVERY = timedelta(minutes=1)
 _MAX_TOKEN_LEN = 200
 
 _header = APIKeyHeader(name="X-API-Key", auto_error=False)
+#: The session cookie in development, where the site is plain HTTP on localhost.
 COOKIE_NAME = "pa_session"
+#: In production the ``__Host-`` prefix makes a browser accept the cookie only if it is Secure, has
+#: Path=/ and no Domain: a sibling site or a subdomain cannot plant or overwrite it.
+HOST_COOKIE_NAME = "__Host-pa_session"
+
+
+def cookie_name(settings: Settings) -> str:
+    """Which cookie carries the session: ``__Host-pa_session`` in production."""
+    return HOST_COOKIE_NAME if settings.env == "prod" else COOKIE_NAME
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,7 +159,13 @@ def lookup_ui_session(session: Session, settings: Settings, token: str) -> UiSes
     row = session.scalar(select(UiSession).where(UiSession.token_hash == digest))
     if row is None or not hmac.compare_digest(row.token_hash, digest):
         return None
-    if row.revoked_at is not None or _aware(row.expires_at) <= datetime.now(UTC):
+    now = datetime.now(UTC)
+    if row.revoked_at is not None or _aware(row.expires_at) <= now:
+        return None
+    # Idle: measured from the last time the session was used (bookkept once a minute, see
+    # ``_touch``), or from sign-in if it never has been.
+    last_use = _aware(row.last_seen_at or row.created_at)
+    if now - last_use > timedelta(minutes=settings.ui_session_idle_minutes):
         return None
     if row.api_key_id is None:
         if not (settings.env == "dev" and settings.dev_api_key and row.user == "dev"):
@@ -206,7 +221,7 @@ def _refuse(request: Request, code: int, detail: str, action: str) -> HTTPExcept
 def authenticate(
     request: Request,
     key: str | None = Depends(_header),
-    cookie_token: str | None = Cookie(default=None, alias=COOKIE_NAME),
+    cookie_token: str | None = None,
     session: Session = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> Principal:
@@ -215,7 +230,13 @@ def authenticate(
     Cookie-authenticated unsafe requests must come from our own origin (CSRF guard). A request
     with no credential at all is not audited - that is every browser's first visit - but a
     wrong key, a dead session and a cross-site post are.
+
+    The session cookie is read here, by the name the settings give it, because that name depends
+    on the environment and a ``Cookie(alias=...)`` default is fixed when the module is imported.
+    ``cookie_token`` lets a caller that has already read it (the pre-body check) pass it in.
     """
+    if cookie_token is None:
+        cookie_token = request.cookies.get(cookie_name(settings))
     if key:
         if is_dev_key(settings, key):
             return Principal(user="dev", key_id=None)

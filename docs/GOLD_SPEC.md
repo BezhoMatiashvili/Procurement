@@ -26,7 +26,7 @@ letters upper-cased. Nothing else - no stemming, no substring match, no case-end
 
 | type | canonical form | example |
 |---|---|---|
-| `party_name` | legal form + name, no quotes; the legal form **abbreviated** however the document writes it (`შეზღუდული პასუხისმგებლობის საზოგადოება` is `შპს`, `სააქციო საზოგადოება` is `სს`, `ინდივიდუალური მეწარმე` and `ინდ. მეწარმე` are `ი/მ`) | `შპს ნიმუში დეველოპმენტ` |
+| `party_name` | legal form + name, no quotes; the legal form **abbreviated** however the document writes it (`შეზღუდული პასუხისმგებლობის საზოგადოება` is `შპს`, `სააქციო საზოგადოება` is `სს`, `ინდივიდუალური მეწარმე` and `ინდ. მეწარმე` are `ი/მ`) | `შპს ნიმუში ვექტორი` |
 | `party_director` | full name, **nominative**, without a courtesy title (`ბატონი`, `ქალბატონ`, `ბ-ნ`) and without a patronymic (`გიორგის ძე`, `ზურაბის ასული` between the first name and the surname); a name written with an initial keeps it (`გ. ნიმუშაძე`); the act check compares it with the contract's director whose first name starts with that letter, on the surname | `გიორგი ნიმუშაძე` (not `…ნიმუშაძის`) |
 | `party_address` | as written, no quotes, no trailing punctuation; it ends where another requisite (code, account, bank) begins | `ქ. თბილისი, ნიმუშის ქ. N5` |
 | `party_id_code` | digits only (9 or 11); a code printed in groups of three by one separator (`123 456 789`, `123-456-789`, `123.456.789`) is the same code; a labelled run of another length is no code fact | `123456789` |

@@ -42,6 +42,7 @@ from procurement_agent.extraction.normalize import normalize_spaces, parse_georg
 from procurement_agent.extraction.prompts import SYSTEM_COMPARE, compare_user_prompt
 from procurement_agent.llm.base import LLMClient, LLMError
 from procurement_agent.security.audit import log
+from procurement_agent.security.safe_errors import safe_exc
 
 ExplanationKind = Literal["rewritten", "expanded", "shortened", "clarified"]
 
@@ -205,7 +206,7 @@ def request_explanations(
             model=model,
         )
     except LLMError as e:
-        log.warning("compare_explain_failed", error=repr(e), hunks=len(candidates))
+        log.warning("compare_explain_failed", error=safe_exc(e), hunks=len(candidates))
         notes.append(
             SkipNote(
                 rule_id="CMP.EXPLAIN",

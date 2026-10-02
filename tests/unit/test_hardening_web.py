@@ -14,26 +14,38 @@ from procurement_agent.security.ratelimit import RateLimitConfig, RateLimiter, c
 # --- the LLM endpoint must stay on the private network -------------------------------------
 
 
-@pytest.mark.parametrize(
-    "url",
-    [
-        "http://ollama:11434",
-        "http://127.0.0.1:11434",
-        "http://localhost:11434",
-        "http://host.docker.internal:11434",
-        "http://10.1.2.3:11434",
-        "http://172.16.0.5:11434",
-        "http://172.31.255.1:11434",
-        "http://192.168.1.20:11434",
-        "http://[::1]:11434",
-        "http://[fd00::1]:11434",
-        "http://gpu-box.lan:11434",
-        "http://llm.internal:11434",
-        "https://ollama.local",
-    ],
-)
-def test_internal_llm_endpoints_are_accepted(url: str) -> None:
+_THIS_MACHINE = [
+    "http://ollama:11434",
+    "http://127.0.0.1:11434",
+    "http://127.5.5.5:11434",
+    "http://localhost:11434",
+    "http://host.docker.internal:11434",
+    "http://[::1]:11434",
+    "http://[::ffff:127.0.0.1]:11434",
+]
+_COMPANY_NETWORK = [
+    "http://10.1.2.3:11434",
+    "http://172.16.0.5:11434",
+    "http://172.31.255.1:11434",
+    "http://192.168.1.20:11434",
+    "http://[fd00::1]:11434",
+    "http://gpu-box.lan:11434",
+    "http://llm.internal:11434",
+    "https://ollama.local",
+]
+
+
+@pytest.mark.parametrize("url", _THIS_MACHINE)
+def test_this_machine_and_the_compose_service_are_accepted_by_default(url: str) -> None:
     assert Settings(ollama_base_url=url).ollama_base_url == url.rstrip("/")
+
+
+@pytest.mark.parametrize("url", _COMPANY_NETWORK)
+def test_another_host_on_the_company_network_needs_an_explicit_opt_in(url: str) -> None:
+    """Private is not "this computer": the document text would go to whatever answers there."""
+    with pytest.raises(ValidationError, match="PA_LLM_ALLOW_LAN"):
+        Settings(ollama_base_url=url)
+    assert Settings(ollama_base_url=url, llm_allow_lan=True).ollama_base_url == url.rstrip("/")
 
 
 @pytest.mark.parametrize(
@@ -61,6 +73,8 @@ def test_internal_llm_endpoints_are_accepted(url: str) -> None:
 def test_public_or_ambiguous_llm_endpoints_are_refused(url: str) -> None:
     with pytest.raises(ValidationError, match="internal host"):
         Settings(ollama_base_url=url)
+    with pytest.raises(ValidationError, match="internal host"):  # the opt-in widens nothing public
+        Settings(ollama_base_url=url, llm_allow_lan=True)
 
 
 # --- the rate limiter ----------------------------------------------------------------------

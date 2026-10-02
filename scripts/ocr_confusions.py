@@ -4,11 +4,15 @@
 Runs in the image, on the output of ``scripts/synthetic_scans.py`` (``X.scan.pdf`` beside the
 ``X.docx`` it was printed from):
 
-    docker run --rm --entrypoint python \\
+    docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp --entrypoint python \\
         -v "$PWD/src:/app/src:ro" -v "$PWD/scripts:/app/scripts:ro" \\
         -v "$PWD/samples:/app/samples:ro" -v "$PWD/models:/models:ro" -v "$OUT:/out" \\
         procurement-agent:0.1.0 /app/scripts/ocr_confusions.py \\
         /app/samples/synthetic_scans/test-set-2 --out /out/confusions.json --dump /out/synth
+
+``--user`` because ``samples/`` is mode 0700 (it holds the client's documents) and the image's own
+``app`` user is uid 999: the container has to read it as you. ``HOME=/tmp`` because ``/app`` is not
+writable by another user and the libraries put their caches in ``$HOME``.
 
 Each scan is read the way the product reads a PDF, its words are aligned with the Word file's,
 and every word the OCR got almost right is compared letter by letter: which letter it read as

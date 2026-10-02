@@ -3,12 +3,13 @@
 # runs as non-root and contains Tesseract with Georgian + English language data.
 #
 # Base images are pinned to exact patch tags (Python 3.12.14 on Debian 12, uv 0.12.8 — the uv
-# that wrote uv.lock). Tags can still be re-pushed upstream, so pin digests at release time:
+# that wrote uv.lock) AND to the digest those tags had on 2026-10-02, because a tag can be
+# re-pushed upstream. To move to a newer base on purpose:
 #   docker buildx imagetools inspect python:3.12.14-slim-bookworm --format '{{.Manifest.Digest}}'
 #   docker buildx imagetools inspect ghcr.io/astral-sh/uv:0.12.8   --format '{{.Manifest.Digest}}'
-# and append @sha256:<digest> to both references below (keep the tag for readability).
-ARG PYTHON_IMAGE=python:3.12.14-slim-bookworm
-ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.12.8
+# and replace the @sha256:<digest> on both references below (keep the tag for readability).
+ARG PYTHON_IMAGE=python:3.12.14-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.12.8@sha256:d1cbaeadc234fe19c0d93daabcf5e98738cd93c6d1dd4918ef6aa30735feb23a
 
 FROM ${UV_IMAGE} AS uv
 
@@ -51,6 +52,9 @@ WORKDIR /app
 COPY --from=builder --chown=app:app /app/.venv /app/.venv
 COPY --from=builder /app/dictionaries /app/dictionaries
 COPY --chown=app:app src ./src
+# The process that restarts the server when /ready stops answering (docker-compose.yml runs it): the
+# one file of scripts/ in the image. Standard library only, so it runs when the app's imports break.
+COPY --chown=app:app scripts/supervise.py ./scripts/supervise.py
 # The root filesystem is read-only in docker-compose.yml and HOME (/app) is not writable, so
 # every library that keeps a cache (HuggingFace, torch, matplotlib, generic XDG users) is
 # pointed at /tmp, which compose mounts as tmpfs. Nothing there needs to survive a restart:
@@ -64,8 +68,11 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     HF_HUB_OFFLINE=1 \
+    HF_DATASETS_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1 \
     HF_HUB_DISABLE_TELEMETRY=1 \
+    HF_HUB_DISABLE_IMPLICIT_TOKEN=1 \
+    HF_HUB_DISABLE_UPDATE_CHECK=1 \
     DO_NOT_TRACK=1 \
     XDG_CACHE_HOME=/tmp/.cache \
     HF_HOME=/tmp/.cache/huggingface \
@@ -85,4 +92,4 @@ EXPOSE 8000
 # /health stays a pure liveness probe for anything that only needs to know the process is up.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD ["python", "-c", "import sys,urllib.request as u; sys.exit(0 if u.urlopen('http://127.0.0.1:8000/ready', timeout=3).status == 200 else 1)"]
-CMD ["uvicorn", "procurement_agent.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--proxy-headers"]
+CMD ["uvicorn", "procurement_agent.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--proxy-headers", "--no-server-header"]

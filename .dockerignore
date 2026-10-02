@@ -11,6 +11,7 @@
 !uv.lock
 !README.md
 !src/
+!scripts/supervise.py
 
 # Re-included directories can still carry build debris.
 **/__pycache__

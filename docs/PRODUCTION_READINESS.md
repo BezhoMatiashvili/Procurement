@@ -12,22 +12,31 @@ deployer duty or an open item.
 | Control | Status | Where / how |
 |---|---|---|
 | API-key authentication (256-bit, stored as SHA-256, constant-time compare, revocable) | [x] | `security/auth.py`, `cli create-key / list-keys / revoke-key` |
-| Server-side UI sessions (token cookie, server expiry `PA_UI_SESSION_HOURS`, logout revokes, key revocation kills its sessions) | [x] | `security/auth.py`, `ui_sessions` table |
+| Server-side UI sessions (token cookie, server expiry `PA_UI_SESSION_HOURS`, idle expiry `PA_UI_SESSION_IDLE_MINUTES`, logout revokes, key revocation kills its sessions; `__Host-` cookie prefix in prod) | [x] | `security/auth.py`, `ui_sessions` table |
 | CSRF: cookie-authenticated state changes refused from other origins (`Sec-Fetch-Site` / `Origin`), `SameSite=Strict` | [x] | `security/auth.py` |
-| Security headers: CSP (`default-src 'self'`, no inline script), `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy: no-referrer`, `no-store` on the API | [x] | `main.py` |
-| HSTS | [ ] | deployer: set it on the TLS proxy (the app never sees TLS) |
+| Security headers on every answer, refusals included: CSP (`default-src 'self'`, no inline script), `X-Frame-Options: DENY`, `nosniff`, `Referrer-Policy: no-referrer`, `Permissions-Policy`, COOP/CORP `same-origin`, `no-store` on the API; no `Server` banner | [x] | `security/headers.py`, `main.py`, `--no-server-header` in the image command |
+| HSTS | [x] | sent by the app in prod (one year, sub-domains); the TLS proxy may add its own |
+| Host allow-list: a request naming any other host is refused (DNS rebinding, tunnels); prod refuses to start without `PA_ALLOWED_HOSTS` | [x] | `security/hosts.py` |
 | Rate limiting, fixed window per client address, `/health` `/ready` `/static` exempt | [x] | `security/ratelimit.py`, `PA_RATE_LIMIT` |
 | Per-user cap on queued + running jobs | [x] | `PA_MAX_ACTIVE_JOBS_PER_USER` |
 | Upload validation: extension allow-list, magic bytes, zip-bomb limits, macro/VBA refusal, page limit, encrypted PDFs refused | [x] | `security/upload_guard.py` |
-| Request-body cap counted on streamed bytes (chunked bodies included); credential-less multipart refused before it is read | [x] | `security/body_limit.py`; cap = 2 × `PA_MAX_FILE_MB` + 1 MB |
+| Request-body cap per route, counted on streamed bytes (chunked bodies included): 1 MiB on every route that takes no file, 2 × `PA_MAX_FILE_MB` + 1 MB on the upload routes, where the caller is authenticated *before* the body is read | [x] | `security/body_limit.py`, `security/preauth.py`; live-socket check in `scripts/offline_smoke.py` |
+| Hostile-input bounds: no exponential or quadratic reading of document text (patterns fixed, runs and tokens bounded, text/cell budgets), bounded rendering, workbook cell count refused before load, one lock around the app's own pdfium use | [x] | `ingestion/text_limits.py`, `ingestion/xlsx_size.py`, `ingestion/render.py`, `ingestion/pdfium_lock.py`; `tests/regex_budget.py`, `scripts/audit_resources.py` |
+| Bounded report work: at most `PA_MAX_CONCURRENT_REPORTS` computed at once, the rest 503 + `Retry-After` | [x] | `security/capacity.py` |
+| Annotated Word output drops external relationships, embedded objects, risky fields | [x] | `report/docx_sanitize.py` |
 | Formula-injection escaping in every generated workbook | [x] | `report/xlsx_safe.py`, used by all four writers: BOQ merged workbook, comparison export, extraction export, `scripts/boq_compare.py` |
-| Append-only audit trail (DB table + JSON log line) | [x] | `security/audit.py`; see SECURITY.md §4 for the actions |
-| Content-free logs, key redaction | [x] | `security/audit.py` |
-| Retention sweep and best-effort secure delete | [x] | worker sweep every 10 min, `cli sweep`, `PA_RETENTION_DAYS` |
-| Air-gap: internal Docker network, offline flags for every ML library, Ollama URL must be internal, `trust_env=False` | [x] | `docker-compose.yml`, `config.py` |
-| Container hardening: non-root, read-only rootfs, `cap_drop: ALL`, `no-new-privileges`, tmpfs `/tmp`, memory/PID limits, init | [x] | `Dockerfile`, `docker-compose.yml` |
+| Append-only audit trail (DB table with triggers that abort UPDATE/DELETE + JSON log line); reads, key operations, denied probes and refused outbound attempts included | [x] | `db.py`, `security/audit.py`, `cli audit`, `cli audit-prune`; see SECURITY.md §4 for the actions |
+| Content-free logs and stored errors, proven by a canary test through every input path | [x] | `security/safe_errors.py`, `security/logscrub.py`, `tests/integration/test_log_canary.py` |
+| Retention: row first, files second, a reconciler that retries what failed, derived outputs and caches removed, overwrite + fsync, SQLite `secure_delete` | [x] | `jobs/retention.py`, `jobs/worker.py` sweep every 10 min, `cli sweep`, `PA_RETENTION_DAYS` |
+| Files created owner-only (umask 077, data dir 0700), no core dumps | [x] | `security/hardening.py`, `db.py`, `config.py`, compose `ulimits` |
+| Air-gap, four layers: internal Docker networks (no route out), offline flags force-set before any ML import, an in-process egress guard, Ollama URL = this machine / the compose service (LAN only by opt-in), cloud models refused, only two model-server requests possible, `trust_env=False`, no redirects | [x] | `docker-compose.yml`, `procurement_agent/__init__.py`, `security/egress.py`, `config.py`, `llm/ollama_client.py` |
+| Proof of the air-gap: the whole product flow in a loopback-only network namespace | [x] | `scripts/verify_offline.sh` (CI job `offline`) |
+| Model files verified against `MANIFEST.sha256` at every prod start | [x] | `security/models_manifest.py`, `cli models-manifest` |
+| Container hardening: non-root, read-only rootfs, `cap_drop: ALL`, `no-new-privileges`, tmpfs `/tmp` (noexec), memory/PID/CPU limits, no core dumps, init | [x] | `Dockerfile`, `docker-compose.yml`; `tests/unit/test_deployment_policy.py` |
 | Trusted-proxy handling for `X-Forwarded-For` (never `*`) | [x] | `FORWARDED_ALLOW_IPS` (image default loopback; compose trusts only its relay) |
-| Prod start-up refuses a dev key or missing Docling models | [x] | `Settings.validate_for_prod` |
+| Prod start-up refuses: a dev key, missing or unverified Docling models, the egress guard off, no host allow-list, `FORWARDED_ALLOW_IPS=*` | [x] | `Settings.validate_for_prod` |
+| Authorisation matrix over every route (401 / 404-for-others / CSRF / headers / cookie flags), and a harness that breaks each guard to prove a test fails | [x] | `tests/integration/test_security_matrix.py`, `scripts/mutate_security.py` (CI job `mutation`) |
+| Client documents kept out of the repository (generic block in the hook and CI) and the client's identifiers out of commits (salted-hash canary, local hook) | [x] | `scripts/check_no_documents.sh`, `scripts/client_canary.py` |
 
 ## 2. Reliability
 
@@ -44,9 +53,12 @@ deployer duty or an open item.
   idle, with a clean "Application shutdown complete".
 - [x] **Start order.** The app waits for Ollama's healthcheck (`ollama list`); the relay starts
   after the app.
-- [ ] **Restart on unhealthy.** Compose marks an unready container `unhealthy` but does not
-  restart it (`restart: unless-stopped` covers crashes only). Wire `/ready` into whatever
-  monitoring the client runs.
+- [x] **Restart when hung.** Compose marks an unready container `unhealthy` but never restarts
+  it, and a request that spins in a regular expression or a native parser freezes the process
+  from inside. The compose command is `scripts/supervise.py`, a standard-library process that
+  probes `/ready` over loopback and restarts the server after three failed probes in a row (see
+  SECURITY.md §7). The running job is failed; nothing else is lost. Still wire `/ready` into
+  whatever monitoring the client runs, so a restart loop is noticed.
 
 ## 3. Observability
 
@@ -56,8 +68,9 @@ deployer duty or an open item.
   client IP and timestamp.
 - [ ] Ship container stdout to the client's log store if they want retention beyond Docker's
   log driver. Nothing leaves the host unless the operator configures it.
-- [ ] No metrics endpoint. `/api/v1/status` (authenticated) reports queue length, model and OCR
-  availability for a human; there is no Prometheus exporter.
+- [ ] No metrics endpoint. `/api/v1/status` (authenticated) reports the caller's own active jobs,
+  model and OCR availability for a human (server-wide queue depth is deliberately not shown);
+  there is no Prometheus exporter.
 
 ## 4. Testing and quality gate
 
@@ -74,6 +87,9 @@ deployer duty or an open item.
 | Secrets in history | gitleaks (full history) | CI; pre-commit on staged changes |
 | Real documents never committed | `block-documents` pre-commit hook (pdf/doc(x)/xls(x)/archives outside `tests/fixtures/`) | pre-commit |
 | Accuracy regression | `scripts/evaluate.py --set all` (synthetic gold committed; client gold git-ignored) | locally, before any extraction/check change |
+| Security scorecard (static analysis, repo and machine hygiene, egress policy, the no-network run, authorisation matrix, log canary, deployment policy, regex budget, worst-case resource ceilings, security mutation) | `scripts/security_audit.sh` (`--quick`, `--online` adds pip-audit) | locally, before a release |
+| The product runs with no network at all | `scripts/verify_offline.sh` | CI job `offline`; locally |
+| Security tests fail when their guard is removed | `scripts/mutate_security.py` | CI job `mutation`; locally |
 
 Warnings raised by `procurement_agent` fail the test run; third-party warnings are silenced
 one message at a time in `pyproject.toml`, never by category.
@@ -93,20 +109,22 @@ Docker does not publish ports of a container whose only network is `internal: tr
 on Docker 29.7: the mapping is dropped without an error). That is why the relay exists: it is
 the only container on a second network (`edge`), holds no state, and forwards to the app.
 `edge` has outbound NAT disabled, so the published port answers but the relay cannot reach the
-internet (measured: outbound `wget` times out). The app and Ollama have no route at all; verify
-with the command in SECURITY.md §2.
+internet (measured: outbound `wget` times out). The app and Ollama have no route at all, and
+they sit on two different internal networks (`internal` with the relay, `llm` with each other) so
+the relay cannot reach Ollama; verify with the command in SECURITY.md §2.
 
 ### 5.2 Reverse proxy duties (deployer)
 
-- [ ] Terminate TLS with the company certificate; redirect HTTP to HTTPS; send
-  `Strict-Transport-Security`.
+- [ ] Terminate TLS with the company certificate and redirect HTTP to HTTPS. (The app sends
+  `Strict-Transport-Security` itself in production; a proxy-level header is optional.)
 - [ ] Set `X-Forwarded-For` to the client address (nginx: `proxy_set_header X-Forwarded-For
   $remote_addr;`, which also overwrites anything the client sent). The relay reads the
   address right-to-left and passes one value on; the app trusts only the relay
   (`FORWARDED_ALLOW_IPS`). Without this header every user shares one rate-limit bucket and the
   audit log records the Docker gateway instead of the user.
 - [ ] Pass the original `Host` header (nginx: `proxy_set_header Host $host;`; nginx otherwise
-  sends `127.0.0.1:8000`). Current browsers send `Sec-Fetch-Site` over HTTPS and the CSRF check
+  sends `127.0.0.1:8000`), and list the names users type in `PA_ALLOWED_HOSTS`: the app answers
+  400 to any other name, and compose refuses to start without the variable. Current browsers send `Sec-Fetch-Site` over HTTPS and the CSRF check
   uses that; for a browser that does not, the check falls back to comparing `Origin` with
   `Host`, and a rewritten `Host` would refuse every UI form post. The relay passes `Host`
   through unchanged.
@@ -118,11 +136,14 @@ with the command in SECURITY.md §2.
 
 - [ ] `/data` (the `app-data` volume) on an encrypted disk (LUKS or equivalent).
 - [ ] `.env` readable only by the operator (`chmod 600`); `PA_ENV=prod`, `PA_DEV_API_KEY`
-  empty.
+  empty, `PA_ALLOWED_HOSTS` set. `PA_APP_CPUS` / `PA_OLLAMA_CPUS` below the host's core count keep
+  one runaway parse from starving the host (no default: Docker refuses a number above the cores).
 - [ ] If `172.30.231.0/24` or `172.30.232.0/24` collides with a host network, set `PA_INTERNAL_SUBNET`/`PA_EDGE_SUBNET`/`PA_EDGE_GATEWAY` and
   `PA_PROXY_IP` in `.env` together.
 - [ ] Copy `./models` and the `ollama` volume from the connected machine that ran
-  `scripts/prefetch_models.sh`. The spelling dictionary is not among them: the image carries
+  `scripts/prefetch_models.sh`, after writing the checksum manifest there
+  (`python -m procurement_agent.cli models-manifest write`): production verifies it at every
+  start and refuses to run on a changed, missing or extra model file. The spelling dictionary is not among them: the image carries
   it, fetched and hash-checked by `docker compose build`, which needs the network anyway.
 
 ### 5.4 Keys
@@ -182,21 +203,38 @@ unaffected.
 
 ### 5.7 Pinning
 
-The Dockerfile pins base images by exact tag (`python:3.12.14-slim-bookworm`, `uv:0.12.8`),
-compose pins Ollama `0.34.2` and Caddy `2.11.4` by tag and digest, and CI pins actions by tag.
-At release, add digests to the Dockerfile's two images and SHAs to the CI actions (commands in
-the file headers).
+The Dockerfile pins its two base images by tag **and digest** (`python:3.12.14-slim-bookworm`,
+`uv:0.12.8`, as resolved on 2026-10-02), compose pins Ollama `0.34.2` and Caddy `2.11.4` by tag and
+digest, and CI pins every action by commit (the tag stays in a comment) and the gitleaks image by
+digest. To move a pin on purpose, use the commands in the file headers, and re-run
+`scripts/evaluate.py` when it is Ollama, Docling or the models. Debian packages installed at build
+time (Tesseract and its language data) are not pinned: the build needs the network anyway, and a
+rebuild takes the distribution's current security fixes.
+
+`torch` and `torchvision` are direct dependencies from the PyTorch **CPU** index, so `uv.lock`
+holds no CUDA wheels (the 19 NVIDIA/CUDA/triton packages, about 2.5 GB, are gone), and OpenCV is
+the headless build (no Qt or window-system libraries); `rapidocr`'s request for the GUI build is
+overridden in `pyproject.toml`. The re-lock moved torch and torchvision one patch release (2.14.0 →
+2.14.1, 0.29.0 → 0.29.1) and nothing else. Docling was run again over every evaluated document in
+that environment; the comparison is in `docs/SECURITY.md` §11.
 
 ## 6. Known limitations
 
 - API keys only; no directory (LDAP/AD/OIDC) integration yet.
 - No application-level encryption at rest; relies on disk encryption.
+- Parsing runs inside the web process (no sandbox), so a native-parser bug runs with the
+  process's access to the stored documents, and a runaway parse is stopped by the supervisor's
+  restart, not by a hard limit; the input limits are a bound, not a proof. SECURITY.md §10 has
+  the full list of what the security work does not cover.
 - One uvicorn worker and one job thread by design; the rate limiter's counters live in memory.
 - OCR runs only inside the image (no host Tesseract), so scanned PDFs are not in the host eval.
 - The accuracy numbers are fitted to the client's own set, not held-out (ACCURACY.md).
-- pip-audit (needs network access) and gitleaks run in CI and have each been run once by hand
-  in the CI form: no known vulnerabilities in `uv.lock`, no leaks in the 3 commits of history.
-  Uncommitted work is not covered by that gitleaks run; CI will scan it once committed.
+- pip-audit (needs network access) and gitleaks run in CI. pip-audit was also run by hand on
+  2026-10-02 over the re-locked `uv.lock` (the 154 packages that apply on Linux): no known
+  vulnerabilities. gitleaks itself has not been run on this machine (no binary); an offline scan
+  of every commit of every ref and of the working tree for credential-shaped strings found none
+  (`scripts/security_audit.sh`, step `repo_secrets` - a smaller rule set than gitleaks', so CI
+  stays the gate). Uncommitted work is not covered by CI until it is committed.
 
 ## 7. Deferred / open questions
 
@@ -232,11 +270,14 @@ unknown one.
 - **httpx2 for the test client:** adopt `httpx2>=2.12` once it can be fetched (2.11.0, the
   only offline-cached version, has PYSEC-2026-3846); until then one Starlette warning is
   filtered by message.
-- **Release pinning:** the CI actions are pinned to tags and the Dockerfile's base images to
-  exact versions; pin both to digests / commit SHAs at the first release (commands in the
-  file headers). A full `docker build` has not been run on this machine (base images not
-  cached); the compose stack's relay, networks and healthchecks were verified on a probe
-  stack.
+- **Release pinning:** done on 2026-10-02 for the Dockerfile's base images (digests), the CI
+  actions (commit SHAs) and the gitleaks image (digest); the pre-commit gitleaks hook is pinned by
+  tag. The image has been built on this machine before, but **not since** the lock went CPU-only
+  and the Dockerfile took the supervisor, the digests and the offline environment: build it once
+  on a connected machine (`docker compose build`), check its size and `docker compose up`, before
+  relying on it. The policy tests (`tests/unit/test_deployment_policy.py`) check the Dockerfile's
+  and compose file's content, not that they build; the compose stack's relay, networks and
+  healthchecks were verified on a probe stack.
 - **Git history:** before this pass, a client party name appeared in a docstring and in
   `docs/TEST_REPORT_2026-09-21.md`; both are replaced in the working tree but remain in the
   already-committed history. Rewrite history (e.g. `git filter-repo --replace-text`) before

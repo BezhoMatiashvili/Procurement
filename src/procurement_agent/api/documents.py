@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from datetime import datetime
 from typing import Annotated
 
@@ -20,10 +21,10 @@ from procurement_agent.api.deps import (
 from procurement_agent.config import Settings, get_settings
 from procurement_agent.db import get_session
 from procurement_agent.extraction.pipeline import upload_path
-from procurement_agent.ingestion.render import render_page
+from procurement_agent.ingestion.render import MAX_BOXES, PageTooLargeError, render_page
+from procurement_agent.jobs.retention import delete_document_files
 from procurement_agent.jobs.worker import (
     Worker,
-    delete_document_files,
     mark_deleted,
     retention_expiry,
 )
@@ -230,14 +231,20 @@ def page_image(
     if doc.kind != "pdf":
         raise HTTPException(status.HTTP_404_NOT_FOUND, "page images are only available for PDFs")
     boxes: list[tuple[float, float, float, float]] = []
-    for raw in (bbox or [])[:20]:
+    for raw in (bbox or [])[:MAX_BOXES]:
         try:
             left, top, right, bottom = (float(x) for x in raw.split(","))
         except ValueError as e:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "bad bbox") from e
+        # float() reads "nan" and "inf"; neither is a place on a page
+        if not all(math.isfinite(v) for v in (left, top, right, bottom)):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "bad bbox")
         boxes.append((left, top, right, bottom))
     try:
         png = render_page(upload_path(settings, doc.id, doc.kind), page_no, boxes)
+    except PageTooLargeError as e:
+        # the PDF's own page size: nothing the caller can change, and not "not found" either
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(e)) from e
     except ValueError as e:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(e)) from e
     # A rendered page is document content, so reading it is audited like reading a result.
