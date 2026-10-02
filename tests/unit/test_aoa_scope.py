@@ -394,8 +394,9 @@ class TestServiceTables:
             "3. საფასური",
         )
         assert [(i.text, i.numbers) for i in service_items(lines)] == [
-            ("ფასადის შეღებვა 2", ("2",)),
-            ("ფანჯრის შეცვლა 4", ("4",)),
+            # each cell's text after the one before it: a figure is a number of its own
+            ("ფასადის შეღებვა; 2", ("2",)),
+            ("ფანჯრის შეცვლა; 4", ("4",)),
         ]
 
     def test_a_money_column_is_left_to_the_fee_rules(self) -> None:
@@ -408,11 +409,11 @@ class TestServiceTables:
             "1, მომსახურება = ფასადის შეღებვა, რაოდენობა = 2;",
             "2, მომსახურება = ფანჯრის შეცვლა, რაოდენობა = 4;",
         )
-        assert [i.text for i in service_items(lines)] == ["ფასადის შეღებვა 2", "ფანჯრის შეცვლა 4"]
+        assert [i.text for i in service_items(lines)] == ["ფასადის შეღებვა; 2", "ფანჯრის შეცვლა; 4"]
 
     def test_a_row_labelled_by_its_service_keeps_the_label(self) -> None:
         lines = ("კერძოდ:", "ფასადის შეღებვა, რაოდენობა = 2. ფანჯრის შეცვლა, რაოდენობა = 4")
-        assert [i.text for i in service_items(lines)] == ["ფასადის შეღებვა 2", "ფანჯრის შეცვლა 4"]
+        assert [i.text for i in service_items(lines)] == ["ფასადის შეღებვა; 2", "ფანჯრის შეცვლა; 4"]
 
     def test_the_sentence_after_a_table_is_no_item(self) -> None:
         """Near miss: a table's rows end with ";", the next clause with a full stop."""

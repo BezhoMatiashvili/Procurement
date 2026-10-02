@@ -96,9 +96,16 @@ _SECTION_WORDS: dict[str, str] = {
     "tax_lien": r"საგადასახადო\s+გირავნობა",
     "pledge": r"მოძრავ\s+ნივთებსა",
     "debtors": r"მოვალეთა\s+რეესტრი",
-    "footer": r"(?:საჯარო\s+რეესტრის\s+ეროვნული\s+სააგენტო\.\s*)?http://public\.reestri\.gov\.ge",
 }
 _SECTIONS = re.compile("|".join(f"(?P<{key}>{pattern})" for key, pattern in _SECTION_WORDS.items()))
+#: A page's footer - the line with the registry's web address, its page number on it or not -
+#: and a page number alone on its line ("1(2)", "გვერდი: 1(2)"). A section runs on over a page
+#: break: the footer between two of its lines ends nothing (red team R6, R6-04).
+_PAGE_FURNITURE = re.compile(
+    r"^[^\n]*http://public\.reestri\.gov\.ge[^\n]*$"
+    r"|^[ \t]*(?:გვერდი[ \t]*:?[ \t]*)?\d{1,3}[ \t]*\([ \t]*\d{1,3}[ \t]*\)[ \t]*$",
+    re.MULTILINE,
+)
 _ALL_LABELS = re.compile(
     "|".join(f"(?:{p})" for p in (*(p for ps in _FIELDS.values() for p in ps), *_OTHER_LABELS))
 )
@@ -288,6 +295,7 @@ def parse_extract(text: str) -> tuple[RegistryEntry, list[Person]]:
     if not _TITLE.search(text):
         msg = "no registry extract title (ამონაწერი მეწარმეთა და არასამეწარმეო ...)"
         raise NotAnExtractError(msg)
+    text = _PAGE_FURNITURE.sub("", text)
     markers = _markers(text)
     code = normalize_code(_field(text, "id_code", markers) or "")
     if not code:

@@ -53,7 +53,7 @@ _PLACE_KIND = re.compile(
     r"ქ|ბ|შეს|დას|სართ|კორპ|სოფ|მოედ|გამზ|მ/რ|ოთ"
     r"|(?:ქალაქ|ქუჩ|გამზირ|შესახვევ|ჩიხ|მოედან|ხეივან|დასახლებ|მიკრორაიონ|კორპუს|ბინ|სართულ"
     r"|სადარბაზო|ოთახ|სოფელ|დაბა|ტერიტორი)[ა-ჰ]*"
-    r"|n|no|№|street|st|avenue|ave|city|apt|flat|floor",
+    r"|n|no|№|#|street|st|avenue|ave|city|apt|flat|floor",
     re.IGNORECASE,
 )
 _COUNTRY = re.compile(r"საქართველო[ა-ჰ]*|georgia", re.IGNORECASE)
@@ -67,8 +67,10 @@ Part = tuple[Literal["number", "word"], frozenset[str]]
 
 
 def address_parts(address: str) -> list[Part]:
-    """The parts of an address that are compared, in order: its numbers and its place names."""
-    tokens = [_QUOTES.sub("", t) for t in _TOKEN.findall(address.replace("№", " № "))]
+    """The parts of an address that are compared, in order: its numbers and its place names. A
+    number is marked "№", "N" or "#" ("#8"), or not at all."""
+    marked = address.replace("№", " № ").replace("#", " # ")
+    tokens = [_QUOTES.sub("", t) for t in _TOKEN.findall(marked)]
     tokens = [t for t in tokens if t]
     parts: list[Part] = []
     for i, token in enumerate(tokens):
@@ -112,7 +114,11 @@ def _same(a: Part, b: Part) -> bool:
         return False
     if a[0] == "number":
         return a[1] == b[1]
-    return same_place_word(next(iter(a[1])), next(iter(b[1])))
+    x, y = next(iter(a[1])), next(iter(b[1]))
+    # an initial for a street's namesake: "ა. წერეთლის" is "აკაკი წერეთლის" (red team R6, R6-11)
+    if len(x) == 1 or len(y) == 1:
+        return len(x) != len(y) and (y.startswith(x) if len(x) == 1 else x.startswith(y))
+    return same_place_word(x, y)
 
 
 def compare_addresses(act: str, registry: str) -> Literal["same", "omits", "different"]:

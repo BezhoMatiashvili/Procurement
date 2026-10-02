@@ -12,11 +12,15 @@ import io
 import zipfile
 from pathlib import Path
 
+import pytest
 from docx import Document
 from lxml import etree
 
 from procurement_agent.checks.aoa import check_aoa
+from procurement_agent.checks.aoa_scope import _table_items, scope_part
 from procurement_agent.checks.findings import CheckReport, Finding
+from procurement_agent.registry.extract import parse_extract
+from procurement_agent.registry.fields import compare_addresses
 from procurement_agent.registry.snapshot import RegistryEntry
 from procurement_agent.registry.source import RegistrySource
 from procurement_agent.report.docx_annotate import annotate_docx, paragraph_text, tracked_edits
@@ -429,3 +433,234 @@ class TestWhereATrackedChangeGoes:
         )
         out, _ = annotate_docx(src, [finding], tmp_path / "o.docx")
         assert 'w:type="page"' in _xml(out)
+
+
+# --- R6-06: the act's date against the work done, whatever dates follow ------------------------
+
+_PREAMBLE = (
+    "მიღება-ჩაბარების აქტი\nქ. თბილისი\nშპს „ომეგა ტრეიდი“ (საიდენტიფიკაციო კოდი: 404123457) და "
+    "შპს „სიგმა სერვისი“ (საიდენტიფიკაციო კოდი: 405987612) შორის დადებული ხელშეკრულების №7 "
+    "საფუძველზე.\n"
+)
+
+
+def _act_date_findings(body: str) -> list[Finding]:
+    return _of(_check(_PREAMBLE + body, None), "AOA.ACT_DATE")
+
+
+class TestTheWorkDoneIsNotTheDatesAfterIt:
+    """Rule 4: an act dated the day the work was done is right; a date written after the
+    sentence that says when - a payment's deadline, a signature's day, a date on a line of its
+    own after the act's own date - says nothing of the work."""
+
+    def test_a_payment_deadline_is_not_the_end_of_the_work(self) -> None:
+        body = (
+            "მომსახურება შესრულდა 25.03.2026.\n"
+            "ანგარიშსწორება განხორციელდება 05.04.2026-მდე.\n"
+            "აქტი გაფორმდა 25.03.2026."
+        )
+        assert _act_date_findings(body) == []
+
+    def test_a_signature_date_is_not_the_end_of_the_work(self) -> None:
+        body = (
+            "მომსახურება შესრულდა 25.03.2026.\n"
+            "საფასური შეადგენს 500 (ხუთასი) ლარს.\n"
+            "აქტი გაფორმდა 25.03.2026.\n"
+            "ხელმოწერა: ________ 26.03.2026"
+        )
+        assert _act_date_findings(body) == []
+
+    def test_a_date_after_the_acts_own_does_not_hide_a_wrong_act_date(self) -> None:
+        body = (
+            "მომსახურება შესრულდა 25.03.2026.\n"
+            "საფასური შეადგენს 500 (ხუთასი) ლარს.\n"
+            "აქტი გაფორმდა 20.03.2026.\n"
+            "20.03.2026"
+        )
+        [finding] = _act_date_findings(body)
+        assert (finding.quote, finding.replacement) == ("20.03.2026", "25.03.2026")
+
+    def test_a_signature_on_the_next_line_is_not_the_end_of_the_work(self) -> None:
+        body = (
+            "მომსახურება შესრულდა 25.03.2026.\n"
+            "ხელმოწერა: ________ 26.03.2026\n"
+            "აქტი გაფორმდა 25.03.2026."
+        )
+        assert _act_date_findings(body) == []
+
+    def test_a_period_under_its_heading_still_ends_where_it_says(self) -> None:
+        """Near miss: a heading's dates on the line after it, a payment's after them: the
+        period is the heading's range, and an act dated on its last day is right."""
+        body = (
+            "2. შესრულების პერიოდი:\n"
+            "01.03.2026 - 31.03.2026\n"
+            "3. ანგარიშსწორება განხორციელდება 10.04.2026-მდე.\n"
+            "4. აქტი გაფორმდა 31.03.2026."
+        )
+        assert _act_date_findings(body) == []
+
+    def test_a_verb_ending_its_line_reads_the_dates_on_the_next(self) -> None:
+        """Near miss: "შესრულდა:" with the range on the line below is the period still, and an
+        act dated before its end is wrong."""
+        body = "მომსახურება შესრულდა:\n01.03.2026 - 31.03.2026\nაქტი გაფორმდა 20.03.2026."
+        [finding] = _act_date_findings(body)
+        assert finding.quote == "20.03.2026"
+
+    def test_a_completion_sentence_with_its_payment_beside_it(self) -> None:
+        """Near miss: the payment's deadline in the very sentence that dates the work."""
+        body = (
+            "მომსახურება შესრულდა 25.03.2026, ანგარიშსწორება 05.04.2026-მდე.\n"
+            "აქტი გაფორმდა 25.03.2026."
+        )
+        assert _act_date_findings(body) == []
+
+
+# --- R6-04: an extract's page footer ends no section --------------------------------------------
+
+_EXTRACT = (
+    "*B90000071 *\nამონაწერი მეწარმეთა და არასამეწარმეო\n(არაკომერციული) იურიდიული პირების\n"
+    "რეესტრიდან\nგანაცხადის ნომერი: 765432\nგანაცხადის რეგისტრაციის ნომერი: B90000071\n"
+    "ამონაწერის მომზადების თარიღი: 25/04/2026 11:20:00\nსუბიექტი\n"
+    "საფირმო სახელწოდება: შპს სიგმა სერვისი\n"
+    "იურიდიული მისამართი: საქართველო, ქ. ქუთაისი, ნინოშვილის ქ. №8\n"
+    "საიდენტიფიკაციო კოდი: 405987612\n"
+    "სამართლებრივი ფორმა: შეზღუდული პასუხისმგებლობის საზოგადოება\n"
+    "ხელმძღვანელობაზე/წარმომადგენლობაზე უფლებამოსილი პირები\n"
+    "- 01000000077, ნიკა სამხარაძე,\nდირექტორი, ,\n"
+    "საჯარო რეესტრის ეროვნული სააგენტო. http://public.reestri.gov.ge გვერდი: 1(2)\n"
+    "- 01000000088, თამარ გოგოლაძე,\nდირექტორი, ,\n"
+    "დამფუძნებლები\n- 01000000099, ლევან ქავთარაძე,\n"
+    "საჯარო რეესტრის ეროვნული სააგენტო. http://public.reestri.gov.ge გვერდი: 2(2)\n"
+)
+
+
+class TestAnExtractOverAPageBreak:
+    def test_the_persons_after_a_page_footer_are_read(self) -> None:
+        entry, people = parse_extract(_EXTRACT)
+        assert entry.directors == ("ნიკა სამხარაძე", "თამარ გოგოლაძე")
+        assert [p.position for p in people] == ["დირექტორი", "დირექტორი"]
+
+    def test_the_2025_footer_and_a_page_number_alone_on_its_line(self) -> None:
+        text = _EXTRACT.replace(
+            "საჯარო რეესტრის ეროვნული სააგენტო. http://public.reestri.gov.ge გვერდი: 1(2)\n",
+            "http://public.reestri.gov.ge\n1(2)\n",
+        )
+        entry, _ = parse_extract(text)
+        assert entry.directors == ("ნიკა სამხარაძე", "თამარ გოგოლაძე")
+
+    def test_the_founders_are_still_no_directors(self) -> None:
+        """Near miss: the section after the persons still ends theirs."""
+        entry, _ = parse_extract(_EXTRACT)
+        assert "ლევან ქავთარაძე" not in entry.directors
+
+
+# --- R6-05: the contractor's tax status, as the act says it of the contractor -------------------
+
+_TYPED = (
+    "მიღება-ჩაბარების აქტი\n"
+    "შპს „ომეგა ტრეიდი“, საიდენტიფიკაციო კოდი: 404123457{customer} (შემდგომში „შემკვეთი“) და\n"
+    "ი/მ „გიორგი ნიკოლაძე“, პირადი ნომერი: 01001012345{contractor} (შემდგომში „შემსრულებელი“)\n"
+    "„შემკვეთის“ პროექტ „ნათელი“ (ს/კ: 03.04.05.678) მომსახურების გაწევა.\n"
+    "მომსახურება შესრულდა 2026 წლის 1 აპრილიდან 2026 წლის 30 აპრილის ჩათვლით.\n"
+    "საფასური შეადგენს 700 (შვიდასი) ლარს, დღგ-ს გარეშე.\nაქტი გაფორმდა 2026 წლის 30 აპრილი\n"
+)
+
+
+def _type_of(customer: str = "", contractor: str = "") -> object:
+    report = _check(_TYPED.format(customer=customer, contractor=contractor), None)
+    return report.summary.get("contractor_type")
+
+
+class TestTheContractorsStatus:
+    def test_a_status_denied_is_no_status(self) -> None:
+        assert _type_of(contractor=", დღგ-ს გადამხდელი არ არის") is None
+        assert _type_of(contractor=", მცირე მეწარმის სტატუსის გარეშე") is None
+
+    def test_the_customers_status_is_not_the_contractors(self) -> None:
+        assert _type_of(customer=", დღგ-ს გადამხდელი") is None
+
+    def test_the_contractors_own_status_is_read(self) -> None:
+        """Near miss: stated of the contractor, and not denied."""
+        assert _type_of(contractor=", დღგ-ს გადამხდელი") == "individual_entrepreneur_vat"
+        assert _type_of(contractor=", მცირე მეწარმე") == "small_business"
+        assert (
+            _type_of(contractor=", მცირე მეწარმის სტატუსით და არ არის დღგ-ს გადამხდელი")
+            == "small_business"
+        )
+
+
+# --- R6-09: a services table's money column, and its cells kept apart ---------------------------
+
+
+class TestAServicesTablesColumns:
+    @pytest.mark.parametrize("column", ["ანაზღაურება", "Fee", "საფასური"])
+    def test_a_money_column_is_no_part_of_a_service(self, column: str) -> None:
+        line = (
+            f"1, მომსახურება = ფასადის ესკიზი. 1, რაოდენობა = 2. 1, {column} = 500. "
+            f"2, მომსახურება = ფანჯრის ნახაზი. 2, რაოდენობა = 4. 2, {column} = 800"
+        )
+        items = [scope_part(t) for t in _table_items(line) or []]
+        assert [i.numbers for i in items] == [("2",), ("4",)]
+
+    def test_two_figures_in_two_cells_are_two_numbers(self) -> None:
+        """Near miss: an unnamed second figure column is no money column, and its figure is
+        a number of its own, not thousands of the quantity's."""
+        line = "1, მომსახურება = ფასადის ესკიზი. 1, რაოდენობა = 2. 1, ფურცლები = 500"
+        [item] = [scope_part(t) for t in _table_items(line) or []]
+        assert set(item.numbers) == {"2", "500"}
+
+
+# --- R6-10: what the plot code label holds --------------------------------------------------------
+
+
+def _cadastral_notes(act: str) -> list[Finding]:
+    return _of(_check(act, None), "AOA.CADASTRAL_PRESENT")
+
+
+class TestThePlotCode:
+    NO_PLOT = ACT.replace(
+        "„შემკვეთის“ პროექტ „ნათელი“ (ს/კ: 03.04.05.678) მომსახურების გაწევა.",
+        "„შემკვეთის“ პროექტ „ნათელი“ - მომსახურების გაწევა.",
+    )
+
+    def test_an_identification_code_in_groups_is_no_plot_code(self) -> None:
+        act = self.NO_PLOT.replace("საიდენტიფიკაციო კოდი: 405987612", "ს/კ 405.987.612")
+        [note] = _cadastral_notes(act)
+        assert note.message_en == "the act does not state the cadastral code"
+
+    def test_a_year_after_a_dashed_plot_code_is_no_part_of_it(self) -> None:
+        act = ACT.replace(
+            "(ს/კ: 03.04.05.678) მომსახურების გაწევა.",
+            "საკადასტრო კოდი 03-04-05-678 2026 წლის აპრილში მომსახურების გაწევა.",
+        )
+        [note] = _cadastral_notes(act)
+        assert (note.quote, note.replacement) == ("03-04-05-678", "03.04.05.678")
+
+    def test_a_plot_code_in_other_groups_is_still_reported(self) -> None:
+        """Near miss: a code under the plot label that is no plot code's shape, and no party's
+        code either, is still named as written wrong."""
+        act = ACT.replace("(ს/კ: 03.04.05.678)", "(ს/კ: 03.4.05.678)")
+        [note] = _cadastral_notes(act)
+        assert note.quote == "03.4.05.678"
+
+
+# --- R6-11: an address written with an initial, or with "#" ---------------------------------------
+
+
+class TestAnAddressWrittenShort:
+    REGISTRY = "საქართველო, ქ. ქუთაისი, აკაკი წერეთლის ქუჩა, N 8"
+
+    @pytest.mark.parametrize(
+        "act",
+        [
+            "ქ. ქუთაისი, ა. წერეთლის ქ. 8",
+            "ქ. ქუთაისი, აკაკი წერეთლის ქ. #8",
+            "ქ. ქუთაისი, ა. წერეთლის ქ. # 8",
+        ],
+    )
+    def test_the_same_address(self, act: str) -> None:
+        assert compare_addresses(act, self.REGISTRY) == "same"
+
+    def test_another_initial_is_another_name(self) -> None:
+        """Near miss: an initial of another first name is not this street's."""
+        assert compare_addresses("ქ. ქუთაისი, გ. წერეთლის ქ. 8", self.REGISTRY) == "different"

@@ -152,10 +152,17 @@ class Company:
     act: dict[str, str] = field(default_factory=dict)
 
 
+#: a noun's nominative ending and the one-letter endings that only decline it (dative -ს,
+#: vocative -ო): "სერვისი" written "სერვისს" is the same name in another case, not a slip
+_DECLINED = {"ი": "სო"}
+
+
 def _slip(word: str, rng: random.Random) -> str:
-    """One letter of ``word`` changed - never the first, never into the same letter."""
+    """One letter of ``word`` changed - never the first, never into the same letter, and never
+    the last into a letter that only declines the word."""
     i = rng.randrange(1, len(word))
-    letter = rng.choice([c for c in _GEORGIAN if c != word[i]])
+    banned = _DECLINED.get(word[i], "") if i == len(word) - 1 else ""
+    letter = rng.choice([c for c in _GEORGIAN if c != word[i] and c not in banned])
     return word[:i] + letter + word[i + 1 :]
 
 

@@ -161,6 +161,14 @@ a liquidation in the registry (a warning).
 * The reader on the two public extracts: code, name, legal form, full address (its wrapped
   line too), the director and position, sole representation, preparation date, no status - and
   neither the founders' nor the partners' persons taken for representatives.
+* **Red team R6:** the page footer ("… http://public.reestri.gov.ge გვერდი: 1(2)") was read as a
+  section heading, so the persons and the status on the next page were lost (R6-04): a footer
+  and a page number alone on its line now end nothing. A street's namesake written with an
+  initial ("ა. წერეთლის" for "აკაკი წერეთლის") and a house number marked "#" were a different
+  address (R6-11): an initial now matches a word with its letter, another initial does not, and
+  "#" marks a number as "№" and "N" do. The harness then planted one declined name as a slip
+  ("სერვისს", the dative of "სერვისი", which the check rightly accepts) on seed 21; it no longer
+  does. **Fresh seeds 21 and 23, 3,000 cases each: 6,000 of 6,000 (100%).**
 
 ### Rule 2: a signatory other than the director (out of scope, as the client says)
 
@@ -188,6 +196,18 @@ period's end, on the month's end, or off both.
 * **After the fix: seed 1 840/840; fresh seeds 2 and 3, 200 a class: 2,800 of 2,800 each
   (100%)**, with every correction read back as the expected date in the act's own style, and the
   gold sets unchanged.
+* **Red team R6, what dates the work (R6-06):** a date anywhere within 160 characters after
+  "შესრულდა" was read as the period's end, so a payment's deadline ("ანგარიშსწორება
+  განხორციელდება 05.04.2026-მდე") or a signature's day made a right act wrong, with a
+  "correction" to the month's end, and a bare date after the act's own hid a wrong act date. A
+  verb of work done now dates the work in its own sentence only; a date after a payment, an
+  advance, a signature or the act's own signing words is never the work's; a heading's or a
+  label's dates still run onto the next lines. **Rules 3 and 4 also (R6-10):** "ს/კ" abbreviates
+  both codes, and a company's code in groups ("ს/კ 405.987.612") was a malformed plot code; a
+  year after a dashed plot code ("03-04-05-678 2026 წლის") was read into it. A party's code, or
+  nine or eleven digits in three groups or fewer, is no plot code, and a part with four digits in
+  a row is no part of one. **Fresh seed 21, 200 a class: 2,800 of 2,800**; the gold sets and the
+  snapshot of every output unchanged.
 
 ### Rules 5-8: the tax wording by contractor type (`scripts/tax_rules_accuracy.py`)
 
@@ -204,6 +224,12 @@ too; eleven classes, among them the type read from the act and the cases where i
   now read for 39 acts (a company for 24, whose wording rules are then not applicable) and no
   finding changed but the invoice note's "a small business needs none" sentence, now that the
   natural-person family's type is known.
+* **Red team R6 (R6-05):** an entrepreneur's status was read anywhere in the act - a status
+  denied ("დღგ-ს გადამხდელი არ არის", "მცირე მეწარმის სტატუსის გარეშე") or the customer's
+  ("შემკვეთი … დღგ-ს გადამხდელი") typed the contractor. A status now counts only when said in the
+  contractor's own block and denied nowhere there, a denial read in the status's clause ("მცირე
+  მეწარმეა და არ არის დღგ-ს გადამხდელი" is a small business). **Fresh seed 21, 200 a class:
+  2,200 of 2,200.**
 
 ### Rule 10: the act against its contract (`scripts/contract_rules_accuracy.py`)
 
@@ -271,6 +297,11 @@ contract's value in the act's own form (a director's name in the case the act wr
   on the whole clause, whose words a tracked change would have replaced by the number; it is
   now the number alone, at its own place). A fee, a payment method and a value left out stay
   comments: a fee in figures and words, or a sentence, is for a person to rewrite.
+* **A services table's columns (red team R6, R6-09):** a money column headed "ანაზღაურება" or
+  "Fee" was read as part of the service, and its cells were joined to the quantity's with a
+  space - "2" and "500" made the number 2 500, a false "number differs". Those headings are money
+  columns now, and a row's cells are joined with "; ", each figure a number of its own. **Fresh
+  seed 21: 2,500 of 2,500.**
 * **Not compared:** the bank's name (its code and the account name the bank); the subject or
   services where only one document states them, a one-column table of services (Docling reads
   its first row as a header), and a contract whose parties are named without quotes (each a skip

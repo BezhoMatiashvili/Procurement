@@ -80,8 +80,8 @@ _ITEM_NUMBER = re.compile(r"\d{1,3}(?:\.\d{1,3})*[.)]?|[ა-ჰ][.)]?")
 #: A money column of such a table: the fee rules read the value, the services rule compares
 #: what was done and how much of it.
 _MONEY_COLUMN = re.compile(
-    r"ფას|ჯამ|ღირებულ|თანხ|ლარ|დოლარ|ევრო|სულ|[₾$€]"
-    r"|(?<![a-z])(?:price|amount|total|sum|cost|gel|usd|eur)",
+    r"ფას|ჯამ|ღირებულ|თანხ|ლარ|დოლარ|ევრო|სულ|ანაზღაურ|ტარიფ|[₾$€]"
+    r"|(?<![a-z])(?:price|amount|total|sum|cost|fee|rate|tariff|gel|usd|eur)",
     re.IGNORECASE,
 )
 
@@ -226,8 +226,9 @@ def subject_clause(text: str) -> ScopePart | None:
 
 def _table_items(line: str) -> list[str] | None:
     """The items of a table written in cells (``_CELL``): each row's label - unless it is an
-    item number - and the cells of every column but a money column, joined. None for a line
-    that is no such table."""
+    item number - and the cells of every column but a money column, joined with "; ": a cell's
+    figure is a number of its own, never thousands of the cell's before it ("2" and "500" are not
+    "2 500", red team R6, R6-09). None for a line that is no such table."""
     cells = list(_CELL.finditer(line))
     if not cells or cells[0].start() != 0 or cells[0].group("row") is None:
         return None
@@ -240,7 +241,7 @@ def _table_items(line: str) -> list[str] | None:
         row = rows.setdefault(label, [] if _ITEM_NUMBER.fullmatch(label) else [label])
         if value and not _MONEY_COLUMN.search(cell.group("column")):
             row.append(value)
-    return [" ".join(parts) for parts in rows.values() if parts]
+    return ["; ".join(parts) for parts in rows.values() if parts]
 
 
 def service_items(lines: Sequence[str]) -> list[ScopePart]:

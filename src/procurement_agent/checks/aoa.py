@@ -362,18 +362,15 @@ _ACT_NAMED_BEFORE = re.compile(r"აქტი[\s„“”\"']*$")
 #: An advance or prepayment clause: a date there is a payment's, never the act's.
 _ADVANCE_WORDS = re.compile(r"ავანს|წინასწარ|advance|prepay", re.IGNORECASE)
 #: What opens the service period, its dates within ``_date_hits_near``'s reach after it, past
-#: the end of its sentence: "შესრულდა …", a "შესრულების თარიღი" heading, and the other ways acts
-#: say it - "გაწეულია 01.11.2026 - 30.11.2026 პერიოდში" (the services rendered), a "საანგარიშო
-#: პერიოდი" (reporting period) heading, the period of rendering or of delivery ("მომსახურების
-#: გაწევის პერიოდი:", "მიწოდების პერიოდი:", red team R4).
+#: the end of its sentence: a "შესრულების თარიღი" heading, and the other ways acts label it - a
+#: "საანგარიშო პერიოდი" (reporting period) heading, the period of rendering or of delivery
+#: ("მომსახურების გაწევის პერიოდი:", "მიწოდების პერიოდი:", red team R4). A verb of work done
+#: ("შესრულდა", "გაწეულია") opens it in its own sentence only (``_PERFORMED``): a payment's
+#: deadline or a signature's day in the sentences after it says nothing of the work (red team
+#: R6, R6-06).
 _PERIOD_KEYS = (
-    "შესრულდა",
-    "დასრულდა",
-    "ჩაბარდა",
     "შესრულების თარიღი",
     "შესრულების პერიოდი",
-    "გაწეულია",
-    "გაიწია",
     "საანგარიშო პერიოდ",
     "მომსახურების პერიოდ",
     "გაწევის პერიოდ",
@@ -423,6 +420,14 @@ _YEARLESS_END = re.compile(
 _MONTH_PERIOD = re.compile(r"(?<!\d)(?P<y>\d{4})\s*წ(?:ლის|\.)?\s*(?P<m>[ა-ჰ]{3,14})\s+თვ[ეი]")
 #: How far after the words that open the period its dates may stand (``_date_hits_near``).
 _PERIOD_REACH = 160
+#: A payment or a signature named before a date: the date is the money's or the signature's,
+#: never the work's ("ანგარიშსწორება განხორციელდება 05.04.2026-მდე", "ხელმოწერა: ____
+#: 26.03.2026"; red team R6, R6-06). An advance is ``_ADVANCE_NAMED``'s.
+_NOT_THE_WORK = re.compile(
+    r"ანგარიშსწორ|გადახდ|გადაიხად|გადაირიცხ|ჩაირიცხ|ჩარიცხ|ხელმოწერ|ხელს\s+აწერ|ხელი\s+მოაწერ"
+    r"|(?<![a-z])(?:payment|paid|signature|signed)",
+    re.IGNORECASE,
+)
 #: How surely a range no verb and no service word stands beside is the period
 #: (``AoaChecker._period_ranges``): only when it is the act's one range.
 _BARE_RANGE = 2
@@ -1238,9 +1243,13 @@ class AoaChecker:
             i = bisect_right(ends, h.start)
             opened = ends[i - 1] if i else None
             a, b = self._sentence_of(h.start)
-            if opened is not None and _ADVANCE_NAMED.search(text, opened, h.start):
+            # an advance, a payment or a signature named after the words that open the period,
+            # before the date - or the act's own signing: the date is theirs (red team R6)
+            between = (_ADVANCE_NAMED, _NOT_THE_WORK, _ACT_SIGNED)
+            if opened is not None and any(p.search(text, opened, h.start) for p in between):
                 return False
-            return not ((opened is None or opened < a) and _ADVANCE_NAMED.search(text, a, b))
+            elsewhere = _ADVANCE_NAMED.search(text, a, b) or _NOT_THE_WORK.search(text, a, b)
+            return not ((opened is None or opened < a) and elsewhere)
 
         out = [
             (d, h)
@@ -1298,8 +1307,11 @@ class AoaChecker:
             ):
                 continue
             performed = _PERFORMED.search(text, a, b) is not None
+            labelled = any(a <= k < b for k in labels)
             if _CONTRACT_WINDOW.search(text, a, b) and not performed:
                 continue
+            if _NOT_THE_WORK.search(text, a, b) and not (performed or labelled):
+                continue  # a payment's window, a signature's date
             inside = [h for h in hits if a <= h.start < b]
             if not inside:
                 continue
@@ -1314,7 +1326,7 @@ class AoaChecker:
                 end = date.fromisoformat(str(last.normalized)) if last is not None else None
             if end is None or last is None or start > end:
                 continue
-            if performed or any(a <= k < b for k in labels):
+            if performed or labelled:
                 rank = 0
             elif _SERVICE_WORDS.search(text, a, b):
                 rank = 1
@@ -1861,7 +1873,15 @@ class AoaChecker:
             )
         if self.aoa.anchors(FactType.cadastral_code):
             return
-        written = _CADASTRAL_LABELLED.search(self.aoa.text)
+        # "ს/კ" abbreviates both codes: one that is a party's identification code is no plot's
+        written = next(
+            (
+                m
+                for m in _CADASTRAL_LABELLED.finditer(self.aoa.text)
+                if not self._an_identification_code(m.group("code") or m.group("code2"))
+            ),
+            None,
+        )
         if written is None:
             self._add(
                 "AOA.CADASTRAL_PRESENT",
@@ -1872,7 +1892,7 @@ class AoaChecker:
             )
             return
         group = "code" if written.group("code") is not None else "code2"
-        token = written.group(group).strip()
+        token = _cadastral_token(written.group(group).strip())
         span = (written.start(group), written.start(group) + len(token))
         dotted = _dotted_cadastral(token)
         if dotted is not None:
@@ -1896,6 +1916,14 @@ class AoaChecker:
                 actual=token,
                 span=span,
             )
+
+    def _an_identification_code(self, token: str) -> bool:
+        """Whether a code under the plot code's label is an identification code: a party's, or
+        nine or eleven digits in three groups or fewer - a plot code has four or more ("ს/კ
+        405.987.612" is a company's code in groups; red team R6, R6-10)."""
+        digits = re.sub(r"\D", "", token)
+        groups = [g for g in re.split(r"\D+", token) if g]
+        return digits in self.aoa.id_codes() or (len(digits) in (9, 11) and len(groups) <= 3)
 
     def _title_span(self) -> tuple[int, int] | None:
         """Where the act names itself ("მიღება-ჩაბარების აქტი"), or its first line."""
@@ -2302,9 +2330,8 @@ class AoaChecker:
                 "a foreign legal form and no Georgian code",
             )
         if kind == "individual_entrepreneur":
-            text = self.aoa.text
-            small = _SMALL_BUSINESS.search(text) is not None
-            vat = _VAT_PAYER.search(text) is not None and not _NOT_VAT_PAYER.search(text)
+            small = self._stated_of(p, _SMALL_BUSINESS)
+            vat = self._stated_of(p, _VAT_PAYER)
             if small and not vat:
                 return "small_business", (
                     "აქტში მითითებული მცირე მეწარმის სტატუსი",
@@ -2316,6 +2343,26 @@ class AoaChecker:
                     "the VAT-payer status the act states",
                 )
         return None
+
+    def _stated_of(self, p: Party, status: re.Pattern[str]) -> bool:
+        """Whether the act says ``p`` has the ``status`` ("მცირე მეწარმე", "დღგ-ს გადამხდელი"):
+        said in ``p``'s own block - the customer's status is not the contractor's - and denied
+        nowhere there ("დღგ-ს გადამხდელი არ არის", "მცირე მეწარმის სტატუსის გარეშე"), a denial
+        read in the status's own clause (red team R6, R6-05)."""
+        text = self.aoa.text
+        said = denied = False
+        for m in status.finditer(text):
+            if self._owner_of(m.span()) is not p:
+                continue
+            before = text[max(0, m.start() - _CLAUSE_REACH) : m.start()]
+            after = text[m.end() : m.end() + _CLAUSE_REACH]
+            left = max((c.end() for c in _CLAUSE_END.finditer(before)), default=0)
+            right = next((c.start() for c in _CLAUSE_END.finditer(after)), len(after))
+            if _DENIED.search(before, left) or _DENIED.search(after, 0, right):
+                denied = True
+            else:
+                said = True
+        return said and not denied
 
     def _qualifies_net(self, phrase: TaxPhrase, nets: list[RoledAmount]) -> bool:
         """Whether an exclusion ("დღგ-ს გარეშე", "excl. VAT") is the label of a fee before tax."""
@@ -5319,6 +5366,22 @@ _CADASTRAL_GROUPS = (2, 2, 2, 3, 3, 2, 3)
 _ACT_TITLE = re.compile(r"მიღება\s*-?\s*ჩაბარების\s+აქტ[ა-ჰ]*")
 
 
+def _cadastral_token(token: str) -> str:
+    """The plot code a token read after its label holds: the longest run of its space-separated
+    parts that is a plot code, or else the token up to a part with four digits in a row, which
+    no plot code's group has - a year after the code ("03-04-05-678 2026 წლის") is no part of it
+    (red team R6, R6-10)."""
+    cuts = [m.start() for m in re.finditer(r"\s+", token)]
+    for cut in [len(token), *reversed(cuts)]:
+        if _dotted_cadastral(token[:cut]) is not None:
+            return token[:cut]
+    for i, cut in enumerate(cuts):
+        end = cuts[i + 1] if i + 1 < len(cuts) else len(token)
+        if re.search(r"\d{4}", token[cut:end]):
+            return token[:cut]
+    return token
+
+
 def _dotted_cadastral(token: str) -> str | None:
     """A cadastral code written with other separators, rewritten with dots - or None when its
     digit groups are no cadastral code's."""
@@ -5334,9 +5397,13 @@ def _dotted_cadastral(token: str) -> str | None:
 #: მეწარმე", "მცირე ბიზნესის სტატუსი"), a VAT payer ("დღგ-ს გადამხდელი"), or not one.
 _SMALL_BUSINESS = re.compile(r"(?<![ა-ჰ])მცირე\s+(?:მეწარმ|ბიზნეს)[ა-ჰ]*")
 _VAT_PAYER = re.compile(r"(?<![ა-ჰ])დ\.?ღ\.?გ\.?-?ს\s+გადამხდელ[ა-ჰ]*")
-_NOT_VAT_PAYER = re.compile(
-    r"(?<![ა-ჰ])(?:არ\s+არის|არა)\s+(?:რეგისტრირებული\s+)?დ\.?ღ\.?გ\.?-?ს\s+გადამხდელ"
-)
+#: A status denied in its clause: "არ არის", "არა", "არც", "… სტატუსის გარეშე" (without).
+_DENIED = re.compile(r"(?<![ა-ჰ])(?:არ|არა|არც)(?![ა-ჰ])|გარეშე")
+#: Where a status's clause ends: a stop, a bracket, a colon, a line, or "და" (and) - "მცირე
+#: მეწარმეა და არ არის დღგ-ს გადამხდელი" says two things.
+_CLAUSE_END = re.compile(r"[,;.()\n:]|(?<![ა-ჰ])და(?![ა-ჰ])")
+#: How far either side of a status its clause is read.
+_CLAUSE_REACH = 120
 
 
 #: A date the act writes in ISO, which a correction may then write in ISO too.
