@@ -9,6 +9,8 @@ from __future__ import annotations
 import importlib.util
 import random
 import sys
+from collections import Counter
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
 
@@ -27,6 +29,45 @@ def test_every_rule_10_case_comes_out_right(seed: int) -> None:
     passed, failures = harness.run(5, seed)
     assert [(c.cls, why) for c, why in failures] == []
     assert sum(passed.values()) == 5 * len(harness.CLASSES)
+
+
+def _subject_case(subject: str, act_subject: str) -> object:
+    p = harness.make_pair(random.Random(3))
+    p.subject = subject
+    # the act lists five of something too: the same digits, written right, in another line
+    p.services = tuple(s.format(k=5) for s in harness.SERVICES[1])
+    p.act["subject"] = act_subject
+    return harness.Case(
+        "subject_number",
+        harness._act(p),
+        harness._contract(p),
+        (),
+        harness._act(replace(p, act={})),
+    )
+
+
+def test_a_subject_number_is_corrected_where_the_subject_writes_it_alone() -> None:
+    """The subject's "5" for the contract's "4" is rewritten in the subject; the service list's
+    own "5", written right, is not (red team R6: the marking check of the harness)."""
+    case = _subject_case(
+        "4 ერთეული სერვერის ტექნიკური მომსახურების გაწევა",
+        "5 ერთეული სერვერის ტექნიკური მომსახურების გაწევა",
+    )
+    marked: Counter[str] = Counter()
+    assert harness.score(case, marked) is None
+    assert marked["subject_number:right"] == marked["subject_number:wrong"] == 1
+
+
+def test_a_subject_number_with_its_words_is_left_to_its_comment() -> None:
+    """Near miss: "5 (ხუთი)" corrected to "4" would read "4 (ხუთი)": the comment says what to
+    write, and nothing is rewritten."""
+    case = _subject_case(
+        "4 (ოთხი) ერთეული სერვერის ტექნიკური მომსახურების გაწევა",
+        "5 (ხუთი) ერთეული სერვერის ტექნიკური მომსახურების გაწევა",
+    )
+    marked: Counter[str] = Counter()
+    assert harness.score(case, marked) is None
+    assert marked["subject_number:right"] == 0
 
 
 def test_a_declined_name_is_never_planted_as_a_slip() -> None:

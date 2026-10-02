@@ -153,7 +153,9 @@ def test_a_changed_number_in_the_subject_is_an_error() -> None:
     assert finding.message_en == (
         "a number in the subject differs from the contract: 2 in the act, 3 in the contract"
     )
-    assert finding.quote is not None and finding.quote.endswith(f"2 ენაზე {_SUBJECT}")
+    # the number alone, corrected where the subject writes it: the act's other "2" is not the
+    # subject's (red team R6)
+    assert (finding.quote, finding.replacement, finding.places) == ("2", "3", ((0,), 2))
 
 
 def test_the_act_restating_a_duplicated_list_reports_a_change_once() -> None:

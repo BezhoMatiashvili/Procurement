@@ -9,10 +9,15 @@ bank code and an IBAN - and plants one class of difference in the act (or none):
 client's bullets - the contractor's and the customer's code, name and director, a code given to
 the wrong party, the subject, the cadastral code, an act outside the contract's term, a service,
 the fee, the payment deadline and method, the IBAN and the bank code, a party's code or the
-account left out - and two harmless restyles. A case passes when the act's errors and warnings
-are exactly the expected rule ids (a few named secondary ones allowed) and each finding's
-correction is the contract's value in the act's own form (a director's name in the case the act
-writes it in). Every name, code and account is invented.
+account left out, the contractor's address - and the customer's own name, address or account
+written for the contractor (red team R6, R6-03), and two harmless restyles. A case passes when
+the act's errors and warnings are exactly the expected rule ids (a few named secondary ones
+allowed), each finding's correction is the contract's value in the act's own form (a director's
+name in the case the act writes it in), and the act annotated as a Word file, every tracked
+change accepted, leaves each line it wrote right as it was and writes each line it wrote wrong
+either as it was (a comment says what to write) or as it should be. How many of those lines
+the tracked changes put right is printed beside each class. Every name, code and account is
+invented.
 """
 
 # the templates are a contract's and an act's own lines
@@ -24,13 +29,18 @@ import argparse
 import random
 import string
 import sys
+import tempfile
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+
+from docx import Document
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from procurement_agent.checks.aoa import check_aoa
+from procurement_agent.checks.findings import Finding
+from procurement_agent.report.docx_annotate import annotate_docx, paragraph_text
 
 FIRST = {
     "გიორგი": "გიორგის",
@@ -112,6 +122,10 @@ CLASSES = (
     "bic",
     "omit_contractor_code",
     "omit_iban",
+    "contractor_address",
+    "address_copied",
+    "name_copied",
+    "customer_account",
     "h_quotes",
     "h_amount_format",
 )
@@ -134,6 +148,10 @@ EXPECTED: dict[str, set[str]] = {
     "bic": {"AOA.BANK"},
     "omit_contractor_code": {"AOA.ID_CODES"},
     "omit_iban": {"AOA.BANK"},
+    "contractor_address": {"AOA.PARTY_ADDRESS"},
+    "address_copied": {"AOA.PARTY_ADDRESS"},
+    "name_copied": {"AOA.PARTY_NAME"},
+    "customer_account": {"AOA.BANK"},
 }
 #: secondary findings a class may raise besides its own
 ALLOWED: dict[str, set[str]] = {
@@ -224,15 +242,23 @@ class Pair:
     month: int
     validity_month: int
     act: dict[str, str] = field(default_factory=dict)
+    #: the customer's own account, stated in its block of both documents (and the contractor's
+    #: in its block of the contract), when a class needs the accounts told apart
+    customer_iban: str | None = None
+
+
+def _account(iban: str | None) -> str:
+    return f"; ანგარიშის ნომერი: {iban}" if iban else ""
 
 
 def _contract(p: Pair) -> str:
     c, k = p.customer, p.contractor
     services = "\n".join(f"- {s}" for s in p.services)
+    k_iban = p.iban if p.customer_iban else None
     return f"""ხელშეკრულება
 საქართველო, თბილისი                    1 თებერვალი, 2026 წელი
-{c.block()} (შემდგომში „შემკვეთი“) წარმოდგენილი დირექტორის {c.director_genitive} სახით და
-{k.block()} (შემდგომში „შემსრულებელი“) წარმოდგენილი დირექტორის {k.director_genitive} სახით
+{c.block()}{_account(p.customer_iban)} (შემდგომში „შემკვეთი“) წარმოდგენილი დირექტორის {c.director_genitive} სახით და
+{k.block()}{_account(k_iban)} (შემდგომში „შემსრულებელი“) წარმოდგენილი დირექტორის {k.director_genitive} სახით
 მუხლი I. ხელშეკრულების საგანი
 1.1. „შემსრულებელი“ იღებს ვალდებულებას „{p.project}“ პროექტისთვის (ს/კ: {p.cadastral}) {p.subject} (შემდგომში „მომსახურება“).
 1.2. „შემსრულებელმა“ საანგარიშო თვეში „შემკვეთს“ უნდა ჩააბაროს:
@@ -268,9 +294,10 @@ def _act(p: Pair) -> str:
     fee = a.get("fee", f"{p.fee[0]} ({p.fee[1]})")
     days = a.get("days", f"{p.days[0]} ({p.days[1]})")
     method = a.get("method", "შემსრულებლის საბანკო ანგარიშზე გადარიცხვით")
+    k_address = a.get("contractor_address", f"ქ. {k.city}, {k.street} {k.number}")
     text = f"""მიღება-ჩაბარების აქტი
-{c.form} „{name(c, "customer_name")}“, საიდენტიფიკაციო კოდი: {c_code}, იურიდიული მისამართი: ქ. {c.city}, {c.street} {c.number} (შემდგომში „შემკვეთი“) წარმოდგენილი დირექტორის {c_gen} სახით და
-{k.form} „{name(k, "contractor_name")}“, საიდენტიფიკაციო კოდი: {k_code}, იურიდიული მისამართი: ქ. {k.city}, {k.street} {k.number} (შემდგომში „შემსრულებელი“)
+{c.form} „{name(c, "customer_name")}“, საიდენტიფიკაციო კოდი: {c_code}, იურიდიული მისამართი: ქ. {c.city}, {c.street} {c.number}{_account(p.customer_iban)} (შემდგომში „შემკვეთი“) წარმოდგენილი დირექტორის {c_gen} სახით და
+{k.form} „{name(k, "contractor_name")}“, საიდენტიფიკაციო კოდი: {k_code}, იურიდიული მისამართი: {k_address} (შემდგომში „შემსრულებელი“)
 „მხარეებმა“ გააფორმეს ხელშეკრულება, რომლის საგანსაც წარმოადგენს „შემკვეთის“ პროექტ „{p.project}“ (ს/კ: {a.get("cadastral", p.cadastral)}) {subject} (შემდგომში „მომსახურება“).
 2. შესრულების თარიღი
 მომსახურება შესრულდა 2026 წლის 1 {ablative} 2026 წლის {last} {genitive} ჩათვლით.
@@ -410,6 +437,26 @@ def plant(rng: random.Random, p: Pair, cls: str) -> list[Want]:
     elif cls == "omit_iban":
         p.act["omit_iban"] = "1"
         return [Want(None, p.iban)]
+    elif cls == "contractor_address":
+        p.act["contractor_address"] = f"ქ. {k.city}, {k.street} {k.number % 149 + 1}"
+        return [Want(p.act["contractor_address"], f"ქ. {k.city}, {k.street} {k.number}")]
+    elif cls == "address_copied":
+        # the customer's address, right where the customer's block states it
+        if (c.city, c.street, c.number) == (k.city, k.street, k.number):
+            c.number = k.number % 149 + 1
+        p.act["contractor_address"] = f"ქ. {c.city}, {c.street} {c.number}"
+        return [Want(p.act["contractor_address"], f"ქ. {k.city}, {k.street} {k.number}")]
+    elif cls == "name_copied":
+        # the customer's name, in the preamble and over the signature: the same legal form, so
+        # that the customer's own copies are the very same words
+        k.form = c.form
+        p.act["contractor_name"] = c.name
+        return [Want(f"{k.form} {c.name}", f"{k.form} {k.name}")]
+    elif cls == "customer_account":
+        # the customer's account, stated in its own block, written in the payment line too
+        p.customer_iban = _iban(rng)
+        p.act["iban"] = p.customer_iban
+        return [Want(p.customer_iban, p.iban)]
     elif cls == "h_quotes":
         p.act["quotes"] = "1"
     elif cls == "h_amount_format":
@@ -423,15 +470,56 @@ class Case:
     act: str
     contract: str
     wants: tuple[Want, ...] = ()
+    #: the act as it should have been written: the same pair with nothing planted
+    clean: str = ""
 
 
 def make_case(rng: random.Random, cls: str) -> Case:
     p = make_pair(rng)
     wants = plant(rng, p, cls)
-    return Case(cls, _act(p), _contract(p), tuple(wants))
+    return Case(cls, _act(p), _contract(p), tuple(wants), _act(replace(p, act={})))
 
 
-def score(case: Case) -> str | None:
+def _accepted(act: str, findings: list[Finding]) -> list[str]:
+    """The act as a Word file, a paragraph a line, annotated with ``findings`` as the product
+    annotates it (the checked text given), every tracked change accepted."""
+    with tempfile.TemporaryDirectory() as tmp:
+        src, out = Path(tmp) / "act.docx", Path(tmp) / "annotated.docx"
+        doc = Document()
+        for line in act.rstrip("\n").split("\n"):
+            doc.add_paragraph(line)
+        doc.save(str(src))
+        annotate_docx(src, findings, out, text=act)
+        return [paragraph_text(p, accepted=True) for p in Document(str(out)).paragraphs]
+
+
+def _marking(case: Case, findings: list[Finding], marked: Counter[str] | None) -> str | None:
+    """Every tracked change accepted: a line the act wrote right must stay as it was, and a line
+    it wrote wrong must read as it was (its comment says what to write) or as it should be.
+    ``marked`` counts the wrong lines and those the tracked changes put right, per class."""
+    planted = case.act.rstrip("\n").split("\n")
+    clean = case.clean.rstrip("\n").split("\n")
+    accepted = _accepted(case.act, findings)
+    if len(accepted) != len(planted):
+        return "the annotated act has another number of paragraphs"
+    if len(clean) != len(planted):
+        return None  # a class that adds or drops a line: no line to compare it with
+    wrong = 0
+    for now, written, right in zip(accepted, planted, clean, strict=True):
+        if written == right and now != written:
+            return "a tracked change rewrote a line the act wrote right"
+        if written != right and now not in (written, right):
+            return "a tracked change wrote a line neither as the act had it nor as it should be"
+        if written != right:
+            wrong += 1
+            if marked is not None:
+                marked[f"{case.cls}:right"] += now == right
+    if marked is not None:
+        marked[f"{case.cls}:wrong"] += wrong
+    return None
+
+
+def score(case: Case, marked: Counter[str] | None = None) -> str | None:
     report = check_aoa(aoa_text=case.act, contract_text=case.contract)
     found = [f for f in report.findings if f.severity in ("error", "warning")]
     got = {f.rule_id for f in found}
@@ -443,17 +531,19 @@ def score(case: Case) -> str | None:
         values = [f.expected or "" for f in mine]
         if not any((v == w.right) if w.exact else (w.right in v) for v in values):
             return f"correction of {w.actual!r}: {values} is not {w.right!r}"
-    return None
+    return _marking(case, report.findings, marked)
 
 
-def run(per_class: int, seed: int) -> tuple[Counter[str], list[tuple[Case, str]]]:
+def run(
+    per_class: int, seed: int, marked: Counter[str] | None = None
+) -> tuple[Counter[str], list[tuple[Case, str]]]:
     rng = random.Random(seed)  # noqa: S311 - reproducible test data
     passed: Counter[str] = Counter()
     failures: list[tuple[Case, str]] = []
     for cls in CLASSES:
         for _ in range(per_class):
             case = make_case(rng, cls)
-            why = score(case)
+            why = score(case, marked)
             if why is None:
                 passed[cls] += 1
             else:
@@ -467,11 +557,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--show", type=int, default=2)
     args = parser.parse_args(argv)
-    passed, failures = run(args.per_class, args.seed)
+    marked: Counter[str] = Counter()
+    passed, failures = run(args.per_class, args.seed, marked)
     total = args.per_class * len(CLASSES)
     print(f"rule 10: {sum(passed.values())} of {total} cases right")
+    print(f"  {'class':22s} {'right':>5s}   wrong lines put right by a tracked change")
     for cls in CLASSES:
-        print(f"  {cls:22s} {passed[cls]:5d} / {args.per_class}")
+        wrong, right = marked[f"{cls}:wrong"], marked[f"{cls}:right"]
+        # a harmless restyle's lines are not wrong: nothing is to put them right
+        tracked = f"{right} / {wrong}" if wrong and not cls.startswith("h_") else "-"
+        print(f"  {cls:22s} {passed[cls]:5d} / {args.per_class}   {tracked}")
     reasons = Counter(f"{c.cls}: {w}" for c, w in failures)
     for reason, n in reasons.most_common(20):
         print(f"  {n:4d}  {reason}")

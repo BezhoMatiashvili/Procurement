@@ -2660,46 +2660,127 @@ class AoaChecker:
     def _owner_at(self, pos: int) -> Party | None:
         """The act party whose block ``pos`` stands in: the one named last before it - by its
         name, its identification code or its role label ("„შემკვეთი“" over a signature). None
-        when no party is named before it."""
-        best: tuple[int, Party] | None = None
+        when no party is named before it.
+
+        A name two parties are written with - the customer's name copied for the contractor -
+        names neither: of the parties named last by it, the one is taken that was last named by
+        what only it is called, its code or its role (red team R6, R6-03)."""
+        before = [
+            (q, [s for s in _mention_starts(self.aoa.text, q) if s < pos]) for q in self.aoa.parties
+        ]
+        last = {id(q): max(starts) for q, starts in before if starts}
+        if not last:
+            return None
+        top = max(last.values())
+        tied = [q for q, _ in before if last.get(id(q)) == top]
+        if len(tied) == 1:
+            return tied[0]
+
+        def own_last(q: Party) -> int:
+            shared = {s for r, starts in before if r is not q for s in starts}
+            own = [s for r, starts in before if r is q for s in starts if s not in shared]
+            return max(own, default=-1)
+
+        return max(tied, key=own_last)
+
+    def _owner_of(self, span: tuple[int, int]) -> Party | None:
+        """The act party the words at ``span`` are written for: the party whose name the party
+        reader read right there, or else the one whose block they stand in (``_owner_at``)."""
+        a, b = span
         for q in self.aoa.parties:
-            for start in _mention_starts(self.aoa.text, q):
-                if start < pos and (best is None or start > best[0]):
-                    best = (start, q)
-        return best[1] if best else None
+            if q.span is not None and q.span[0] < b and a < q.span[1]:
+                return q
+        return self._owner_at(a)
 
-    def _places_of_director(
-        self, p: Party, form: str, spans: list[tuple[int, int]]
+    def _contract_match(self, q: Party) -> Party | None:
+        """The contract party the act's ``q`` is (``_matched_parties``); None without one."""
+        return next((m.match for m in self._matched_parties() if m.party is q), None)
+
+    def _own_places(
+        self, p: Party | None, spans: list[tuple[int, int]], right_for: Callable[[Party], bool]
     ) -> tuple[tuple[int, int] | None, tuple[tuple[int, ...], int] | None] | None:
-        """Where the wrong ``form`` of ``p``'s director is ``p``'s: the first such place, and
-        which of the form's places those are (``Finding.places``). A name copied from the other
-        party - the customer's director written for the contractor - is right where it stands
-        in the customer's block, and only the contractor's places are to be marked. Every place
-        is, when none of them is plainly another party's correct director.
+        """Where words written wrong for ``p`` are ``p``'s: the first such place, and which of
+        the words' places those are (``Finding.places``). The same words in another party's
+        block, where they are that party's own and right (``right_for``) - the customer's
+        director, name, address or account copied for the contractor - are right where they
+        stand, and only the other places are to be marked (red team R6, R6-03). Every place is,
+        when none of them is plainly another party's own. ``p`` None: words that are no one
+        party's (an account the act pays to), wrong wherever no party's block states them as
+        its own.
 
-        None when every place is another party's correct director (red team R4, AOA-R4-01): the
-        customer's director copied into the contractor's signature alone leaves the customer's
-        own preamble genitive right, and that form is no mistake of the contractor's at all."""
-        others: list[int] = []
-        for i, (start, _) in enumerate(spans):
-            owner = self._owner_at(start)
-            if owner is None or owner is p:
-                continue
-            if self.contract is not None:
-                owned = next((m.match for m in self._matched_parties() if m.party is owner), None)
-                theirs = owned.directors if owned is not None else []
-            else:
-                # with no contract (the registry check), that party's signatory as the act writes
-                # it: two directors one letter apart are two people, not a slip of either
-                theirs = owner.directors
-            if any(_same_person(form, cd) for cd in theirs):
-                others.append(i)
+        None when every place is another party's own (red team R4, AOA-R4-01)."""
+        others = [
+            i
+            for i, span in enumerate(spans)
+            if (owner := self._owner_of(span)) is not None and owner is not p and right_for(owner)
+        ]
         mine = [i for i in range(len(spans)) if i not in others]
         if not mine and others:
             return None
         if not others:
             return (spans[0] if spans else None), None
         return spans[mine[0]], (tuple(mine), len(spans))
+
+    def _places_of_director(
+        self, p: Party, form: str, spans: list[tuple[int, int]]
+    ) -> tuple[tuple[int, int] | None, tuple[tuple[int, ...], int] | None] | None:
+        """``_own_places`` of the wrong ``form`` of ``p``'s director. None when every place is
+        another party's correct director: the customer's director copied into the contractor's
+        signature alone leaves the customer's own preamble genitive right, and that form is no
+        mistake of the contractor's at all."""
+
+        def right_for(owner: Party) -> bool:
+            if self.contract is not None:
+                owned = self._contract_match(owner)
+                theirs = owned.directors if owned is not None else []
+            else:
+                # with no contract (the registry check), that party's signatory as the act writes
+                # it: two directors one letter apart are two people, not a slip of either
+                theirs = owner.directors
+            return any(_same_person(form, cd) for cd in theirs)
+
+        return self._own_places(p, spans, right_for)
+
+    def _right_for(self, rule_id: str, q: Party, written: str) -> bool:
+        """Whether ``written`` is ``q``'s own name or address, right as the source ``rule_id``
+        compares with states it: the contract party ``q`` is, or ``q``'s registry entry - with
+        no entry for ``q``, as the act writes it for ``q``, which nothing here says is wrong."""
+        stated: str | None
+        if rule_id in ("AOA.PARTY_NAME", "AOA.PARTY_ADDRESS"):
+            match = self._contract_match(q)
+            if match is None:
+                return False
+            stated = match.name if rule_id == "AOA.PARTY_NAME" else match.address
+            return bool(stated) and classify_difference(written, stated or "") is None
+        entry: RegistryEntry | None = None
+        if self.registry is not None and q.id_code:
+            entry = self.registry.lookup(q.id_code)  # type: ignore[attr-defined]
+        if rule_id == "AOA.REGISTRY_ADDRESS":
+            stated = entry.address if entry is not None and entry.address else q.address
+            return bool(stated) and compare_addresses(written, stated or "") == "same"
+        stated = entry.name if entry is not None and entry.name else q.name
+        if not stated:
+            return False
+        # the name without its legal form: the registry writes the form out in full
+        mine, theirs = split_legal_form(written)[1], split_legal_form(stated)[1]
+        return bool(mine) and bool(theirs) and classify_difference(mine, theirs) is None
+
+    def _party_places(
+        self, rule_id: str, p: Party, written: str
+    ) -> tuple[tuple[int, int] | None, tuple[tuple[int, ...], int] | None, bool]:
+        """Where a finding about ``p``'s ``written`` name or address is marked: the place it
+        points at, which of the words' places it marks (``Finding.places``), and whether a
+        tracked change may rewrite them. The words written in another party's block as that
+        party's own are no place of ``p``'s mistake (``_own_places``); when every place is, the
+        reader's party blocks are not to be trusted with a change, and the places get comments
+        only."""
+        span = self._find_span(written)
+        spans = whole_word_spans(self.aoa.text, written)
+        where = self._own_places(p, spans, lambda q: self._right_for(rule_id, q, written))
+        if where is None:
+            return span, None, False
+        first, places = where
+        return (first if first is not None else span), places, True
 
     def rule_parties(self) -> None:
         """Client rule 1 and the contract cross-check: identify by code, then verify the rest."""
@@ -2803,7 +2884,7 @@ class AoaChecker:
                 )
                 continue
             self._compare_field(
-                "AOA.PARTY_NAME", "მხარის დასახელება", "party name", p.name, match.name
+                "AOA.PARTY_NAME", "მხარის დასახელება", "party name", p.name, match.name, party=p
             )
             self._omitted_code(p, match, m.code_of)
             self._compare_field(
@@ -2812,6 +2893,7 @@ class AoaChecker:
                 "legal address",
                 p.address,
                 match.address,
+                party=p,
             )
             self._proxies(p, match)
             self._signatories(p, match, deputy=False)
@@ -3009,9 +3091,40 @@ class AoaChecker:
 
     def _id_code_party(self, p: Party, match: Party, owner: Party) -> None:
         """AOA.ID_CODE_PARTY: the act gives ``p`` (the contract's ``match``) the code the contract
-        gives ``owner``. Marked from the party's name to the code, where the act's text allows:
-        the code alone is also written, correctly, in the owner's own block."""
+        gives ``owner``. The code is marked, and corrected, where it is written for ``p``: in the
+        owner's own block it is right (``_own_places``). When the places cannot be told apart, the
+        mark runs from the party's name to the code, where the act's text allows, and corrects
+        nothing."""
         span = self._span_in_act(p.id_span, p.id_code or "")
+
+        def right_for(q: Party) -> bool:
+            theirs = self._contract_match(q)
+            return theirs is not None and theirs.id_code == p.id_code
+
+        where = None
+        if span is not None:
+            where = self._own_places(
+                p, whole_word_spans(self.aoa.text, self.aoa.as_written(*span)), right_for
+            )
+        first = where[0] if where is not None else None
+        if where is not None and first is not None:
+            span, places = first, where[1]
+            written = self.aoa.as_written(*first)
+            self._add(
+                "AOA.ID_CODE_PARTY",
+                "error",
+                f"საიდენტიფიკაციო კოდი სხვა მხარისაა: აქტში {p.name}-ის კოდად წერია {p.id_code}, "
+                f"რაც ხელშეკრულებით {owner.name}-ის კოდია; {match.name}-ის კოდია {match.id_code}",
+                f"identification code belongs to another party: the act gives {p.name} the code "
+                f"{p.id_code}, which is {owner.name}'s in the contract; {match.name}'s code is "
+                f"{match.id_code}",
+                expected=in_grouping(match.id_code, written) if match.id_code else None,
+                actual=p.id_code,
+                span=span,
+                places=places,
+                replaces=bool(match.id_code),
+            )
+            return
         named = self._span_in_act(p.span, "")
         if span is not None and named is not None and 0 <= span[0] - named[0] <= 200:
             span = (named[0], span[1])
@@ -3146,7 +3259,10 @@ class AoaChecker:
         *,
         against: Literal["contract", "registry"] = "contract",
         note: tuple[str, str] = ("", ""),
+        party: Party | None = None,
     ) -> None:
+        """``party``: the act party ``actual`` is written for, whose own places alone are
+        marked (``_party_places``)."""
         # A side with no value is not compared: a signature block restates a party's name
         # without its address, and that is how acts are written, not a gap in the act.
         if not actual or not expected:
@@ -3162,6 +3278,9 @@ class AoaChecker:
         hint_ka = " (როგორც ჩანს, ორთოგრაფიული შეცდომაა)" if diff.looks_like_typo else ""
         hint_en = " (looks like a misspelling)" if diff.looks_like_typo else ""
         source_ka, source_en = _SOURCE[against]
+        span, places, replaces = self._find_span(actual), None, True
+        if party is not None:
+            span, places, replaces = self._party_places(rule_id, party, actual)
         self._add(
             rule_id,
             "error",
@@ -3171,8 +3290,9 @@ class AoaChecker:
             f"{note[1]}",
             expected=expected,
             actual=actual,
-            span=self._find_span(actual),
-            replaces=True,
+            span=span,
+            places=places,
+            replaces=replaces,
         )
 
     def _name_cut_short(self, actual: str, expected: str) -> Difference | None:
@@ -3317,6 +3437,13 @@ class AoaChecker:
             return
         if found.verdict == "number":
             differ, stated = ", ".join(found.differ), ", ".join(contract.numbers)
+            # the number itself is corrected, where the act writes it, when which of the
+            # contract's numbers it stands for is beyond doubt; else the clause is marked, and
+            # the comment names the numbers: the contract's are no words to put in its place
+            pair = self._subject_number(act, contract, found)
+            spans = whole_word_spans(self.aoa.text, pair[0]) if pair else []
+            if pair is None or pair[2] not in spans:
+                pair = None
             self._add(
                 "AOA.SUBJECT",
                 decision.severity,
@@ -3324,10 +3451,13 @@ class AoaChecker:
                 f"{stated}",
                 f"a number in the subject differs from the contract: {differ} in the act, "
                 f"{stated} in the contract",
-                expected=stated,
-                actual=differ,
-                span=act.span,
-                replaces=True,
+                expected=pair[1] if pair else stated,
+                actual=pair[0] if pair else differ,
+                span=pair[2] if pair else act.span,
+                # that place alone: the same digits elsewhere - a list's quantity, a fee - are
+                # no part of the subject
+                places=((spans.index(pair[2]),), len(spans)) if pair else None,
+                replaces=pair is not None,
             )
             return
         shown_act, shown_contract = _shorten(act.text), _shorten(contract.text)
@@ -3351,6 +3481,26 @@ class AoaChecker:
                 f"says '{shown_act}', the contract '{shown_contract}'"
             )
         self._scope_note("AOA.SUBJECT", SUBJECT_ID, decision, ka, en, act.span)
+
+    def _subject_number(
+        self, act: ScopePart, contract: ScopePart, found: Alignment
+    ) -> tuple[str, str, tuple[int, int]] | None:
+        """The act's subject's number that stands for one of the contract's, the contract's, and
+        where the act writes it - when that is beyond doubt: one number differs, the contract
+        states one the act does not, both in plain digits, and the act writes its number once,
+        with no number in words after it ("5 (ხუთი)" would keep the wrong words). None
+        otherwise."""
+        missing = [n for n in contract.numbers if n not in act.numbers]
+        if len(found.differ) != 1 or len(missing) != 1 or act.span is None:
+            return None
+        mine, theirs = found.differ[0], missing[0]
+        if not (mine.isdigit() and theirs.isdigit()):
+            return None
+        a, b = act.span
+        hits = [m for m in _PLAIN_NUMBER.finditer(self.aoa.text, a, b) if m.group() == mine]
+        if len(hits) != 1 or _WORDS_AFTER.match(self.aoa.text, hits[0].end()):
+            return None
+        return mine, theirs, hits[0].span()
 
     def rule_services(self) -> None:
         """Client rule 10.6, the services: each service the act lists must be one the contract
@@ -3596,6 +3746,7 @@ class AoaChecker:
             a for q in self.contract.parties if q.role in _PAYEE_ROLES for a in q.accounts
         )
         if payee_accounts and all(o is not None and o.role in _PAYER_ROLES for o in owners):
+            span, places, own = self._paid_to_places(act_accounts[0])
             self._add(
                 "AOA.BANK",
                 "error",
@@ -3606,9 +3757,32 @@ class AoaChecker:
                 f"{', '.join(payee_accounts)}",
                 expected=", ".join(payee_accounts),
                 actual=", ".join(act_accounts),
-                span=self._account_span(act_accounts[0]),
-                replaces=len(payee_accounts) == 1,
+                span=span,
+                places=places,
+                replaces=len(payee_accounts) == 1 and own,
             )
+
+    def _paid_to_places(
+        self, iban: str
+    ) -> tuple[tuple[int, int] | None, tuple[tuple[int, ...], int] | None, bool]:
+        """Where the act writes the payer's account ``iban`` as the one to pay to: the place a
+        finding points at, which of the account's places it marks (``Finding.places``), and
+        whether a tracked change may rewrite them. The account written in the payer's own block
+        of the act, as the contract gives it to the payer, is right where it stands (red team R6,
+        R6-03); when that is every place, the act states the payer's account only as the payer's
+        own, and nothing there is to be rewritten."""
+
+        def right_for(q: Party) -> bool:
+            match = self._contract_match(q)
+            return match is not None and iban in match.accounts
+
+        hits = [(h.start, h.end) for h in self.aoa.bank_hits("IBAN") if h.value == iban]
+        # each way the act writes it - grouped, or not - is a quote of its own
+        for written in dict.fromkeys(self.aoa.as_written(a, b) for a, b in hits):
+            where = self._own_places(None, whole_word_spans(self.aoa.text, written), right_for)
+            if where is not None and where[0] is not None:
+                return where[0], where[1], True
+        return self._account_span(iban), None, False
 
     def _bank_pairing(self) -> None:
         """The bank code beside each account must be the one the contract gives that account.
@@ -4527,6 +4701,10 @@ class AoaChecker:
             reg_form = split_legal_form(entry.legal_form)[0]
         if act_form and reg_form and act_form != reg_form:
             written = entry.legal_form or reg_form
+            # the party's own name, where the form is written wrong - never the first "შპს" of
+            # the act, nor the same name in another party's block, each the other party's and
+            # written right (red team R6, R6-01 and R6-03)
+            span, places, replaces = self._party_places("AOA.REGISTRY_NAME", p, p.name)
             self._add(
                 "AOA.REGISTRY_NAME",
                 "error",
@@ -4536,10 +4714,9 @@ class AoaChecker:
                 f"'{reg_form}' ({written}){note[1]}",
                 expected=f"{reg_form} {act_bare}",
                 actual=p.name,
-                # the party's own name, where the form is written wrong - never the first
-                # "შპს" of the act, which may be the other party's, written right (red team R6)
-                span=self._find_span(p.name),
-                replaces=True,
+                span=span,
+                places=places,
+                replaces=replaces,
             )
         if not reg_bare:
             return
@@ -4551,6 +4728,7 @@ class AoaChecker:
             f"{act_form} {reg_bare}" if act_form else reg_bare,
             against="registry",
             note=note,
+            party=p,
         )
 
     def _registry_address(self, p: Party, entry: RegistryEntry, note: tuple[str, str]) -> None:
@@ -4578,6 +4756,7 @@ class AoaChecker:
         if verdict == "same":
             return
         if verdict == "omits":
+            span, places, _ = self._party_places("AOA.REGISTRY_ADDRESS", p, p.address)
             self._add(
                 "AOA.REGISTRY_ADDRESS",
                 "warning",
@@ -4587,7 +4766,8 @@ class AoaChecker:
                 f"registry has '{entry.address}'{note[1]}",
                 expected=entry.address,
                 actual=p.address,
-                span=self._find_span(p.address),
+                span=span,
+                places=places,
             )
             return
         self._compare_field(
@@ -4598,6 +4778,7 @@ class AoaChecker:
             entry.address,
             against="registry",
             note=note,
+            party=p,
         )
 
     def _registry_directors(self, p: Party, entry: RegistryEntry, note: tuple[str, str]) -> None:
@@ -4725,6 +4906,11 @@ def _swapped(name: str) -> str:
 
 #: How far apart an account and its bank code may be and still be read as one block.
 _PAIR_WINDOW = 400
+
+#: A number in plain digits of its own - not a part of a code, a date, a decimal or a word.
+_PLAIN_NUMBER = re.compile(r"(?<![\w.,/\-])\d+(?!\w)(?![.,/\-]\d)")
+#: A number's words in brackets after it, "5 (ხუთი)": written again by whatever corrects it.
+_WORDS_AFTER = re.compile(r"[ \u00a0]*\(")
 
 
 def _bank_pairs_with_hits(view: DocumentView) -> list[tuple[str, str, AnchorHit]] | None:

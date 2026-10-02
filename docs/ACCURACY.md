@@ -253,6 +253,24 @@ contract's value in the act's own form (a director's name in the case the act wr
   slips in the label "საიდენტიფიკაციო კოდი", and the code beside it, no longer read as the
   party's, was then reported as left out. A code is only left out when its digits are nowhere
   in the act; the misspelt label is AOA.SPELLING's.
+* **Where a correction goes (red team R6, R6-03):** the customer's own name, address or account
+  written for the contractor is right where the customer's block states it, and a tracked
+  change there made a right act wrong. Each party's value is now corrected only at the places
+  that are its own: a place written in another party's block, as that party's own value, is
+  left alone - a name told by where the party reader read it, a place by the party named last
+  before it, and a name two parties are written with by the code or role named last that only
+  one of them has. A finding whose places cannot be told apart is a comment and changes
+  nothing. The harness gained four classes (the contractor's address, and the customer's
+  address, name and account written for the contractor) and checks every case end to end: the
+  act as a Word file, annotated, every tracked change accepted, must leave each line it wrote
+  right as it was, and each line it wrote wrong as it was or as it should be. **Fresh seeds 12
+  and 13, 100 a class: 2,500 of 2,500 each**, no line written right ever changed. The check
+  also showed where a reviewer can accept a correction in one click: every code, name,
+  director, address, cadastral code, service, payment deadline, account and bank code, and now
+  a code given to the wrong party and a number in the subject (the subject's number was marked
+  on the whole clause, whose words a tracked change would have replaced by the number; it is
+  now the number alone, at its own place). A fee, a payment method and a value left out stay
+  comments: a fee in figures and words, or a sentence, is for a person to rewrite.
 * **Not compared:** the bank's name (its code and the account name the bank); the subject or
   services where only one document states them, a one-column table of services (Docling reads
   its first row as a header), and a contract whose parties are named without quotes (each a skip

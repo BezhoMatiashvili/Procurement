@@ -193,9 +193,10 @@ class TestIdCodeParty:
             "code 123456789, which is შპს ალფა ჯგუფი's in the contract; შპს ბეტა სერვისი's code "
             "is 987654321"
         )
-        # marked from the contractor's name to the code: the code alone is also, rightly,
-        # written in the client's block
-        assert finding.quote == "შპს „ბეტა სერვისი“, საიდენტიფიკაციო კოდი: 123456789"
+        # the code is marked, and corrected, in the contractor's block alone: the client's block
+        # writes it too, rightly (red team R6, R6-03)
+        assert (finding.quote, finding.replacement) == ("123456789", "987654321")
+        assert finding.places == ((1,), 2)
 
     def test_the_client_written_with_the_contractors_code_is_not_a_name_error(self) -> None:
         """The mirror case used to come out as PARTY_NAME, PARTY_ADDRESS and DIRECTOR, each with
@@ -204,7 +205,8 @@ class TestIdCodeParty:
         assert _ids(report) == ["AOA.ID_CODE_PARTY"]
         finding = report.findings[0]
         assert (finding.expected, finding.actual) == ("123456789", "987654321")
-        assert finding.quote == "შპს „ალფა ჯგუფი“. საიდენტიფიკაციო კოდი: 987654321"
+        assert (finding.quote, finding.replacement) == ("987654321", "123456789")
+        assert finding.places == ((0,), 2)
 
     def test_a_block_with_the_other_partys_name_is_a_name_error_not_a_code_error(self) -> None:
         """The contractor's block - its code, its address - under the client's name: the name

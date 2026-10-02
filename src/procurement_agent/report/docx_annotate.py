@@ -515,6 +515,25 @@ def _context(text: str, start: int, end: int) -> tuple[tuple[str, ...], tuple[st
     return tuple(fold_look_alikes(w) for w in before), tuple(fold_look_alikes(w) for w in after)
 
 
+#: How far before and after its line ``_around`` looks for the words of the lines around it.
+_AROUND_CHARS = 300
+
+
+def _around(text: str, start: int, end: int) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The last words before the line that holds ``text[start:end]`` and the first after it,
+    as many as ``_context`` takes, look-alike letters folded: what tells two places apart whose
+    lines say the same - a name alone on a signature line under each party's role."""
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", end)
+    line_end = len(text) if line_end < 0 else line_end
+    before = _TOKEN.findall(text[max(0, line_start - _AROUND_CHARS) : line_start])
+    after = _TOKEN.findall(text[line_end : line_end + _AROUND_CHARS])[:_CONTEXT_WORDS]
+    return (
+        tuple(fold_look_alikes(w) for w in before[-_CONTEXT_WORDS:]),
+        tuple(fold_look_alikes(w) for w in after),
+    )
+
+
 def _chosen_places(
     document: DocumentType,
     quote: str,
@@ -525,12 +544,13 @@ def _chosen_places(
     whole-word places in the checked text), and whether they are surely those places.
 
     With the checked ``text``, each chosen place is found by the words around it there, in the
-    file: the order the file shows its parts in is not always the order the check read them in
-    (a header the parser appends, a table read by columns), and a tracked change must never
-    rewrite another copy of the words, written right (red team R6). Without it, or when the
-    words around a place do not single one out, the ordinals are taken when the file shows as
-    many places as the checked text did - then surely those places only without the text to
-    say otherwise - and every place is marked, none surely, when it shows another number."""
+    file - on its own line, and when two lines say the same, on the lines around it: the order
+    the file shows its parts in is not always the order the check read them in (a header the
+    parser appends, a table read by columns), and a tracked change must never rewrite another
+    copy of the words, written right (red team R6). Without it, or when the words around a
+    place do not single one out, the ordinals are taken when the file shows as many places as
+    the checked text did - then surely those places only without the text to say otherwise -
+    and every place is marked, none surely, when it shows another number."""
     wanted, total = places
     found: list[_Place] = []
     bounds: list[tuple[int, int]] = []  # each place in the file's text, its paragraphs joined
@@ -556,6 +576,9 @@ def _chosen_places(
                 break
             want = _context(text, *occurrences[i])
             matches = [k for k, c in enumerate(contexts) if c == want]
+            if len(matches) > 1:
+                wide = _around(text, *occurrences[i])
+                matches = [k for k in matches if _around(file_text, *bounds[k]) == wide]
             if len(matches) != 1:
                 break
             chosen.append(found[matches[0]])
@@ -569,7 +592,7 @@ def _chosen_places(
 
 def paragraphs_in_order(container: object) -> Iterator[Paragraph]:
     """Every paragraph in reading order - a table's between the paragraphs around it, a content
-    control's where it stands, a text box's after the paragraph that anchors it - each once: a
+    control's where it stands, a text box's before the paragraph that anchors it - each once: a
     merged cell, which python-docx returns for every grid column it spans, is read once, as a
     text reader reads it."""
     seen: set[object] = set()  # the cells' elements, held so that each keeps its identity

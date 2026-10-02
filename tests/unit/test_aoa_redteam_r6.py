@@ -77,11 +77,15 @@ def _word(lines: list[str]) -> bytes:
     return out.getvalue()
 
 
-def _accepted(tmp_path: Path, lines: list[str], findings: list[Finding]) -> list[str]:
-    """The act's paragraphs once annotated and every tracked change accepted."""
+def _accepted(
+    tmp_path: Path, lines: list[str], findings: list[Finding], *, checked: bool = False
+) -> list[str]:
+    """The act's paragraphs once annotated and every tracked change accepted; ``checked``: the
+    annotator is given the checked text, as the API gives it."""
     src = tmp_path / "act.docx"
     src.write_bytes(_word(lines))
-    out, _ = annotate_docx(src, findings, tmp_path / "o.docx")
+    text = "\n".join(lines) + "\n" if checked else None
+    out, _ = annotate_docx(src, findings, tmp_path / "o.docx", text=text)
     return [paragraph_text(p, accepted=True) for p in Document(str(out)).paragraphs]
 
 
@@ -124,6 +128,107 @@ class TestAlignmentOfWords:
             (0, len(written), "GE15ZZ0000000123456789")
         ]
         assert tracked_edits("405-987-621", "405987612") == [(0, 11, "405987612")]
+
+
+# --- R6-03: a value copied from the other party, corrected only where it is wrong ---------------
+
+_CUSTOMER_ADDRESS = "ქ. თბილისი, წერეთლის 41"
+_CONTRACTOR_ADDRESS = "ქ. ქუთაისი, ნინოშვილის 8"
+_CUSTOMER_ACCOUNT = "GE64ZZ0000000987654321"
+_CONTRACTOR_ACCOUNT = "GE15ZZ0000000123456789"
+
+
+def _customer_account(text: str) -> str:
+    """The customer's own account, in its block of the preamble."""
+    return text.replace(
+        "წერეთლის 41 (შემდგომში", f"წერეთლის 41, ანგარიში: {_CUSTOMER_ACCOUNT} (შემდგომში"
+    )
+
+
+def _each_partys_account(text: str) -> str:
+    return _customer_account(text).replace(
+        "ნინოშვილის 8 (შემდგომში", f"ნინოშვილის 8, ანგარიში: {_CONTRACTOR_ACCOUNT} (შემდგომში"
+    )
+
+
+def _act(lines: list[str]) -> str:
+    return "\n".join(lines) + "\n"
+
+
+class TestCopiedFromTheOtherParty:
+    """The customer's value written for the contractor is right where the customer's block
+    states it: a tracked change there would make a right act wrong."""
+
+    def test_an_address_is_corrected_in_the_contractors_block_only(self, tmp_path: Path) -> None:
+        lines = [line.replace(_CONTRACTOR_ADDRESS, _CUSTOMER_ADDRESS) for line in ACT_LINES]
+        [finding] = [f for f in _of(_check(_act(lines)), "AOA.PARTY_ADDRESS") if f.replacement]
+        accepted = _accepted(tmp_path, lines, [finding], checked=True)
+        assert accepted[1] == ACT_LINES[1]
+        assert accepted[2] == ACT_LINES[2]
+
+    def test_the_contractors_own_copies_are_all_corrected(self, tmp_path: Path) -> None:
+        """Near miss: the same wrong address restated in the contractor's signature block is the
+        contractor's too."""
+        lines = [line.replace(_CONTRACTOR_ADDRESS, _CUSTOMER_ADDRESS) for line in ACT_LINES]
+        lines.append(f"მისამართი: {_CUSTOMER_ADDRESS}")
+        [finding] = [f for f in _of(_check(_act(lines)), "AOA.PARTY_ADDRESS") if f.replacement]
+        accepted = _accepted(tmp_path, lines, [finding], checked=True)
+        assert accepted[1] == ACT_LINES[1]
+        assert accepted[2] == ACT_LINES[2]
+        assert accepted[-1] == f"მისამართი: {_CONTRACTOR_ADDRESS}"
+
+    def test_an_address_against_the_registry_likewise(self, tmp_path: Path) -> None:
+        lines = [line.replace(_CONTRACTOR_ADDRESS, _CUSTOMER_ADDRESS) for line in ACT_LINES]
+        entry = RegistryEntry(
+            id_code="405987612",
+            name="შპს სიგმა სერვისი",
+            address=_CONTRACTOR_ADDRESS,
+            source="extract",
+        )
+        report = _check(_act(lines), None, registry=RegistrySource.of(None, [entry]))
+        [finding] = [f for f in _of(report, "AOA.REGISTRY_ADDRESS") if f.replacement]
+        accepted = _accepted(tmp_path, lines, [finding], checked=True)
+        assert accepted[1] == ACT_LINES[1]
+        assert accepted[2] == ACT_LINES[2]
+
+    def test_the_customers_account_is_corrected_in_the_payment_line_only(
+        self, tmp_path: Path
+    ) -> None:
+        lines = [_customer_account(line) for line in ACT_LINES]
+        lines[8] = lines[8].replace(_CONTRACTOR_ACCOUNT, _CUSTOMER_ACCOUNT)
+        report = _check(_act(lines), _each_partys_account(CONTRACT))
+        [finding] = [f for f in _of(report, "AOA.BANK") if f.replacement]
+        assert finding.replacement == _CONTRACTOR_ACCOUNT
+        accepted = _accepted(tmp_path, lines, [finding], checked=True)
+        assert accepted[1] == lines[1]  # the customer's own, where its block states it
+        assert accepted[8] == ACT_LINES[8]
+
+    def test_the_customers_account_in_its_own_block_alone_is_no_change(
+        self, tmp_path: Path
+    ) -> None:
+        """Near miss: an act that states only the customer's account, in the customer's block,
+        is still reported, but nothing written there is wrong to rewrite."""
+        lines = [_customer_account(line) for line in ACT_LINES]
+        lines[8] = "ბანკის კოდი: ZZBKGE22"
+        report = _check(_act(lines), _each_partys_account(CONTRACT))
+        [finding] = [f for f in _of(report, "AOA.BANK") if f.actual == _CUSTOMER_ACCOUNT]
+        assert finding.replacement is None
+        assert finding.expected == _CONTRACTOR_ACCOUNT
+
+    def test_a_name_is_corrected_where_it_names_the_contractor(self, tmp_path: Path) -> None:
+        lines = list(ACT_LINES)
+        lines[2] = lines[2].replace("შპს „სიგმა სერვისი“", "შპს „ომეგა ტრეიდი“")
+        lines[15] = "შპს „ომეგა ტრეიდი“"
+        report = _check(_act(lines))
+        findings = [f for f in _of(report, "AOA.PARTY_NAME") if f.replacement]
+        assert findings
+        accepted = _accepted(tmp_path, lines, findings, checked=True)
+        assert accepted[1] == ACT_LINES[1]
+        assert accepted[12] == ACT_LINES[12]
+        assert accepted[2] == ACT_LINES[2]
+        assert accepted[15] == ACT_LINES[15]
+        # the contractor's director, under its role and the name copied for it, is its own
+        assert _of(report, "AOA.DIRECTOR") == []
 
 
 # --- R6-02, R6-07, R6-12, R6-15, R6-16: where a tracked change may go --------------------------
@@ -186,6 +291,29 @@ class TestWhereATrackedChangeGoes:
             "ხელშეკრულება დაიდო 20.03.2026 წელს.",
             "აქტი გაფორმდა 25.03.2026 წელს.",
         ]
+
+    SIGNATURES = ("„შემკვეთი“", "20.03.2026", "„შემსრულებელი“", "20.03.2026")
+
+    def test_lines_alike_are_told_apart_by_the_lines_around_them(self, tmp_path: Path) -> None:
+        """R6-03: a value alone on its line under each party's role: the role above it says
+        which place is which, in the file as in the checked text."""
+        checked = "\n".join(self.SIGNATURES) + "\n"
+        finding = _finding("20.03.2026", "25.03.2026", places=((1,), 2))
+        src = tmp_path / "act.docx"
+        src.write_bytes(_word(list(self.SIGNATURES)))
+        out, _ = annotate_docx(src, [finding], tmp_path / "o.docx", text=checked)
+        accepted = [paragraph_text(p, accepted=True) for p in Document(str(out)).paragraphs]
+        assert accepted == ["„შემკვეთი“", "20.03.2026", "„შემსრულებელი“", "25.03.2026"]
+
+    def test_lines_alike_around_other_lines_get_comments_alone(self, tmp_path: Path) -> None:
+        """Near miss: a file that writes the blocks in another order than the checked text has
+        them: the lines around no place are the ones the check read, and nothing is rewritten."""
+        checked = "\n".join(self.SIGNATURES) + "\n"
+        finding = _finding("20.03.2026", "25.03.2026", places=((1,), 2))
+        src = tmp_path / "act.docx"
+        src.write_bytes(_word([*self.SIGNATURES[2:], *self.SIGNATURES[:2]]))
+        out, _ = annotate_docx(src, [finding], tmp_path / "o.docx", text=checked)
+        assert _revisions(out) == 0
 
     def test_a_value_in_an_inline_content_control_is_found(self, tmp_path: Path) -> None:
         """R6-02: a date picker inside the paragraph: Docling reads it, and so must the marks."""
