@@ -309,6 +309,16 @@ body's text is left as it was.
   on every act the text with all changes rejected is the act's own, paragraph for paragraph, the
   text with all changes accepted holds every insertion, and LibreOffice opens every file. The
   strict gold's comment places are unchanged (0 occurrence errors).
+* **An act that arrives as a PDF** (`report/pdf_annotate.py`, `?format=pdf`, the report's PDF
+  download) is returned with a highlight on the words at fault and the comment as its note,
+  found as in a Word file - quotes, spaces and look-alike letters set aside, since a PDF's text
+  often lacks the quote marks its font draws and breaks a phrase across lines (one quad a line).
+  A scanned page has no characters: the line or table cell Docling's OCR read the words in is
+  highlighted, and the note says so. The summary and the findings no words stand for are a note
+  on the first page; nothing but annotations is added (tests check for no script, action or
+  link). Measured on the synthetic fixtures and an upload through the API end to end; the gold
+  sets hold no PDF act, so the client's scans are checked inside the image (OCR) in the final
+  run.
 
 ### Scanned PDFs (OCR inside the Docker image, Tesseract `kat+eng`, 216 dpi)
 

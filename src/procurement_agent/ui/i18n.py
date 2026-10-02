@@ -182,9 +182,13 @@ STRINGS: dict[str, tuple[str, str]] = {
     "aoa.contract": ("Contract", "ხელშეკრულება"),
     "aoa.contract.none": ("not supplied", "არ არის ატვირთული"),
     "aoa.download": ("Download the act with comments", "ჩამოტვირთეთ აქტი შენიშვნებით"),
+    "aoa.download.pdf": (
+        "Download the act with notes (PDF)",
+        "ჩამოტვირთეთ აქტი შენიშვნებით (PDF)",
+    ),
     "aoa.download.unavailable": (
-        "Word comments can only be attached to a .docx act; this one is a {kind}.",
-        "შენიშვნების ჩაწერა შესაძლებელია მხოლოდ .docx აქტში; ეს ფაილი არის {kind}.",
+        "Notes can only be written into a .docx or a .pdf act; this one is a {kind}.",
+        "შენიშვნების ჩაწერა შესაძლებელია მხოლოდ .docx ან .pdf აქტში; ეს ფაილი არის {kind}.",
     ),
     "aoa.rerun": ("Re-run with these details", "ხელახლა შემოწმება ამ მონაცემებით"),
     "aoa.rerun.choose": ("Choose the contractor type", "აირჩიეთ შემსრულებლის ტიპი"),

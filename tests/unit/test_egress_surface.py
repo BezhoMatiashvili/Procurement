@@ -20,6 +20,15 @@ NETWORK_IMPORTS = {
     "httpx": {"llm/ollama_client.py"},  # the one outbound path: the model server
     "socket": {"security/egress.py"},  # the guard that watches every other one
 }
+#: Raw C bindings, and the only file that may import each. PDFium's own API, for what its Python
+#: wrapper does not offer: the highlights and notes the annotated PDF carries. Fixed setters on
+#: annotations the module itself creates, under PDFIUM_LOCK - no library is loaded, nothing
+#: reaches a network; ``ctypes`` itself stays forbidden below.
+FFI_IMPORTS = {
+    "pypdfium2.raw": {"report/pdf_annotate.py"},
+    "pypdfium2_raw": set(),
+}
+
 #: Never, anywhere in the application.
 FORBIDDEN_IMPORTS = {
     "requests",
@@ -109,6 +118,16 @@ def test_no_forbidden_module_is_imported() -> None:
             if _under(name, FORBIDDEN_IMPORTS):
                 offenders.append(f"{path.relative_to(SRC)} imports {name}")
     assert offenders == []
+
+
+@pytest.mark.parametrize("module", sorted(FFI_IMPORTS))
+def test_each_raw_binding_is_imported_by_its_one_owner(module: str) -> None:
+    importers = {
+        str(p.relative_to(SRC))
+        for p in _modules()
+        if any(_under(n, {module}) for n in _imports(ast.parse(p.read_text(encoding="utf-8"))))
+    }
+    assert importers == FFI_IMPORTS[module]
 
 
 @pytest.mark.parametrize("module", sorted(NETWORK_IMPORTS))

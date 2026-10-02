@@ -303,6 +303,12 @@ reach every copy of the data, which is why the volume belongs on an encrypted di
 * Dependencies with native code (Docling, PyTorch, pypdfium2, Pillow) are the main attack
   surface for malformed documents; they are kept current via the lock file and run inside the
   hardened container described above - but in the same process as the web server (§10).
+* The annotated PDF (`report/pdf_annotate.py`) calls PDFium's C API through pypdfium2's raw
+  bindings, for the highlights and notes its Python wrapper does not offer: fixed annotation
+  setters on annotations the module creates, under the process-wide PDFium lock. It is the one
+  module allowed that import (`tests/unit/test_egress_surface.py`, `FFI_IMPORTS`); `ctypes`
+  itself stays forbidden everywhere, and the output carries nothing but annotations - no
+  action, link or script (`tests/unit/test_pdf_annotate.py`).
 * Model files are checked against a manifest at start (§2); the formats in use (safetensors, ONNX)
   cannot carry code the way a pickle can, so this detects a swapped or truncated weight file, not
   a code-execution attempt.

@@ -62,6 +62,7 @@ from procurement_agent.extraction.pipeline import (
     upload_path,
 )
 from procurement_agent.fx.provider import open_rate_provider
+from procurement_agent.ingestion.docling_service import load_document
 from procurement_agent.ingestion.xlsx_size import WorkbookTooLargeError
 from procurement_agent.jobs.worker import Worker
 from procurement_agent.llm.base import LLMClient
@@ -75,6 +76,7 @@ from procurement_agent.report.docx_annotate import (
     annotate_docx,
     summary_comment,
 )
+from procurement_agent.report.pdf_annotate import PdfItem, annotate_pdf, docling_items
 from procurement_agent.security.audit import audit
 from procurement_agent.security.auth import Principal, authenticate
 from procurement_agent.security.capacity import report_capacity
@@ -83,6 +85,7 @@ router = APIRouter(prefix="/api/v1/checks", tags=["checks"])
 
 _DOCX_MEDIA = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 _XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+_PDF_MEDIA = "application/pdf"
 
 
 #: The lari's first day: no exchange rate is older.
@@ -415,7 +418,7 @@ def check_acceptance_act(
     principal: Annotated[Principal, Depends(authenticate)],
     session: Annotated[Session, Depends(get_session)],
     settings: Annotated[Settings, Depends(get_settings)],
-    fmt: Annotated[Literal["json", "docx"], Query(alias="format")] = "json",
+    fmt: Annotated[Literal["json", "docx", "pdf"], Query(alias="format")] = "json",
 ) -> Response:
     aoa = owned_document(session, principal, body.aoa_document_id)
     contract = (
@@ -446,6 +449,8 @@ def check_acceptance_act(
     )
     if fmt == "json":
         return Response(report.model_dump_json(), media_type="application/json")
+    if fmt == "pdf":
+        return annotated_pdf(settings, aoa, report)
     return annotated_docx(settings, aoa, report)
 
 
@@ -466,6 +471,38 @@ def annotated_docx(settings: Settings, aoa: Document, report: CheckReport) -> Re
         media_type=_DOCX_MEDIA,
         headers={
             "Content-Disposition": f'attachment; filename="checked-{aoa.id[:8]}.docx"',
+            "X-Finding-Count": str(len(report.findings)),
+            "X-Error-Count": str(len(report.errors)),
+        },
+    )
+
+
+def annotated_pdf(settings: Settings, aoa: Document, report: CheckReport) -> Response:
+    """A copy of a PDF act with a highlight and a note for each finding, and a note on its first
+    page saying what could not be checked. A scanned act is marked by the lines Docling read."""
+    if aoa.kind != "pdf":
+        raise HTTPException(
+            status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            f"PDF notes can only be written into a PDF act; this one is a {aoa.kind}",
+        )
+    source = upload_path(settings, aoa.id, aoa.kind)
+    items: list[PdfItem] = []
+    if is_scanned_pdf(settings, aoa.id, aoa.kind):
+        stored = result_dir(settings, aoa.id) / "docling.json"
+        if stored.exists():
+            items = docling_items(load_document(stored))
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "annotated.pdf"
+        try:
+            annotate_pdf(source, report.findings, out, summary=summary_comment(report), items=items)
+        except UnsupportedDocumentError as e:
+            raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, str(e)) from e
+        data = out.read_bytes()
+    return Response(
+        data,
+        media_type=_PDF_MEDIA,
+        headers={
+            "Content-Disposition": f'attachment; filename="checked-{aoa.id[:8]}.pdf"',
             "X-Finding-Count": str(len(report.findings)),
             "X-Error-Count": str(len(report.errors)),
         },

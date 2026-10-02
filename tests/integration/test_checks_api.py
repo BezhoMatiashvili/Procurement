@@ -474,6 +474,59 @@ def test_docx_output_is_refused_for_a_spreadsheet(client: TestClient) -> None:
     assert "Scanned PDFs" in r.json()["detail"]
 
 
+def test_pdf_output_is_refused_for_an_act_that_is_no_pdf(client: TestClient) -> None:
+    act = _upload(client, "act.xlsx", ACT_LINES)
+    r = client.post("/api/v1/checks/aoa?format=pdf", headers=H, json={"aoa_document_id": act})
+    assert r.status_code == 415
+    assert "PDF act" in r.json()["detail"]
+
+
+@pytest.mark.docling
+def test_a_pdf_act_comes_back_with_its_notes(client: TestClient) -> None:
+    """A PDF act (the synthetic offer, parsed by Docling) is returned as a PDF with a note on its
+    first page, as the client asks for an act that arrives as a PDF."""
+    import ctypes
+
+    import pypdfium2 as pdfium
+    import pypdfium2.raw as pdfium_c
+
+    data = (Path(__file__).resolve().parents[1] / "fixtures" / "offer_ka_en.pdf").read_bytes()
+    r = client.post(
+        "/api/v1/documents", headers=H, files={"file": ("act.pdf", data, "application/pdf")}
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    deadline = time.time() + 300
+    while time.time() < deadline:
+        job = client.get(f"/api/v1/jobs/{body['parse_job_id']}", headers=H).json()
+        if job["status"] in ("done", "failed"):
+            assert job["status"] == "done", job
+            break
+        time.sleep(0.5)
+    act = str(body["document"]["id"])
+    r = client.post("/api/v1/checks/aoa?format=pdf", headers=H, json={"aoa_document_id": act})
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"] == "application/pdf"
+    pdf = pdfium.PdfDocument(r.content)
+    try:
+        page = pdf[0]
+        count = pdfium_c.FPDFPage_GetAnnotCount(page)
+        assert count >= 1
+        notes = []
+        for k in range(count):
+            a = pdfium_c.FPDFPage_GetAnnot(page, k)
+            size = pdfium_c.FPDFAnnot_GetStringValue(a, b"Contents", None, 0)
+            buf = ctypes.create_string_buffer(size)
+            pdfium_c.FPDFAnnot_GetStringValue(
+                a, b"Contents", ctypes.cast(buf, ctypes.POINTER(pdfium_c.FPDF_WCHAR)), size
+            )
+            notes.append(buf.raw.decode("utf-16-le"))
+            pdfium_c.FPDFPage_CloseAnnot(a)
+    finally:
+        pdf.close()
+    assert any("Summary" in n for n in notes)
+
+
 def test_the_rate_limiter_is_actually_wired(tmp_path: Path) -> None:
     """The Limiter and its 429 handler existed but no middleware applied them, so the
     configured limit never took effect."""

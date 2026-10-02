@@ -71,7 +71,8 @@ curl -s -H "$K" -X POST localhost:8000/api/v1/checks/aoa \
      -d '{"aoa_document_id":"<act>","contract_document_id":"<contract>"}'
 # ?format=docx returns the act with one Word comment per finding, each correction that
 # replaces words as a tracked change (accept or reject it in Word), and a note on the first
-# word naming what could not be checked. For an act in a foreign
+# word naming what could not be checked; ?format=pdf returns a PDF act with a highlight and a
+# note on the words at fault (a scan: on the line OCR read them in). For an act in a foreign
 # currency, "advance_amount" (in the act's currency; 0 = none) and "advance_date" (ISO) give the
 # advance paid; left out, the act's own is used. "rates": [{"currency":"USD","date":"2026-09-10",
 # "rate":"2.6104"}] types in a day's rate (lari per one unit), used instead of the imported one

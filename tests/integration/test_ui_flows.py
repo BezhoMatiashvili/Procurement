@@ -397,15 +397,18 @@ def test_the_act_report_separates_skipped_rules_from_findings(client: TestClient
     assert not any("AOA.CONTRACT_*" in block for block in findings_lists)
 
 
-def test_the_annotated_download_is_offered_only_for_a_word_act(client: TestClient) -> None:
-    """annotate_docx refuses spreadsheets as well as scans, so the test is 'is it a .docx',
-    not 'is it not a PDF'."""
+def test_the_annotated_download_is_offered_only_for_a_word_or_a_pdf_act(
+    client: TestClient,
+) -> None:
+    """A Word act gets the file with comments, a PDF act the PDF with notes
+    (``test_checks_api``); a spreadsheet neither, and the page says why."""
     act = _act(client)
-    assert "annotated.docx" in client.get(f"/ui/checks/aoa?act={act}").text
+    page = client.get(f"/ui/checks/aoa?act={act}").text
+    assert "annotated.docx" in page and "annotated.pdf" not in page
 
     sheet = _upload(client, "act.xlsx", build_boq(LINES), XLSX)
     body = client.get(f"/ui/checks/aoa?act={sheet}").text
-    assert "annotated.docx" not in body
+    assert "annotated.docx" not in body and "annotated.pdf" not in body
     assert "xlsx" in body  # and it says why, rather than hiding the button
 
 

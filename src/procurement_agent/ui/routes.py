@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
-from typing import Annotated, cast, get_args
+from typing import Annotated, Literal, cast, get_args
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, UploadFile, status
@@ -24,6 +24,7 @@ from procurement_agent.api import documents as docs_api
 from procurement_agent.api.checks import (
     BoqCheckRequest,
     annotated_docx,
+    annotated_pdf,
     boq_documents,
     compare_annotated_docx,
     compare_xlsx,
@@ -724,11 +725,54 @@ def aoa_annotated(
     """A plain link, not a JS blob: works with JavaScript off and needs no CSP argument. The
     report's own query rides along, so the Word file carries the model's reading when the page
     does."""
+    return _aoa_file(
+        request, principal, session, settings, act, contract, contractor_type,
+        (advance_amount, advance_date), review, registry, fmt="docx",
+    )  # fmt: skip
+
+
+@router.get("/checks/aoa/annotated.pdf")
+def aoa_annotated_pdf(
+    request: Request,
+    principal: Annotated[Principal, Depends(authenticate)],
+    session: Annotated[Session, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    act: str,
+    contract: str | None = None,
+    contractor_type: Annotated[str | None, Query(max_length=32)] = None,
+    advance_amount: Annotated[str | None, Query(max_length=40)] = None,
+    advance_date: Annotated[str | None, Query(max_length=40)] = None,
+    review: str | None = None,
+    registry: Annotated[str | None, Query(max_length=600)] = None,
+) -> Response:
+    """The same link for an act that arrived as a PDF: the PDF with a highlight and a note for
+    each finding."""
+    return _aoa_file(
+        request, principal, session, settings, act, contract, contractor_type,
+        (advance_amount, advance_date), review, registry, fmt="pdf",
+    )  # fmt: skip
+
+
+def _aoa_file(
+    request: Request,
+    principal: Principal,
+    session: Session,
+    settings: Settings,
+    act: str,
+    contract: str | None,
+    contractor_type: str | None,
+    advance_query: tuple[str | None, str | None],
+    review: str | None,
+    registry: str | None,
+    *,
+    fmt: Literal["docx", "pdf"],
+) -> Response:
+    """The act checked as the report shows it, as a file with the findings marked in it."""
     try:
         aoa_doc, contract_doc, ctype = _aoa_inputs(
             session, principal, act, contract, contractor_type
         )
-        advance = parse_advance(advance_amount, advance_date)
+        advance = parse_advance(*advance_query)
         review_row = owned_review_job(session, principal, review, aoa_doc, contract_doc)
         report = run_aoa(
             settings,
@@ -740,14 +784,15 @@ def aoa_annotated(
             entered_rates=_typed_rates(request)[0],
             registry_docs=_extracts(session, principal, registry),
         )
-        # 415 for a scan or a spreadsheet: an HTML navigation must not land on raw JSON.
-        resp = annotated_docx(settings, aoa_doc, report)
+        # 415 for a file of the other kind: an HTML navigation must not land on raw JSON.
+        writer = annotated_docx if fmt == "docx" else annotated_pdf
+        resp = writer(settings, aoa_doc, report)
     except HTTPException as e:
         return _http_error(request, principal, e, "/ui/start/aoa")
     audit(
         session,
         actor=principal.user,
-        action="check.aoa.docx",
+        action=f"check.aoa.{fmt}",
         document_id=aoa_doc.id,
         ip=client_ip(request),
         detail=f"{len(report.errors)} error(s), {len(report.findings)} finding(s)",

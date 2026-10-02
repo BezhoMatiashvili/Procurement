@@ -895,7 +895,7 @@ def test_an_act_not_ready_renders_a_page_not_json(ui: TestClient) -> None:
         doc = s.get(Document, act)
         assert doc is not None
         doc.status = DocumentStatus.parsing
-    for path in ("/ui/checks/aoa", "/ui/checks/aoa/annotated.docx"):
+    for path in ("/ui/checks/aoa", "/ui/checks/aoa/annotated.docx", "/ui/checks/aoa/annotated.pdf"):
         r = ui.get(f"{path}?act={act}")
         assert _is_page(r)
         assert "not ready" in r.text

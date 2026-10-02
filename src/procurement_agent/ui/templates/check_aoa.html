@@ -33,15 +33,17 @@
   <div class="actions">
     {% if act.kind == "docx" %}
     <a class="btn" href="/ui/checks/aoa/annotated.docx?{{ query }}">{{ icon("download") }}{{ t("aoa.download") }}</a>
+    {% elif act.kind == "pdf" %}
+    <a class="btn" href="/ui/checks/aoa/annotated.pdf?{{ query }}">{{ icon("download") }}{{ t("aoa.download.pdf") }}</a>
     {% endif %}
     <button type="button" class="secondary js-only" data-print>{{ icon("print") }}{{ t("compare.print") }}</button>
     <a class="btn ghost" href="/ui/start/aoa">{{ icon("refresh") }}{{ t("aoa.again") }}</a>
   </div>
 </div>
 
-{# Disabled-with-a-reason, not hidden: a missing button reads as a bug. annotate_docx refuses
-   spreadsheets as well as scans, so the test is "is it a .docx", not "is it not a PDF". #}
-{% if act.kind != "docx" %}
+{# Disabled-with-a-reason, not hidden: a missing button reads as a bug. A Word act gets comments
+   and tracked changes, a PDF act (a scan too) highlights with notes; a spreadsheet neither. #}
+{% if act.kind not in ("docx", "pdf") %}
 <p class="muted small">{{ icon("info") }} {{ t("aoa.download.unavailable", kind=act.kind) }}</p>
 {% endif %}
 
