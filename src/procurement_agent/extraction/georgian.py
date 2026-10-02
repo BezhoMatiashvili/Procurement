@@ -332,6 +332,8 @@ def in_case_of(wrong: str, right: str, *, written: Collection[str] = ()) -> str:
 
     >>> in_case_of("გიორგი კალანია", "გიორგი კალანაძის")
     'გიორგი კალანაძე'
+    >>> in_case_of("ლევან მეჩაშვილი", "ლევანის მელაშვილის")
+    'ლევან მელაშვილი'
     """
     forms = list(written)
     right_lemma = lemma(right)
@@ -345,8 +347,72 @@ def in_case_of(wrong: str, right: str, *, written: Collection[str] = ()) -> str:
         ]
         case = _case_meant(wrong, right_lemma, {phrase_case(right), *(c for _, c in mine)})
         same = [f for f, c in mine if c == case]
-        return same[0] if same else inflect(right_lemma, case)
-    return inflect(right_lemma, _case_meant(wrong, right_lemma, {phrase_case(right)}))
+        shown = [right, *(f for f, _ in mine)]
+        return _in_own_words(wrong, same[0] if same else inflect(right_lemma, case), shown)
+    return _in_own_words(
+        wrong, inflect(right_lemma, _case_meant(wrong, right_lemma, {phrase_case(right)})), [right]
+    )
+
+
+def _declined_words(shown: Collection[str], count: int) -> set[int]:
+    """Which of a ``count``-word name's words before the last the documents decline with it:
+    in one of the ``shown`` forms, written in the case of its last word, other than the
+    nominative ("ლევანის მელაშვილის"). Not a word whose case differs from the last word's - the
+    fixed genitive of "საქართველოს ბანკი"."""
+    out: set[int] = set()
+    for form in shown:
+        _, core, _ = _split_quotes(normalize_spaces(form))
+        parts = core.split()
+        if len(parts) != count or (case := case_of(parts[-1])) == "nom":
+            continue
+        out |= {i for i, word in enumerate(parts[:-1]) if case_of(word) == case}
+    return out
+
+
+def _in_own_words(wrong: str, corrected: str, shown: Collection[str]) -> str:
+    """``corrected`` with its words before the last in the act's own form, where they decline.
+
+    Only the last word of a name declines by the case model. A document may decline the words
+    before it too - a person's first name, "ლევანის მელაშვილის" - and the forms the documents
+    write of the right name, ``shown``, tell which (``_declined_words``). Such a word is given
+    as ``wrong`` writes it when that is a form of it ("ლევან" for "ლევანის": the act's own
+    grammar), and a misspelled one in its form nearest the slip (``_nearest_form``). Any other
+    word - the nominative "ბეტა" of "ბეტა სერვისი", the fixed genitive of "საქართველოს ბანკი"
+    - is the right word as written."""
+    _, wrong_core, _ = _split_quotes(normalize_spaces(wrong))
+    lead, core, trail = _split_quotes(normalize_spaces(corrected))
+    mine, theirs = wrong_core.split(), core.split()
+    if len(mine) != len(theirs) or len(theirs) < 2:
+        return corrected
+    declined, case = _declined_words(shown, len(theirs)), case_of(theirs[-1])
+    head: list[str] = []
+    for i, (w, c) in enumerate(zip(mine[:-1], theirs[:-1], strict=True)):
+        if i not in declined or w == c:
+            head.append(c)
+        else:
+            head.append(w if same_word(w, c) else _nearest_form(w, c, case))
+    return lead + " ".join([*head, theirs[-1]]) + trail
+
+
+#: How many edits a misspelled word may be from the form of the right word it was meant in; a
+#: word further from every form is another word, and the right one is given as written.
+_SLIP_EDITS = 2
+
+
+def _nearest_form(slip: str, right: str, case: Case) -> str:
+    """The form of the declining word ``right`` that the misspelled ``slip`` was meant in,
+    ``case`` being the case of the phrase's last word: of the forms the phrase allows - that
+    case, the nominative, or the short form a first name takes before a surname ("ლევან" of
+    "ლევანი") - the one fewest edits from the slip; ``right`` as written on a tie, or when
+    ``slip`` is no slip of it (another name: "გელა" for "დავით")."""
+    if not is_georgian_word(right):
+        return right
+    base = lemma_word(right)
+    forms = [right, base, inflect_word(base, case)]
+    if len(base) > 3 and base.endswith("ი") and base[-2] not in _VOWELS:
+        forms.append(base[:-1])
+    best = min(forms, key=lambda f: damerau(slip, f))
+    return best if damerau(slip, best) <= _SLIP_EDITS else right
 
 
 #: A word's last syllable with the vowel some nouns drop before their ending put back: "წერეთლი"
@@ -394,7 +460,9 @@ def _case_meant(wrong: str, right_lemma: str, written: Collection[Case] = ()) ->
     if not wrong_core.split() or not right_core.split():
         return read
     last, name = wrong_core.split()[-1], right_core.split()[-1]
-    if not is_georgian_word(last):
+    if not is_georgian_word(last) or last == inflect_word(name, read):
+        # the name written right in the case its ending reads: the slip is elsewhere in the
+        # phrase ("ლევაჩ მელაშვილი"), and the case is what the document wrote
         return read
     near = {inflect_word(name, c): c for c in CASES if damerau(last, inflect_word(name, c)) <= 1}
     if damerau(last, inflect_word(name, read), cap=2) <= 1:

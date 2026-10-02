@@ -194,6 +194,45 @@ too; eleven classes, among them the type read from the act and the cases where i
   finding changed but the invoice note's "a small business needs none" sentence, now that the
   natural-person family's type is known.
 
+### Rule 10: the act against its contract (`scripts/contract_rules_accuracy.py`)
+
+A contract and its act written from scratch for each case - two invented companies with codes,
+addresses and directors (the contract declining a director's first name with the surname, as many
+contracts do), a project and its cadastral code, a subject and services with numbers in them, a
+term, a fee in digits and words, an advance, a payment deadline and method, a bank code and an
+IBAN - and one difference planted in the act for each of the client's bullets: either party's
+code, name or director, a code given to the wrong party, the subject, the cadastral code, an act
+after the contract's validity, a service, the fee, the payment deadline or method, the IBAN or the
+bank code, a party's code or the account left out; and two harmless restyles. A case passes when
+the act's errors and warnings are exactly the expected rule ids and each correction is the
+contract's value in the act's own form (a director's name in the case the act writes it in).
+
+* **First run (seed 1, 30 a class): 428 of 570** - every miss the harness's own: it built the
+  months' oblique forms wrongly, and the check rightly flagged them as misspellings. Fixed: 570
+  of 570. Every planted difference was found in that first run too.
+* **Fresh seeds 2 and 3, 100 a class: 1,899 and 1,900 of 1,900.** The one miss was the harness's
+  again: a slip of a name's last letter, "ჯგუფი" written "ჯგუფს", is the same name declined,
+  which the check accepts; the harness no longer plants a declined form as a slip.
+* **Gaps closed, general rules:** a party named without its code was silent, now a warning with
+  the contract's code (not when the act states no code at all: that stays the one error); an act
+  without its account named no account to write, now the contractor's when exactly one is the
+  contractor's; an account without its bank code was silent, now a note with the code.
+* **Corrections checked, a real defect found:** with each correction compared to the contract's
+  value, every director slip failed: where the contract declined the first name ("ლევანის
+  მელაშვილის") and the act wrote the name in the nominative ("ლევან მეჩაშვილი"), the
+  correction kept the contract's genitive first name ("ლევანის მელაშვილი"). A correction now
+  keeps the words the act writes as forms of the right ones and puts only a misspelled word
+  right, in the case the act writes the name in; a word the documents never decline (the first
+  word of a company's name, the fixed genitive of "საქართველოს ბანკი") is given as the contract
+  writes it - the first version of the fix changed one such word in the held-out set into a
+  case form, which the strict gold caught. A name whose ending the act writes right is no longer
+  read as meant in another case.
+* **After the fixes, on the final code: fresh seeds 10 and 11, 100 a class: 2,100 of 2,100
+  each (100%)**, the corrections included (seeds 4 to 9, each 2,100 of 2,100, ran on the
+  versions in between); the gold sets unchanged and the snapshot of every output identical.
+* **Not compared:** the bank's name (its code and the account name the bank), and the subject or
+  services where only one document states them (a skip note, as before).
+
 ### Scanned PDFs (OCR inside the Docker image, Tesseract `kat+eng`, 216 dpi)
 
 The client's 7 scans, each paired with its Word twin by content: character error rate 0.16-0.40
@@ -762,8 +801,9 @@ with a unit test and a near miss (`tests/unit/test_redteam_r3_parties.py`,
   dropped or doubled digit), in the act's grouping (`987-654-312` → `987-654-321`; a round-2
   test now expects the grouped `987 654 321`), or none. Two readers share the label: the code
   facts keep 9 or 11 digits (`normalize.ID_CODE_RE`, GOLD_SPEC 2), the party reader and the act
-  check also read a slip's length (`ID_CODE_WRITTEN_RE`). Left open, as the verifier asked: a
-  party whose code the act leaves out is not reported.
+  check also read a slip's length (`ID_CODE_WRITTEN_RE`). Left open then, as the verifier asked:
+  a party whose code the act leaves out was not reported. It is now (rule 10, 2026-10-02): a
+  warning whose correction is the contract's code.
 * **`ინდივიდუალური მეწარმე` is `ი/მ` (AOA-R3-04).** The long forms are one table
   (`_SPELLED_OUT_FORMS`) the legal-form pattern is built from, so a form read is always written
   short.

@@ -617,6 +617,10 @@ strict_findings: true             # anything else reported (any severity) is a f
     text = the act's code, correction = the contract's (red team R5, AOA-R5-13, policy); the
     reverse (the contract's branch against the act's 8-character code) and two different
     branches are not decided and stay errors;
+  * an act that states no account → `AOA.BANK`, a warning, correction = the contractor's
+    account the contract states, when exactly one can be told to be the contractor's (none
+    otherwise); an act that states the account but not the bank code beside it → `AOA.BANK`, an
+    `info` note (the account names the bank), correction = the contractor's bank code;
   * an act not written in Georgian: what the rules read off Georgian wording (the parties'
     codes, the project, the period) is a skip note saying so, never a finding - an English
     label's code included;
@@ -627,8 +631,10 @@ strict_findings: true             # anything else reported (any severity) is a f
     code as printed, correction = the nearest contract code, written in the act's grouping
     (`987-654-312` → `987-654-321`). A code of the wrong length is corrected only to a contract
     code two digit slips or fewer from it (a digit dropped, doubled or changed), and otherwise
-    has none; the message gives its length. Whether every party the contract codes must state its code in the act is not
-    decided: a code left out is silent;
+    has none; the message gives its length. A party the act names without the code the
+    contract gives it (and the code nowhere else in the act) → `AOA.ID_CODES`, a warning, text
+    = the party's name, correction = the contract's code (client rule 10: the same code); an
+    act that states no code at all stays the one `AOA.ID_CODES` error;
   * a signatory written with a patronymic (`დავით გიორგის ძე მელაძე`) is compared on the first
     name and the surname; a finding quotes the whole name as written and its correction keeps
     the patronymic, in the act's case; a signatory nearest to the one the contract names for

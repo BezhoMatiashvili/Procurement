@@ -2776,6 +2776,7 @@ class AoaChecker:
             self._compare_field(
                 "AOA.PARTY_NAME", "მხარის დასახელება", "party name", p.name, match.name
             )
+            self._omitted_code(p, match, m.code_of)
             self._compare_field(
                 "AOA.PARTY_ADDRESS",
                 "იურიდიული მისამართი",
@@ -2787,6 +2788,28 @@ class AoaChecker:
             self._signatories(p, match, deputy=False)
             self._signatories(p, match, deputy=True)
         self._unread_signing_proxies()
+
+    def _omitted_code(self, p: Party, match: Party, code_of: Party | None) -> None:
+        """A party the act names without the identification code the contract gives it (client
+        rule 10: the same code, name and director): a warning with the contract's code - nothing
+        the act writes is wrong, a field of it is missing. Not when the code is anywhere in the
+        act, where the party reader did not tie it to the party, nor when the act states no code
+        at all: rule_parties reports that once, as an error."""
+        if p.id_code or not match.id_code or code_of is not None:
+            return
+        act_codes = self.aoa.id_codes() | _labelled_codes(self.aoa.text)
+        if not act_codes or match.id_code in act_codes:
+            return
+        self._add(
+            "AOA.ID_CODES",
+            "warning",
+            f"{p.name}: აქტში ამ მხარის საიდენტიფიკაციო კოდი არ წერია (ხელშეკრულებით: "
+            f"{match.id_code})",
+            f"{p.name}: the act does not state this party's identification code (the "
+            f"contract's: {match.id_code})",
+            expected=match.id_code,
+            span=p.span,
+        )
 
     def _unread_signing_proxies(self) -> None:
         """A skip note for an attorney the act's signature block names ("მინდობილი პირი: …") that
@@ -3418,11 +3441,29 @@ class AoaChecker:
                         span=self._account_span(x) if unit == "IBAN" else self._find_span(x),
                     )
             elif not a and unit == "IBAN":
+                # the contractor's account the contract states, when there is one to name
+                paid = sorted(self._payee_bank(unit)) or (sorted(c) if len(c) == 1 else [])
+                account = paid[0] if len(paid) == 1 else None
                 self._add(
                     "AOA.BANK",
                     "warning",
-                    "აქტში საბანკო ანგარიში არ წერია",
-                    "the act does not state a bank account",
+                    "აქტში საბანკო ანგარიში არ წერია"
+                    + (f" (ხელშეკრულებით: {account})" if account else ""),
+                    "the act does not state a bank account"
+                    + (f" (the contract's: {account})" if account else ""),
+                    expected=account,
+                )
+            elif not a and unit == "SWIFT" and c and self.aoa.bank("IBAN"):
+                # an account and no bank code: the IBAN names the bank, so a note, not a warning
+                paid = sorted(self._payee_bank(unit)) or (sorted(c) if len(c) == 1 else [])
+                code = paid[0] if len(paid) == 1 else None
+                self._add(
+                    "AOA.BANK",
+                    "info",
+                    "აქტში ბანკის კოდი არ წერია" + (f" (ხელშეკრულებით: {code})" if code else ""),
+                    "the act does not state the bank code"
+                    + (f" (the contract's: {code})" if code else ""),
+                    expected=code,
                 )
         self._sub_accounts()
         if not mismatched:
