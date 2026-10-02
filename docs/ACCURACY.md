@@ -162,6 +162,17 @@ a liquidation in the registry (a warning).
   line too), the director and position, sole representation, preparation date, no status - and
   neither the founders' nor the partners' persons taken for representatives.
 
+### Rule 2: a signatory other than the director (out of scope, as the client says)
+
+The client's rule 2 - check that a signatory who is not the director has the authority to sign
+and that the power of attorney has not expired - is marked by the client "ამ ეტაპზე
+არარელევანტურია" (not relevant at this stage). Nothing reads a power-of-attorney register, so
+neither authority nor expiry is checked. What the act check does with such a signatory: an
+attorney the act names (`მინდობილობით მოქმედი პირი`, `მინდობილი პირი` at the signature) is
+compared with the one the contract names - a slip of that name is an `AOA.DIRECTOR` error with
+its correction - and an attorney the contract does not name is an `AOA.DIRECTOR` warning that
+asks for the power of attorney to be checked, with no correction offered.
+
 ### Rules 3 and 4: the project, the cadastral code, the act's date (`scripts/act_rules_accuracy.py`)
 
 Acts written from scratch in three layouts (prose, "label: value" lines, numbered sections), three
@@ -309,6 +320,12 @@ body's text is left as it was.
   on every act the text with all changes rejected is the act's own, paragraph for paragraph, the
   text with all changes accepted holds every insertion, and LibreOffice opens every file. The
   strict gold's comment places are unchanged (0 occurrence errors).
+* **Where a Word file keeps text outside its body:** a form's content controls (`w:sdt`) and text
+  boxes are text Docling reads, so a finding can stand there; both are now searched and marked
+  in place (a text box Word keeps twice, as DrawingML and as a VML copy for older readers, is
+  marked once, in the copy Word shows). Headers and footers cannot carry a Word comment: a
+  finding that stands only there goes in the note at the top. On the gold sets nothing moved
+  (strict findings, comment places and the snapshot of every output unchanged).
 * **An act that arrives as a PDF** (`report/pdf_annotate.py`, `?format=pdf`, the report's PDF
   download) is returned with a highlight on the words at fault and the comment as its note,
   found as in a Word file - quotes, spaces and look-alike letters set aside, since a PDF's text

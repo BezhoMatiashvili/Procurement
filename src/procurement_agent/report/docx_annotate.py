@@ -24,12 +24,14 @@ import zipfile
 from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from docx import Document
 from docx.comments import Comment
 from docx.document import Document as DocumentType
 from docx.opc.exceptions import PackageNotFoundError
 from docx.oxml.ns import qn
+from docx.table import Table
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
@@ -286,19 +288,68 @@ def _candidates(finding: Finding, text: str | None = None) -> list[str]:
     return out
 
 
+#: Markup compatibility: a text box written twice, as DrawingML (``mc:Choice``) and as VML for
+#: older readers (``mc:Fallback``). Word shows the first, so only it is searched and marked.
+_MC_FALLBACK = "{http://schemas.openxmlformats.org/markup-compatibility/2006}Fallback"
+
+
+def _blocks(element: Any) -> Iterator[Any]:
+    """A container's paragraphs and tables in order, a block-level content control's among them:
+    a form wraps its fields in ``w:sdt``, and Docling reads what they hold."""
+    for child in element:
+        if child.tag in (qn("w:p"), qn("w:tbl")):
+            yield child
+        elif child.tag == qn("w:sdt"):
+            content = child.find(qn("w:sdtContent"))
+            if content is not None:
+                yield from _blocks(content)
+
+
+def _text_boxes(paragraph: Any) -> Iterator[Any]:
+    """The text boxes a paragraph anchors, each once: not one inside another text box (that
+    box's own paragraph anchors it), nor the VML copy kept for older readers."""
+    for box in paragraph.iter(qn("w:txbxContent")):
+        ancestors = list(box.iterancestors())
+        if any(a.tag == _MC_FALLBACK for a in ancestors):
+            continue
+        if next((a for a in ancestors if a.tag == qn("w:p")), None) is paragraph:
+            yield box
+
+
+def _with_text_boxes(block: Any, parent: Any) -> Iterator[Paragraph]:
+    """A paragraph, then the paragraphs of the text boxes it anchors (and of their tables)."""
+    yield Paragraph(block, parent)
+    for box in _text_boxes(block):
+        for inner in _blocks(box):
+            if inner.tag == qn("w:p"):
+                yield from _with_text_boxes(inner, parent)
+                continue
+            for row in Table(inner, parent).rows:
+                for cell in row.cells:
+                    yield from all_paragraphs(cell)
+
+
 def all_paragraphs(container: object) -> Iterator[Paragraph]:
-    """Every paragraph in the document, including the ones inside tables.
+    """Every paragraph in the document, including the ones inside tables, content controls and
+    text boxes.
 
     ``Document.paragraphs`` yields only top-level paragraphs. The client's acceptance acts lay
     their numbered sections out in tables, so without this the comments for the amount, the
     dates and the signatories all fell back to a document-level note - the fields most in need
-    of being marked in place.
+    of being marked in place. A form's content controls and a text box hold text the check
+    reads too. A container's paragraphs come before its tables, as they always have: a search
+    that wants one place takes the first.
     """
-    yield from container.paragraphs  # type: ignore[attr-defined]
-    for table in getattr(container, "tables", []):
-        for row in table.rows:
-            for cell in row.cells:
-                yield from all_paragraphs(cell)
+    body: Any = getattr(container, "_body", container)
+    blocks = list(_blocks(body._element))
+    for block in blocks:
+        if block.tag == qn("w:p"):
+            yield from _with_text_boxes(block, body)
+    for block in blocks:
+        if block.tag == qn("w:tbl"):
+            for row in Table(block, body).rows:
+                for cell in row.cells:
+                    yield from all_paragraphs(cell)
 
 
 #: One place a comment goes: the paragraph, the offsets in its text, and the runs covering them.
@@ -360,24 +411,28 @@ def _chosen_places(
 
 
 def paragraphs_in_order(container: object) -> Iterator[Paragraph]:
-    """Every paragraph in reading order - a table's between the paragraphs around it - each
-    once: a merged cell, which python-docx returns for every grid column it spans, is read
-    once, as a text reader reads it."""
+    """Every paragraph in reading order - a table's between the paragraphs around it, a content
+    control's where it stands, a text box's after the paragraph that anchors it - each once: a
+    merged cell, which python-docx returns for every grid column it spans, is read once, as a
+    text reader reads it."""
     seen: set[object] = set()  # the cells' elements, held so that each keeps its identity
 
-    def walk(inner: object) -> Iterator[Paragraph]:
-        for block in inner.iter_inner_content():  # type: ignore[attr-defined]
-            if isinstance(block, Paragraph):
-                yield block
+    def walk(element: Any, parent: Any) -> Iterator[Paragraph]:
+        for block in _blocks(element):
+            if block.tag == qn("w:p"):
+                yield Paragraph(block, parent)
+                for box in _text_boxes(block):
+                    yield from walk(box, parent)
                 continue
-            for row in block.rows:
+            for row in Table(block, parent).rows:
                 for cell in row.cells:
                     if cell._tc in seen:
                         continue
                     seen.add(cell._tc)
-                    yield from walk(cell)
+                    yield from walk(cell._tc, cell)
 
-    yield from walk(container)
+    body: Any = getattr(container, "_body", container)
+    yield from walk(body._element, body)
 
 
 def _places_of(document: DocumentType, needle: str, *, whole: bool, every: bool) -> list[_Place]:
