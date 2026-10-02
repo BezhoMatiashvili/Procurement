@@ -47,6 +47,18 @@ def _comments_xml(path: Path) -> str:
         return z.read("word/comments.xml").decode()
 
 
+def _tracked(path: Path) -> tuple[list[str], list[str]]:
+    """The text each tracked deletion and each tracked insertion holds, in document order."""
+    from lxml import etree
+
+    w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    with zipfile.ZipFile(path) as z:
+        root = etree.fromstring(z.read("word/document.xml"))
+    deleted = ["".join(t.text or "" for t in d.iter(f"{w}delText")) for d in root.iter(f"{w}del")]
+    inserted = ["".join(t.text or "" for t in i.iter(f"{w}t")) for i in root.iter(f"{w}ins")]
+    return deleted, inserted
+
+
 def test_a_comment_is_written_for_each_finding(act: Path, tmp_path: Path) -> None:
     out, unanchored = annotate_docx(
         act,
@@ -193,7 +205,8 @@ def test_a_month_typo_is_marked_on_the_word_with_its_correction(tmp_path: Path) 
     out, unanchored = annotate_docx(path, [finding], tmp_path / "o.docx")
     assert unanchored == []
     assert "should be: აპრილიდან" in _comments_xml(out)
-    assert "აპრლიდან" in [r.text for p in Document(str(out)).paragraphs for r in p.runs]
+    # the word alone is struck through and its correction written beside it, as a tracked change
+    assert _tracked(out) == (["აპრლიდან"], ["აპრილიდან"])
 
 
 def test_the_invoice_note_is_marked_on_the_acts_total(tmp_path: Path) -> None:

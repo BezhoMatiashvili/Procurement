@@ -69,7 +69,9 @@ page says so instead of rendering a raw 404.
 curl -s -H "$K" -X POST localhost:8000/api/v1/checks/aoa \
      -H 'content-type: application/json' \
      -d '{"aoa_document_id":"<act>","contract_document_id":"<contract>"}'
-# ?format=docx returns the act with one Word comment per finding. For an act in a foreign
+# ?format=docx returns the act with one Word comment per finding, each correction that
+# replaces words as a tracked change (accept or reject it in Word), and a note on the first
+# word naming what could not be checked. For an act in a foreign
 # currency, "advance_amount" (in the act's currency; 0 = none) and "advance_date" (ISO) give the
 # advance paid; left out, the act's own is used. "rates": [{"currency":"USD","date":"2026-09-10",
 # "rate":"2.6104"}] types in a day's rate (lari per one unit), used instead of the imported one
@@ -134,6 +136,10 @@ for the NET/VAT wording rules, or a business-registry snapshot that has not been
 NET/VAT wording for a company) is named in the report as not applicable instead, since nothing
 failed to run. Findings carry a stable rule id, a bilingual message, the expected value
 and a character span, so the same object serves the API, the Excel export and the Word comments.
+Where a rule knows the exact words that replace the ones at fault - a code, a name in the act's
+case, a date in the act's style, a misspelt word - the finding carries them as `replacement`,
+and the annotated file writes them as a tracked change beside the comment, word by word; a
+value the act leaves out, advice and a note to check stay comments.
 
 An act written in a foreign currency gets one note with the invoice it needs in lari, at the
 NBG rate: the advance at the rate of the day it was paid, the rest at the rate of the act's

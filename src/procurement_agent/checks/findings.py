@@ -36,6 +36,12 @@ class Finding(BaseModel):
     #: many places there are. A name copied from the other party is wrong in this party's block
     #: and right in that party's own. None: every place is (``report/docx_annotate``).
     places: tuple[tuple[int, ...], int] | None = None
+    #: What the document's words at the finding's place should read instead, as the correction
+    #: a reviewer accepts as a tracked change (``report/docx_annotate``): set only where the rule
+    #: knows ``expected`` is those words written right in the act's own form - a code, a name in
+    #: its case, a date in the act's style, a misspelt word. None for a note to check
+    #: (``needs_review``), a value the act leaves out, or a correction that is advice.
+    replacement: str | None = None
     provenance: Provenance | None = None
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     #: A note the rules could not decide either way - the same clause in other words, a service

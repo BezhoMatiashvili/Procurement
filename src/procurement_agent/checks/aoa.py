@@ -1020,7 +1020,12 @@ class AoaChecker:
         needs_review: bool = False,
         reviewed_by: Literal["llm"] | None = None,
         places: tuple[tuple[int, ...], int] | None = None,
+        replaces: bool = False,
     ) -> None:
+        """``replaces``: the caller knows ``expected`` is the words at ``span`` written right, in
+        the act's own form, and the annotated file may offer it as a tracked change
+        (``Finding.replacement``) - unless the finding ends up a note to check or without a
+        correction."""
         if severity == "error" and self._misread(rule_id, actual, expected):
             severity, needs_review = "warning", True
             ka, en = _MISREAD_KA + ka, _MISREAD_EN + en
@@ -1035,6 +1040,11 @@ class AoaChecker:
         key = (rule_id, severity, en, expected, actual)
         if any(_finding_key(f) == key for f in self.findings):
             return
+        # the words it replaces are found where the finding is marked - by its quote, or by the
+        # value it read (``report/docx_annotate``) - and lined up with it there
+        replacement = (
+            expected if replaces and expected and not needs_review and severity != "info" else None
+        )
         self.findings.append(
             Finding(
                 rule_id=rule_id,
@@ -1046,6 +1056,7 @@ class AoaChecker:
                 span=span,
                 quote=quote,
                 places=places,
+                replacement=replacement,
                 confidence=confidence,
                 needs_review=needs_review,
                 reviewed_by=reviewed_by,
@@ -1606,6 +1617,7 @@ class AoaChecker:
                         actual=words,
                         span=pair.words_span,
                         confidence=0.9,
+                        replaces=True,
                     )
                 elif len(words.split()) <= 3:
                     self._add(
@@ -1873,6 +1885,7 @@ class AoaChecker:
                 expected=dotted,
                 actual=token,
                 span=span,
+                replaces=True,
             )
         else:
             self._add(
@@ -1998,6 +2011,7 @@ class AoaChecker:
             actual=act_hit.raw_text,
             span=(act_hit.start, act_hit.end),
             places=self._act_date_places(act_hit),
+            replaces=True,
         )
 
     def rule_month_spelling(self) -> None:
@@ -2019,6 +2033,7 @@ class AoaChecker:
                 actual=word,
                 span=(at, at + len(word)) if at >= 0 else (start, end),
                 confidence=0.9,
+                replaces=True,
             )
 
     def rule_script_spelling(self) -> None:
@@ -2064,6 +2079,7 @@ class AoaChecker:
                 quote=word,
                 span=(found.start, found.end),
                 confidence=0.95,
+                replaces=True,
             )
 
     def rule_prose_spelling(self) -> None:
@@ -2101,6 +2117,7 @@ class AoaChecker:
                 span=(typo.start, typo.end),
                 confidence=0.8 if typo.attested else 0.6,
                 needs_review=self.aoa.ocr or not typo.attested,
+                replaces=True,
             )
 
     def rule_iban_format(self) -> None:
@@ -2142,6 +2159,7 @@ class AoaChecker:
                 expected=codes[0] if len(codes) == 1 else None,
                 actual=hit.value,
                 span=span,
+                replaces=True,
             )
 
     def bank_code_problems(self) -> list[AnchorHit]:
@@ -2744,6 +2762,7 @@ class AoaChecker:
                     expected=in_grouping(closest, written) if closest else None,
                     actual=code,
                     span=span,
+                    replaces=True,
                 )
 
         if not self.contract.parties:
@@ -2929,6 +2948,7 @@ class AoaChecker:
                 actual=written,
                 span=span,
                 places=places,
+                replaces=True,
             )
 
     def _proxies(self, p: Party, match: Party) -> None:
@@ -2968,6 +2988,7 @@ class AoaChecker:
                         expected=expected,
                         actual=form,
                         span=span,
+                        replaces=True,
                     )
                 continue
             director = match.directors[0] if match.directors else None
@@ -3151,6 +3172,7 @@ class AoaChecker:
             expected=expected,
             actual=actual,
             span=self._find_span(actual),
+            replaces=True,
         )
 
     def _name_cut_short(self, actual: str, expected: str) -> Difference | None:
@@ -3214,6 +3236,7 @@ class AoaChecker:
                 expected=_closest(x, sorted(c)),
                 actual=x,
                 span=self._find_span(x),
+                replaces=True,
             )
 
     def rule_project(self) -> None:
@@ -3243,6 +3266,7 @@ class AoaChecker:
                 expected=in_case_of(name, c[0]),
                 actual=name,
                 span=self._find_span(name),
+                replaces=True,
             )
 
     def rule_subject(self) -> None:
@@ -3303,6 +3327,7 @@ class AoaChecker:
                 expected=stated,
                 actual=differ,
                 span=act.span,
+                replaces=True,
             )
             return
         shown_act, shown_contract = _shorten(act.text), _shorten(contract.text)
@@ -3374,6 +3399,7 @@ class AoaChecker:
                     expected=best.text,
                     actual=item.text,
                     span=self._find_span(item.text),
+                    replaces=True,
                 )
                 continue
             if best is not None and found.share >= MATCH_SHARE:
@@ -3450,6 +3476,7 @@ class AoaChecker:
                         expected=_closest(x, sorted(c), preferred=payee),
                         actual=x,
                         span=self._account_span(x) if unit == "IBAN" else self._find_span(x),
+                        replaces=True,
                     )
             elif not a and unit == "IBAN":
                 # the contractor's account the contract states, when there is one to name
@@ -3580,6 +3607,7 @@ class AoaChecker:
                 expected=", ".join(payee_accounts),
                 actual=", ".join(act_accounts),
                 span=self._account_span(act_accounts[0]),
+                replaces=len(payee_accounts) == 1,
             )
 
     def _bank_pairing(self) -> None:
@@ -3624,6 +3652,7 @@ class AoaChecker:
                 expected=want,
                 actual=code,
                 span=(hit.start, hit.end),
+                replaces=True,
             )
 
     def rule_fee(self) -> None:
@@ -3837,6 +3866,7 @@ class AoaChecker:
             expected=words_for(price.value),
             actual=pair.words,
             span=pair.words_span,
+            replaces=True,
         )
 
     def _fee_finding(
@@ -4273,6 +4303,7 @@ class AoaChecker:
                     expected=expected,
                     actual=d.raw,
                     span=d.span,
+                    replaces=len({c.raw for c in contract}) == 1,
                 )
             elif d.qualifier and same.qualifier:
                 self._add(
@@ -4375,6 +4406,7 @@ class AoaChecker:
                 expected=expected,
                 actual=f"{s.percent:g}%",
                 span=s.span,
+                replaces=len(shares) == 1,
             )
 
     def rule_registry(self) -> None:
@@ -4505,6 +4537,7 @@ class AoaChecker:
                 expected=f"{reg_form} {act_bare}",
                 actual=p.name,
                 span=self._find_span(act_form),
+                replaces=True,
             )
         if not reg_bare:
             return
@@ -4625,6 +4658,7 @@ class AoaChecker:
                     actual=written,
                     span=span,
                     places=places,
+                    replaces=True,
                 )
 
     def _registry_status(self, p: Party, entry: RegistryEntry, note: tuple[str, str]) -> None:

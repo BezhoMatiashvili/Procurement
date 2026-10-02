@@ -70,7 +70,11 @@ from procurement_agent.registry.extract import NotAnExtractError, read_extract
 from procurement_agent.registry.snapshot import RegistryEntry, open_snapshot
 from procurement_agent.registry.source import RefusedExtract, RegistrySource
 from procurement_agent.report.compare_xlsx import to_xlsx as compare_to_xlsx
-from procurement_agent.report.docx_annotate import UnsupportedDocumentError, annotate_docx
+from procurement_agent.report.docx_annotate import (
+    UnsupportedDocumentError,
+    annotate_docx,
+    summary_comment,
+)
 from procurement_agent.security.audit import audit
 from procurement_agent.security.auth import Principal, authenticate
 from procurement_agent.security.capacity import report_capacity
@@ -446,12 +450,14 @@ def check_acceptance_act(
 
 
 def annotated_docx(settings: Settings, aoa: Document, report: CheckReport) -> Response:
-    """A copy of the act with one Word comment per finding, which is what the client asked for."""
+    """A copy of the act with one Word comment per finding and the corrections that replace words
+    as tracked changes, which is what the client asked for; a note on its first word says what
+    could not be checked."""
     source = upload_path(settings, aoa.id, aoa.kind)
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "annotated.docx"
         try:
-            annotate_docx(source, report.findings, out)
+            annotate_docx(source, report.findings, out, summary=summary_comment(report))
         except UnsupportedDocumentError as e:
             raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, str(e)) from e
         data = out.read_bytes()

@@ -22,16 +22,18 @@ import copy
 import re
 import zipfile
 from collections.abc import Iterator, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
 from docx import Document
 from docx.comments import Comment
 from docx.document import Document as DocumentType
 from docx.opc.exceptions import PackageNotFoundError
+from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
-from procurement_agent.checks.findings import Finding
+from procurement_agent.checks.findings import CheckReport, Finding
 from procurement_agent.extraction.normalize import QUOTE_CHARS, fold_look_alikes, normalize_spaces
 from procurement_agent.report.docx_sanitize import neutralise_package
 from procurement_agent.security.audit import log
@@ -392,6 +394,205 @@ def _places_of(document: DocumentType, needle: str, *, whole: bool, every: bool)
     return found
 
 
+# --- tracked changes ----------------------------------------------------------------------------
+
+#: A word or a number: what a tracked change replaces, so the reviewer sees the word at fault
+#: struck through and the right one beside it, not a letter inside a word.
+_TOKEN = re.compile(r"\w+")
+#: Spaces and quotes, no part of what a correction says: "შპს „ბეტა“" is "შპს ბეტა".
+_SPACES_AND_QUOTES = re.compile(rf"[\s{re.escape(QUOTE_CHARS)}]+")
+
+
+def tracked_edits(written: str, replacement: str) -> list[tuple[int, int, str]] | None:
+    """How ``written`` - the document's words at a finding's place - becomes ``replacement``,
+    as (start, end, new text) on ``written``; None when the two cannot be lined up safely, and
+    the place is left to its comment.
+
+    * word for word when both have as many words: each word that differs is replaced, and the
+      quotes, spaces and punctuation around it stay ("შპს „დელტა ტრთიდი“" -> only "ტრთიდი");
+    * the same words with other separators ("01-02-03-456" for "01.02.03.456"): the whole;
+    * one value for another, one word on either side (a code, an account): the whole;
+    * otherwise only a run of words between words both share ("15 (თხუთმეტი)" inside a longer
+      deadline). A correction that would rewrite the words around it, or only add some (a
+      value left out), is a comment's to explain, not a change a reviewer accepts in one click.
+
+    No edit at all when the words already read as the replacement (a place found by the
+    correction itself)."""
+    mine, theirs = list(_TOKEN.finditer(written)), list(_TOKEN.finditer(replacement))
+    if not mine or not theirs:
+        return None
+    if [m.group() for m in mine] == [t.group() for t in theirs]:
+        if _SPACES_AND_QUOTES.sub("", written) == _SPACES_AND_QUOTES.sub("", replacement):
+            return []
+        return [
+            (mine[0].start(), mine[-1].end(), replacement[theirs[0].start() : theirs[-1].end()])
+        ]
+    if len(mine) == len(theirs):
+        return [
+            (m.start(), m.end(), t.group())
+            for m, t in zip(mine, theirs, strict=True)
+            if m.group() != t.group()
+        ]
+    if len(mine) == 1 or len(theirs) == 1:
+        return [
+            (mine[0].start(), mine[-1].end(), replacement[theirs[0].start() : theirs[-1].end()])
+        ]
+    shorter = min(len(mine), len(theirs))
+    head = 0
+    while head < shorter and mine[head].group() == theirs[head].group():
+        head += 1
+    tail = 0
+    while tail < shorter - head and mine[-1 - tail].group() == theirs[-1 - tail].group():
+        tail += 1
+    if not head or not tail or head + tail >= shorter:
+        return None
+    first, last = mine[head], mine[len(mine) - 1 - tail]
+    new = replacement[theirs[head].start() : theirs[len(theirs) - 1 - tail].end()]
+    return [(first.start(), last.end(), new)]
+
+
+#: One planned tracked change: the paragraph, the offsets in its text, the text to write.
+_Edit = tuple[Paragraph, int, int, str]
+
+
+def _plan_edits(edits: list[_Edit], paragraph: Paragraph, start: int, end: int, new: str) -> None:
+    """Plan the tracked change that puts ``new`` in place of the words at ``start:end``, unless
+    the words cannot be lined up with it or another finding's change already holds any of them:
+    the first finding to claim words writes them, the others keep their comments."""
+    written = "".join(r.text for r in paragraph.runs)[start:end]
+    planned = tracked_edits(written, new)
+    if not planned:
+        return
+    mine = [(paragraph, start + a, start + b, text) for a, b, text in planned]
+    for _, a, b, _ in mine:
+        if any(q._p is paragraph._p and a < y and x < b for q, x, y, _ in edits):
+            return
+    edits.extend(mine)
+
+
+def _runs_between(paragraph: Paragraph, start: int, end: int) -> list[Run] | None:
+    """The runs that hold exactly ``start:end`` of the paragraph's text, split where needed;
+    None when a boundary falls inside a run that is more than text (``_splittable``)."""
+    for boundary in (start, end):
+        pos = 0
+        for run in list(paragraph.runs):
+            length = len(run.text)
+            if pos < boundary < pos + length:
+                if not _splittable(run):
+                    return None
+                _split_run(run, boundary - pos)
+                break
+            pos += length
+    covered: list[Run] = []
+    pos = 0
+    for run in paragraph.runs:
+        run_end = pos + len(run.text)
+        if pos >= start and run_end <= end and run.text:
+            covered.append(run)
+        pos = run_end
+    whole = "".join(r.text for r in paragraph.runs)[start:end]
+    if not covered or "".join(r.text for r in covered) != whole:
+        return None
+    if not all(_splittable(r) for r in covered):
+        return None
+    return covered
+
+
+_XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
+
+
+def _wrap(runs: list[Run], new: str, author: str, stamp: str, revision: int) -> int:
+    """Mark ``runs`` deleted and ``new`` inserted after them, as a reviewer's tracked change:
+    the runs move into a ``w:del`` (their text becomes ``w:delText``), and a ``w:ins`` holds one
+    run with the first run's formatting. Returns the next free revision id."""
+    first = runs[0]._r
+    parent = first.getparent()
+    if parent is None:  # pragma: no cover - a run found in a paragraph has one
+        return revision
+    attributes = {qn("w:author"): author, qn("w:date"): stamp}
+    deleted = parent.makeelement(qn("w:del"), {qn("w:id"): str(revision), **attributes})
+    first.addprevious(deleted)
+    style = first.find(qn("w:rPr"))
+    for run in runs:
+        for t in run._r.findall(qn("w:t")):
+            t.tag = qn("w:delText")
+        deleted.append(run._r)
+    text = _XML_ILLEGAL.sub("", new)
+    if not text:
+        return revision + 1
+    inserted = parent.makeelement(qn("w:ins"), {qn("w:id"): str(revision + 1), **attributes})
+    r = parent.makeelement(qn("w:r"), {})
+    if style is not None:
+        r.append(copy.deepcopy(style))
+    t = r.makeelement(qn("w:t"), {_XML_SPACE: "preserve"})
+    t.text = text
+    r.append(t)
+    inserted.append(r)
+    deleted.addnext(inserted)
+    return revision + 2
+
+
+def _track(document: DocumentType, edits: Sequence[_Edit], author: str, when: datetime) -> int:
+    """Write every planned change as a tracked change; returns how many were written. Every
+    change's runs are found first: splitting a run never changes a paragraph's text, moving
+    runs into a ``w:del`` does. Revision ids start above every id the document already uses."""
+    if not edits:
+        return 0
+    used = [int(v) for v in document.element.xpath("//@w:id") if str(v).isdigit()]
+    revision = max(used, default=0) + 1
+    stamp = when.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    targets = [
+        (runs, new)
+        for paragraph, start, end, new in edits
+        if (runs := _runs_between(paragraph, start, end)) is not None
+    ]
+    for runs, new in targets:
+        revision = _wrap(runs, new, author, stamp, revision)
+    return len(targets)
+
+
+def paragraph_text(paragraph: Paragraph, *, accepted: bool = False) -> str:
+    """A paragraph's text with its tracked changes rejected - the words the document wrote,
+    deleted text in and inserted text out - or, ``accepted``, as a reviewer who accepts them
+    all reads it. ``Paragraph.text`` sees neither: it reads only a paragraph's own runs."""
+    parts: list[str] = []
+    for el in paragraph._p.iter(qn("w:t"), qn("w:delText")):
+        inserted = any(a.tag == qn("w:ins") for a in el.iterancestors())
+        deleted = el.tag == qn("w:delText")
+        if (deleted and accepted) or (inserted and not accepted):
+            continue
+        parts.append(el.text or "")
+    return "".join(parts)
+
+
+def summary_comment(report: CheckReport) -> str | None:
+    """The note at the top of the annotated file: what the check could not run or does not
+    apply to this act, so a clean margin is never read as "everything was checked"."""
+    lines = [f"[შეჯამება / Summary] {AUTHOR}"]
+    if report.skipped:
+        lines.append("ვერ შემოწმდა / Not checked:")
+        lines += [f"• {s.rule_id}: {s.reason_ka} / {s.reason_en}" for s in report.skipped]
+    if not_applicable := report.summary.get("not_applicable"):
+        lines.append(f"არ ეხება ამ აქტს / Not applicable: {not_applicable}")
+    return _XML_ILLEGAL.sub("", "\n".join(lines)) if len(lines) > 1 else None
+
+
+def _add_note(document: DocumentType, text: str, author: str) -> None:
+    """A comment on the document's first word: the summary and the findings no words of the
+    document stand for. The body's text is left as it was; a document with no text at all gets
+    a paragraph to carry it."""
+    for paragraph in paragraphs_in_order(document):
+        first = _TOKEN.search("".join(r.text for r in paragraph.runs))
+        if first is None:
+            continue
+        found = _cover_next(paragraph, first.group(), 0)
+        if found is not None:
+            document.add_comment(found[0], text=text, author=author, initials=INITIALS)
+            return
+    run = document.add_paragraph().add_run("—")
+    document.add_comment(run, text=text, author=author, initials=INITIALS)
+
+
 def annotate_docx(
     source: Path,
     findings: Sequence[Finding],
@@ -399,11 +600,17 @@ def annotate_docx(
     *,
     author: str = AUTHOR,
     text: str | None = None,
+    summary: str | None = None,
+    when: datetime | None = None,
 ) -> tuple[Path, list[Finding]]:
-    """Write ``source`` to ``out_path`` with one Word comment per finding.
+    """Write ``source`` to ``out_path`` with one Word comment per finding, and a tracked change
+    wherever a finding knows the words that replace the ones at fault (``Finding.replacement``)
+    and they line up with them (``tracked_edits``): the reviewer accepts or rejects it in Word.
 
     ``text`` is the text the findings were computed over - the one their ``span`` offsets
-    index into. When it is given, the words at each span are searched for first.
+    index into. When it is given, the words at each span are searched for first. ``summary``
+    (``summary_comment``) opens the file, on its first word, with the findings that could not
+    be anchored; ``when`` dates the tracked changes (now by default).
 
     Returns the path and the findings that could not be anchored to any text — those belong in
     the report so that nothing is silently dropped, which is the failure mode that would make
@@ -433,12 +640,15 @@ def annotate_docx(
     # A place is its paragraph and the offsets in the paragraph's text, which splitting runs for
     # later findings never changes.
     comments: dict[tuple[object, int, int], Comment] = {}
+    edits: list[_Edit] = []
     for finding in findings:
         places = _places_for(document, finding, text)
         if not places:
             unanchored.append(finding)
             continue
         for paragraph, start, end, runs in places:
+            if finding.replacement:
+                _plan_edits(edits, paragraph, start, end, finding.replacement)
             key = (paragraph._p, start, end)
             if (existing := comments.get(key)) is not None:
                 existing.add_paragraph(comment_text(finding))
@@ -447,15 +657,12 @@ def annotate_docx(
                 runs, text=comment_text(finding), author=author, initials=INITIALS
             )
 
-    if unanchored:
-        para = document.add_paragraph()
-        run = para.add_run("—")
-        document.add_comment(
-            run,
-            text="\n\n".join(comment_text(f) for f in unanchored),
-            author=author,
-            initials=INITIALS,
-        )
+    notes = [*([summary] if summary else []), *(comment_text(f) for f in unanchored)]
+    if notes:
+        _add_note(document, "\n\n".join(notes), author)
+    # last: a tracked change moves runs out of the paragraph's direct children, where the
+    # searches above read the text
+    _track(document, edits, author, when or datetime.now(UTC))
     # The file goes back to a reviewer as something this system produced: nothing the upload used
     # to reach out or to run (see docx_sanitize) goes with it.
     removed = neutralise_package(document)

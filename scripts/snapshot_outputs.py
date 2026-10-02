@@ -55,6 +55,7 @@ def _finding(f: Any) -> dict[str, Any]:
         "quote": f.quote,
         "span": list(f.span) if f.span else None,
         "needs_review": f.needs_review,
+        "replacement": getattr(f, "replacement", None),
         "en": f.message_en,
     }
 

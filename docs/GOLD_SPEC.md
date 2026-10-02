@@ -503,7 +503,8 @@ strict_findings: true             # anything else reported (any severity) is a f
   `30.06.26 წ.`); an English date stays English (`30 June 2026`). A correction is ISO only
   where the act wrote ISO.
 * `occurrences` is checked by annotating the act (`report/docx_annotate.py`) and counting the
-  comments whose anchored text contains `text`. A place is where `text` stands as whole words:
+  comments whose anchored text contains `text` - the act's own words: a tracked change's deleted
+  text is read, its inserted text is not. A place is where `text` stands as whole words:
   `ივნის` is not a place inside `ივნისიდან`, nor a name's nominative inside its genitive. A name
   copied from another party (the customer's director written for the contractor) is marked only
   in the places of the party it is wrong for; where it stands in its own party's block it is right,

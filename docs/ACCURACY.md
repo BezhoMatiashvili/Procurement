@@ -247,6 +247,69 @@ contract's value in the act's own form (a director's name in the case the act wr
   its first row as a header), and a contract whose parties are named without quotes (each a skip
   note, as before).
 
+### Rule 11: spelling, measured again at 300 a class (2026-10-02)
+
+The prose rule (`checks/aoa_spelling.py`, unchanged since the attempt described under "Decisions
+taken against measurements") on fresh seeds, every case a mutated act parsed by Docling:
+
+| class | seed | detected | correction right | false findings |
+|---|---|---|---|---|
+| `prose_typo` (any letter, at random) | 101 | 87% | 84% | 1% |
+| | 102 | 87% | 85% | 2% |
+| | 103 | 91% | 87% | 0% |
+| | 104 | 89% | 87% | 0% |
+| `prose_slip` (the slips of a hand and an ear) | 101 | 95% | 93% | 1% |
+| | 102 | 92% | 89% | 1% |
+| | 103 | 93% | 91% | 0% |
+| | 104 | 91% | 90% | 0% |
+
+* **The false findings of seeds 101 and 102 were rule 10's:** a slip planted in the label
+  "საიდენტიფიკაციო კოდი" left the code beside it unread, and the new "code left out" warning
+  fired; a code is now left out only when its digits are nowhere in the act (seeds 103 and 104:
+  0%).
+* **Why a slip is missed, on the dictionary's own words** (`ka_GE`, five letters or more, one
+  hand slip each, never the first letter): when the word the slip was made in is written
+  elsewhere in the documents, 96.5% are corrected and none wrongly; when it is not, 89.9% - the
+  rest are ties between two dictionary words one letter away (4.3%), a wrong pick among them
+  (2.8%), a slip that is a form the dictionary lacks and the rule must accept (2%: a final "ი"
+  dropped reads as an attributive), and another form of the same verb or participle (1%).
+* **Tried and not taken:** reporting a tie as "check this word" (the words the dictionary lacks
+  that are one letter from two others are the verb forms that made the false flags of the
+  held-out prose run), and ranking a correction by any form of it the documents write (worse:
+  1,115 right against 1,119). Random replacements no hand makes stay unreported unless the
+  documents write the word: the rule is built not to call a word it does not know a misspelling.
+  The limit is the dictionary's; a wrong pick (2.8% of slips in words the documents do not
+  write elsewhere) is a correction a reviewer rejects, and the finding still marks the slip.
+
+### Marking: comments and tracked changes in the act (`report/docx_annotate.py`)
+
+The client asks for each field that needs correcting to be marked in the file itself, "with the
+correct variant as a comment or Track Change". Every finding is a Word comment, as before; where
+the rule knows the exact words that replace the ones at fault (`Finding.replacement`: a code, an
+account, a bank code, a cadastral code, a name or a director in the act's case, a date in the
+act's style, a misspelt word, a fee or an amount in words, a service's or the subject's number,
+a payment deadline, the registry's legal form), the file also carries a tracked change, word by
+word: "შპს „დელტა ტრთიდი“" keeps its quotes and only "ტრთიდი" is struck and "ტრეიდი" inserted.
+A change is written only when the words line up safely (as many words on both sides, one value
+for another, or a run of words between words both share); a value left out, a period or term
+that is advice, the tax wording, a role swap and a note to check stay comments. The first
+finding to claim words writes them; revision ids start above every id the file uses; a run that
+is more than text (a field) is never rewritten. A note on the act's first word lists what could
+not be checked and what does not apply, and any finding no words of the act stand for - the
+body's text is left as it was.
+
+* **Mutation harness, tracked changes scored** (`scripts/mutate_aoa.py`, "track": after accept
+  all, every wrong place reads the correction): seed 201, 20 a class, every class - 100% wherever a
+  change is offered (codes, accounts, bank codes, the cadastral code, the act's date, director,
+  address, project, month and number-word typos, Latin or Cyrillic letters, prose typos); party
+  names, which the first version left without a change, 100% on seed 202. Detection, correction
+  and comment places unchanged, 0% false findings on the 14 harmless classes.
+* **The gold sets' acts, annotated as the product annotates them:** client 6 acts / 27 findings
+  with a replacement / 31 tracked insertions, Test Set 2 12 / 38 / 44, Test Set 3 23 / 19 / 22;
+  on every act the text with all changes rejected is the act's own, paragraph for paragraph, the
+  text with all changes accepted holds every insertion, and LibreOffice opens every file. The
+  strict gold's comment places are unchanged (0 occurrence errors).
+
 ### Scanned PDFs (OCR inside the Docker image, Tesseract `kat+eng`, 216 dpi)
 
 The client's 7 scans, each paired with its Word twin by content: character error rate 0.16-0.40

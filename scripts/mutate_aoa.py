@@ -1774,7 +1774,8 @@ def load_bases(settings: Settings) -> list[Base]:
 
 
 def comment_coverage(docx_path: Path, needle: str) -> tuple[int, int, int]:
-    """(occurrences of ``needle``, fully covered by a comment, touched by a comment)."""
+    """(occurrences of ``needle``, fully covered by a comment, touched by a comment), in the
+    document's own words: a tracked change's deleted text counts, its inserted text does not."""
     with zipfile.ZipFile(docx_path) as z:
         root = etree.fromstring(z.read("word/document.xml"))
     body = root.find(qn("w:body"))
@@ -1790,7 +1791,9 @@ def comment_coverage(docx_path: Path, needle: str) -> tuple[int, int, int]:
             open_.add(el.get(qn("w:id")))
         elif tag == qn("w:commentRangeEnd"):
             open_.discard(el.get(qn("w:id")))
-        elif tag == qn("w:t"):
+        elif tag == qn("w:delText") or (
+            tag == qn("w:t") and not any(a.tag == qn("w:ins") for a in el.iterancestors())
+        ):
             for ch in el.text or "":
                 chars.append(ch)
                 cov.append(bool(open_))
@@ -1814,6 +1817,37 @@ def comment_coverage(docx_path: Path, needle: str) -> tuple[int, int, int]:
 
 def count_in_docx(docx_path: Path, needle: str) -> int:
     return comment_coverage(docx_path, needle)[0]
+
+
+def docx_text(docx_path: Path, *, accepted: bool) -> str:
+    """The body's text with its tracked changes rejected (the document's own words) or, with
+    ``accepted``, accepted - as a reviewer reads it after "accept all"."""
+    with zipfile.ZipFile(docx_path) as z:
+        root = etree.fromstring(z.read("word/document.xml"))
+    out: list[str] = []
+    for el in root.find(qn("w:body")).iter():
+        if el.tag == qn("w:p"):
+            out.append("\n")
+        elif el.tag in (qn("w:t"), qn("w:delText")):
+            inserted = any(a.tag == qn("w:ins") for a in el.iterancestors())
+            if (el.tag == qn("w:delText") and accepted) or (inserted and not accepted):
+                continue
+            out.append(el.text or "")
+    return "".join(out)
+
+
+def whole_count(text: str, needle: str) -> int:
+    """How often ``needle`` stands in ``text`` as whole tokens, folded."""
+    folded, want = fold(text), fold(needle)
+    n = start = 0
+    while want and (k := folded.find(want, start)) >= 0:
+        start = k + 1
+        if (want[0].isalnum() and k > 0 and folded[k - 1].isalnum()) or (
+            want[-1].isalnum() and k + len(want) < len(folded) and folded[k + len(want)].isalnum()
+        ):
+            continue
+        n += 1
+    return n
 
 
 def _num(s: str | None) -> float | None:
@@ -1879,7 +1913,8 @@ def score_aoa(case: Case, findings: list[Any], annotated: Path) -> dict[str, Any
     out["fp"] = bool(extra or missing)
     if not case.expects:
         return out
-    det, corr, occ, notes = [], [], [], []
+    det, corr, occ, track, notes = [], [], [], [], []
+    original = accepted = None
     for e in case.expects:
         cands = [f for f in findings if f.rule_id in e.rules]
         if e.text is not None:
@@ -1906,10 +1941,26 @@ def score_aoa(case: Case, findings: list[Any], annotated: Path) -> dict[str, Any
                 notes.append(
                     f"comments cover {full}/{e.occurrences} (touch {touched}) of {e.text!r}"
                 )
+        # the tracked change: after "accept all", every wrong place reads the correction
+        if e.corrections and e.text and e.occurrences and any(f.replacement for f in cands):
+            if original is None or accepted is None:
+                original = docx_text(annotated, accepted=False)
+                accepted = docx_text(annotated, accepted=True)
+            fixed = whole_count(original, e.text) - whole_count(accepted, e.text)
+            written = max(
+                whole_count(accepted, c) - whole_count(original, c) for c in e.corrections
+            )
+            track.append(fixed == e.occurrences and written >= e.occurrences)
+            if not track[-1]:
+                notes.append(
+                    f"tracked changes fix {fixed}/{e.occurrences} of {e.text!r}, write the "
+                    f"correction {written} time(s)"
+                )
     out.update(
         detected=all(det),
         correction=all(corr) if corr else None,
         occurrences=all(occ) if occ else None,
+        tracked=all(track) if track else None,
         notes=notes,
     )
     return out
@@ -2053,6 +2104,7 @@ def failed(r: dict[str, Any]) -> bool:
         or a.get("detected") is False
         or a.get("correction") is False
         or a.get("occurrences") is False
+        or a.get("tracked") is False
         or not r["compare"]["exact"]
     )
 
@@ -2082,6 +2134,7 @@ def aggregate(results: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
             "detected": rate("detected"),
             "correction": rate("correction"),
             "occurrences": rate("occurrences"),
+            "tracked": rate("tracked"),
             "false_positive": rate("fp"),
             "compare_exact": rate("exact", "compare"),
         }
@@ -2112,6 +2165,8 @@ def fail_reason(r: dict[str, Any], hide: bool) -> str:
             parts.append("wrong correction")
         if a.get("occurrences") is False:
             parts.append("occurrences wrong")
+        if a.get("tracked") is False:
+            parts.append("tracked change wrong")
     if a["extra"]:
         parts.append(f"extra {a['extra']}")
     if a["missing_base"]:
@@ -2464,13 +2519,13 @@ def main(argv: list[str] | None = None) -> int:
             f"\n== mutation results (seed {args.seed}, {args.per_class} per class, {time.time() - t0:.0f}s) =="
         )
         print(
-            f"{'class':<26} {'n':>3} {'uniq':>4} {'inv':>3} {'na':>3} {'detect':>6} {'corr':>6} {'occ':>6} {'fp':>6} {'cmp':>6}"
+            f"{'class':<26} {'n':>3} {'uniq':>4} {'inv':>3} {'na':>3} {'detect':>6} {'corr':>6} {'occ':>6} {'track':>6} {'fp':>6} {'cmp':>6}"
         )
         for cls, a in agg.items():
             f = lambda x: "     -" if x is None else f"{100 * x:5.0f}%"  # noqa: E731
             print(
                 f"{cls:<26} {a['n']:>3} {a['uniq']:>4} {a['invalid']:>3} {a['not_applicable']:>3} {f(a['detected']):>6} "
-                f"{f(a['correction']):>6} {f(a['occurrences']):>6} {f(a['false_positive']):>6} {f(a['compare_exact']):>6}"
+                f"{f(a['correction']):>6} {f(a['occurrences']):>6} {f(a['tracked']):>6} {f(a['false_positive']):>6} {f(a['compare_exact']):>6}"
             )
         print("\n== failure examples (up to 3 per class) ==")
         for cls in agg:

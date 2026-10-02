@@ -48,7 +48,7 @@ def _commented_lines(tmp_path: Path, act: str, findings: list[Finding]) -> list[
     """The act's lines that carry a comment once it is annotated."""
     from docx import Document
 
-    from procurement_agent.report.docx_annotate import annotate_docx
+    from procurement_agent.report.docx_annotate import annotate_docx, paragraph_text
 
     doc = Document()
     for line in act.splitlines():
@@ -61,7 +61,7 @@ def _commented_lines(tmp_path: Path, act: str, findings: list[Finding]) -> list[
     marked: list[str] = []
     for p in Document(str(out)).paragraphs:
         if p._p.findall(f".//{w}commentRangeStart"):
-            marked.append(p.text)
+            marked.append(paragraph_text(p))  # the act's own words, before any tracked change
     return marked
 
 

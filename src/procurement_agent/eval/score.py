@@ -655,14 +655,20 @@ _W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
 
 def comment_anchors(docx: Path) -> dict[str, str]:
-    """Each comment id in ``word/document.xml`` and the folded text its range covers."""
+    """Each comment id in ``word/document.xml`` and the folded text its range covers - the
+    document's own words: a tracked change's deleted text is read, its inserted text is not,
+    so a comment on a corrected word still marks the word the document wrote."""
     with zipfile.ZipFile(docx) as z:
         parser = etree.XMLParser(resolve_entities=False, no_network=True)
         root = etree.fromstring(z.read("word/document.xml"), parser)
     open_ranges: dict[str, list[str]] = {}
     done: dict[str, str] = {}
+    inserted = 0
     for event, el in etree.iterwalk(root, events=("start", "end")):
         tag = el.tag
+        if tag == f"{_W}ins":
+            inserted += 1 if event == "start" else -1
+            continue
         if event == "start":
             if tag == f"{_W}commentRangeStart":
                 open_ranges[el.get(f"{_W}id", "")] = []
@@ -670,7 +676,7 @@ def comment_anchors(docx: Path) -> dict[str, str]:
                 cid = el.get(f"{_W}id", "")
                 if cid in open_ranges:
                     done[cid] = fold("".join(open_ranges.pop(cid)))
-            elif tag in (f"{_W}t", f"{_W}delText"):
+            elif tag in (f"{_W}t", f"{_W}delText") and not inserted:
                 for parts in open_ranges.values():
                     parts.append(el.text or "")
             elif tag in (f"{_W}tab", f"{_W}br"):
