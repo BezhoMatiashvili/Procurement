@@ -47,6 +47,13 @@ class TestOmittedPartyCode:
         )
         assert [f.severity for f in _of(_check(act), "AOA.ID_CODES")] == []
 
+    def test_a_code_under_a_misspelt_label_is_not_left_out(self) -> None:
+        """Near miss: the act states the code, its label misspelt - AOA.SPELLING's to report;
+        the code is no more missing grouped by the act's own separators."""
+        for written in ("საიდენტიფიკციო კოდი: 987654321, ", "საიდენტიფიკციო კოდი: 987-654-321, "):
+            act = ACT.replace(_CONTRACTOR_CODE, written)
+            assert [f.severity for f in _of(_check(act), "AOA.ID_CODES")] == []
+
     def test_an_act_without_any_code_stays_one_error(self) -> None:
         act = ACT.replace("საიდენტიფიკაციო კოდი: 123456789; ", "").replace(_CONTRACTOR_CODE, "")
         assert [f.severity for f in _of(_check(act), "AOA.ID_CODES")] == ["error"]

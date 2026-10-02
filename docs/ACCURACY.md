@@ -230,8 +230,22 @@ contract's value in the act's own form (a director's name in the case the act wr
 * **After the fixes, on the final code: fresh seeds 10 and 11, 100 a class: 2,100 of 2,100
   each (100%)**, the corrections included (seeds 4 to 9, each 2,100 of 2,100, ran on the
   versions in between); the gold sets unchanged and the snapshot of every output identical.
-* **Not compared:** the bank's name (its code and the account name the bank), and the subject or
-  services where only one document states them (a skip note, as before).
+* **Services in a Word table (found after the harness, which writes plain text):** invented
+  contracts and acts as Word files through Docling, the services as lines, as a table in the act,
+  and as a table in both: with a table the rule said the act lists no services and compared
+  none. It now reads a table's rows in the forms the chunker and Docling write them (one row to
+  a line, `1: …;`; a header's columns, `1, მომსახურება = …`; an unbulleted list's `…;` lines),
+  each row an item without its item number, a money column left to the fee rules and a quantity
+  compared. A changed number in a table is now the same error as in a list; the gold sets and
+  the snapshot of every output are unchanged.
+* **A code under a misspelt label is not left out:** the spelling harness (rule 11) planted
+  slips in the label "საიდენტიფიკაციო კოდი", and the code beside it, no longer read as the
+  party's, was then reported as left out. A code is only left out when its digits are nowhere
+  in the act; the misspelt label is AOA.SPELLING's.
+* **Not compared:** the bank's name (its code and the account name the bank); the subject or
+  services where only one document states them, a one-column table of services (Docling reads
+  its first row as a header), and a contract whose parties are named without quotes (each a skip
+  note, as before).
 
 ### Scanned PDFs (OCR inside the Docker image, Tesseract `kat+eng`, 216 dpi)
 

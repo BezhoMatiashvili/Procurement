@@ -371,6 +371,57 @@ class TestServiceItems:
         assert [i.text for i in service_items(lines)] == ["ფასადის შეღებვა"]
 
 
+class TestServiceTables:
+    """A list of services laid out as a Word table, in the forms the chunker and Docling write
+    a table's rows (``ingestion/chunker``): each row is an item, its item number no part of it,
+    a money column left to the fee rules and a quantity kept to be compared."""
+
+    def test_rows_one_to_a_line_are_items(self) -> None:
+        lines = ("კერძოდ:", "1: ფასადის შეღებვა;", "2: 4 ფანჯრის შეცვლა;", "„შემკვეთი“")
+        assert [i.text for i in service_items(lines)] == ["ფასადის შეღებვა", "4 ფანჯრის შეცვლა"]
+
+    def test_a_label_and_its_value_are_one_item(self) -> None:
+        lines = ("კერძოდ:", "ფასადის შეღებვა: 2 ცალი;", "ფანჯრის შეცვლა: 4 ცალი;")
+        assert [i.numbers for i in service_items(lines)] == [("2",), ("4",)]
+
+    def test_a_table_under_a_header_on_one_line_is_its_rows(self) -> None:
+        lines = (
+            "მომსახურების აღწერა:",
+            "1, მომსახურება = ფასადის შეღებვა. 1, რაოდენობა = 2. 2, მომსახურება = ფანჯრის "
+            "შეცვლა. 2, რაოდენობა = 4",
+            "3. საფასური",
+        )
+        assert [(i.text, i.numbers) for i in service_items(lines)] == [
+            ("ფასადის შეღებვა 2", ("2",)),
+            ("ფანჯრის შეცვლა 4", ("4",)),
+        ]
+
+    def test_a_money_column_is_left_to_the_fee_rules(self) -> None:
+        lines = ("კერძოდ:", "1, დასახელება = ფასადის შეღებვა. 1, ფასი = 500. 1, სულ = 500")
+        assert [(i.text, i.numbers) for i in service_items(lines)] == [("ფასადის შეღებვა", ())]
+
+    def test_rows_keyed_by_their_number_are_items(self) -> None:
+        lines = (
+            "კერძოდ:",
+            "1, მომსახურება = ფასადის შეღებვა, რაოდენობა = 2;",
+            "2, მომსახურება = ფანჯრის შეცვლა, რაოდენობა = 4;",
+        )
+        assert [i.text for i in service_items(lines)] == ["ფასადის შეღებვა 2", "ფანჯრის შეცვლა 4"]
+
+    def test_a_row_labelled_by_its_service_keeps_the_label(self) -> None:
+        lines = ("კერძოდ:", "ფასადის შეღებვა, რაოდენობა = 2. ფანჯრის შეცვლა, რაოდენობა = 4")
+        assert [i.text for i in service_items(lines)] == ["ფასადის შეღებვა 2", "ფანჯრის შეცვლა 4"]
+
+    def test_the_sentence_after_a_table_is_no_item(self) -> None:
+        """Near miss: a table's rows end with ";", the next clause with a full stop."""
+        lines = ("კერძოდ:", "1: ფასადის შეღებვა;", "საფასური შეადგენს 100 (ასი) ლარს.")
+        assert [i.text for i in service_items(lines)] == ["ფასადის შეღებვა"]
+
+    def test_a_table_under_no_lead_in_lists_no_services(self) -> None:
+        lines = ("მხარეთა რეკვიზიტები", "1: ფასადის შეღებვა;", "1, მომსახურება = შეღებვა")
+        assert service_items(lines) == []
+
+
 class TestNumbersAndAlignment:
     def test_numbers_are_values_and_dates_are_not_numbers(self) -> None:
         part = scope_part("1 000 (ათასი) ლარის ღირებულების 3 გვერდი, 2026 წლის 1 მარტამდე")

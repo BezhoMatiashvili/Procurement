@@ -631,6 +631,16 @@ def _labelled_codes(text: str) -> set[str]:
     return {id_code_digits(m.group(1)) for m in _ID_LABELLED.finditer(text)}
 
 
+#: A number a code may be: 7 to 13 digits (a slip's length too), or three groups of digits.
+_CODE_SHAPED = re.compile(r"(?<!\d)(?:\d{7,13}|\d{3}(?P<sep>[ .\-])\d{3}(?P=sep)\d{2,5})(?!\d)")
+
+
+def _code_shaped(text: str) -> set[str]:
+    """Every number in ``text`` that may be an identification code, as its digits, whatever
+    stands before it - a misspelt label ("საიდენტიფიკციო კოდი") or none."""
+    return {id_code_digits(m.group(0)) for m in _CODE_SHAPED.finditer(text)}
+
+
 def _contract_is_subject(text: str, pos: int) -> bool:
     """Whether the signing named at ``pos`` is the contract's: "ხელშეკრულება გაფორმდა",
     "ხელშეკრულების გაფორმების თარიღი" - the contract named just before it, and no act after."""
@@ -2793,12 +2803,13 @@ class AoaChecker:
         """A party the act names without the identification code the contract gives it (client
         rule 10: the same code, name and director): a warning with the contract's code - nothing
         the act writes is wrong, a field of it is missing. Not when the code is anywhere in the
-        act, where the party reader did not tie it to the party, nor when the act states no code
-        at all: rule_parties reports that once, as an error."""
+        act - under a label the readers did not take (a misspelt one, which AOA.SPELLING
+        reports) or where the party reader did not tie it to the party - nor when the act
+        states no code at all: rule_parties reports that once, as an error."""
         if p.id_code or not match.id_code or code_of is not None:
             return
         act_codes = self.aoa.id_codes() | _labelled_codes(self.aoa.text)
-        if not act_codes or match.id_code in act_codes:
+        if not act_codes or match.id_code in act_codes | _code_shaped(self.aoa.text):
             return
         self._add(
             "AOA.ID_CODES",
