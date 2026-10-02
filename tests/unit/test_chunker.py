@@ -220,6 +220,15 @@ def test_a_two_column_table_with_no_header_is_written_one_row_to_a_line() -> Non
     assert "საგარანტიო ვადა: 12 (თორმეტი) თვე" in text
 
 
+def test_an_item_number_header_no_row_marks_is_no_row_of_data() -> None:
+    """A PDF's list of works: "N | სამუშაოს დასახელება", which Docling did not mark the header,
+    heads the rows - it is no work to compare with the contract's."""
+    rows = [["N", "სამუშაოს დასახელება"], ["1", "ფასადის შეღებვა"], ["2", "ფანჯრის შეცვლა"]]
+    text = _text(_key_terms_document(rows, header=False))
+    assert "1: ფასადის შეღებვა" in text
+    assert "სამუშაოს დასახელება" not in text
+
+
 def test_a_two_column_table_under_a_real_header_keeps_its_column_names() -> None:
     """Near miss: a header that names what its column holds ("რაოდენობა") is no list of labels
     and values: the rows keep the column's name, as the price and service readers read them."""

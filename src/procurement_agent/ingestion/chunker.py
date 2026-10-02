@@ -215,6 +215,10 @@ def _first_row_is_data(table: TableItem) -> bool:
     return not value or bool(_DIGIT.search(label) or _DIGIT.search(value))
 
 
+#: A column header that names a column of item numbers: "N", "№", "#", "No.", "ნ/ნ", "რიგითი №".
+_ITEM_NUMBER_HEADER = re.compile(
+    r"\s*(?:N|№|#|No\.?|ნ\s*/\s*ნ|რ\s*/\s*ნ|რიგითი(?:\s*(?:N|№))?)\s*", re.IGNORECASE
+)
 #: A column header that names its column only as the values ("მონაცემი", "მნიშვნელობა"): the
 #: table is labels and their values, whatever its first column is headed.
 _VALUE_HEADER = re.compile(
@@ -243,7 +247,8 @@ def _labels_and_values(table: TableItem) -> int | None:
     if _VALUE_HEADER.fullmatch(value):
         return 1
     if not any(cell.column_header for row in grid for cell in row):
-        return 0
+        # a column of item numbers headed "N", "№", "#": the header Docling did not mark
+        return 1 if _ITEM_NUMBER_HEADER.fullmatch(normalize_spaces(first[0].text)) else 0
     return None
 
 
