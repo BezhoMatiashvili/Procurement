@@ -57,9 +57,15 @@ _SUBJECT_END = re.compile(
     rf"\(\s*შემდგომში[\s\-,{_Q}]*(?:მომსახურება|სამუშაო(?:ები)?|საქონელი)(?![ა-ჰ])"
 )
 #: A lead-in whose list is the services: "… უნდა ჩააბაროს:", "კერძოდ:", "მოიცავს:",
-#: "მომსახურების აღწერა:". One that says what a party must do - "ვალდებულია:" - lists
-#: obligations instead.
-_LEAD_IN = re.compile(r"ჩააბაროს|კერძოდ|მოიცავს|მომსახურების\s+აღწერა")
+#: "მომსახურების აღწერა:", and one that names the works or services it lists - "სამუშაოების
+#: ჩამონათვალი:", "შესრულებულია შემდეგი სამუშაოები:", "სამუშაოების აღწერა:" (Test Set 4). One
+#: that says what a party must do - "ვალდებულია:" - lists obligations instead, and a list of
+#: other things ("დოკუმენტების ჩამონათვალი:") no work.
+_LEAD_IN = re.compile(
+    r"ჩააბაროს|კერძოდ|მოიცავს|(?:მომსახურების|სამუშაოების)\s+აღწერა"
+    r"|(?:სამუშაოების|მომსახურების|სერვისების)\s+ჩამონათვალი"
+    r"|შემდეგი\s+(?:სამუშაო|მომსახურებ|სერვის)"
+)
 _OBLIGATIONS = re.compile(r"ვალდებულია")
 #: A list line: "- …", "• …", "ა) …", "1) …".
 _BULLET = re.compile(r"(?:[-•*·]|[ა-ჰ]\)|\d{1,2}\))\s*(\S.*)")

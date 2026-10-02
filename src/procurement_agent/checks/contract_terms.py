@@ -624,6 +624,14 @@ _NAMES: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 
+#: A word saying how many taxes, right before tax wording: "ყველა", "ყველა სახის", "ყოველგვარი",
+#: "all", "all applicable".
+_QUANTIFIER_BEFORE = re.compile(
+    r"(?:(?<![ა-ჰ])(?:ყველა(?:\s+სახის)?|ყოველგვარი)|(?<![a-z])all(?:\s+applicable)?)\s+$",
+    re.IGNORECASE,
+)
+
+
 @dataclass(frozen=True, slots=True)
 class TaxPhrase:
     """One piece of tax wording in a document, where it is, and which taxes it names."""
@@ -655,9 +663,14 @@ def tax_phrases(text: str) -> list[TaxPhrase]:
     def add(kind: TaxKind, m: re.Match[str]) -> None:
         if _inside(m.span(), labels) or _inside(m.span(), quoted):
             return
-        phrase = m.group(0)
+        start, end = m.span()
+        # the word that says how many taxes is the phrase's own: "ყველა გადასახადის ჩათვლით"
+        # is to go whole, where a foreign organisation's fee must be NET (Test Set 4)
+        if (q := _QUANTIFIER_BEFORE.search(text, max(0, start - 40), start)) is not None:
+            start = q.start()
+        phrase = text[start:end]
         names = frozenset(name for name, pattern in _NAMES if pattern.search(phrase))
-        found.append(TaxPhrase(kind=kind, span=m.span(), text=phrase, names=names))
+        found.append(TaxPhrase(kind=kind, span=(start, end), text=phrase, names=names))
 
     for m in _NET.finditer(text):
         add("net", m)

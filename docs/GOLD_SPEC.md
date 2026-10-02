@@ -552,7 +552,11 @@ strict_findings: true             # anything else reported (any severity) is a f
   foreign form + no Georgian code) or an individual entrepreneur's status is stated ("მცირე
   მეწარმე" or "დღგ-ს გადამხდელი", not both); otherwise unknown and `AOA.TAX_WORDING` is skipped.
   A small business's wording is taxes in general ("ითვალისწინებს გადასახადებს", "გადასახადების
-  ჩათვლით"); VAT alone is a warning; its correction is "გადასახადების (მათ შორის დღგ-ს) ჩათვლით".
+  ჩათვლით"); VAT alone is a warning, text = the words that say VAT alone, its correction
+  "გადასახადების (მათ შორის დღგ-ს) ჩათვლით". Wording missing altogether is an error, text = the
+  fee, its correction the fee as it should read with the wording after it (`4 200 (ოთხი ათას
+  ორასი) აშშ დოლარი გადასახადების (მათ შორის დღგ-ს) ჩათვლით`). A word saying how many taxes
+  ("ყველა", "ყოველგვარი", "all") is part of the wording it stands before (Test Set 4).
 * The registry (client rule 1, `AOA.REGISTRY_*`): the extract a user uploads for a party wins over
   the operator's snapshot. A name differs only in its words or its legal form (folded to the
   abbreviation); an address only in its place names (in their own forms - the name, its genitive,

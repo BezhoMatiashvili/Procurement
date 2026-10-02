@@ -139,7 +139,11 @@ KEY_TERMS = [
 ]
 
 
-def _key_terms_document(rows: list[list[str]], *, rich: bool = False) -> DoclingDocument:
+def _key_terms_document(
+    rows: list[list[str]], *, rich: bool = False, header: bool = True
+) -> DoclingDocument:
+    """``header``: the first row marked as the column header, as Docling marks a Word table's
+    and not always a PDF's."""
     doc = DoclingDocument(name="synthetic")
     doc.add_text(label=DocItemLabel.TEXT, text="4. ძირითადი პირობები:")
     table = doc.add_table(data=TableData(num_rows=len(rows), num_cols=2))
@@ -150,7 +154,7 @@ def _key_terms_document(rows: list[list[str]], *, rich: bool = False) -> Docling
                 "end_row_offset_idx": r + 1,
                 "start_col_offset_idx": c,
                 "end_col_offset_idx": c + 1,
-                "column_header": r == 0,
+                "column_header": header and r == 0,
             }
             if rich:
                 group = doc.add_group(
@@ -182,6 +186,46 @@ def test_a_real_header_row_adds_nothing() -> None:
     text = _text(_key_terms_document([["პირობა", "მნიშვნელობა"], *KEY_TERMS]))
     assert "პირობა:" not in text
     assert text.count("ხელშეკრულების ღირებულება") == 1
+
+
+#: An act's requisites as a table: labels and their values, under a header that names the values
+#: only as such (Test Set 4).
+REQUISITES = [
+    ["დასახელება", "მონაცემი"],
+    ["დამკვეთის საიდენტიფიკაციო კოდი", "405284716"],
+    ["პროექტის დასახელება", "„ვერხვების ბაღი“"],
+]
+
+
+def test_a_table_of_labels_and_values_is_written_one_row_to_a_line() -> None:
+    """Docling's triplets put the header's word between each label and its value ("…კოდი,
+    მონაცემი = 405284716"), which no reader reads: each row is a "label: value" line, and the
+    header is no line of its own."""
+    text = _text(_key_terms_document(REQUISITES))
+    assert "დამკვეთის საიდენტიფიკაციო კოდი: 405284716" in text
+    assert "პროექტის დასახელება: „ვერხვების ბაღი“" in text
+    assert "მონაცემი" not in text
+
+
+def test_a_table_of_labels_and_values_no_row_of_which_is_marked_the_header() -> None:
+    """A PDF's table: Docling marked no row the header, and the header's words are a row like
+    any other."""
+    text = _text(_key_terms_document(REQUISITES, header=False))
+    assert "დამკვეთის საიდენტიფიკაციო კოდი: 405284716" in text
+    assert "მონაცემი" not in text
+
+
+def test_a_two_column_table_with_no_header_is_written_one_row_to_a_line() -> None:
+    text = _text(_key_terms_document(KEY_TERMS, header=False))
+    assert "საგარანტიო ვადა: 12 (თორმეტი) თვე" in text
+
+
+def test_a_two_column_table_under_a_real_header_keeps_its_column_names() -> None:
+    """Near miss: a header that names what its column holds ("რაოდენობა") is no list of labels
+    and values: the rows keep the column's name, as the price and service readers read them."""
+    rows = [["მომსახურება", "რაოდენობა"], ["ფასადის ესკიზი", "2"], ["ფანჯრის ნახაზი", "4"]]
+    text = _text(_key_terms_document(rows))
+    assert "ფასადის ესკიზი, რაოდენობა = 2" in text
 
 
 def test_the_contract_value_in_a_headerless_key_terms_table_is_the_total() -> None:

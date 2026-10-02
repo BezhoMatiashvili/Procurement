@@ -351,6 +351,8 @@ _SWIFT_LABELLED = re.compile(
 # "(შემდგომში „შემკვეთი“)", "(შემდგომში - ,,შემსრულებელი”)"
 _ROLE = re.compile(rf"შემდგომში[\s\-\u2013\u2014]*(?:{_QUOTED}|[,\s]*([ა-ჰ]{{4,20}}))")
 _ROLE_BARE = re.compile(rf"{_QUOTED}")
+#: A side's word labelling the name after it, a requisites row: "დამკვეთი: შპს „…“".
+_ROLE_LABEL = re.compile(rf"(?<![ა-ჰ])({'|'.join(sorted(_SIDE_WORDS))})\s*:\s*$")
 
 # words that look like a name after "დირექტორი" but are role nouns, not people
 _NOT_A_NAME = {
@@ -907,6 +909,13 @@ def find_parties(text: str, *, split_conflicts: bool = False) -> list[Party]:
             if party.role in _SIDE_WORDS:
                 party.role_source = "defined"
                 party.role_span = (start + rm.start(), start + rm.end())
+        elif rm := _ROLE_LABEL.search(before):
+            # "დამკვეთი: შპს „…“": the side labels the name on its own row, as plainly as a
+            # definition does (Test Set 4)
+            party.role = rm.group(1)
+            party.role_source = "defined"
+            offset = start - len(before)
+            party.role_span = (offset + rm.start(1), offset + rm.end(1))
         elif rm := _ROLE_BARE.search(before):
             # signature blocks put the bare role above the name: “შემსრულებელი” / შპს „…“
             cand = _clean(rm.group(1))

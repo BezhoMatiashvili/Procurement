@@ -116,9 +116,10 @@ class PartyColumnsTableSerializer(TripletTableSerializer):
     ) -> SerializationResult:
         first = _party_columns(item)
         by_rows = first is None and _first_row_is_data(item)
-        keyed = first is None and not by_rows and _keyed_by_item_number(item)
+        pairs = None if first is not None or by_rows else _labels_and_values(item)
+        keyed = first is None and not by_rows and pairs is None and _keyed_by_item_number(item)
         if (
-            first is None and not by_rows and not keyed
+            first is None and not by_rows and pairs is None and not keyed
         ) or item.self_ref in doc_serializer.get_excluded_refs(**kwargs):
             return super().serialize(item=item, doc_serializer=doc_serializer, doc=doc, **kwargs)
         parts: list[SerializationResult] = []
@@ -138,6 +139,8 @@ class PartyColumnsTableSerializer(TripletTableSerializer):
         ]
         if keyed:
             text = _keyed_rows(texts)
+        elif pairs is not None:
+            text = _by_row(texts[pairs:])
         else:
             text = _by_row(texts) if first is None else _by_column(texts, first)
         if text:
@@ -210,6 +213,38 @@ def _first_row_is_data(table: TableItem) -> bool:
     if not label:
         return False
     return not value or bool(_DIGIT.search(label) or _DIGIT.search(value))
+
+
+#: A column header that names its column only as the values ("მონაცემი", "მნიშვნელობა"): the
+#: table is labels and their values, whatever its first column is headed.
+_VALUE_HEADER = re.compile(
+    r"\s*(?:მონაცემ[ა-ჰ]*|მნიშვნელობ[ა-ჰ]*|ინფორმაცი[ა-ჰ]*|values?|data|details?)\s*",
+    re.IGNORECASE,
+)
+
+
+def _labels_and_values(table: TableItem) -> int | None:
+    """For a two-column table of labels and their values, how many of its rows to leave out (a
+    header row, or none); None for any other table.
+
+    Docling's triplets put the column's name between each label and its value ("…კოდი, მონაცემი
+    = 405284716"), or the column's number when no row is marked the header ("…კოდი, 1 =
+    405284716"): no reader reads either (Test Set 4). Such a table is written one row to a line,
+    "label: value", like a key-terms table (``_first_row_is_data``) - when its first row names
+    the second column only as the values, that row, marked the header or not, says nothing and
+    is left out; when Docling marked no row the header at all, every row is a label and its
+    value. A header that names what its column holds ("რაოდენობა", "თანხა") keeps the triplets:
+    the price and service readers read the column's name."""
+    grid = table.data.grid
+    if table.data.num_cols != 2 or len(grid) < 2:
+        return None
+    first = grid[0]
+    value = "" if first[1].start_col_offset_idx == 0 else normalize_spaces(first[1].text)
+    if _VALUE_HEADER.fullmatch(value):
+        return 1
+    if not any(cell.column_header for row in grid for cell in row):
+        return 0
+    return None
 
 
 def _by_row(texts: list[list[str]]) -> str:

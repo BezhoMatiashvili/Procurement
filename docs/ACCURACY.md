@@ -42,6 +42,7 @@ number of places its Word comment marks.
 | client (`client_v2`) | 6 acts, the contract, 6 compare pairs | 99/99 and 37/37 | all | 0 | 0 |
 | Test Set 2 (`ts2`) | 12 acts, the contract, compare pairs | 198/198 and 54/54 | all | 0 | 0 |
 | Test Set 3 (`ts3`) | 3 families, 23 acts, 3 contracts, compare pairs | 373/373 and 107/107 | all | 0 | 0 |
+| Test Set 4 (`ts4`), written blind | 7 families, 44 documents, Word and text PDF | (findings only) | 37 of 39 | 2 | 3 (see below) |
 
 These are **tuned** numbers: every set was looked at while fixing. The honest numbers are the
 first runs on data nobody had looked at, kept in `eval_runs/` (git-ignored):
@@ -51,6 +52,41 @@ first runs on data nobody had looked at, kept in `eval_runs/` (git-ignored):
 * Test Set 3 BOQ, first run (`heldout-ts3-boq-first-f65db38.txt`): 66 of 127 checks.
 * Prose spelling on 14 unseen texts (`heldout-prose-first-49f5827.txt`): 3 false flags on 7
   acts checked against their contracts.
+
+### Test Set 4: written blind from the client's rules (`ts4`, 2026-10-03)
+
+An agent that read the client's eleven rules and `docs/GOLD_SPEC.md`, never the rules' code,
+wrote 44 invented documents (`samples/gen_test_set_4.py`) in layouts of its own choosing - a
+requisites table, an act dated in its heading line, a bilingual act, numbered clauses, text PDFs
+written by LibreOffice - with their contracts, registry extracts and an answer key.
+
+* **First run, kept verbatim (`eval_runs/heldout-ts4-first-f09b516.txt`): 25 findings matched,
+  14 missing, 63 unexpected** - most of them one layout read wrong: a two-column requisites
+  table under a header ("დასახელება | მონაცემი") written by Docling as "label, მონაცემი =
+  value", which no reader read (the codes, the project, the plot code "missing"); an act dated
+  in its heading line ("ქ. თბილისი<TAB>date") over a row "ხელშეკრულება: …", whose contract word
+  made the date the contract's; and the text PDFs' lines read out of order ("2026 21 წლის
+  აგვისტო"): their writer set the digits and the punctuation in a second font and wrote each
+  line's runs one font at a time.
+* **General fixes:** a two-column table of labels and values (a header naming its column only
+  as the values, or no header at all) is written one "label: value" row to a line; a contract
+  word that labels the next field ("ხელშეკრულება:") names no contract by a date, and a date
+  that ends its line is said of nothing on the lines after it; a side's word labelling a name
+  ("დამკვეთი: შპს „…“") is its role; a PDF's lines read left to right - the text cells of each
+  line in the order they stand, cells written across or right up against each other made one
+  from their words (Docling took "01.07.2026-" and "დან" for a word broken over a line and
+  dropped the hyphen); the tax wording "VAT alone" is marked on those words, and a word saying
+  how many taxes ("ყველა") is the wording's; a fee's advance and remainder that make up the act's
+  own fee are that fee in parts, not a second wrong fee; a list under "სამუშაოების ჩამონათვალი:"
+  or "შესრულებულია შემდეგი სამუშაოები:" is the services.
+* **After them: 37 matched, 2 missing, 3 unexpected.** The three that remain are no misreading:
+  an act dated after the contract's performance window, within its validity, gets the warning
+  the client is to decide on (rule 4's month-end date can fall after a mid-month window - see
+  Known limits); the gold wrote a missing tax wording's correction as the wording alone, before
+  GOLD_SPEC said it is the fee as it should read; and one gold entry names `AOA.PAYMENT_TERMS`,
+  a rule id that does not exist, for the `AOA.PAYMENT_DEADLINE` finding the check makes. The
+  other gold sets and the snapshot of every output are unchanged, and every rule's harness on a
+  fresh seed (31) is at 100%.
 
 ### BOQ: an independent reference reader (`scripts/evaluate_boq.py`)
 
@@ -475,7 +511,10 @@ image-size issue, not an accuracy one, left for its own change.
   a fixed coefficient cell in every amount formula, which total a bid offers when it gives a
   discount below its total incl. VAT, pairing a contract's and an act's parties by role in the
   comparison, and whether a one-sided date counts as carried when the other document states it
-  in another role.
+  in another role; and an act dated after the contract's performance window but within its
+  validity: the client's rule 10 asks only that the act fall in the validity, yet rule 4's
+  month-end date falls after a window that ends mid-month - today a warning that names the
+  conflict, which the client may keep or drop.
 
 ## The central design decision: read the label, do not ask the model
 

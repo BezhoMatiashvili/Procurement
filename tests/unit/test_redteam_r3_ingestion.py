@@ -245,13 +245,19 @@ def test_a_title_merged_across_the_first_row_is_written_once(tmp_path: Path) -> 
     assert facts["contract_number"] == ["14/2026"]
 
 
-@pytest.mark.parametrize(
-    "header", [["პირობა", "მნიშვნელობა"], ["", "თანხა"]], ids=["named", "blank-corner"]
-)
-def test_a_real_header_row_is_still_a_header(tmp_path: Path, header: list[str]) -> None:
+def test_a_real_header_row_is_still_a_header(tmp_path: Path) -> None:
     """The near miss: a header names its columns and carries no figure; Docling's triplets,
     which write each row under its column's name, stay as they were."""
-    rows = [header, _PRICE, _PENALTY]
+    rows = [["", "თანხა"], _PRICE, _PENALTY]
     _, text = _extract_docx(tmp_path, _table_docx(rows, before=_PREAMBLE))
-    assert f"{_PRICE[0]}, {header[1]} = {_PRICE[1]}" in text
-    assert f"{header[0]}:" not in text or not header[0]
+    assert f"{_PRICE[0]}, თანხა = {_PRICE[1]}" in text
+
+
+def test_a_header_naming_the_values_only_heads_labels_and_their_values(tmp_path: Path) -> None:
+    """A header that names its second column only as the values ("პირობა | მნიშვნელობა") heads
+    a table of labels and their values: each row a "label: value" line, as the readers read
+    them, and the header still no row of data (Test Set 4)."""
+    rows = [["პირობა", "მნიშვნელობა"], _PRICE, _PENALTY]
+    _, text = _extract_docx(tmp_path, _table_docx(rows, before=_PREAMBLE))
+    assert f"{_PRICE[0]}: {_PRICE[1]}" in text
+    assert "პირობა:" not in text

@@ -693,7 +693,9 @@ def contract_named_by(text: str, hit: RuleHit) -> int | None:
     "this date is the contract's" for the act's date, its period and the contract date the
     extraction states (red team R4)."""
     after = _CONTRACT_REFERENCE.match(text, hit.end)
-    if after is not None:
+    # a contract word that labels the next field ("ხელშეკრულება: …", a requisites row after a
+    # heading's date) names no contract by this date (Test Set 4)
+    if after is not None and not _LABEL_WORD.match(text, after.end()):
         return after.end() - len("ხელშეკრულებ")
     reach = max(0, hit.start - _CONTRACT_DATED_REACH)
     before = _CONTRACT_DATED_BEFORE.search(text, reach, hit.start)
@@ -735,7 +737,13 @@ def _yearless_end(text: str, first: RuleHit, limit: int) -> RuleHit | None:
     return None
 
 
-def _heading_date(text: str, hits: list[RuleHit]) -> tuple[date, RuleHit] | None:
+#: How many of a document's first lines its heading may take.
+_HEADING_LINES = 8
+
+
+def _heading_date(
+    text: str, hits: list[RuleHit], lines: Sequence[str] = ()
+) -> tuple[date, RuleHit] | None:
     """An act dated only in its heading ("ქ. თბილისი, 31.08.2026"): the first date that opens
     the document and is not the contract's.
 
@@ -755,10 +763,17 @@ def _heading_date(text: str, hits: list[RuleHit]) -> tuple[date, RuleHit] | None
             claimed.add(named)
             passed_over = True
             continue
+        # a date that ends its line is said of nothing on the lines after it: "Tbilisi /
+        # ქ. თბილისი<TAB>date", then "Under Contract No. …" (Test Set 4)
+        written = text[h.start : h.end]
+        ends_line = any(line.rstrip(" .,;").endswith(written) for line in lines[:_HEADING_LINES])
         near = [
             m.start()
-            for m in _CONTRACT_WORD.finditer(text, max(0, h.start - 60), h.end + 30)
-            if m.start() not in claimed
+            for m in _CONTRACT_WORD.finditer(
+                text, max(0, h.start - 60), h.end if ends_line else h.end + 30
+            )
+            # a label of the next field is no contract this date is said of (Test Set 4)
+            if m.start() not in claimed and not _LABEL_WORD.match(text, m.end())
         ]
         if near:
             return None
@@ -768,6 +783,10 @@ def _heading_date(text: str, hits: list[RuleHit]) -> tuple[date, RuleHit] | None
                 return None
         return date.fromisoformat(str(h.normalized)), h
     return None
+
+
+#: The rest of a word that labels a field: its ending, then a colon ("ხელშეკრულება:").
+_LABEL_WORD = re.compile(r"[ა-ჰ]*\s*:")
 
 
 def _date_hits_near(
@@ -1166,7 +1185,7 @@ class AoaChecker:
             key_at = max((s for s in key_starts if s <= hit.start), default=hit.start)
             if not self._in_advance_clause(hit.start) and not _contract_is_subject(text, key_at):
                 return d, hit
-        return _heading_date(text, find_dates(text))
+        return _heading_date(text, find_dates(text), self.aoa.lines)
 
     def _act_date_places(self, hit: RuleHit) -> tuple[tuple[int, ...], int] | None:
         """Which places of the act's date, as written at ``hit``, a finding about it marks
@@ -2242,23 +2261,29 @@ class AoaChecker:
         if fixed or _tax_wording_met(self.contractor_type, phrases):
             return
         fee = fees[0] if fees else None
-        fix = self._in_script(rule, fee.span[0] if fee else 0)
         note_ka, note_en = self._type_note()
-        vat_only = self.contractor_type == "small_business" and any(
-            p.kind == "inclusion" and p.names == {"vat"} for p in phrases
+        vat_only = (
+            next((p for p in phrases if p.kind == "inclusion" and p.names == {"vat"}), None)
+            if self.contractor_type == "small_business"
+            else None
         )
-        if vat_only:
+        if vat_only is not None:
             # the act says VAT is included and nothing of the other taxes: the client's wording
-            # names them all - a warning, since the fee itself may well be right
+            # names them all - a warning, since the fee itself may well be right; marked on the
+            # words to write otherwise, the correction those words (GOLD_SPEC, Test Set 4)
             self._add(
                 "AOA.TAX_WORDING",
                 "warning",
                 f"{rule.rule_ka}; აქტში წერია მხოლოდ დღგ-ს ჩართვაზე{note_ka}",
                 f"{rule.rule_en}; the act speaks of VAT only{note_en}",
-                expected=f"{fee.raw} {fix}" if fee else fix,
-                span=fee.span if fee else None,
+                expected=self._in_script(rule, vat_only.span[0]),
+                actual=vat_only.text,
+                span=vat_only.span,
             )
             return
+        # no wording at all: marked on the fee, the correction the fee as it should read, with
+        # the wording after it (GOLD_SPEC)
+        fix = self._in_script(rule, fee.span[0] if fee else 0)
         self._add(
             "AOA.TAX_WORDING",
             "error",
@@ -3951,7 +3976,10 @@ class AoaChecker:
             for share in doc.advance(in_act=doc is self.aoa).shares
             if 0 < share.percent < 100
         ]
-        if parts and not _fee_parts_add_up(parts, matched, prices, shares):
+        # the parts make up the act's own fee, right or wrong: a wrong fee is the fee's mistake,
+        # and the rest after its advance, corrected to a price, would be wrong (Test Set 4)
+        stated = [*matched, *(r.money for r in wrong)]
+        if parts and not _fee_parts_add_up(parts, stated, prices, shares):
             # a part the contract itself states (its advance) is not the one that is wrong
             wrong += [
                 r
