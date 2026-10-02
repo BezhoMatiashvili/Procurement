@@ -441,9 +441,12 @@ def test_the_rerun_form_opens_on_a_blank_choice_that_is_not_required(client: Tes
 def test_a_company_report_says_the_wording_rules_do_not_apply(client: TestClient) -> None:
     """Not applicable is neither a finding nor "could not run" - but it is said."""
     act = _act(client)
+    # left unset, the act's company form and nine-digit code say the type, and the page says so
     unset = client.get(f"/ui/checks/aoa?act={act}").text
-    assert "არ ვრცელდება" not in unset
+    assert "შემსრულებლის ტიპი დადგინდა აქტიდან: იურიდიული პირი / კომპანია" in unset
+    assert "არ ვრცელდება" in unset
     ka = client.get(f"/ui/checks/aoa?act={act}&contractor_type=company").text
+    assert "შემსრულებლის ტიპი დადგინდა აქტიდან" not in ka
     assert "ამ ტიპის შემსრულებელზე არ ვრცელდება: NET/დღგ-ს ფორმულირების წესები (5-8)." in ka
     assert "AOA.TAX_WORDING" not in ka  # not listed among the rules that could not run
     client.post("/ui/lang", data={"lang": "en", "next": "/ui/"}, headers=SAME_ORIGIN)

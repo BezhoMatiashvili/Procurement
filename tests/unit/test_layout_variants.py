@@ -64,8 +64,10 @@ def test_a_natural_person_is_a_party() -> None:
 
 
 def test_an_individual_entrepreneurs_changed_code_is_reported() -> None:
+    """The act states the entrepreneur pays VAT, so the type is read from it (rule 6) - and its
+    fee says "taxes included", not "VAT included": that is the act's one error."""
     contract, act = _with_ie(CONTRACT), _with_ie(ACT)
-    assert _errors(act, contract) == []
+    assert _errors(act, contract) == ["AOA.TAX_WORDING"]
     assert "AOA.ID_CODES" in _errors(act.replace("01001001001", "01001001010"), contract)
 
 

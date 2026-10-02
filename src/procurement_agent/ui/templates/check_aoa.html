@@ -69,6 +69,9 @@
      t("aoa.not_applicable.tax") if "AOA.TAX_WORDING" in not_applicable else "",
      t("aoa.not_applicable.fx") if "AOA.FX_INVOICE" in not_applicable else "",
    ] | select | list %}
+{% if "contractor_type_inferred" in report.summary %}
+<p class="small muted">{{ icon("info") }} {{ t("aoa.type_inferred", type=t("contractor." ~ report.summary["contractor_type"]), why=report.summary["contractor_type_inferred_ka"] if lang == "ka" else report.summary["contractor_type_inferred"]) }}</p>
+{% endif %}
 {% if not_applicable_labels %}
 <p class="small muted">{{ icon("info") }} {{ t("aoa.not_applicable", rules=not_applicable_labels | join("; ")) }}</p>
 {% endif %}

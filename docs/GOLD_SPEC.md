@@ -541,6 +541,12 @@ strict_findings: true             # anything else reported (any severity) is a f
   figure's own. It adds up with the advance's figure, or - when the act or the contract states
   the advance only as a share - as the fee less that share. A remainder that adds up is not
   compared; one that does not is compared like a fee.
+* The contractor type (client rules 5-9): given, or read from the act where the paid party's
+  legal form and code agree (company form + 9 digits; "ფ/პ"/"ფიზიკური პირი" + 11 digits; a
+  foreign form + no Georgian code) or an individual entrepreneur's status is stated ("მცირე
+  მეწარმე" or "დღგ-ს გადამხდელი", not both); otherwise unknown and `AOA.TAX_WORDING` is skipped.
+  A small business's wording is taxes in general ("ითვალისწინებს გადასახადებს", "გადასახადების
+  ჩათვლით"); VAT alone is a warning; its correction is "გადასახადების (მათ შორის დღგ-ს) ჩათვლით".
 * The registry (client rule 1, `AOA.REGISTRY_*`): the extract a user uploads for a party wins over
   the operator's snapshot. A name differs only in its words or its legal form (folded to the
   abbreviation); an address only in its place names (in their own forms - the name, its genitive,

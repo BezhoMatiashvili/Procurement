@@ -218,6 +218,11 @@ STRINGS: dict[str, tuple[str, str]] = {
         "No NBG rate for this day has been imported: type the rate from nbg.gov.ge.",
         "ამ დღის NBG-ის კურსი შემოტანილი არ არის: შეიყვანეთ კურსი nbg.gov.ge-დან.",
     ),
+    "aoa.type_inferred": (
+        "Contractor type read from the act: {type} ({why}); if it is wrong, choose the right one "
+        "below.",
+        "შემსრულებლის ტიპი დადგინდა აქტიდან: {type} ({why}); თუ არასწორია, აირჩიეთ სწორი ქვემოთ.",
+    ),
     "aoa.not_applicable": (
         "Not applicable to this contractor type: {rules}.",
         "ამ ტიპის შემსრულებელზე არ ვრცელდება: {rules}.",

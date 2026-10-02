@@ -178,6 +178,22 @@ period's end, on the month's end, or off both.
   (100%)**, with every correction read back as the expected date in the act's own style, and the
   gold sets unchanged.
 
+### Rules 5-8: the tax wording by contractor type (`scripts/tax_rules_accuracy.py`)
+
+Acts with an invented contractor of each type (natural person, VAT-paying or small-business
+entrepreneur, foreign organisation, company), the type given or left to be read from the act, the
+fee worded right, wrongly or not at all in Georgian and English phrasings, an advance line worded
+too; eleven classes, among them the type read from the act and the cases where it must not be
+(an entrepreneur with no status, or with both).
+
+* First run (seed 1, 60 a class): 660 of 660. The phrasings were then widened (English "including
+  VAT", "VAT included", "NET amount", "gross, taxes included"; "დამატებული ღირებულების
+  გადასახადის ჩათვლით").
+* **Fresh seeds 2 and 3, 200 a class: 2,200 of 2,200 each (100%).** On the gold sets the type is
+  now read for 39 acts (a company for 24, whose wording rules are then not applicable) and no
+  finding changed but the invoice note's "a small business needs none" sentence, now that the
+  natural-person family's type is known.
+
 ### Scanned PDFs (OCR inside the Docker image, Tesseract `kat+eng`, 216 dpi)
 
 The client's 7 scans, each paired with its Word twin by content: character error rate 0.16-0.40

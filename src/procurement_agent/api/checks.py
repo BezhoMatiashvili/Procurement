@@ -102,8 +102,9 @@ class EnteredRate(BaseModel):
 class AoaCheckRequest(BaseModel):
     aoa_document_id: str = Field(max_length=64)
     contract_document_id: str | None = Field(default=None, max_length=64)
-    #: Drives the NET/VAT wording rules. Nothing in the document states it, so when it is
-    #: omitted that rule is reported as skipped rather than guessed.
+    #: Drives the NET/VAT wording rules (5-8) and the invoice exemption (9). Omitted, it is read
+    #: from the act where its legal form, code and stated status agree - and said so - and the
+    #: rule is otherwise reported as skipped rather than guessed.
     contractor_type: ContractorType | None = None
     #: An advance paid on a foreign-currency act, in the act's currency, and the day it was
     #: paid (rule 9: the advance is invoiced at that day's rate). Omitted, each is read from the

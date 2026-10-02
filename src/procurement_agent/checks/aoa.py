@@ -127,6 +127,7 @@ from procurement_agent.extraction.georgian import (
     in_case_of,
     inflect,
     is_georgian_word,
+    legal_form_kind,
     lemma,
     lemma_word,
     mixed_script_words,
@@ -248,12 +249,15 @@ _TAX_RULES: dict[ContractorType, _TaxRule] = {
     ),
     "small_business": _TaxRule(
         offends=frozenset({"exclusion"}),
-        rule_ka="მცირე მეწარმისთვის უნდა ეწეროს, რომ „ანგარიშსწორება ითვალისწინებს გადასახადებს“",
-        rule_en="for a small business the act must state that settlement includes taxes",
+        rule_ka="მცირე მეწარმისთვის უნდა ეწეროს, რომ „ანგარიშსწორება ითვალისწინებს გადასახადებს“ "
+        "(მათ შორის დღგ-ს)",
+        rule_en="for a small business the act must state that the settlement includes taxes "
+        "(VAT among them)",
         absent_ka="აქტში არ წერია, რომ ანგარიშსწორება გადასახადებს ითვალისწინებს",
         absent_en="the act does not say taxes are included",
-        fix_ka="გადასახადების ჩათვლით",
-        fix_en="including taxes",
+        # the client's phrase as a qualifier that fits beside a fee or in place of a wrong one
+        fix_ka="გადასახადების (მათ შორის დღგ-ს) ჩათვლით",
+        fix_en="including taxes (VAT among them)",
     ),
     "foreign": _TaxRule(
         offends=frozenset({"inclusion", "exclusion", "mention"}),
@@ -965,6 +969,10 @@ class AoaChecker:
         self.speller = speller
         self.registry = registry
         self.contractor_type = contractor_type
+        #: the type the user gave; a run infers one from the act only when this is None
+        self._given_type = contractor_type
+        #: why the act's own words gave the type, when they did (``_infer_contractor_type``)
+        self._type_reason: tuple[str, str] | None = None
         #: the NBG rates for a foreign-currency act's invoice (``rule_fx_invoice``)
         self.rates: RateProvider = rates if rates is not None else NullRateProvider()
         #: an advance the user entered; what it leaves blank is read from the act
@@ -1434,6 +1442,11 @@ class AoaChecker:
         self._scope = None
         self._review = None
         self._period_reading = None
+        self.contractor_type, self._type_reason = self._given_type, None
+        if self.contractor_type is None:
+            inferred = self._infer_contractor_type()
+            if inferred is not None:
+                self.contractor_type, self._type_reason = inferred[0], inferred[1]
         self.rule_amount_words()
         self.rule_required_fields()
         self.rule_act_date()
@@ -1483,6 +1496,10 @@ class AoaChecker:
         act = self._act_date()
         if act:
             out["act_date"] = str(act[0])
+        if self._type_reason is not None and self.contractor_type is not None:
+            out["contractor_type"] = self.contractor_type
+            out["contractor_type_inferred"] = self._type_reason[1]
+            out["contractor_type_inferred_ka"] = self._type_reason[0]
         not_applicable = [r for r, types in _NOT_APPLICABLE if self.contractor_type in types]
         if not_applicable:
             out["not_applicable"] = ", ".join(not_applicable)
@@ -2151,9 +2168,16 @@ class AoaChecker:
         # "დღგ-ს გარეშე" beside the fee before tax says what that part is, not what the fee is
         phrases = [p for p in tax_phrases(self.aoa.text) if not self._qualifies_net(p, nets)]
         fees = [m for m in self._fee_amounts() if all(m != r.money for r in nets)]
-        scopes = [fee_scope(self.aoa.sentences(), m.span) for m in fees]
+        # every payment field: the fee, and an advance or a remainder stated with it (rule 6)
+        paid = [
+            r.money
+            for r in self.aoa.amounts()
+            if r.role in ("advance", "remainder") and r.money not in fees
+        ]
+        scopes = [fee_scope(self.aoa.sentences(), m.span) for m in (*fees, *paid)]
         if not scopes:  # no fee found to read beside: the whole act is where the wording is
             scopes = [(0, len(self.aoa.text))]
+        self._type_contradicted(phrases)
         if self.contractor_type == "foreign":
             fixed = self._tax_mentions(rule, phrases, scopes)
         else:
@@ -2163,14 +2187,107 @@ class AoaChecker:
             return
         fee = fees[0] if fees else None
         fix = self._in_script(rule, fee.span[0] if fee else 0)
+        note_ka, note_en = self._type_note()
+        vat_only = self.contractor_type == "small_business" and any(
+            p.kind == "inclusion" and p.names == {"vat"} for p in phrases
+        )
+        if vat_only:
+            # the act says VAT is included and nothing of the other taxes: the client's wording
+            # names them all - a warning, since the fee itself may well be right
+            self._add(
+                "AOA.TAX_WORDING",
+                "warning",
+                f"{rule.rule_ka}; აქტში წერია მხოლოდ დღგ-ს ჩართვაზე{note_ka}",
+                f"{rule.rule_en}; the act speaks of VAT only{note_en}",
+                expected=f"{fee.raw} {fix}" if fee else fix,
+                span=fee.span if fee else None,
+            )
+            return
         self._add(
             "AOA.TAX_WORDING",
             "error",
-            f"{rule.rule_ka}; {rule.absent_ka}",
-            f"{rule.rule_en}; {rule.absent_en}",
+            f"{rule.rule_ka}; {rule.absent_ka}{note_ka}",
+            f"{rule.rule_en}; {rule.absent_en}{note_en}",
             expected=f"{fee.raw} {fix}" if fee else fix,
             span=fee.span if fee else None,
         )
+
+    def _type_contradicted(self, phrases: list[TaxPhrase]) -> None:
+        """An act that says the contractor is not a VAT payer, checked as a VAT-registered
+        entrepreneur: one of the two is wrong - the type chosen, or the act - and the report
+        asks which, on the act's words."""
+        if self.contractor_type != "individual_entrepreneur_vat":
+            return
+        for p in phrases:
+            if p.kind == "exempt" and "vat" in p.names:
+                self._add(
+                    "AOA.TAX_WORDING",
+                    "warning",
+                    f"შემსრულებელი შემოწმდა, როგორც დღგ-ს გადამხდელი ინდ. მეწარმე, აქტში კი "
+                    f"წერია „{p.text}“ — გადაამოწმეთ შემსრულებლის ტიპი",
+                    f"the contractor was checked as a VAT-registered individual entrepreneur, but "
+                    f"the act says '{p.text}' - check the contractor's type",
+                    actual=p.text,
+                    span=p.span,
+                )
+                return
+
+    def _type_note(self) -> tuple[str, str]:
+        """Said after a wording finding when the type was read from the act, not given."""
+        if self._type_reason is None:
+            return "", ""
+        ka, en = self._type_reason
+        return (
+            f" (შემსრულებლის ტიპი დადგინდა აქტიდან: {ka})",
+            f" (contractor type read from the act: {en})",
+        )
+
+    def _infer_contractor_type(self) -> tuple[ContractorType, tuple[str, str]] | None:
+        """The contractor's type where the act states it beyond doubt, with why - else None.
+
+        The contractor is the one party on the paid side ("შემსრულებელი", "მიმწოდებელი" ...).
+        Its legal form and its identification code must agree: a company's form and a nine-digit
+        code, a natural person's ("ფ/პ", "ფიზიკური პირი") and an eleven-digit personal number, a
+        foreign form (LLC, GmbH ...) and no Georgian code. An individual entrepreneur is a VAT
+        payer or a small business by a status the act states in so many words, never by a
+        guess: with neither stated, or both, the type stays unknown and the rule asks for it.
+        """
+        payees = [p for p in self.aoa.parties if _side(p.role) == "payee"]
+        if len(payees) != 1 or not payees[0].name:
+            return None
+        p = payees[0]
+        kind = legal_form_kind(p.name or "")
+        code = id_code_digits(p.id_code or "")
+        if kind == "company" and len(code) == 9:
+            return "company", (
+                "კომპანიის სამართლებრივი ფორმა და 9-ნიშნა კოდი",
+                "a company's legal form and nine-digit code",
+            )
+        if kind == "natural_person" and len(code) == 11:
+            return "natural_person", (
+                "ფიზიკური პირი და პირადი ნომერი",
+                "a natural person and a personal number",
+            )
+        if kind == "foreign" and not code:
+            return "foreign", (
+                "უცხოური სამართლებრივი ფორმა, საქართველოს კოდის გარეშე",
+                "a foreign legal form and no Georgian code",
+            )
+        if kind == "individual_entrepreneur":
+            text = self.aoa.text
+            small = _SMALL_BUSINESS.search(text) is not None
+            vat = _VAT_PAYER.search(text) is not None and not _NOT_VAT_PAYER.search(text)
+            if small and not vat:
+                return "small_business", (
+                    "აქტში მითითებული მცირე მეწარმის სტატუსი",
+                    "the small-business status the act states",
+                )
+            if vat and not small:
+                return "individual_entrepreneur_vat", (
+                    "აქტში მითითებული დღგ-ს გადამხდელის სტატუსი",
+                    "the VAT-payer status the act states",
+                )
+        return None
 
     def _qualifies_net(self, phrase: TaxPhrase, nets: list[RoledAmount]) -> bool:
         """Whether an exclusion ("დღგ-ს გარეშე", "excl. VAT") is the label of a fee before tax."""
@@ -4939,6 +5056,15 @@ def _dotted_cadastral(token: str) -> str | None:
     return ".".join(groups)
 
 
+#: An individual entrepreneur's tax status, as an act states it: a small business ("მცირე
+#: მეწარმე", "მცირე ბიზნესის სტატუსი"), a VAT payer ("დღგ-ს გადამხდელი"), or not one.
+_SMALL_BUSINESS = re.compile(r"(?<![ა-ჰ])მცირე\s+(?:მეწარმ|ბიზნეს)[ა-ჰ]*")
+_VAT_PAYER = re.compile(r"(?<![ა-ჰ])დ\.?ღ\.?გ\.?-?ს\s+გადამხდელ[ა-ჰ]*")
+_NOT_VAT_PAYER = re.compile(
+    r"(?<![ა-ჰ])(?:არ\s+არის|არა)\s+(?:რეგისტრირებული\s+)?დ\.?ღ\.?გ\.?-?ს\s+გადამხდელ"
+)
+
+
 #: A date the act writes in ISO, which a correction may then write in ISO too.
 _ISO_WRITTEN = re.compile(r"\s*\d{4}-\d{2}-\d{2}")
 #: A four-digit year in a date as written.
@@ -5169,7 +5295,8 @@ def _tax_wording_met(contractor_type: ContractorType, phrases: list[TaxPhrase]) 
     if contractor_type == "individual_entrepreneur_vat":
         return any(p.kind == "inclusion" and "vat" in p.names for p in phrases)
     if contractor_type == "small_business":
-        return "inclusion" in kinds
+        # taxes in general: "ითვალისწინებს გადასახადებს", "გადასახადების ჩათვლით" - not VAT alone
+        return any(p.kind == "inclusion" and not p.names for p in phrases)
     return "net" in kinds
 
 

@@ -94,7 +94,6 @@ def test_a_correct_act_restating_subject_and_services_has_no_findings() -> None:
     assert report.findings == []
     assert [s.rule_id for s in report.skipped] == [
         "AOA.SPELLING",
-        "AOA.TAX_WORDING",
         "AOA.REGISTRY",
     ]
 

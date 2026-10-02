@@ -277,9 +277,7 @@ class TestNotApplicable:
         report = check_aoa(aoa_text=ACT, contract_text=CONTRACT, contractor_type=contractor_type)  # type: ignore[arg-type]
         assert report.summary["not_applicable"] == "AOA.FX_INVOICE"
 
-    @pytest.mark.parametrize(
-        "contractor_type", [None, "natural_person", "individual_entrepreneur_vat"]
-    )
+    @pytest.mark.parametrize("contractor_type", ["natural_person", "individual_entrepreneur_vat"])
     def test_every_rule_applies_to_the_other_types(self, contractor_type: str | None) -> None:
         report = check_aoa(aoa_text=ACT, contract_text=CONTRACT, contractor_type=contractor_type)  # type: ignore[arg-type]
         assert "not_applicable" not in report.summary
@@ -290,9 +288,26 @@ class TestRulesThatCannotRun:
     checking nothing."""
 
     def test_tax_wording_is_skipped_when_the_contractor_type_is_unknown(self) -> None:
-        report = check_aoa(aoa_text=ACT, contract_text=CONTRACT)
+        """An individual entrepreneur whose tax status the act does not state: the type stays
+        unknown - a VAT payer and a small business are never guessed - and the rule asks."""
+        ie = "ი/მ გიორგი ნიკოლაძე, საიდენტიფიკაციო კოდი: 01001001001"
+        act = ACT.replace("შპს „ბეტა სერვისი“, საიდენტიფიკაციო კოდი: 987654321", ie)
+        report = check_aoa(aoa_text=act)
         assert any(s.rule_id == "AOA.TAX_WORDING" for s in report.skipped)
         assert not any(f.rule_id == "AOA.TAX_WORDING" for f in report.findings)
+        assert "contractor_type_inferred" not in report.summary
+
+    def test_a_company_contractor_is_read_from_the_act(self) -> None:
+        """A company's legal form and nine-digit code agree: the type is the act's own, said so,
+        and the wording rules do not apply to it."""
+        report = check_aoa(aoa_text=ACT, contract_text=CONTRACT)
+        assert report.summary["contractor_type"] == "company"
+        assert (
+            report.summary["contractor_type_inferred"]
+            == "a company's legal form and nine-digit code"
+        )
+        assert report.summary["not_applicable"] == "AOA.TAX_WORDING"
+        assert not any(s.rule_id == "AOA.TAX_WORDING" for s in report.skipped)
 
     def test_registry_rules_are_skipped_without_a_snapshot(self) -> None:
         report = check_aoa(aoa_text=ACT, contract_text=CONTRACT)
@@ -563,7 +578,7 @@ class TestTaxWording:
                 _worded("გადასახადების გარეშე"),
                 "small_business",
                 "გადასახადების გარეშე",
-                "გადასახადების ჩათვლით",
+                "გადასახადების (მათ შორის დღგ-ს) ჩათვლით",
             ),
             # a foreign organisation's fee with taxes in it: NET goes there
             (ACT, "foreign", "გადასახადების ჩათვლით", "NET"),
@@ -603,7 +618,12 @@ class TestTaxWording:
                 "100 (ასი) ლარს",
                 "100 (ასი) ლარს დღგ-ს ჩათვლით",
             ),
-            (_UNWORDED, "small_business", "100 (ასი) ლარს", "100 (ასი) ლარს გადასახადების ჩათვლით"),
+            (
+                _UNWORDED,
+                "small_business",
+                "100 (ასი) ლარს",
+                "100 (ასი) ლარს გადასახადების (მათ შორის დღგ-ს) ჩათვლით",
+            ),
             (_UNWORDED, "foreign", "100 (ასი) ლარს", "100 (ასი) ლარს NET"),
             (_english_fee("The fee is 100 GEL."), "foreign", "100 GEL", "100 GEL NET"),
         ],

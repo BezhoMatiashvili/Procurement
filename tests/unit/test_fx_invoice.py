@@ -361,7 +361,10 @@ def test_the_exempt_types_get_no_skip_either_when_nothing_could_be_worked_out() 
 
 
 def test_an_unknown_contractor_type_is_calculated_and_says_who_needs_none() -> None:
-    unset = _note(_check())
+    # an entrepreneur whose status the act does not state: the type stays unknown
+    ie = "ი/მ გიორგი ნიკოლაძე, საიდენტიფიკაციო კოდი: 01001001001"
+    unknown = USD_ACT.replace("შპს „ბეტა სერვისი“, საიდენტიფიკაციო კოდი: 987654321", ie)
+    unset = _note(_check(unknown, None))
     assert "A small business or a foreign organisation needs no such invoice." in unset.message_en
     assert "მცირე მეწარმესა და უცხოურ ორგანიზაციას" in unset.message_ka
     for contractor_type in ("company", "natural_person", "individual_entrepreneur_vat"):

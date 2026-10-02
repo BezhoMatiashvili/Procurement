@@ -152,6 +152,16 @@ where the one read from the act comes back to be confirmed; a contract's advance
 for a payment, since a contract only plans one. A small business or a foreign organisation needs
 no such invoice, and the report says the rule does not apply.
 
+The contractor's type drives the tax wording rules (5-8: NET for a natural person, VAT included
+for a VAT-paying entrepreneur, "ანგარიშსწორება ითვალისწინებს გადასახადებს (მათ შორის დღგ-ს)" for
+a small business, no tax words and NET for a foreign organisation) and the invoice exemption
+(9). The user may choose it; left unchosen, it is read from the act where the contractor's legal
+form and code agree (a company's form and nine digits, "ფ/პ" and a personal number, a foreign
+form and no Georgian code) and, for an individual entrepreneur, only from a status the act states
+in so many words - never guessed - and the report says it was read and why. Every payment field
+is checked (the fee, an advance, a remainder); a small business's "VAT included" alone is a
+warning; an act that says the contractor pays no VAT, checked as a VAT payer, is a warning.
+
 The parties are checked against the business registry by their identification codes (rule 1):
 against each party's own extract, uploaded with the act - the PDF a user downloads from the
 National Agency of Public Registry, read from its text layer in either of the agency's layouts

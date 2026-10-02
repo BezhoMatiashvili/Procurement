@@ -107,7 +107,6 @@ def test_a_correct_act_under_a_full_contract_has_no_findings() -> None:
     assert report.findings == []
     assert [s.rule_id for s in report.skipped] == [
         "AOA.SPELLING",
-        "AOA.TAX_WORDING",
         "AOA.SUBJECT",
         "AOA.SERVICES",
         "AOA.REGISTRY",
