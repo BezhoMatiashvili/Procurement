@@ -23,6 +23,7 @@ import sys
 import tempfile
 import threading
 import time
+import zipfile
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -294,6 +295,65 @@ def main() -> int:
         expect(j.status_code == 200 and len(j.json()["bidders"]) == 2, j.text[:200])
         x = api.post("/api/v1/checks/boq", json=body, params={"format": "xlsx"})
         expect(x.status_code == 200 and x.content[:2] == b"PK")
+
+    @step("acceptance act: a registry extract, imported rates, tracked changes, the PDF's notes")
+    def _aoa() -> None:
+        from docx import Document
+        from tests.unit.test_aoa_check import ACT, CONTRACT
+        from tests.unit.test_registry_extract import LAYOUT_2011
+
+        from procurement_agent.cli import main as cli
+
+        def word(text: str) -> bytes:
+            doc = Document()
+            for line in text.splitlines():
+                doc.add_paragraph(line)
+            out = io.BytesIO()
+            doc.save(out)
+            return out.getvalue()
+
+        dollars = ("100 (ასი) ლარს", "100 (ასი) აშშ დოლარს")
+        contract = upload("contract-usd.docx", word(CONTRACT.replace(*dollars)))
+        # a code slip: corrected as a tracked change
+        act = upload("act-usd.docx", word(ACT.replace(*dollars).replace("987654321", "987654312")))
+        # the customer's extract, its name not the act's: read, and compared
+        extract = upload("extract.docx", word(LAYOUT_2011.replace("400000017", "123456789")))
+        rates = Path(data_dir) / "nbg-rates.json"
+        rates.write_text(
+            json.dumps(
+                {
+                    "source": "NBG",
+                    "rates": [
+                        {"date": "2026-04-30", "currency": "USD", "quantity": 1, "rate": "2.7"}
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        expect(cli(["load-fx-rates", str(rates)]) == 0, "the rate file was not imported")
+        body = {
+            "aoa_document_id": act,
+            "contract_document_id": contract,
+            "registry_document_ids": [extract],
+        }
+        r = api.post("/api/v1/checks/aoa", json=body)
+        expect(r.status_code == 200, r.text[:200])
+        found = {f["rule_id"]: f for f in r.json()["findings"]}
+        expect(found.get("AOA.ID_CODES", {}).get("replacement") == "987654321", sorted(found))
+        expect("AOA.REGISTRY_NAME" in found, sorted(found))
+        expect("270.00" in found.get("AOA.FX_INVOICE", {}).get("message_en", ""), sorted(found))
+        w = api.post("/api/v1/checks/aoa", json=body, params={"format": "docx"})
+        expect(w.status_code == 200 and w.content[:2] == b"PK", w.status_code)
+        with zipfile.ZipFile(io.BytesIO(w.content)) as z:
+            xml = z.read("word/document.xml").decode()
+            expect("word/comments.xml" in z.namelist(), "no comments in the act")
+        expect("<w:del " in xml and "<w:ins " in xml, "no tracked change in the act")
+        pdf_act = upload("act.pdf", (ROOT / "tests" / "fixtures" / "offer_ka_en.pdf").read_bytes())
+        p = api.post(
+            "/api/v1/checks/aoa", json={"aoa_document_id": pdf_act}, params={"format": "pdf"}
+        )
+        expect(p.status_code == 200 and p.content[:5] == b"%PDF-", p.status_code)
+        expect(b"/Annot" in p.content, "the PDF act came back without notes")
 
     @step("the browser interface: sign in with a key, list documents, open a page")
     def _ui() -> None:
