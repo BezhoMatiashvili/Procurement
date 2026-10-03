@@ -305,20 +305,35 @@ harness that removes each security control in turn and requires a test to fail.
 
 ## Accuracy and performance (this dev box: 18-core CPU, 30 GB RAM, no GPU)
 
-Strict scoring against docs/GOLD_SPEC.md (canonical values compared exactly, every fact of an
-unlisted type a false positive, every finding scored with its correction and the places its
-Word comment marks), rules and anchors only:
+The client's eleven rules for an acceptance act (`AOA and Contract/AI instructions.docx`), each
+measured on the final code by its own harness of invented documents on a fresh seed, and on the
+gold sets (strict scoring against docs/GOLD_SPEC.md: canonical values compared exactly, every
+fact of an unlisted type a false positive, every finding scored with its correction and the
+places its Word comment marks). Rules and anchors only; the LLM plays no part.
+
+| client rule | what the app does | measured |
+|---|---|---|
+| 1. names, signatories and legal address against the registry, by ID code | a registry snapshot and uploaded NAPR extracts (2011 and 2025 layouts); legal forms, address abbreviations, surname-first names folded; status and the extract's date shown | `registry_accuracy.py`, seed 41: 3,000 of 3,000 cases (10 classes) |
+| 2. a signatory other than the director needs authority | out of scope, as the client says: a warning where the contract names another signatory | - |
+| 3. project name and cadastral code present | read by label, quoted or not; a malformed code reported as such | `act_rules_accuracy.py` (rules 3 and 4), seed 41: 2,800 of 2,800 |
+| 4. act date = completion date; a period ends the month | single date: that day; a period: its own last day or the month's last day, else the month's end recommended | (with rule 3) |
+| 5-8. tax wording by contractor type | the type inferred only when every signal agrees (never for an ი/მ whose status the act does not state), or chosen by the user; the client's own phrase as the correction | `tax_rules_accuracy.py`, seed 41: 2,200 of 2,200 |
+| 9. foreign-currency invoice at NBG rates (not for small businesses, foreign organisations) | rates imported offline or typed in; the invoice computed term by term, half-up to the tetri | `fx_accuracy.py`, seed 41: 500 of 500 invoices exact to the tetri |
+| 10. the act against its contract (codes, names, directors, subject, services, plot, amount, payment terms, bank details, the act in the contract's term) | each value compared and corrected in the act's own form | `contract_rules_accuracy.py`, seed 41: 2,500 of 2,500; mutated real acts (below) |
+| 11. spelling | hunspell `ka_GE` and the documents' own words | random one-letter typos 87-88% found, typing slips 91-92% (see the limits) |
+| marking in the file | a Word comment per finding, a tracked change where the correction replaces words exactly, an annotated PDF for PDF acts | 86 gold acts: rejecting all changes gives the act back, accepting all holds every correction, LibreOffice opens every file |
 
 | measure | result |
 |---|---|
-| client set, Test Set 2, Test Set 3 (strict `scripts/evaluate.py`) | every field and every finding matched; nothing missing, nothing unexpected |
+| client set, Test Set 2, Test Set 3 (strict `scripts/evaluate.py`) | every field and every finding matched (62, 89 and 59 findings); nothing missing, nothing unexpected |
+| Test Set 4, written blind from the client's rules by an agent that never read the code | first run 25 matched, 14 missing, 63 unexpected; after general fixes 37, 2, 3 - the five left are no misreading (docs/ACCURACY.md) |
+| act check, mutation harness on real acts (20 error classes, 300 a class, two fresh seeds, 12,000 planted mistakes) | every value class detected, corrected in the act's own form, marked in every place and fixed by its tracked change: 100%, but one stray-letter correction in 300 on one seed; prose typos and slips found 87-92%, corrected 85-91% |
+| harmless edits (14 classes, 8,400 cases on the same seeds) | 0 false findings |
+| comparison of the same mutated pairs | 100% per class, but a director slip that breaks the surname's declension (98.7-99%) |
 | BOQ against an independent reference reader (`scripts/evaluate_boq.py`) | 106/106, 106/106, 132/132 checks: totals to the cent, common scope, colours, merged workbook |
-| act check, mutation harness (20 error classes; 21,000 planted mistakes over four large runs) | the first three found 2 missed and 5 corrected in a wrong form, each fixed as a general rule; the final run on the final code: 6,000 of 6,000 detected, corrected in the act's own form and marked |
-| harmless edits (14 classes: styles, layouts, formats; 14,700 cases) | 0 false findings |
-| comparison of the same mutated pairs | 100% per class, but a director slip that breaks the surname's declension (99%) |
 | BOQ mutation harness (17 classes, 7 seeds, the last 25 a class) | 100% of valid mutants |
-| scanned acts (OCR) against the Word contract | every planted mistake reported, no false error |
-| five adversarial red-team rounds | 285 confirmed defects, fixed test-first except the known limits in docs/ACCURACY.md; the rate fell from 17% to 8% of deliberately unusual variants |
+| scanned acts (OCR in the image) against the Word contract | every planted mistake reported, no false error; 41 of 45 findings marked on the line OCR read them in |
+| five adversarial red-team rounds, a sixth on the acceptance-act work, a security review | 285 + 16 confirmed defects fixed test-first; the security review's 9 findings and the re-check's fixed, 64 mutations of the security controls all caught |
 
 **The sets above were looked at while fixing, so these are tuned numbers.** The honest ones are
 the first runs on unseen data (Test Set 3: extraction precision 88.8% / recall 87.6% before any

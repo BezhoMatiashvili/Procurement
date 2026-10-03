@@ -27,8 +27,15 @@ must not, and `"*"` for a document that must be completely clean.
 
 ## Current results
 
-Measured 2026-10-01 on branch `accuracy-hardening` (rules and anchors only; the LLM is off by
-default and plays no part in any number below). Commands are in "How accuracy is measured".
+Measured 2026-10-01 on branch `accuracy-hardening` and again, for the client's eleven rules, on
+2026-10-03 on branch `aoa-instructions` at its final code (rules and anchors only; the LLM is off
+by default and plays no part in any number below). Commands are in "How accuracy is measured".
+
+On the final code, every rule's own harness on a fresh seed (41): rule 1 3,000 of 3,000 cases,
+rules 3 and 4 2,800 of 2,800, rules 5-8 2,200 of 2,200, rule 9 500 of 500 invoices exact to the
+tetri, rule 10 2,500 of 2,500. The strict gold sets below, the snapshot of every module's output
+on every set (the held-out one too) and the annotated gold acts are the same, byte for byte, as
+before the security review's changes.
 
 ### Strict evaluation against the gold sets (`scripts/evaluate.py --strict`, docs/GOLD_SPEC.md)
 
@@ -86,7 +93,7 @@ written by LibreOffice - with their contracts, registry extracts and an answer k
   GOLD_SPEC said it is the fee as it should read; and one gold entry names `AOA.PAYMENT_TERMS`,
   a rule id that does not exist, for the `AOA.PAYMENT_DEADLINE` finding the check makes. The
   other gold sets and the snapshot of every output are unchanged, and every rule's harness on a
-  fresh seed (31) is at 100%.
+  fresh seed (31, and 41 on the final code) is at 100%.
 
 ### BOQ: an independent reference reader (`scripts/evaluate_boq.py`)
 
@@ -111,7 +118,8 @@ typo classes. A case passes only with the finding, the correction in the act's o
 comment on every place, and nothing else reported.
 
 Six small seeds (71-199, 12 cases a class) and then four large runs, 300, 300, 150 and 300 cases
-a class (36,450 cases in all; about one in two is distinct, a repeat being scored once):
+a class (36,450 cases in all; about one in two is distinct, a repeat being scored once), and on
+the acceptance-act branch two more at 300 a class (21,600 cases):
 
 | run | error classes (15,000 planted mistakes over the three runs) | harmless classes | what it found, each fixed as a general rule |
 |---|---|---|---|
@@ -119,6 +127,8 @@ a class (36,450 cases in all; about one in two is distinct, a repeat being score
 | seed 223, 300 a class | 1 address missed, 1 month corrected into a form no date takes, 1 month read as another month, 2 stray letters in the signing verb hid the act's date | 0 in 4,200 | a phrase declines on its last word only; a month tie is decided by the whole word, or no month is read; a date's form wins a tie; the act's date is read past a stray letter |
 | seed 229, 150 a class, after those fixes | detection 100%, 1 stray letter corrected by a guessed letter (1 in 3,000) | 0 in 2,100 | a stray letter dropped beats a letter guessed in its place |
 | **seed 241, 300 a class, the final code** | **all 6,000: detected, corrected in the act's own form, every place marked, nothing else reported (100%)** | **0 in 4,200** | nothing new; the comparison missed 1 director slip in 300 (the known declension limit) |
+| seed 301, 300 a class, `aoa-instructions` before the security review | all detected, every place marked, every tracked change right; 1 of the stray-letter class's 300 corrections wrong, on a client act (its text is client data, so the case was not opened) | 0 in 4,200 | nothing to fix as a rule; the comparison missed 3 director slips in 300 |
+| **seed 302, 300 a class, the security review's code (9e073ff; the commits after it change no Word output: the gold acts' XML and every output's snapshot are the same)** | **all 6,000: detected, corrected in the act's own form, every place marked, every tracked change right (100%)** | **0 in 4,200** | the comparison missed 4 director slips in 300 (the known declension limit) |
 
 Every failing case of the three runs passes on the final code. A targeted rerun of the classes
 touched, 300 cases each: party name, address and month typos 100% on every measure with no
@@ -133,18 +143,19 @@ missed 2 and wrote 5 corrections in a wrong form; none of those remain.
 
 What stays below 100%:
 
-* **The comparison of a director slip that breaks a surname's declension** (99-99.3% of the
+* **The comparison of a director slip that breaks a surname's declension** (98.7-99.3% of the
   director class): "ლომძიე" for "ლომიძე" is reported, but its value is read off its genitive
   ("ლომძიი"); see the limits.
-* **Prose typos** (`prose_typo`, random one-letter edits: 87-91% detected; `prose_slip`, typing
-  slips: 91-93%). The misses are words the dictionary lacks, a slip that makes another real
+* **Prose typos** (`prose_typo`, random one-letter edits: 87-91% detected, 85-86% corrected on
+  seeds 301 and 302; `prose_slip`, typing slips: 91-93% detected, 89-91% corrected). The misses are words the dictionary lacks, a slip that makes another real
   word or a real form of one ("გვედრის", the genitive of a word the dictionary holds), and
-  ties between two corrections; a prose slip gave an unrelated note 1-2 times in 300.
+  ties between two corrections; a prose slip gave an unrelated note 1-4 times in 300.
 
 `scripts/mutate_boq.py` (17 classes: quantity, unit, added/removed/reordered lines, description
 edits, hard-coded or wrong arithmetic, shifted Summary, renamed headers, text in numeric cells,
 merged cells, hidden rows, missing cached values, reconciliation, filled blanks), seeds 11, 17,
-23, 31, 41, 43 and 47 (the last 25 cases a class, 422 valid): every valid mutant 100% (a mutant whose deletion breaks a Summary formula into
+23, 31, 41, 43 and 47 (the last 25 cases a class, 422 valid; seed 31 again on the final code,
+420 valid): every valid mutant 100% (a mutant whose deletion breaks a Summary formula into
 `#REF!` is reported invalid, not scored).
 
 ### Rule 9: the invoice in lari, end to end (`scripts/fx_accuracy.py`, 2026-10-02)
@@ -429,6 +440,15 @@ body's text is left as it was.
   against PDFium's own page-to-screen transform for every quarter turn. The annotated copy is
   also rebuilt from the act's pages (R6-08, `docs/SECURITY.md`); on Test Set 4's PDF acts every
   mark is where it was.
+* **What a hostile file can make marking cost (security review, 2026-10-03).** A value repeated
+  thousands of times made every comment cost more than the one before (5,000 repeats: about
+  50 minutes), a table cell claiming to span two billion columns cost gigabytes, and a PDF page
+  of thousands of touching text cells held the parser for minutes. Now every place in a
+  paragraph is found in one pass, a cell is read once, and a page's words are indexed: on the
+  86 gold Word acts the annotated files are the same, byte for byte (dates aside), as before the
+  change, and a PDF page is drawn anew pixel-identical. A search reads at most 1,000 places of
+  one value, a finding is marked in at most 50 and a file in at most 300; past them the note at
+  the top says how many places are marked, and the finding gets no tracked change.
 
 ### Scanned PDFs (OCR inside the Docker image, Tesseract `kat+eng`, 216 dpi)
 
@@ -475,8 +495,8 @@ report on every run.
 
 ### Tests
 
-4,106 unit and integration tests, 93.8% line coverage (`scripts/check.sh --offline`: ruff,
-format, mypy strict, bandit, pytest).
+5,730 unit and integration tests, 94.3% line coverage (`scripts/check.sh --offline`: ruff,
+format, mypy strict, bandit, pytest), on the final code.
 
 ### The deployable image
 
@@ -499,6 +519,10 @@ image-size issue, not an accuracy one, left for its own change.
 * **English documents.** An act or contract in English gets skip notes, not findings; English
   party blocks and amounts in words are not read.
 * **A scanned contract** is only as good as its OCR: codes it misreads cannot be compared.
+* **A finding past the marking limits** (a value written more than 50 times, or a file needing
+  more than 300 marks) is marked in its first places only, says so in the note at the top, and
+  gets no tracked change - no real act comes near either limit (of the 86 gold Word acts, the
+  one most marked carries 14 comments).
 * **Prose spelling** rests on the hunspell `ka_GE` dictionary, which lacks words and forms:
   83-92% of random typos are found, and a correction no document writes is a note to check, not
   a warning.
