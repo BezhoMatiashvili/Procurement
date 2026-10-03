@@ -299,6 +299,16 @@ reach every copy of the data, which is why the volume belongs on an encrypted di
   not see the Debian packages in the image (Tesseract and its libraries) or the native libraries
   bundled inside wheels (OpenSSL 1.1.1k inside `opencv-python-headless`, for one), which
   `pip-audit` cannot see either.
+* The licences of those packages, of the components outside Python (base images, Tesseract, the
+  spelling dictionary, Caddy, Ollama) and of the models are in `docs/THIRD_PARTY.md`, written by
+  `scripts/third_party.py` from the lock and the installed metadata. It lists what it cannot
+  classify as unknown instead of guessing, names the copyleft libraries bundled inside wheels
+  (GEOS in `shapely`, FFmpeg in `opencv-python-headless`, `libquadmath` and `libgfortran` in
+  `numpy` and `scipy`, for example) and says what each licence asks of someone shipping the
+  product. `tests/unit/test_third_party.py` fails when it no longer lists exactly the production
+  packages of `uv.lock`, and when a copyleft or unknown licence appears that nobody has read;
+  the fix is `uv run python scripts/third_party.py --out docs/THIRD_PARTY.md` plus, for a new
+  licence, a reviewed entry in the script.
 * Documents cannot reach the repository: `scripts/check_no_documents.sh` blocks any document,
   archive, database, key, `.env` or client directory (a link to one included, which is how a git
   worktree holds them) outside `tests/fixtures/` - as a CI job (`repo-guard`, which runs after a

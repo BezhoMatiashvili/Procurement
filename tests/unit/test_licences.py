@@ -325,6 +325,14 @@ def test_python_files_named_after_licences_are_not_licence_files(tmp_path: Path)
     assert licences.read_raw(dist).notices == ()
 
 
+def test_a_licence_that_grants_commercial_and_non_commercial_use_restricts_nothing(
+    tmp_path: Path,
+) -> None:
+    text = "This library is free for commercial and non-commercial use as long as it is credited.\n"
+    dist = _dist(tmp_path, ["License-Expression: MIT"], {"pkg-1.0.dist-info/LICENSE": text})
+    assert licences.read_raw(dist).notices == ()
+
+
 def test_non_commercial_terms_are_noticed(tmp_path: Path) -> None:
     dist = _dist(
         tmp_path,

@@ -140,7 +140,13 @@ _LICENSE_LINE_FAMILY = (
     (re.compile(r"\bCC-BY-SA"), "CC-BY-SA"),
     (re.compile(r"\bSSPL"), "SSPL"),
 )
-_NON_COMMERCIAL = re.compile(r"\bnon-?commercial\b", re.I)
+# Terms that restrict use to non-commercial purposes. "free for commercial and non-commercial use"
+# (the SSLeay licence) grants both and is not one of them.
+_NON_COMMERCIAL = re.compile(
+    r"\bfor\s+non-?commercial\b|\bnon-?commercial\s+(?:use|purposes?)\s+only\b"
+    r"|\bno\s+commercial\s+use\b",
+    re.I,
+)
 _PRIMARY_NAME = re.compile(r"^(licen[sc]e|copying|unlicense)(\.[a-z0-9]+)?$", re.I)
 _NOTICE_NAME = re.compile(r"^(licen[sc]e|copying|notice|copyright|unlicense)", re.I)
 _NOT_TEXT = frozenset(
