@@ -377,8 +377,10 @@ What this does not do, so nobody has to discover it:
 * **The input limits are a bound, not a proof.** They stop the long-run shapes that made
   patterns quadratic (and the fixed patterns were exponential); the regular-expression scan
   (`tests/regex_budget.py`) searches for super-linear patterns with strings built from each
-  pattern's own pieces, and finds none after the limits. A search that finds nothing has not
-  covered every input.
+  pattern's own pieces, and finds none after the limits. A string that looks slow is timed
+  again (three times in all) and judged on its shortest times, so a loaded machine does not
+  report a linear pattern; a quadratic one is slow on every run. A search that finds nothing has
+  not covered every input.
 * **No application-level encryption at rest**: files, the database and the audit trail are
   plaintext to anyone with the disk; rely on disk encryption (LUKS), and keep `/data` and backups
   on it.
