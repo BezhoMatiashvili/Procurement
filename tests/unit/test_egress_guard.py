@@ -221,6 +221,12 @@ def test_only_an_absolute_canonical_path_can_be_allowed(path: str, as_bytes: boo
     assert guard.unix_paths == frozenset()
 
 
+@pytest.mark.parametrize("not_a_path", [None, 5, ("/run/parser/parser.sock",), 1.5])
+def test_something_that_is_not_a_path_cannot_be_allowed(not_a_path: object) -> None:
+    with pytest.raises(ValueError, match="absolute and canonical"):
+        EgressGuard().allow_unix(not_a_path)  # type: ignore[arg-type]
+
+
 def test_the_message_of_a_refused_path_does_not_repeat_it() -> None:
     with pytest.raises(ValueError) as refused:
         EgressGuard().allow_unix("/run/../secret-name/x.sock")
