@@ -361,7 +361,8 @@ def active_names(data: bytes) -> set[str]:
     is handed out.
 
     It fails closed: a stream's data is skipped by its own dictionary's length - a direct
-    ``/Length`` of the object's outermost dictionary, never one a dictionary inside it holds -
+    ``/Length`` of the object's outermost dictionary, never one a dictionary or an array inside
+    it holds -
     and must end where ``endstream`` stands; a length that refers elsewhere or does not end there,
     a string still open at the end, and an object stream make the copy unreadable, and refused
     (security review: a decoy ``/Length`` inside a resource made the old reading skip past the
@@ -369,6 +370,7 @@ def active_names(data: bytes) -> set[str]:
     found: set[str] = set()
     i, n = 0, len(data)
     depth = 0  # how deep in dictionaries
+    arrays = 0  # how deep in arrays
     length: int | None = None  # the current object's own /Length, read directly
     while i < n:
         c = data[i]
@@ -408,12 +410,16 @@ def active_names(data: bytes) -> set[str]:
             text = name.decode("latin-1")
             if text in _ACTIVE_NAMES or text == "ObjStm":
                 found.add(text)
-            if text == "Length" and depth == 1:
+            if text == "Length" and depth == 1 and arrays == 0:
                 m = _LENGTH.match(data, j)
                 length = int(m.group(1)) if m is not None and m.group(2) is None else None
                 j = m.end() if m is not None else j
             i = j
-        elif c in _PDF_SPACE or c in b"[]{}":
+        elif c == 0x5B:  # [ an array
+            arrays, i = arrays + 1, i + 1
+        elif c == 0x5D:  # ] its end
+            arrays, i = max(0, arrays - 1), i + 1
+        elif c in _PDF_SPACE or c in b"{}":
             i += 1
         else:  # a number or a keyword
             j = i
@@ -421,7 +427,7 @@ def active_names(data: bytes) -> set[str]:
                 j += 1
             word = data[i:j]
             if word == b"obj":
-                depth, length = 0, None
+                depth, arrays, length = 0, 0, None
             elif word == b"stream":
                 eol = _EOL.match(data, j)
                 if length is None or eol is None:

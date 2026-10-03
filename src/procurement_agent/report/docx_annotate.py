@@ -173,8 +173,9 @@ def _split_run(run: Run, offset: int) -> Run:
     head = copy.deepcopy(run._r)
     run._r.addprevious(head)
     head_run = Run(head, run._parent)
-    head_run.text = run.text[:offset]
-    run.text = run.text[offset:]
+    text = _run_text(run)
+    head_run.text = text[:offset]
+    run.text = text[offset:]
     return head_run
 
 

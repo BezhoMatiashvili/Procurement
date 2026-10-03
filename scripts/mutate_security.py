@@ -222,9 +222,17 @@ MUTATIONS = [
     Mutation(
         "pdf_length_read_anywhere",
         "src/procurement_agent/report/pdf_annotate.py",
-        'if text == "Length" and depth == 1:',
+        'if text == "Length" and depth == 1 and arrays == 0:',
         'if text == "Length":',
         "a /Length inside a resource makes the check of the saved copy skip the objects after it",
+        ("tests/unit/test_security_review_aoa.py",),
+    ),
+    Mutation(
+        "pdf_length_read_in_arrays",
+        "src/procurement_agent/report/pdf_annotate.py",
+        'if text == "Length" and depth == 1 and arrays == 0:',
+        'if text == "Length" and depth == 1:',
+        "a /Length in an array of a stream's dictionary makes the check skip the objects after it",
         ("tests/unit/test_security_review_aoa.py",),
     ),
     Mutation(

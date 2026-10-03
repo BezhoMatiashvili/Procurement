@@ -444,6 +444,21 @@ class TestWhatTheAnnotatedPdfCarries:
 _OBJ = b"1 0 obj\n"
 
 
+def _decoy(entry: bytes) -> bytes:
+    """A stream whose dictionary holds ``entry`` after its own /Length: a decoy length of 5
+    that lands on a fake "endstream" in the data, and the object after it carrying a file."""
+    data = b"AAAAA\nendstream (hidden"
+    return (
+        _OBJ
+        + b"<< /Length %d " % len(data)
+        + entry
+        + b" >>\nstream\n"
+        + data
+        + b"\nendstream\nendobj\n2 0 obj\n<< /AF [1 0 R] >>\nendobj\n3 0 obj\n<< /T (z) >>"
+        b"\nendobj"
+    )
+
+
 class TestActiveNames:
     @pytest.mark.parametrize(
         ("data", "found"),
@@ -461,12 +476,11 @@ class TestActiveNames:
                 b"2 0 obj\n<< /AF [1 0 R] >>\nendobj",
                 {"AF"},
             ),
-            # a /Length inside a dictionary inside the stream's own is not the stream's
-            (
-                _OBJ + b"<< /Res << /Length 99999 >> /Length 3 >>\nstream\nabc\nendstream\n"
-                b"endobj\n2 0 obj\n<< /AA << >> >>\nendobj",
-                {"AA"},
-            ),
+            # a /Length inside a dictionary, or an array, of the stream's own is not the
+            # stream's: read as one, it lands on a fake "endstream" in the data, and the string
+            # opened after it would swallow the object that carries the file
+            (_decoy(b"/Res << /Length 5 >>"), {"AF"}),
+            (_decoy(b"/Res [ /Length 5 ]"), {"AF"}),
             (_OBJ + b"<< /Length 2 0 R >>\nstream\nabc\nendstream", {UNREADABLE}),
             (_OBJ + b"<< /Length 5 >>\nstream\nabc\nendstream", {UNREADABLE}),  # wrong length
             (_OBJ + b"<< >>\nstream\nabc\nendstream", {UNREADABLE}),  # no length

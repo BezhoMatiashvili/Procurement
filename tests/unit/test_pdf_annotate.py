@@ -276,8 +276,10 @@ class TestActiveContent:
         assert _close(marks[0]["rect"], _word_box(TEXT_PDF, "405123456"))
 
     def test_a_page_that_runs_a_script_when_opened_is_refused(self, tmp_path: Path) -> None:
+        """Refused by the page's own check, which says why - not only by the check of the saved
+        copy under it."""
         src = _with_active_content(TEXT_PDF, tmp_path / "act.pdf", page_action=True)
-        with pytest.raises(UnsupportedDocumentError):
+        with pytest.raises(UnsupportedDocumentError, match="opened or closed"):
             annotate_pdf(src, [_finding("405123456")], tmp_path / "o.pdf")
 
 
