@@ -9,6 +9,7 @@ stack once (see docs/SECURITY.md); this keeps them from drifting.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -18,7 +19,10 @@ import yaml
 
 from procurement_agent.config import check_llm_url
 
-ROOT = Path(__file__).resolve().parents[2]
+#: The checkout, or - for ``scripts/mutate_security.py`` - a copy of the deployment files with one
+#: property broken (``PA_DEPLOYMENT_ROOT``): the mutations of the compose file need somewhere to
+#: land that is not the real one.
+ROOT = Path(os.environ.get("PA_DEPLOYMENT_ROOT") or Path(__file__).resolve().parents[2])
 
 
 def _compose(name: str) -> dict[str, Any]:
@@ -64,7 +68,7 @@ def test_every_service_drops_every_capability_and_cannot_regain_privilege(
         extra = set(svc.get("cap_add", []))
         # the Caddy binary carries a file capability and will not exec without it in the set
         assert extra <= {"NET_BIND_SERVICE"}, (name, extra)
-        if name in ("app", "ollama"):
+        if name in ("app", "ollama", "parser"):
             assert not extra, name
 
 
@@ -94,7 +98,6 @@ def test_root_filesystems_are_read_only_and_tmpfs_is_noexec(doc: dict[str, Any])
 def test_nothing_reaches_the_host_beyond_what_is_needed(doc: dict[str, Any]) -> None:
     forbidden = (
         "privileged",
-        "network_mode",
         "pid",
         "ipc",
         "userns_mode",
@@ -105,6 +108,10 @@ def test_nothing_reaches_the_host_beyond_what_is_needed(doc: dict[str, Any]) -> 
     for name, svc in doc["services"].items():
         for key in forbidden:
             assert key not in svc, (name, key)
+        # the one network mode there is: the parser has no network at all
+        assert svc.get("network_mode", "none" if name == "parser" else None) == (
+            "none" if name == "parser" else None
+        ), name
         for volume in svc.get("volumes", []):
             source = volume.split(":", 1)[0]
             assert "docker.sock" not in volume and not source.startswith("/"), (name, volume)
@@ -119,7 +126,9 @@ def test_only_loopback_is_published(doc: dict[str, Any]) -> None:
     assert published, "the relay publishes the one port"
     for name, port in published:
         assert str(port).startswith("127.0.0.1:"), (name, port)
-    assert not any(s.get("ports") for n, s in doc["services"].items() if n in ("app", "ollama"))
+    assert not any(
+        s.get("ports") for n, s in doc["services"].items() if n in ("app", "ollama", "parser")
+    )
 
 
 # --- the networks ----------------------------------------------------------------------------
@@ -167,9 +176,13 @@ def test_the_model_server_cannot_forward_to_a_hosted_service(doc: dict[str, Any]
 
 
 def test_images_are_pinned_by_digest_and_both_compose_files_run_the_same_ollama() -> None:
+    app_image = PROD["services"]["app"]["image"]
     for doc in (PROD, DEV):
         for name, svc in doc["services"].items():
-            if "build" not in svc:
+            if name == "parser":  # the image `app` builds: one build, one set of dependencies
+                assert svc["image"] == app_image and "build" not in svc
+                assert svc.get("pull_policy") == "never", "a missing image is a build, not a pull"
+            elif "build" not in svc:
                 assert re.search(r"@sha256:[0-9a-f]{64}$", svc["image"]), (name, svc["image"])
     assert PROD["services"]["ollama"]["image"] == DEV["services"]["ollama"]["image"]
     script = (ROOT / "scripts" / "switch_dev_ollama.sh").read_text(encoding="utf-8")
@@ -256,3 +269,135 @@ def test_the_build_context_is_an_allow_list() -> None:
     included = {ln[1:] for ln in lines if ln.startswith("!")}
     # scripts/supervise.py: the stdlib-only process that restarts the server (docker-compose.yml)
     assert included <= {"pyproject.toml", "uv.lock", "README.md", "src/", "scripts/supervise.py"}
+
+
+# --- the parser container ----------------------------------------------------------------------
+#
+# Docling parses untrusted uploads. In ``socket`` mode that happens here: no network, none of the
+# application's data, no secrets, hard limits, and a restart when it is killed. Every property
+# below is one the sandbox stops being a sandbox without.
+
+PARSER = PROD["services"]["parser"]
+APP = PROD["services"]["app"]
+
+#: The settings the parser needs and the application also reads: compose passes the same value to
+#: both (from the same ``.env``), or an operator who raises a limit finds the parser enforcing
+#: the old one.
+SHARED_LIMITS = (
+    "PA_MAX_FILE_MB",
+    "PA_MAX_PAGES",
+    "PA_MAX_TEXT_CHARS",
+    "PA_OCR_LANGS",
+    "PA_DOCLING_NUM_THREADS",
+    "PA_DOCLING_TIMEOUT_S",
+    "PA_PARSER_MAX_RESULT_MB",
+    "PA_PARSER_KILL_GRACE_S",
+    "PA_MODELS_MANIFEST_REQUIRED",
+)
+PARSER_ENVIRONMENT = {
+    "PA_ENV",
+    "PA_DOCLING_ARTIFACTS_PATH",
+    "PA_PARSER_SOCKET",
+    *SHARED_LIMITS,
+}
+
+
+def _volumes(service: dict[str, Any]) -> list[str]:
+    return [str(v) for v in service.get("volumes", [])]
+
+
+def test_the_parser_is_a_production_service_and_the_dev_stack_has_none() -> None:
+    assert "parser" not in DEV["services"], "development parses in the process it runs in"
+    assert _env(PARSER)["PA_ENV"] == "prod"
+
+
+def test_the_parser_has_no_network_at_all() -> None:
+    assert PARSER["network_mode"] == "none"
+    assert "networks" not in PARSER
+    assert not PARSER.get("ports") and not PARSER.get("expose")
+    for name, net in PROD["networks"].items():
+        assert name not in _networks(PARSER), name
+        assert net.get("internal") is True or name == "edge"
+
+
+def test_the_parser_has_no_env_file_and_only_the_settings_it_needs() -> None:
+    assert "env_file" not in PARSER
+    env = _env(PARSER)
+    assert set(env) == PARSER_ENVIRONMENT
+    for secret in ("PA_DEV_API_KEY", "PA_OLLAMA_BASE_URL", "PA_ALLOWED_HOSTS", "PA_DATA_DIR"):
+        assert secret not in env
+
+
+def test_the_parser_gets_the_limits_the_application_gets_from_the_same_place() -> None:
+    env = _env(PARSER)
+    for name in SHARED_LIMITS:
+        assert re.fullmatch(rf"\$\{{{name}:-[^}}]+\}}", env[name]), (name, env[name])
+
+
+def test_the_parser_sees_no_application_data_and_shares_exactly_one_volume() -> None:
+    mounts = _volumes(PARSER)
+    assert sorted(mounts) == ["./models:/models:ro", "parser-sock:/run/parser"]
+    assert not any("app-data" in m or "/data" in m.split(":")[1:2] for m in mounts)
+    shared = {m.split(":")[0] for m in mounts} & {m.split(":")[0] for m in _volumes(APP)}
+    assert shared == {"parser-sock", "./models"}, "the socket volume, and the read-only models"
+    assert "app-data" not in {m.split(":")[0] for m in mounts}
+    named = {m.split(":")[0] for m in mounts if not m.startswith(".")}
+    assert named == {"parser-sock"} and set(PROD["volumes"]) >= named
+    assert "ollama" not in {m.split(":")[0] for m in mounts}
+
+
+def test_the_socket_volume_is_writable_on_both_sides_and_the_models_are_not() -> None:
+    assert "parser-sock:/run/parser" in _volumes(PARSER)
+    assert "parser-sock:/run/parser" in _volumes(APP)  # no :ro - the app creates the connection
+    assert "./models:/models:ro" in _volumes(PARSER)
+    assert _env(PARSER)["PA_PARSER_SOCKET"] == "/run/parser/parser.sock"
+
+
+def test_the_parser_is_locked_down_like_the_other_containers_and_bounded_on_its_own() -> None:
+    assert PARSER["read_only"] is True
+    assert PARSER["cap_drop"] == ["ALL"] and not PARSER.get("cap_add")
+    assert "no-new-privileges:true" in PARSER["security_opt"]
+    assert PARSER["ulimits"]["core"] == 0
+    assert PARSER["mem_limit"] and PARSER["pids_limit"] and "cpus" in PARSER
+    assert not PARSER.get("privileged") and not PARSER.get("devices")
+    tmp = [t for t in PARSER["tmpfs"] if t.startswith("/tmp:")]
+    assert len(tmp) == 1 and "size=2g" in tmp[0]
+    assert {"noexec", "nosuid", "nodev"} <= set(tmp[0].split(":", 1)[1].split(","))
+
+
+def test_the_parser_is_killed_by_its_own_kernel_and_comes_back() -> None:
+    """``init: true`` is part of the kill switch: SIGALRM at its default action does nothing to the
+    process that is PID 1 of a namespace, so the Python process must not be PID 1."""
+    assert PARSER["init"] is True
+    assert PARSER["restart"] == "unless-stopped"
+    assert PARSER["command"] == ["python", "-m", "procurement_agent.parser_service"]
+    # a conversion may take the whole Docling timeout: the probe's retries are sized for that
+    health = PARSER["healthcheck"]
+    assert health["test"] == ["CMD", "python", "-m", "procurement_agent.parser_service", "--ping"]
+    assert health["retries"] >= 3 and health["start_period"]
+
+
+def test_the_app_chooses_the_socket_mode_and_waits_for_a_healthy_parser() -> None:
+    assert _env(APP)["PA_PARSER_MODE"] == "socket"
+    assert APP["depends_on"]["parser"] == {"condition": "service_healthy"}
+    assert "parser" not in _networks(APP)
+
+
+def test_the_parser_socket_directory_exists_for_the_app_user_and_is_closed_to_the_world() -> None:
+    run = [ln for ln in DOCKERFILE.splitlines() if "/run/parser" in ln]
+    text = " ".join(run)
+    assert "mkdir -p" in text and "chown app:app" in text
+    assert re.search(r"chmod 0?750 [^&]*/run/parser", text), "the volume inherits this mode"
+
+
+def test_the_environment_example_documents_the_parser_settings() -> None:
+    example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    for name in (
+        "PA_PARSER_MODE",
+        "PA_PARSER_SOCKET",
+        "PA_PARSER_MAX_RESULT_MB",
+        "PA_PARSER_CONNECT_WAIT_S",
+        "PA_PARSER_KILL_GRACE_S",
+        "PA_PARSER_CPUS",
+    ):
+        assert re.search(rf"^#?\s*{name}=", example, re.M), name

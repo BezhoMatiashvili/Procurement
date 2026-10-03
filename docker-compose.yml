@@ -1,7 +1,17 @@
-# Production-style deployment. Three containers, two INTERNAL networks (no route to the outside
+# Production-style deployment. Four containers, two INTERNAL networks (no route to the outside
 # world) and no more connectivity than each pair needs:
 #
 #     host reverse proxy -> 127.0.0.1:8000 -> proxy --[internal]--> app --[llm]--> ollama
+#                                                                    |
+#                                                      [parser-sock: a Unix socket]
+#                                                                    |
+#                                                                 parser  (no network at all)
+#
+# `parser` is Docling's document conversion (PDF and DOCX), moved out of the web process: it has no
+# network, none of the application's data, no secrets, its own memory limit, and Docker starts it
+# again when it dies - including when the kernel ends it for a conversion that never returns. The
+# app reaches it over a Unix socket on a volume only the two of them share. See
+# docs/SECURITY.md sections 2 and 10 for what still runs in the web process.
 #
 # The proxy cannot reach Ollama, and Ollama cannot reach the proxy. A small relay (`proxy`) is the
 # only container with a published port, and only on 127.0.0.1: put the TLS reverse proxy
@@ -40,6 +50,10 @@ services:
       PA_ALLOWED_HOSTS: ${PA_ALLOWED_HOSTS:?set PA_ALLOWED_HOSTS in .env to the host names users type}
       PA_DATA_DIR: /data
       PA_DOCLING_ARTIFACTS_PATH: /models/docling
+      # Docling runs in the `parser` container, over this socket. Setting `inline` instead is the
+      # degraded mode: parsing then runs in this process, with this container's data and database.
+      PA_PARSER_MODE: socket
+      PA_PARSER_SOCKET: /run/parser/parser.sock
       # Baked into the image (Dockerfile), so a development path copied into .env cannot point
       # the prose spelling check at a directory the container does not have.
       PA_SPELLING_DICTIONARY_PATH: /app/dictionaries/hunspell
@@ -49,9 +63,12 @@ services:
     volumes:
       - app-data:/data                       # uploads, results, SQLite — put this on an encrypted disk
       - ./models:/models:ro
+      - parser-sock:/run/parser              # the parser's Unix socket (read-write: connecting writes)
     networks: [internal, llm]                # proxy -> app on `internal`; app -> ollama on `llm`
     depends_on:
       ollama:
+        condition: service_healthy
+      parser:
         condition: service_healthy
     healthcheck:
       # /ready: DB reachable, job worker alive and heartbeating. /health stays pure liveness.
@@ -78,6 +95,58 @@ services:
     # 0 = no cap. Set PA_APP_CPUS (below the host's core count) so one runaway parse cannot
     # starve the host; Docker refuses a number above the host's cores, so there is no default.
     cpus: ${PA_APP_CPUS:-0}
+
+  parser:
+    # The image `app` builds: one build, one set of dependencies, and nothing to pull. It runs a
+    # different command, with none of the application's volumes, secrets or networks.
+    image: procurement-agent:0.1.0
+    pull_policy: never
+    restart: unless-stopped
+    # Not optional. The kill switch is SIGALRM at its default action, and the kernel ignores a
+    # default-action signal sent to PID 1 of a namespace: Python must be this init's child.
+    init: true
+    command: ["python", "-m", "procurement_agent.parser_service"]
+    network_mode: none                       # not an internal network: no network at all
+    # No env_file: nothing of .env reaches the parser except what is listed here. The limits are
+    # the application's own (compose reads the same .env for ${...}), so the two always agree.
+    environment:
+      PA_ENV: prod
+      PA_DOCLING_ARTIFACTS_PATH: /models/docling
+      PA_PARSER_SOCKET: /run/parser/parser.sock
+      PA_MAX_FILE_MB: ${PA_MAX_FILE_MB:-50}
+      PA_MAX_PAGES: ${PA_MAX_PAGES:-300}
+      PA_MAX_TEXT_CHARS: ${PA_MAX_TEXT_CHARS:-6000000}
+      PA_OCR_LANGS: ${PA_OCR_LANGS:-kat,eng}
+      PA_DOCLING_NUM_THREADS: ${PA_DOCLING_NUM_THREADS:-12}
+      PA_DOCLING_TIMEOUT_S: ${PA_DOCLING_TIMEOUT_S:-900}
+      PA_PARSER_MAX_RESULT_MB: ${PA_PARSER_MAX_RESULT_MB:-64}
+      PA_PARSER_KILL_GRACE_S: ${PA_PARSER_KILL_GRACE_S:-30}
+      PA_MODELS_MANIFEST_REQUIRED: ${PA_MODELS_MANIFEST_REQUIRED:-true}
+    volumes:
+      - parser-sock:/run/parser              # shared with `app`, and nothing else is
+      - ./models:/models:ro
+    healthcheck:
+      # Answers a ping over the socket. A conversion in progress answers when it is done (one
+      # request at a time, and Docling's timeout is 15 minutes), so five misses at 30 s is the
+      # margin before `docker ps` says unhealthy - and nothing acts on that: the app waits for
+      # healthy only at start-up, and a wedged parser is ended by its alarm, not by this probe.
+      # start_period covers hashing the models for the manifest and loading them.
+      test: ["CMD", "python", "-m", "procurement_agent.parser_service", "--ping"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 180s
+    read_only: true
+    tmpfs:
+      - /tmp:size=2g,mode=1777,noexec,nosuid,nodev   # the document being converted, and nothing else
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    ulimits:
+      core: 0                                # a crash must not leave a core file of document text
+    mem_limit: 10g                           # an out-of-memory kill ends the parser, not the app
+    pids_limit: 256
+    cpus: ${PA_PARSER_CPUS:-${PA_APP_CPUS:-0}}
 
   ollama:
     # Pinned by version AND digest: `latest` would change the model runtime (and therefore the
@@ -215,3 +284,4 @@ networks:
 volumes:
   app-data:
   ollama:
+  parser-sock:                               # the socket; its mode and owner come from the image

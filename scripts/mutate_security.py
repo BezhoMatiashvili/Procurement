@@ -5,7 +5,8 @@ A security test that passes proves nothing until it is shown to fail when the th
 removed. This copies ``src/`` to a temporary directory, applies one mutation - ownership not
 checked, authentication falling back to a dev user, the CSRF test always true, a key compared by
 prefix only, the pre-body credential check removed, every host allowed, a header dropped, a
-refusal that no longer closes the connection - runs the security tests against that copy, and
+refusal that no longer closes the connection, the parser container given the application's data -
+runs the security tests against that copy (the deployment files are copied beside it), and
 reports whether they failed (the mutation was CAUGHT) or passed (it SURVIVED: a gap in the tests).
 
 Every mutation is an exact text replacement that must match exactly once, so a refactor that moves
@@ -38,6 +39,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+#: The deployment files a mutation of the compose file or the Dockerfile lands in. They are copied
+#: beside the ``src`` copy, and ``PA_DEPLOYMENT_ROOT`` points tests/unit/test_deployment_policy.py at
+#: them: the policy is asserted against the mutated files, never against the real ones.
+DEPLOYMENT_FILES = (
+    "docker-compose.yml",
+    "docker-compose.dev.yml",
+    "Dockerfile",
+    ".dockerignore",
+    ".env.example",
+    "scripts/switch_dev_ollama.sh",
+)
 #: The tests that stand guard. A mutation is caught when any of them fails.
 SUITES = [
     "tests/integration/test_security_matrix.py",
@@ -65,6 +77,151 @@ class Mutation:
 
 
 MUTATIONS = [
+    # --- the parser sandbox: Docling's conversion in a container of its own
+    Mutation(
+        "parser_result_cap_removed_client",
+        "src/procurement_agent/ingestion/parser_client.py",
+        "    cap = settings.parser_max_result_bytes\n",
+        "    cap = 1 << 62\n",
+        "the web process reads a converted document of any size from the parser",
+        ("tests/unit/test_parser_client.py",),
+    ),
+    Mutation(
+        "parser_result_cap_removed_server",
+        "src/procurement_agent/parser_service/server.py",
+        "    if len(result.document) > limits.max_response_bytes:\n",
+        "    if False:\n",
+        "the parser sends a converted document of any size",
+        ("tests/unit/test_parser_server.py",),
+    ),
+    Mutation(
+        "parser_gets_the_app_data",
+        "docker-compose.yml",
+        "      - parser-sock:/run/parser              # shared with `app`, and nothing else is\n",
+        "      - parser-sock:/run/parser              # shared with `app`, and nothing else is\n      - app-data:/data\n",
+        "the container that parses untrusted files can read every stored document and the database",
+        ("tests/unit/test_deployment_policy.py",),
+    ),
+    Mutation(
+        "parser_has_a_network",
+        "docker-compose.yml",
+        "    network_mode: none                       # not an internal network: no network at all\n",
+        "",
+        "the container that parses untrusted files has a network again",
+        ("tests/unit/test_deployment_policy.py",),
+    ),
+    Mutation(
+        "parser_without_init",
+        "docker-compose.yml",
+        '    init: true\n    command: ["python", "-m", "procurement_agent.parser_service"]\n',
+        '    command: ["python", "-m", "procurement_agent.parser_service"]\n',
+        "Python is PID 1 of the parser, so the kernel ignores the alarm that is meant to kill it",
+        ("tests/unit/test_deployment_policy.py",),
+    ),
+    Mutation(
+        "parser_error_with_free_text",
+        "src/procurement_agent/parser_service/protocol.py",
+        '        if set(header) != {"ok", "code"} or type(code) is not str:\n',
+        "        if type(code) is not str:\n",
+        "an error answer may carry text of the parser's choosing, which can quote the document",
+        ("tests/unit/test_parser_protocol.py", "tests/unit/test_parser_client.py"),
+    ),
+    Mutation(
+        "parser_unknown_error_code_accepted",
+        "src/procurement_agent/parser_service/protocol.py",
+        '            return Response(ok=False, code=ErrorCode(code))\n        except ValueError:\n            raise ProtocolError("bad_response") from None\n',
+        "            return Response(ok=False, code=ErrorCode(code))\n        except ValueError:\n            return Response(ok=False, code=ErrorCode.INTERNAL)\n",
+        "a code outside the fixed set is taken for an internal error instead of a broken answer",
+        ("tests/unit/test_parser_protocol.py", "tests/unit/test_parser_client.py"),
+    ),
+    Mutation(
+        "parser_answer_not_a_document",
+        "src/procurement_agent/ingestion/parser_client.py",
+        '        or document.get("schema_name") != "DoclingDocument"\n',
+        "",
+        "whatever JSON the parser returns is stored as the parsed document",
+        ("tests/unit/test_parser_client.py",),
+    ),
+    Mutation(
+        "parser_conversion_not_armed",
+        "src/procurement_agent/parser_service/server.py",
+        "            guard.arm(context.limits.deadline_s, context.limits.cpu_threads)\n",
+        "            pass\n",
+        "a conversion that never returns is never ended",
+        ("tests/unit/test_parser_server.py",),
+    ),
+    Mutation(
+        "parser_alarm_handler_tolerated",
+        "src/procurement_agent/parser_service/server.py",
+        "        if signal.getsignal(signal.SIGALRM) is not signal.SIG_DFL:\n",
+        "        if False:\n",
+        "the kill waits for a Python handler, which a wedged native parser never lets run",
+        ("tests/unit/test_parser_server.py",),
+    ),
+    Mutation(
+        "parser_deadline_after_the_clients",
+        "src/procurement_agent/parser_service/protocol.py",
+        "    return kill_deadline_s(docling_timeout_s, grace_s) + REPLY_SLACK_S\n",
+        "    return kill_deadline_s(docling_timeout_s, grace_s) - 1\n",
+        "the client gives up before the kill: a wedge is reported as a timeout and the parser lives on",
+        ("tests/unit/test_parser_config.py", "tests/unit/test_parser_client.py"),
+    ),
+    Mutation(
+        "parser_socket_world_accessible",
+        "src/procurement_agent/parser_service/server.py",
+        "    previous = os.umask(0o117)",
+        "    previous = os.umask(0o000)",
+        "any local user can connect to the parser and hand it a document",
+        ("tests/unit/test_parser_server.py",),
+    ),
+    Mutation(
+        "parser_work_file_world_readable",
+        "src/procurement_agent/parser_service/server.py",
+        "os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)",
+        "os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)",
+        "the document being converted is readable by other users of the container",
+        ("tests/unit/test_parser_server.py",),
+    ),
+    Mutation(
+        "parser_stem_unchecked",
+        "src/procurement_agent/parser_service/protocol.py",
+        'STEM = re.compile(r"[A-Za-z0-9_-]{1,64}")',
+        'STEM = re.compile(r".{1,64}")',
+        "a request names the file the parser writes: a path walks out of its private directory",
+        ("tests/unit/test_parser_protocol.py", "tests/unit/test_parser_server.py"),
+    ),
+    Mutation(
+        "prod_without_parser_mode",
+        "src/procurement_agent/config.py",
+        "        if self.parser_mode is None:",
+        "        if False:",
+        "production starts parsing in the web process without anybody having chosen it",
+        ("tests/unit/test_parser_config.py",),
+    ),
+    Mutation(
+        "egress_any_unix_socket",
+        "src/procurement_agent/security/egress.py",
+        "            if self._unix_spelling(address) not in self._unix:",
+        "            if False:",
+        "the application may connect to any Unix socket on the machine, not only the parser's",
+        ("tests/unit/test_egress_guard.py",),
+    ),
+    Mutation(
+        "egress_unix_path_normalised_at_compare",
+        "src/procurement_agent/security/egress.py",
+        "            if self._unix_spelling(address) not in self._unix:",
+        "            if os.path.normpath(os.path.abspath(str(address))) not in self._unix:",
+        "'<dir>/link/../x.sock' passes as '<dir>/x.sock' and connects to a different file",
+        ("tests/unit/test_egress_guard.py",),
+    ),
+    Mutation(
+        "egress_noncanonical_unix_path_allowed",
+        "src/procurement_agent/security/egress.py",
+        "        or text != os.path.normpath(text)\n",
+        "",
+        "a socket path with '..' or '//' in it can be put on the allow-list",
+        ("tests/unit/test_egress_guard.py", "tests/unit/test_parser_config.py"),
+    ),
     # --- what the acceptance-act work added: imported and typed rates, registry extracts, the
     # --- annotated files
     Mutation(
@@ -572,6 +729,7 @@ def run(mutation: Mutation, src_copy: Path, timeout: int) -> tuple[str, float]:
         **os.environ,
         "PYTHONPATH": os.pathsep.join([str(src_copy), str(ROOT)]),
         "PYTHONDONTWRITEBYTECODE": "1",
+        "PA_DEPLOYMENT_ROOT": str(src_copy.parent),
     }
     started = time.monotonic()
     try:
@@ -602,6 +760,7 @@ def baseline(src_copy: Path, timeout: int) -> tuple[bool, str]:
         **os.environ,
         "PYTHONPATH": os.pathsep.join([str(src_copy), str(ROOT)]),
         "PYTHONDONTWRITEBYTECODE": "1",
+        "PA_DEPLOYMENT_ROOT": str(src_copy.parent),
     }
     done = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--no-header",
@@ -622,6 +781,9 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="pa-mutate-") as tmp:
         copy = Path(tmp) / "src"
         shutil.copytree(ROOT / "src", copy, ignore=shutil.ignore_patterns("__pycache__"))
+        for name in DEPLOYMENT_FILES:
+            (Path(tmp) / name).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / name, Path(tmp) / name)
         if not args.no_baseline:
             ok, summary = baseline(copy, args.timeout)
             print(

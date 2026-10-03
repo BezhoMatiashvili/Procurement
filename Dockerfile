@@ -47,7 +47,8 @@ RUN apt-get update \
       tesseract-ocr tesseract-ocr-kat tesseract-ocr-eng libgl1 libglib2.0-0 \
  && apt-get clean && rm -r /var/lib/apt/lists \
  && groupadd -r app && useradd -r -g app -d /app -s /usr/sbin/nologin app \
- && mkdir -p /data && chown app:app /data && chmod 700 /data
+ && mkdir -p /data /run/parser && chown app:app /data /run/parser \
+ && chmod 700 /data && chmod 750 /run/parser
 WORKDIR /app
 COPY --from=builder --chown=app:app /app/.venv /app/.venv
 COPY --from=builder /app/dictionaries /app/dictionaries
@@ -55,6 +56,9 @@ COPY --chown=app:app src ./src
 # The process that restarts the server when /ready stops answering (docker-compose.yml runs it): the
 # one file of scripts/ in the image. Standard library only, so it runs when the app's imports break.
 COPY --chown=app:app scripts/supervise.py ./scripts/supervise.py
+# /run/parser is where docker-compose.yml mounts the volume that holds the parser container's Unix
+# socket: a new named volume takes the owner and mode of the directory in the image, which is how
+# both containers' user (app) can use it and nobody else can enter it.
 # The root filesystem is read-only in docker-compose.yml and HOME (/app) is not writable, so
 # every library that keeps a cache (HuggingFace, torch, matplotlib, generic XDG users) is
 # pointed at /tmp, which compose mounts as tmpfs. Nothing there needs to survive a restart:

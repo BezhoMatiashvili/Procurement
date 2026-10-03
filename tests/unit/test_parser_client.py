@@ -329,7 +329,8 @@ GOOD = docling_json(1)
         pytest.param(reply(ok_header(), b"not json at all"), id="a payload that is not JSON"),
         pytest.param(reply(ok_header(), b'["DoclingDocument"]'), id="JSON that is not an object"),
         pytest.param(
-            reply(ok_header(), b'{"schema_name": "Other", "pages": {}}'), id="not a document"
+            reply(ok_header(), b'{"schema_name": "Other", "pages": {"1": {}}}'),
+            id="not a document",
         ),
         pytest.param(
             reply(ok_header(), b'{"schema_name": "DoclingDocument", "pages": []}'), id="pages list"
