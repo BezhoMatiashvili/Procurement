@@ -15,13 +15,13 @@ highlighted, and the note says the line is marked, not the word.
 Findings no words of the act stand for, and the summary of what could not be checked, go in a
 note on the first page. Nothing but annotations is added: no action, no link, no script.
 
-The annotated copy is a new document of new pages, each showing what the act's page shows - its
-content, its own annotations drawn into it - and the notes: never the act's file with notes
-added. What a PDF runs or carries when it opens stays behind, since a reviewer opens the copy as
-the application's own output (red team R6, R6-08): the document's actions, scripts, attached
-files and forms, and every entry of the page itself - its annotations and their actions, its
-associated files, its metadata - for each page is drawn anew from its content alone (security
-review). A page that runs an action itself when opened or closed is refused.
+The annotated copy is a new document holding the act's pages, each with its own annotations
+drawn into it, and the notes - never the act's file with notes added: what a PDF runs or carries
+when it opens (an action, a script, an attached file, a form, a link that launches a program)
+stays behind, since a reviewer opens the copy as the application's own output (red team R6,
+R6-08). What a page itself still names that could run, reach out or carry a file - an action of
+its own, an associated file, annotations it holds in a form PDFium does not draw - and what the
+check of the saved copy cannot read, refuse the copy (``active_names``, security review).
 """
 
 from __future__ import annotations
@@ -210,7 +210,9 @@ def _places_for(
     if finding.places is not None and finding.quote and finding.quote.strip():
         found = pages.places(finding.quote.strip(), whole=True, every=True)
         wanted, total = finding.places
-        if found and len(found) == total <= MAX_SEARCHED:
+        if len(found) > MAX_SEARCHED:
+            return []  # past what a search reads, the places it names cannot be told apart
+        if found and len(found) == total:
             return [found[i] for i in wanted if 0 <= i < len(found)]
     offending = _offending(finding, text)
     for needle in _candidates(finding, text):
@@ -338,58 +340,101 @@ _ACTIVE_NAMES = frozenset(
         "XFA",
     }
 )
+#: What a saved copy is refused for besides those names: an object stream (names packed into
+#: compressed data) and a stream, string or length the reading below cannot account for.
+UNREADABLE = "(unreadable)"
 _PDF_SPACE = frozenset(b"\x00\t\n\x0c\r ")
 _PDF_DELIMITERS = frozenset(b"()<>[]{}/%")
 _NAME_ESCAPE = re.compile(rb"#([0-9A-Fa-f]{2})")
-_LENGTH = re.compile(rb"[\x00\t\n\x0c\r ]*(\d+)(?![\x00\t\n\x0c\r ]+\d+[\x00\t\n\x0c\r ]+R)")
+_SPACE = rb"[\x00\t\n\x0c\r ]"
+#: A /Length's value: a number, or (the second group) an object it refers to.
+_LENGTH = re.compile(
+    _SPACE + rb"*(\d+)(" + _SPACE + rb"+\d+" + _SPACE + rb"+R(?![^\x00\t\n\x0c\r /<>\[\]()%{}]))?"
+)
+_EOL = re.compile(rb"\r\n|\n|\r")
 
 
 def active_names(data: bytes) -> set[str]:
-    """The names in ``_ACTIVE_NAMES`` a PDF's objects use, read as PDF reads them: outside every
-    string and every stream's data, an escaped name (``/J#53``) decoded. The backstop under the
-    redrawing (``_redrawn``): what a page's resources might still carry - a form of its own with
-    an attached file, say - is caught here, and the copy is not handed out."""
+    """The names in ``_ACTIVE_NAMES`` a saved PDF's objects use, read as PDF reads them: outside
+    every string and every stream's data, an escaped name (``/J#53``) decoded; ``ObjStm`` and
+    ``UNREADABLE`` for what cannot be read so. The check every annotated copy passes before it
+    is handed out.
+
+    It fails closed: a stream's data is skipped by its own dictionary's length - a direct
+    ``/Length`` of the object's outermost dictionary, never one a dictionary inside it holds -
+    and must end where ``endstream`` stands; a length that refers elsewhere or does not end there,
+    a string still open at the end, and an object stream make the copy unreadable, and refused
+    (security review: a decoy ``/Length`` inside a resource made the old reading skip past the
+    objects after it)."""
     found: set[str] = set()
     i, n = 0, len(data)
-    length: int | None = None  # the last direct /Length read: the next stream's
+    depth = 0  # how deep in dictionaries
+    length: int | None = None  # the current object's own /Length, read directly
     while i < n:
         c = data[i]
         if c == 0x25:  # % a comment, to the end of its line
             while i < n and data[i] not in (0x0A, 0x0D):
                 i += 1
         elif c == 0x28:  # ( a literal string, balanced, with escapes
-            depth, i = 1, i + 1
-            while i < n and depth:
+            level, i = 1, i + 1
+            while i < n and level:
                 ch = data[i]
                 if ch == 0x5C:
                     i += 2
                     continue
-                depth += (ch == 0x28) - (ch == 0x29)
+                level += (ch == 0x28) - (ch == 0x29)
                 i += 1
+            if level:
+                found.add(UNREADABLE)
         elif c == 0x3C:  # << a dictionary, or a <hex string>
             if data[i + 1 : i + 2] == b"<":
-                i += 2
+                depth, i = depth + 1, i + 2
                 continue
             end = data.find(b">", i)
-            i = n if end < 0 else end + 1
+            if end < 0:
+                found.add(UNREADABLE)
+                break
+            i = end + 1
+        elif c == 0x3E:  # >> a dictionary's end
+            if data[i + 1 : i + 2] == b">":
+                depth = max(0, depth - 1)
+                i += 1
+            i += 1
         elif c == 0x2F:  # /name
             j = i + 1
             while j < n and data[j] not in _PDF_SPACE and data[j] not in _PDF_DELIMITERS:
                 j += 1
             name = _NAME_ESCAPE.sub(lambda m: bytes([int(m.group(1), 16)]), data[i + 1 : j])
             text = name.decode("latin-1")
-            if text in _ACTIVE_NAMES:
+            if text in _ACTIVE_NAMES or text == "ObjStm":
                 found.add(text)
-            if text == "Length" and (m := _LENGTH.match(data, j)) is not None:
-                length, j = int(m.group(1)), m.end()
+            if text == "Length" and depth == 1:
+                m = _LENGTH.match(data, j)
+                length = int(m.group(1)) if m is not None and m.group(2) is None else None
+                j = m.end() if m is not None else j
             i = j
-        elif data.startswith(b"stream", i) and data[i + 6 : i + 7] in (b"\r", b"\n"):
-            start = i + 6 + (2 if data[i + 6 : i + 8] == b"\r\n" else 1)
-            end = data.find(b"endstream", start + (length or 0))
-            i = n if end < 0 else end + len(b"endstream")
-            length = None
-        else:
+        elif c in _PDF_SPACE or c in b"[]{}":
             i += 1
+        else:  # a number or a keyword
+            j = i
+            while j < n and data[j] not in _PDF_SPACE and data[j] not in _PDF_DELIMITERS:
+                j += 1
+            word = data[i:j]
+            if word == b"obj":
+                depth, length = 0, None
+            elif word == b"stream":
+                eol = _EOL.match(data, j)
+                if length is None or eol is None:
+                    found.add(UNREADABLE)
+                    break
+                end = eol.end() + length
+                tail = _EOL.match(data, end)
+                at = tail.end() if tail is not None else end
+                if not data.startswith(b"endstream", at):
+                    found.add(UNREADABLE)
+                    break
+                j, length = at + len(b"endstream"), None
+            i = max(j, i + 1)
     return found
 
 
@@ -422,10 +467,11 @@ def annotate_pdf(
             try:
                 pages.import_pages(source_pdf)
                 _cleared(pages)
-                # and again, each page drawn anew from what it shows: the annotations the pages
-                # no longer hold, and whatever else a page's own entries carry, stay behind
-                pdf = _redrawn(pages)
+                # and again: the annotations the pages no longer hold stay behind as well -
+                # a document saves every object it was ever given
+                pdf = pdfium.PdfDocument.new()
                 try:
+                    pdf.import_pages(pages)
                     return _annotate(pdf, findings, out_path, text, summary, items)
                 finally:
                     pdf.close()
@@ -433,60 +479,6 @@ def annotate_pdf(
                 pages.close()
         finally:
             source_pdf.close()
-
-
-def _page_matrix(page: Any) -> tuple[float, ...]:
-    """PDFium's own transform from a page's space to the page as shown - the crop box (within
-    the media box) turned upright, its corner at the origin: what a page drawn as a form
-    (``page_as_xobject``) is drawn through."""
-    ml, mb, mr, mt = page.get_mediabox()
-    cl, cb, cr, ct = page.get_cropbox()
-    left, bottom = max(ml, min(cl, cr)), max(mb, min(cb, ct))
-    right, top = min(mr, max(cl, cr)), min(mt, max(cb, ct))
-    if right <= left or top <= bottom:
-        left, bottom, right, top = ml, mb, mr, mt
-    return {
-        90: (0.0, -1.0, 1.0, 0.0, -bottom, right),
-        180: (-1.0, 0.0, 0.0, -1.0, right, top),
-        270: (0.0, 1.0, -1.0, 0.0, top, -left),
-    }.get(int(page.get_rotation()) % 360, (1.0, 0.0, 0.0, 1.0, -left, -bottom))
-
-
-def _inverse(m: tuple[float, ...]) -> tuple[float, ...]:
-    a, b, c, d, e, f = m
-    det = a * d - b * c
-    return (d / det, -b / det, -c / det, a / det, (c * f - d * e) / det, (b * e - a * f) / det)
-
-
-def _redrawn(pages: pdfium.PdfDocument) -> pdfium.PdfDocument:
-    """A new document whose every page is a new page with the same boxes and turn, showing the
-    page's content drawn as one form (``page_as_xobject``), placed where the page drew it. A
-    page's dictionary is not copied - its annotations, their actions, its associated files, its
-    metadata and whatever else it names stay behind (security review) - and a highlight sits on
-    the same words as on the page itself."""
-    pdf = pdfium.PdfDocument.new()
-    try:
-        for i in range(len(pages)):
-            page = pages[i]
-            try:
-                form = pages.page_as_xobject(i, pdf)
-                left, bottom, right, top = page.get_mediabox()
-                new = pdf.new_page(right - left, top - bottom)
-                new.set_mediabox(left, bottom, right, top)
-                new.set_cropbox(*page.get_cropbox())
-                new.set_rotation(int(page.get_rotation()) % 360)
-                shown = form.as_pageobject()
-                shown.transform(pdfium.PdfMatrix(*_inverse(_page_matrix(page))))
-                new.insert_obj(shown)
-                new.gen_content()
-                new.close()
-                form.close()
-            finally:
-                page.close()
-    except BaseException:
-        pdf.close()
-        raise
-    return pdf
 
 
 _PAGE_ACTIONS = (pdfium_c.FPDFPAGE_AACTION_OPEN, pdfium_c.FPDFPAGE_AACTION_CLOSE)
@@ -536,20 +528,25 @@ def _annotate(
         notes: dict[tuple[int, tuple[tuple[float, ...], ...]], tuple[_Place, list[Finding]]] = {}
         unanchored: list[Finding] = []
         cut_short: list[str] = []
-        marked = 0
         for finding in findings:
             places = _places_for(pages, finding, text)
-            # as many places as a Word file is marked in (``docx_annotate.MAX_PLACES``)
-            room = max(0, min(MAX_PLACES_PER_FINDING, MAX_PLACES - marked))
-            if len(places) > room:
-                cut_short.append(_cut_short_note(finding, room, len(places)))
-                places = places[:room]
-            if not places:
+            # as many places as a Word file is marked in (``docx_annotate.MAX_PLACES``), the
+            # places another finding marked already shared
+            room = MAX_PLACES - len(notes)
+            kept: list[tuple[tuple[int, tuple[tuple[float, ...], ...]], _Place]] = []
+            for place in places[:MAX_PLACES_PER_FINDING]:
+                key = (place.page, tuple(tuple(round(v, 1) for v in b) for b in place.boxes))
+                if key not in notes:
+                    if room <= 0:
+                        break
+                    room -= 1
+                kept.append((key, place))
+            if len(kept) < len(places):
+                cut_short.append(_cut_short_note(finding, len(kept), len(places)))
+            if not kept:
                 unanchored.append(finding)
                 continue
-            marked += len(places)
-            for place in places:
-                key = (place.page, tuple(tuple(round(v, 1) for v in b) for b in place.boxes))
+            for key, place in kept:
                 notes.setdefault(key, (place, []))[1].append(finding)
     finally:
         text_pages.close()
@@ -574,8 +571,8 @@ def _annotate(
         out_path.unlink(missing_ok=True)
         log.info("pdf_annotation_refused", names=sorted(active))  # names from a fixed set
         msg = (
-            "the PDF's pages carry an action, a script or an attached file: no annotated copy "
-            "of it is made"
+            "the PDF's pages carry an action, a script or an attached file, or a part that "
+            "cannot be checked: no annotated copy of it is made"
         )
         raise UnsupportedDocumentError(msg)
     return out_path, unanchored

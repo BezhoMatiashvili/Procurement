@@ -29,7 +29,7 @@ from procurement_agent.ingestion.docling_service import mend_interleaved
 from procurement_agent.ingestion.text_limits import MAX_SEPARATOR_RUN
 from procurement_agent.registry import extract
 from procurement_agent.registry.extract import NotAnExtractError, persons, read_extract
-from procurement_agent.report import docx_sanitize
+from procurement_agent.report import docx_annotate, docx_sanitize
 from procurement_agent.report.docx_annotate import (
     MAX_PLACES,
     MAX_PLACES_PER_FINDING,
@@ -39,7 +39,7 @@ from procurement_agent.report.docx_annotate import (
     annotate_docx,
     paragraphs_in_order,
 )
-from procurement_agent.report.pdf_annotate import active_names, annotate_pdf
+from procurement_agent.report.pdf_annotate import UNREADABLE, active_names, annotate_pdf
 from tests import regex_budget as rb
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
@@ -333,12 +333,6 @@ def _page(extra: bytes = b"", resources: bytes = b"", contents: bytes = b"15 0 R
     )
 
 
-def _assert_carries_nothing(out: Path) -> None:
-    data = out.read_bytes()
-    assert active_names(data) == set()
-    assert b"INVENTED" not in data and b"invented" not in data
-
-
 _METADATA = b"<< /Type /Metadata /Subtype /XML /Length 8 >>\nstream\nINVENTED\nendstream"
 
 
@@ -352,26 +346,27 @@ class TestWhatTheAnnotatedPdfCarries:
                 {990: b"<< /Type /Annot /Subtype /Link /Rect [9 9 99 29] /A " + _SCRIPT + b" >>"},
             ),
             (_page(b" /AA [ " + _SCRIPT + b" ]"), {}),
-            (
-                _page(b" /Metadata 996 0 R /PieceInfo << /X << /Data (invented) >> >>"),
-                {996: _METADATA},
-            ),
         ],
-        ids=["associated-file", "annots-not-an-array", "actions-as-an-array", "metadata"],
+        ids=["associated-file", "annots-not-an-array", "actions-as-an-array"],
     )
-    def test_what_a_page_names_stays_behind(
+    def test_a_page_that_names_what_runs_or_carries_a_file_is_refused(
         self, tmp_path: Path, page: bytes, extra: dict[int, bytes]
     ) -> None:
-        """Importing pages copied every entry of a page's dictionary; each page is drawn anew."""
+        """Importing pages copies every entry of a page's dictionary: what PDFium does not take
+        off a page (an associated file, annotations held in no array, actions in an array) is
+        found in the saved copy, which is then not handed out."""
         src = _updated(tmp_path / "act.pdf", page, extra)
-        out, _ = annotate_pdf(src, [_finding("405123456")], tmp_path / "o.pdf")
-        _assert_carries_nothing(out)
+        with pytest.raises(UnsupportedDocumentError, match="no annotated copy"):
+            annotate_pdf(src, [_finding("405123456")], tmp_path / "o.pdf")
+        assert not (tmp_path / "o.pdf").exists()
+        with pytest.raises(UnsupportedDocumentError):  # a clean act's copy as well
+            annotate_pdf(src, [], tmp_path / "o.pdf")
 
-    def test_a_clean_act_s_copy_carries_nothing_either(self, tmp_path: Path) -> None:
-        page = _page(b" /AF [980 0 R]")
-        src = _updated(tmp_path / "act.pdf", page, {980: _FILESPEC, 981: _EMBEDDED})
-        out, _ = annotate_pdf(src, [], tmp_path / "o.pdf")
-        _assert_carries_nothing(out)
+    def test_a_page_s_own_metadata_is_passive_and_goes_with_it(self, tmp_path: Path) -> None:
+        page = _page(b" /Metadata 996 0 R /PieceInfo << /X << /Data (invented) >> >>")
+        src = _updated(tmp_path / "act.pdf", page, {996: _METADATA})
+        out, _ = annotate_pdf(src, [_finding("405123456")], tmp_path / "o.pdf")
+        assert active_names(out.read_bytes()) == set()
 
     def test_a_form_its_content_draws_with_a_file_of_its_own_is_refused(
         self, tmp_path: Path
@@ -391,9 +386,44 @@ class TestWhatTheAnnotatedPdfCarries:
             annotate_pdf(src, [_finding("405123456")], tmp_path / "o.pdf")
         assert not (tmp_path / "o.pdf").exists()
 
+    def test_a_decoy_length_hides_nothing(self, tmp_path: Path) -> None:
+        """A /Length inside a form's resources once made the reading skip past the objects after
+        it - here the form that carries the file."""
+        decoy = (
+            b"<< /Type /XObject /Subtype /Form /BBox [0 0 10 10] /Length 8 /Resources << "
+            b"/ExtGState << /G << /Length 2000000000 >> >> >> >>\nstream\n0 0 m S \nendstream"
+        )
+        form = (
+            b"<< /Type /XObject /Subtype /Form /BBox [0 0 10 10] /AF [980 0 R] /Length 8 >>"
+            b"\nstream\n0 0 m S \nendstream"
+        )
+        draw = b"<< /Length 22 >>\nstream\nq /Dec Do Q q /Inv Do Q\nendstream"
+        page = _page(
+            resources=b"/XObject << /Dec 984 0 R /Inv 982 0 R >>", contents=b"[15 0 R 983 0 R]"
+        )
+        extra = {980: _FILESPEC, 981: _EMBEDDED, 982: form, 983: draw, 984: decoy}
+        src = _updated(tmp_path / "act.pdf", page, extra)
+        with pytest.raises(UnsupportedDocumentError):
+            annotate_pdf(src, [_finding("405123456")], tmp_path / "o.pdf")
+
+    def test_pages_sharing_their_resources_still_share_them(self, tmp_path: Path) -> None:
+        """Drawing each page anew as a form (tried, and reverted) copied the resources every
+        page shares once a page: thirty pages, thirty copies of the act's fonts."""
+        src = tmp_path / "act.pdf"
+        pdf = pdfium.PdfDocument(str(TEXT_PDF))
+        try:
+            for _ in range(29):
+                pdf.import_pages(pdfium.PdfDocument(str(TEXT_PDF)))
+            pdf.save(str(src))
+        finally:
+            pdf.close()
+        out, _ = annotate_pdf(src, [_finding("405123456")], tmp_path / "o.pdf")
+        assert out.stat().st_size < 3 * src.stat().st_size
+
     @pytest.mark.parametrize("turn", [0, 90, 180, 270])
-    def test_a_page_is_drawn_where_it_was(self, tmp_path: Path, turn: int) -> None:
-        """The redrawn page shows what the page showed, pixel for pixel, cropped and turned."""
+    def test_a_page_is_shown_as_it_was(self, tmp_path: Path, turn: int) -> None:
+        """The copy's page shows what the act's page showed, pixel for pixel, cropped and
+        turned."""
         src = tmp_path / "act.pdf"
         pdf = pdfium.PdfDocument(str(TEXT_PDF))
         try:
@@ -411,6 +441,9 @@ class TestWhatTheAnnotatedPdfCarries:
             b.close()
 
 
+_OBJ = b"1 0 obj\n"
+
+
 class TestActiveNames:
     @pytest.mark.parametrize(
         ("data", "found"),
@@ -419,9 +452,26 @@ class TestActiveNames:
             (b"<< /J#53 (x) >>", {"JS"}),  # an escaped name is the name
             (b"<< /AF [1 0 R] >>", {"AF"}),
             (b"<< /BaseFont /AAAAAB+Sans /Contents (see /JS (here)) >>", set()),
-            (b"<< /Length 9 >>\nstream\n/AA /JS x\nendstream\n<< /Type /Page >>", set()),
+            (_OBJ + b"<< /Length 9 >>\nstream\n/AA /JS x\nendstream\nendobj", set()),
             (b"<< /T <2F4A53> >>", set()),  # a hex string
             (b"% /JS in a comment\n<< /Type /Annot >>", set()),
+            # a stream's data holding "endstream (" is skipped by its length, not searched
+            (
+                _OBJ + b"<< /Length 13 >>\nstream\nendstream ( x\nendstream\nendobj\n"
+                b"2 0 obj\n<< /AF [1 0 R] >>\nendobj",
+                {"AF"},
+            ),
+            # a /Length inside a dictionary inside the stream's own is not the stream's
+            (
+                _OBJ + b"<< /Res << /Length 99999 >> /Length 3 >>\nstream\nabc\nendstream\n"
+                b"endobj\n2 0 obj\n<< /AA << >> >>\nendobj",
+                {"AA"},
+            ),
+            (_OBJ + b"<< /Length 2 0 R >>\nstream\nabc\nendstream", {UNREADABLE}),
+            (_OBJ + b"<< /Length 5 >>\nstream\nabc\nendstream", {UNREADABLE}),  # wrong length
+            (_OBJ + b"<< >>\nstream\nabc\nendstream", {UNREADABLE}),  # no length
+            (b"<< /T (open >>", {UNREADABLE}),
+            (b"<< /Type /ObjStm /N 3 >>", {"ObjStm"}),
         ],
     )
     def test_names_are_read_as_pdf_reads_them(self, data: bytes, found: set[str]) -> None:
@@ -647,3 +697,110 @@ class TestMending:
             for i in range(docling_service.MEND_MAX_CELLS + 1)
         ]
         assert mend_interleaved(cells, []) is cells
+
+
+# --- 8. the re-check of the fixes -------------------------------------------------------------
+
+
+def test_a_run_s_text_is_read_as_python_docx_reads_it() -> None:
+    """``_run_text`` reads a run child by child, without python-docx's query; it must say what
+    ``Run.text`` says for every kind of child a run holds."""
+    w = nsdecls("w")
+    children = [
+        "<w:t>ა ბ</w:t>",
+        '<w:t xml:space="preserve"> გ </w:t>',
+        "<w:t/>",
+        "<w:tab/>",
+        "<w:br/>",
+        '<w:br w:type="page"/>',
+        '<w:br w:type="textWrapping"/>',
+        "<w:cr/>",
+        "<w:noBreakHyphen/>",
+        "<w:softHyphen/>",
+        '<w:ptab w:relativeTo="margin" w:alignment="right" w:leader="none"/>',
+        '<w:fldChar w:fldCharType="begin"/>',
+        "<w:instrText> PAGE </w:instrText>",
+        '<w:commentReference w:id="1"/>',
+        "<w:rPr><w:b/></w:rPr>",
+    ]
+    rng = random.Random(11)
+    doc = Document()
+    paragraph = doc.add_paragraph()
+    for _ in range(300):
+        picked = "".join(rng.choice(children) for _ in range(rng.randint(0, 6)))
+        paragraph._p.append(parse_xml(f"<w:r {w}>{picked}</w:r>"))
+    runs = docx_annotate._text_runs(paragraph)
+    assert len(runs) == 300
+    assert [docx_annotate._run_text(r) for r in runs] == [r.text for r in runs]
+
+
+class TestTheRecheck:
+    @pytest.mark.parametrize("simple", [True, False], ids=["simple", "complex"])
+    def test_a_link_field_written_without_a_space_is_read(
+        self, tmp_path: Path, simple: bool
+    ) -> None:
+        src = _with_field(
+            tmp_path / "f.docx", " HYPERLINK&quot;file:///C:/x.exe&quot; ", simple=simple
+        )
+        out, _ = annotate_docx(src, [], tmp_path / "o.docx")
+        assert "HYPERLINK" not in _xml(out)
+
+    def test_a_link_field_whose_target_is_another_field_is_not_trusted(
+        self, tmp_path: Path
+    ) -> None:
+        w = nsdecls("w")
+        doc = Document()
+        paragraph = doc.add_paragraph("ხელშეკრულება ")
+        for xml in (
+            '<w:fldChar w:fldCharType="begin"/>',
+            '<w:instrText xml:space="preserve"> HYPERLINK </w:instrText>',
+            '<w:fldChar w:fldCharType="begin"/>',
+            '<w:instrText xml:space="preserve"> QUOTE "file:///C:/x.exe" </w:instrText>',
+            '<w:fldChar w:fldCharType="separate"/>',
+            "<w:t>file:///C:/x.exe</w:t>",
+            '<w:fldChar w:fldCharType="end"/>',
+            '<w:fldChar w:fldCharType="separate"/>',
+            "<w:t>ნახვა</w:t>",
+            '<w:fldChar w:fldCharType="end"/>',
+        ):
+            paragraph._p.append(parse_xml(f"<w:r {w}>{xml}</w:r>"))
+        src = tmp_path / "f.docx"
+        doc.save(str(src))
+        out, _ = annotate_docx(src, [], tmp_path / "o.docx")
+        xml = _xml(out)
+        assert "HYPERLINK" not in xml and "ნახვა" in xml
+
+    def test_findings_on_the_same_words_share_the_file_s_limit(self, tmp_path: Path) -> None:
+        """The limit counted every finding's places, shared or not: twelve findings on the same
+        sixty places left six of them unmarked."""
+        path = _repeated(tmp_path / "r.docx", "405123456", 60)
+        findings = [_finding("405123456", rule_id=f"AOA.RULE_{k}") for k in range(12)]
+        out, unanchored = annotate_docx(path, findings, tmp_path / "o.docx")
+        assert unanchored == []
+        assert _xml(out).count("<w:commentRangeStart ") == MAX_PLACES_PER_FINDING + 1
+
+    def test_a_named_place_past_the_search_is_not_guessed(self, tmp_path: Path) -> None:
+        """A finding naming its 1,100th place of 1,200 was marked on the first fifty: words it
+        does not mean. It goes in the note instead."""
+        path = _repeated(tmp_path / "r.docx", "405123456", 1200)
+        text = "405123456 " * 1200
+        finding = _finding("405123456", places=((1100,), 1200), replacement="405000000")
+        out, unanchored = annotate_docx(path, [finding], tmp_path / "o.docx", text=text)
+        assert unanchored == [finding]
+        assert _xml(out).count("<w:commentRangeStart ") == 1  # the note
+        assert "<w:ins " not in _xml(out)
+
+    def test_a_page_built_to_make_mending_read_every_word_is_left_as_read(self) -> None:
+        """Under the cell and word limits, clumps that each read every word of one long line:
+        the work is bounded, and the page left as Docling read it."""
+        cells: list[TextCell] = []
+        words: list[TextCell] = []
+        for k in range(1500):
+            left = 10.0 + 20.0 * k
+            cells.append(_text_cell(len(cells), "ა", left, 20.0, 10.0))
+            cells.append(_text_cell(len(cells), ".", left + 9.0, 20.0, 4.0))
+        for k in range(20000):
+            words.append(_text_cell(len(words), "ა", 1.0 * k, 20.0, 1.0))
+        started = time.perf_counter()
+        assert mend_interleaved(cells, words) is cells
+        assert time.perf_counter() - started < 5.0

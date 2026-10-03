@@ -179,23 +179,31 @@ def _strip_settings(root: etree._Element) -> int:
     return len(hits)
 
 
+#: A field instruction's name: its leading letters, quoted or not, whatever follows them -
+#: ``HYPERLINK"file:..."`` is a HYPERLINK field.
+_FIELD_NAME = re.compile(r'\s*"?([A-Za-z]+)')
+
+
 def _is_risky(instruction: str) -> bool:
-    words = instruction.strip().split(None, 1)
-    if not words:
+    name = _FIELD_NAME.match(instruction)
+    if name is None:
         return False
-    kind = words[0].strip('"').upper()
+    kind = name.group(1).upper()
     if kind == "HYPERLINK":
-        return not _safe_field_link(words[1] if len(words) > 1 else "")
+        return not _safe_field_link(instruction[name.end() :])
     return kind in _RISKY_FIELDS
 
 
 def _safe_field_link(arguments: str) -> bool:
     """Whether a ``HYPERLINK`` field links where a hyperlink relationship may (``_safe_link``):
-    its target, or none - a link to a place in the document itself (``\\l``) goes nowhere."""
+    its target, or no target and a place in the document itself (``\\l``). A field with neither
+    has its target computed - a field inside it - and is not taken on trust."""
     expect_argument = False
+    local = False
     for quoted, switch, bare in _FIELD_WORDS.findall(arguments):
         if switch:
             expect_argument = switch.lower() in _SWITCHES_WITH_AN_ARGUMENT
+            local = local or switch.lower() == "\\l"
             continue
         if expect_argument:
             expect_argument = False
@@ -203,7 +211,7 @@ def _safe_field_link(arguments: str) -> bool:
         target = quoted if quoted or not bare else bare
         # a field writes a backslash twice: "\\\\host\\share" is \\host\share
         return _safe_link(target.replace("\\\\", "\\"))
-    return True
+    return local
 
 
 def _unwrap_fields(root: etree._Element) -> int:

@@ -87,6 +87,10 @@ _SPACE_GAP = 0.15
 #: than any page of a document holds, and each mended clump costs a search of the words.
 MEND_MAX_CELLS = 5000
 MEND_MAX_WORDS = 30000
+#: The most words the clumps of a page may look at, all told: a page past it is left as read. A
+#: page of an act looks at a few thousand; one built to make every clump read every word of a
+#: line many times that.
+MEND_MAX_WORK = 2_000_000
 
 
 class _Words:
@@ -104,11 +108,13 @@ class _Words:
         entries.sort(key=lambda e: e[0])
         self.entries = entries
         self.heights = [e[0] for e in entries]
+        self.looked_at = 0  # words read, all clumps told
 
     def inside(self, left: float, right: float, top: float, bottom: float) -> list[Any]:
         """The words whose centres lie in the box, left to right - two at the same left in the
         order the page lists them."""
         lo, hi = bisect_left(self.heights, top), bisect_right(self.heights, bottom)
+        self.looked_at += hi - lo
         found = [(b, n, text) for _, x, n, b, text in self.entries[lo:hi] if left <= x <= right]
         found.sort(key=lambda w: (w[0].l, w[1]))
         return [(b, text) for b, _, text in found]
@@ -126,7 +132,7 @@ def mend_interleaved(textlines: list[Any], words: list[Any]) -> list[Any]:
     overlap or touch are made one cell, its text the line's words there (``words``, which lie
     each where it stands) left to right, a space between two words that are apart. A page
     whose cells are apart - a page written one font to a line - is returned as it was, and so is
-    a page past ``MEND_MAX_CELLS`` or ``MEND_MAX_WORDS``."""
+    a page past ``MEND_MAX_CELLS``, ``MEND_MAX_WORDS`` or ``MEND_MAX_WORK``."""
     if len(textlines) < 2 or len(textlines) > MEND_MAX_CELLS or len(words) > MEND_MAX_WORDS:
         return textlines
     index: _Words | None = None  # the words, indexed when the first clump needs them
@@ -151,6 +157,8 @@ def mend_interleaved(textlines: list[Any], words: list[Any]) -> list[Any]:
                 first = min(clump, key=lambda k: textlines[k].index)
                 index = index or _Words(words)
                 merged[first] = _rebuilt(textlines, clump, first, index)
+                if index.looked_at > MEND_MAX_WORK:
+                    return textlines
                 gone.update(k for k in clump if k != first)
             if i is not None:
                 clump, right = [i], boxes[i].r

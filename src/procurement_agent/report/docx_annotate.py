@@ -124,6 +124,19 @@ _RUN_CONTAINERS = frozenset(
 )
 
 
+#: The run children whose text ``Run.text`` reads, in the order they stand.
+_RUN_TEXT_TAGS = frozenset(
+    qn(tag) for tag in ("w:br", "w:cr", "w:noBreakHyphen", "w:ptab", "w:t", "w:tab")
+)
+
+
+def _run_text(run: Run) -> str:
+    """``run.text``, read child by child: python-docx reads it by an XPath query, which a search
+    of every place in a file of many runs made the most of its cost (security review). Each
+    child's own text is python-docx's, so the two are equal."""
+    return "".join(str(e) for e in run._r if e.tag in _RUN_TEXT_TAGS)
+
+
 def _text_runs(paragraph: Paragraph) -> list[Run]:
     """The runs of a paragraph's own text, in order, those nested in a link or an inline content
     control among them: Docling reads their text, and ``Paragraph.runs`` does not."""
@@ -295,7 +308,7 @@ def _cover_all(
     if not needle:
         return []
     runs = _text_runs(paragraph)
-    texts = [r.text for r in runs]  # python-docx reads a run's text by a query: once each
+    texts = [_run_text(r) for r in runs]
     text = "".join(texts)
     in_fields = _simple_field_spans(runs, texts)
     field_ends = [b for _, b in in_fields]
@@ -331,7 +344,7 @@ def _cover_all(
         pos += length
 
     runs = _text_runs(paragraph)
-    texts = [r.text for r in runs]
+    texts = [_run_text(r) for r in runs]
     starts: list[int] = []
     ends: list[int] = []
     pos = 0
@@ -393,13 +406,21 @@ def _field_widener(paragraph: Paragraph) -> Any:
         if "end" in kinds and depth > 0:
             depth -= 1
     position = {r: i for i, r in enumerate(elements)}
+    whole: dict[int, tuple[frozenset[int], list[Run]]] = {}  # a field's runs, made once
 
     def widen(covered: list[Run]) -> list[Run]:
         mine = {position[c._r] for c in covered if c._r in position}
+        reached = {g for c in covered if (g := group_of.get(c._r)) is not None}
+        if len(reached) == 1:  # within one field, as a place mostly is: the field's runs
+            g = next(iter(reached))
+            if g not in whole:
+                whole[g] = (frozenset(groups[g]), [runs[i] for i in groups[g]])
+            members, field_runs = whole[g]
+            if mine <= members:
+                return covered if len(mine) == len(members) else field_runs
         wanted = set(mine)
-        for c in covered:
-            if (g := group_of.get(c._r)) is not None:
-                wanted.update(groups[g])
+        for g in reached:
+            wanted.update(groups[g])
         if wanted == mine:
             return covered
         return [runs[i] for i in sorted(wanted)]
@@ -573,7 +594,7 @@ class _Paragraphs:
             out = list(paragraphs)
             for paragraph in out:
                 if paragraph._p not in texts:
-                    own = "".join(r.text for r in _text_runs(paragraph))
+                    own = "".join(_run_text(r) for r in _text_runs(paragraph))
                     texts[paragraph._p] = (own, _normalised_index(own)[0])
             return out
 
@@ -615,8 +636,12 @@ def _places_for(
     offending = _offending(finding, text)
     if finding.places is not None and finding.quote and finding.quote.strip():
         chosen, trusted = _chosen_places(paragraphs, finding.quote.strip(), finding.places, text)
+        if len(chosen) > MAX_SEARCHED:
+            # the places it names lie past what a search reads: marking the first ones would
+            # mark words it does not mean, so it goes in the note at the top instead
+            return [], False
         if chosen:
-            return chosen, trusted and len(chosen) <= MAX_SEARCHED
+            return chosen, trusted
     for needle in _candidates(finding, text):
         # where the words stand as words first: a typo "ივნის" is not inside "ივნისიდან", and
         # the nominative of a name is not inside its genitive. A needle found only inside
@@ -861,7 +886,7 @@ def _plan_edits(
     the first finding to claim words writes them, the others keep their comments. ``own`` is
     the paragraph's text, when the caller has it."""
     if own is None:
-        own = "".join(r.text for r in _text_runs(paragraph))
+        own = "".join(_run_text(r) for r in _text_runs(paragraph))
     written = own[start:end]
     # what XML cannot carry is dropped before the words are lined up, not after
     planned = tracked_edits(written, _XML_ILLEGAL.sub("", new))
@@ -884,7 +909,7 @@ class _RunIndex:
         pos = 0
         for run in self.runs:
             self.starts.append(pos)
-            pos += len(run.text)
+            pos += len(_run_text(run))
             self.ends.append(pos)
 
     def split_at(self, boundary: int) -> bool:
@@ -910,7 +935,7 @@ def _edit_runs(paragraph: Paragraph, spans: Sequence[tuple[int, int]]) -> list[l
     index = _RunIndex(paragraph)
     splits = [index.split_at(start) and index.split_at(end) for start, end in spans]
     runs, starts, ends = index.runs, index.starts, index.ends
-    text = "".join(r.text for r in runs)
+    text = "".join(_run_text(r) for r in runs)
     fields = set(_field_runs(runs))
     out: list[list[Run] | None] = []
     for (start, end), split in zip(spans, splits, strict=True):
@@ -930,7 +955,7 @@ def _edit_runs(paragraph: Paragraph, spans: Sequence[tuple[int, int]]) -> list[l
 def _rewritable(covered: list[Run], words: str, fields: set[Any]) -> list[Run] | None:
     """``covered``, when a tracked change can move them into a deletion: they hold ``words``
     exactly, are text only, are no field's, and nothing stands between them."""
-    if not covered or "".join(r.text for r in covered) != words:
+    if not covered or "".join(_run_text(r) for r in covered) != words:
         return None
     if not all(_splittable(r) for r in covered):
         return None
@@ -1076,7 +1101,7 @@ def _add_note(document: DocumentType, text: str, author: str) -> None:
     document stand for. The body's text is left as it was; a document with no text at all gets
     a paragraph to carry it."""
     for paragraph in paragraphs_in_order(document):
-        first = _TOKEN.search("".join(r.text for r in _text_runs(paragraph)))
+        first = _TOKEN.search("".join(_run_text(r) for r in _text_runs(paragraph)))
         if first is None:
             continue
         found = _cover_all(paragraph, first.group(), first=True)
@@ -1137,22 +1162,31 @@ def annotate_docx(
     edits: list[_Edit] = []
     own: dict[object, str] = {}  # each paragraph's text, read once
     cut_short: list[str] = []
-    marked = 0
     paragraphs = _Paragraphs(document)
     for finding in findings:
         places, trusted = _places_for(paragraphs, finding, text)
-        room = max(0, min(MAX_PLACES_PER_FINDING, MAX_PLACES - marked))
-        if len(places) > room:
-            cut_short.append(_cut_short_note(finding, room, len(places)))
-            places, trusted = places[:room], False
+        total = len(places)
+        # the file's limit counts the places no finding has marked yet: findings on the same
+        # words share their comment
+        room = MAX_PLACES - len(comments)
+        kept: list[_Place] = []
+        for place in places[:MAX_PLACES_PER_FINDING]:
+            if (place[0]._p, place[1], place[2]) not in comments:
+                if room <= 0:
+                    break
+                room -= 1
+            kept.append(place)
+        if len(kept) < total:
+            cut_short.append(_cut_short_note(finding, len(kept), total))
+            trusted = False
+        places = kept
         if not places:
             unanchored.append(finding)
             continue
-        marked += len(places)
         for paragraph, start, end, runs in places:
             if finding.replacement and trusted:
                 if paragraph._p not in own:
-                    own[paragraph._p] = "".join(r.text for r in _text_runs(paragraph))
+                    own[paragraph._p] = "".join(_run_text(r) for r in _text_runs(paragraph))
                 _plan_edits(edits, paragraph, start, end, finding.replacement, own[paragraph._p])
             key = (paragraph._p, start, end)
             if (existing := comments.get(key)) is not None:

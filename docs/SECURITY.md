@@ -309,31 +309,40 @@ reach every copy of the data, which is why the volume belongs on an encrypted di
   module allowed that import (`tests/unit/test_egress_surface.py`, `FFI_IMPORTS`); `ctypes`
   itself stays forbidden everywhere, and the output carries nothing but annotations - no
   action, link or script (`tests/unit/test_pdf_annotate.py`). Nor does it carry the act's own
-  (red team R6, R6-08; security review): the act's pages are imported into a new document, so
-  what the file runs or carries when it opens - an open action, a document script, an attached
-  file, a form - stays behind; each page's own annotations (links that launch a program or run
-  a script, form fields) are drawn into the page; and each page is then drawn anew, as one form
-  made of its content, on a new page with the same boxes and turn - so nothing else a page's
-  dictionary names comes along either: its annotations and their actions (an array or not), an
-  associated file (`/AF`), its metadata. What a page's content itself draws with - its fonts,
-  images and forms - is the one thing copied, and the saved copy is read once more as PDF reads
-  it (outside strings and stream data, escaped names decoded): a name that only runs something,
-  reaches out or carries a file or a form (`/JS`, `/AA`, `/AF`, `/Launch`, `/EmbeddedFile` ...)
-  anywhere in it refuses the copy (415). A page that runs an action itself when opened or
-  closed is refused too. Five mutations of `scripts/mutate_security.py` stand for these
-  controls (`tests/unit/test_pdf_annotate.py`, `tests/unit/test_security_review_aoa.py`).
+  (red team R6, R6-08): the copy is a new document the act's pages are imported into, so what
+  the file runs or carries when it opens - an open action, a document script, an attached file,
+  a form - stays behind; each page's own annotations (links that launch a program or run a
+  script, form fields) are drawn into the page and their actions dropped, and the pages are
+  imported once more so that no object they no longer use is saved. What importing keeps - every
+  entry of a page's own dictionary, and whatever its content draws with - is then checked in the
+  saved copy, read as PDF reads it (outside strings and stream data, escaped names decoded): a
+  name that only runs something, reaches out or carries a file or a form (`/JS`, `/AA`, `/AF`,
+  `/Launch`, `/EmbeddedFile` ...) refuses the copy (415) - a page's associated file, annotations
+  held in no array, actions written as an array, an attached file of a form the page draws. The
+  check fails closed (security review): a stream's data is skipped by its own dictionary's
+  direct length and must end where `endstream` stands, and a length it cannot read, a stream that
+  does not end there, a string left open and an object stream refuse the copy too. A page's own
+  metadata goes with it: it runs nothing. A page that runs an action itself when opened or closed
+  is refused as well. (Drawing each page anew as a form of its content, to leave a page's
+  dictionary behind, was tried and reverted: PDFium copies a page's resources into each form, so
+  thirty pages sharing a font carried thirty copies of it, and a file built for it gigabytes.)
+  Six mutations of `scripts/mutate_security.py` stand for these controls
+  (`tests/unit/test_pdf_annotate.py`, `tests/unit/test_security_review_aoa.py`).
 * What a hostile file can cost the annotators is bounded: a Word table's cells are read once
   each, whatever number of columns a cell says it spans (python-docx's `Row.cells` made an object
-  for each - gigabytes for one cell); every place of a value in a paragraph is found in one pass;
-  a search reads at most 1,000 places of one value, a finding is marked in at most 50 and a
-  file in at most 300 - a finding cut short is said so in the note at the top and gets no
-  tracked change, so accepting every change never leaves it half corrected. A PDF page's
-  touching text cells are mended by an indexed search of its words, and not at all past 5,000
-  cells or 30,000 words. The registry extract reader's text is held to the same limits as every
+  for each - gigabytes for one cell); every place of a value in a paragraph is found in one pass,
+  a run's text read without python-docx's query; a search reads at most 1,000 places of a value,
+  a finding is marked in at most 50 and a file in at most 300 distinct places - a finding cut
+  short is named in the note at the top and gets no tracked change, so accepting every change
+  never leaves it half corrected, and a finding that names a place past the search is left in
+  the note rather than marked on words it does not mean. A PDF page's touching text cells are
+  mended by an indexed search of its words, and not at all past 5,000 cells, 30,000 words or two
+  million words read. The registry extract reader's text is held to the same limits as every
   other document's (`bound_text`, line by line), its patterns are measured on raw text as well
   (the regex budget harness now builds its inputs from each pattern's own words too, which is
-  how the page-footer pattern's quadratic blanks were found), and it reads at most 200 persons.
-  Word fields that link out are held to the same schemes as links (`http`, `https`, `mailto`).
+  how the page-footer pattern's quadratic blanks, and a contract title's, were found), and it
+  reads at most 200 persons. Word fields that link out are held to the same schemes as links
+  (`http`, `https`, `mailto`); a link field whose target another field computes is unwrapped.
 * Model files are checked against a manifest at start (§2); the formats in use (safetensors, ONNX)
   cannot carry code the way a pickle can, so this detects a swapped or truncated weight file, not
   a code-execution attempt.
