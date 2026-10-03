@@ -17,6 +17,7 @@ hand it to the container.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 import shlex
@@ -38,6 +39,7 @@ from procurement_agent.security.preauth import upload_routes
 ROOT = Path(__file__).resolve().parents[2]
 PROD: dict[str, Any] = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
 PROXY: dict[str, Any] = PROD["services"]["proxy"]
+DEV: dict[str, Any] = yaml.safe_load((ROOT / "docker-compose.dev.yml").read_text(encoding="utf-8"))
 
 
 # --- reading the Caddyfile the way compose and Caddy would ---------------------------------------
@@ -265,3 +267,39 @@ def test_the_relay_tells_a_caller_nothing_about_the_software_that_answered() -> 
         heads = [n.head for n in _handler(_site(), matcher).body]
         assert "header -Server" in heads  # Caddy's own, on an answer the relay writes itself
         assert "header -Via" in heads  # added to proxied answers by reverse_proxy
+
+
+# --- F2: the relay cannot resolve a public name --------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("doc", "name"), [pytest.param(PROD, "proxy", id="prod"), pytest.param(DEV, "relay", id="dev")]
+)
+def test_the_relay_has_no_upstream_resolver_that_can_answer(doc: dict[str, Any], name: str) -> None:
+    """Docker's embedded resolver answers the names of the other containers itself and forwards the
+    rest to the host's resolvers; on the relay's routable ``edge`` network that made a query for any
+    public name work although no TCP connection could leave (a DNS lookup is a way to send data
+    out). ``dns:`` replaces the forwarding targets. Loopback is the one address that cannot be
+    reached from the container's own network namespace: nothing listens there, the query ends in
+    SERVFAIL at once, and no packet leaves the container. Measured on Docker 29.7."""
+    servers = doc["services"][name].get("dns")
+    assert isinstance(servers, list) and servers, "the relay must name its upstream resolvers"
+    for server in servers:
+        assert ipaddress.ip_address(str(server)).is_loopback, server
+
+
+@pytest.mark.parametrize("doc", [pytest.param(PROD, id="prod"), pytest.param(DEV, id="dev")])
+def test_no_service_names_a_resolver_outside_this_machine(doc: dict[str, Any]) -> None:
+    for name, svc in doc["services"].items():
+        for server in svc.get("dns", []):
+            assert ipaddress.ip_address(str(server)).is_loopback, (name, server)
+        assert "dns_search" not in svc and "extra_hosts" not in svc, name
+        assert svc.get("network_mode") is None, name
+
+
+def test_the_relay_still_finds_the_app_by_the_name_the_embedded_resolver_serves() -> None:
+    """The service name is answered by Docker itself, so a loopback ``dns:`` does not hide it; it
+    must be on a network the relay shares with the app."""
+    assert "reverse_proxy app:8000" in _interpolate(PROXY["environment"]["CADDYFILE"])
+    shared = set(PROXY["networks"]) & set(PROD["services"]["app"]["networks"])
+    assert shared == {"internal"}

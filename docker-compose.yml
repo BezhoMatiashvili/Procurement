@@ -123,6 +123,12 @@ services:
     image: caddy:2.11.4-alpine@sha256:de23def33b17fb5d1290b0f6c2add1d70780e52341896c00a4c8a2a2fe9d355e
     restart: unless-stopped
     user: "65534:65534"
+    # Docker's embedded resolver answers the names of the other containers (`app`) itself and
+    # forwards everything else to the host's resolvers - on `edge`, which is routable, that made
+    # `nslookup example.com` work from the relay although no TCP connection could leave (measured
+    # on Docker 29.7), and a lookup is a way to send data out. Pointing its upstream at loopback
+    # inside the container ends every such query in SERVFAIL at once; `app` still resolves.
+    dns: ["127.0.0.1"]
     # The config travels in an environment variable and is written to tmpfs at start: compose
     # `configs:` cannot be mounted into a read-only container, and a separate file would be one
     # more thing to copy to the air-gapped server.

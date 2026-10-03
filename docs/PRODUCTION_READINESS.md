@@ -110,7 +110,9 @@ Docker does not publish ports of a container whose only network is `internal: tr
 on Docker 29.7: the mapping is dropped without an error). That is why the relay exists: it is
 the only container on a second network (`edge`), holds no state, and forwards to the app.
 `edge` has outbound NAT disabled, so the published port answers but the relay cannot reach the
-internet (measured: outbound `wget` times out). The app and Ollama have no route at all, and
+internet (measured: outbound `wget` times out), and the relay's resolver has no upstream
+(`dns: [127.0.0.1]`; measured: `nslookup example.com` from the relay is SERVFAIL, `app` still
+resolves). The app and Ollama have no route at all, and
 they sit on two different internal networks (`internal` with the relay, `llm` with each other) so
 the relay cannot reach Ollama; verify with the command in SECURITY.md §2.
 

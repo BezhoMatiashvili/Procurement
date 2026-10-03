@@ -30,7 +30,18 @@ Three independent layers, then a proof. Each has a test (§11).
   fails in the kernel. The relay cannot reach Ollama and Ollama cannot reach the relay.
 * No container publishes a port except the small relay (`proxy`, Caddy, plain HTTP, no state),
   bound to `127.0.0.1:8000`; the company's TLS reverse proxy sits in front of that. The relay's
-  second network (`edge`) has outbound NAT disabled, so it cannot reach the internet either.
+  second network (`edge`) has outbound NAT disabled, so its TCP connections to the outside time
+  out (measured: `nc 1.1.1.1:80` fails after the 4 s allowed).
+* The relay cannot resolve public names either. Docker's embedded resolver answers the names of
+  other containers itself and forwards the rest to the host's resolvers, and on `edge`, which is
+  routable, that worked: `nslookup example.com` answered from the relay while every TCP
+  connection timed out. A lookup can carry data out in the name it asks for, so the relay has
+  `dns: [127.0.0.1]` - an upstream where nothing listens. Measured on Docker 29.7: from the
+  relay, `app` still resolves and a public name ends in SERVFAIL in 0.1 s; from the app and from
+  Ollama, which sit on internal networks only, a public name gives `Temporary failure in name
+  resolution`, as before. `tests/unit/test_relay_policy.py` checks the setting. Docker refuses
+  `gateway_mode_ipv4=isolated` (no route at all) on a network that is not internal, and a
+  published port needs one, so the relay keeps a default route; what stops it is the missing NAT.
 * Ollama runs with `OLLAMA_NO_CLOUD=1`: its hosted-model features (remote inference, web search)
   are off, so a `...-cloud` model cannot forward a prompt to ollama.com through the local server.
 * The app answers only to the host names in `PA_ALLOWED_HOSTS` (production refuses to start
@@ -82,7 +93,9 @@ bill of quantities, reports, UI, delete, plus live-socket checks of the refusals
 Linux network namespace that has loopback and nothing else, where an attempt to leave the machine
 fails in the kernel whatever opened the socket. It runs in CI. On a deployed stack:
 `docker compose exec app python -c "import urllib.request; urllib.request.urlopen('https://example.com', timeout=3)"`
-must fail with a network error (measured: `Temporary failure in name resolution`).
+must fail with a network error (measured: `Temporary failure in name resolution`), and so
+must the relay's resolver: `docker compose exec proxy nslookup example.com` answers SERVFAIL
+(measured), not an address.
 
 ## 3. Untrusted input
 
