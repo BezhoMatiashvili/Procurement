@@ -85,14 +85,30 @@ def chunks_text(chunks: Sequence[Chunk]) -> str:
     return "\n".join(c.body or c.text for c in chunks)
 
 
-def load_document_text(settings: Settings, doc_id: str, kind: str) -> str:
+def load_document_text(
+    settings: Settings, doc_id: str, kind: str, *, notes: list[str] | None = None
+) -> str:
     """The stored document as the checks read it.
 
     Plain, with no HTTP in it, so a background job can read a document exactly as the API does;
     the evaluation joins its own cached chunks with ``chunks_text``, the same join. The caller
-    checks that the document is ready (the API answers 409 when it is not).
+    checks that the document is ready (the API answers 409 when it is not). ``notes`` collects
+    what the workbook reader had to leave out, as for ``load_chunks``.
     """
-    return chunks_text(load_chunks(settings, doc_id, kind))
+    return chunks_text(load_chunks(settings, doc_id, kind, notes=notes))
+
+
+def truncation_notes(rule_id: str, notes: Sequence[str]) -> list[SkipNote]:
+    """One bilingual note for each thing the workbook reader left out, in the form every report
+    lists what it did not check (``compare_stored`` says the same for a comparison)."""
+    return [
+        SkipNote(
+            rule_id=rule_id,
+            reason_ka=f"ფაილის ნაწილი ლიმიტის გამო არ წაკითხულა და არ შემოწმებულა: {note}",
+            reason_en=f"part of the file was not read (size limit) and was not checked: {note}",
+        )
+        for note in dict.fromkeys(notes)
+    ]
 
 
 def load_segments(

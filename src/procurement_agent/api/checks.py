@@ -60,6 +60,7 @@ from procurement_agent.extraction.pipeline import (
     is_scanned_pdf,
     load_document_text,
     result_dir,
+    truncation_notes,
     upload_path,
 )
 from procurement_agent.extraction.read_status import (
@@ -181,11 +182,11 @@ def _read_extracts(
     return entries, refused
 
 
-def _document_text(settings: Settings, doc: Document) -> str:
+def _document_text(settings: Settings, doc: Document, notes: list[str] | None = None) -> str:
     if doc.status != DocumentStatus.ready:
         msg = f"document {doc.id} is {doc.status.value}, not ready"
         raise HTTPException(status.HTTP_409_CONFLICT, msg)
-    return load_document_text(settings, doc.id, doc.kind)
+    return load_document_text(settings, doc.id, doc.kind, notes=notes)
 
 
 def reported[**P, R](
@@ -250,11 +251,12 @@ def run_aoa(
     )
     try:
         rates = open_rate_provider(settings, entered_rates)
+        cut: list[str] = []
         try:
             report = check_aoa(
-                aoa_text=_document_text(settings, aoa),
+                aoa_text=_document_text(settings, aoa, cut),
                 aoa_id=aoa.id,
-                contract_text=_document_text(settings, contract) if contract else None,
+                contract_text=_document_text(settings, contract, cut) if contract else None,
                 contract_id=contract.id if contract else "contract",
                 registry=registry,
                 contractor_type=contractor_type,
@@ -268,6 +270,7 @@ def run_aoa(
                 ),
                 speller=open_speller(settings),
             )
+            report.skipped.extend(truncation_notes("AOA.TRUNCATED", cut))
             return read_aware_report(report, {"act": aoa_quality, "contract": contract_quality})
         finally:
             rates.close()
