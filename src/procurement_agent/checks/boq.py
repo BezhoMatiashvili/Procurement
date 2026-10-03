@@ -2472,6 +2472,22 @@ def _no_cached_values_finding(book: BoqWorkbook, *, template: bool = False) -> F
 def template_findings(template: BoqWorkbook) -> list[Finding]:
     """What is wrong with, or skipped in, the template itself - true for every bidder alike."""
     out: list[Finding] = []
+    if not template.sheets:
+        # No sheet with the columns of a bill of quantities: every bidder is then missing every
+        # sheet of it, nothing is ranked and nothing is coloured. That is the template's problem,
+        # said first and as an error - not left to a list of sheets "skipped" below it.
+        out.append(
+            _finding(
+                "BOQ.TEMPLATE_UNRECOGNISED",
+                "error",
+                f"{template.name}: შაბლონში BOQ-ის სვეტებიანი გვერდი ვერ ვიპოვეთ (პოზიცია, "
+                "დასახელება, ერთეული, რაოდენობა) — არჩეული ფაილი შაბლონად ვერ ამოვიცანით, "
+                "ამიტომ კომპანიები არ შედარებულა, არ დარანჟირებულა და არ შეღებილა",
+                f"{template.name}: no sheet with the columns of a bill of quantities (item, "
+                "description, unit, quantity) was found - the file chosen as the template was not "
+                "recognised as one, so no bidder was compared, ranked or coloured",
+            )
+        )
     if template.no_cached_values:
         out.append(_no_cached_values_finding(template, template=True))
     for s in template.unreadable_sheets:
