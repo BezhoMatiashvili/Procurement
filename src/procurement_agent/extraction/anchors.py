@@ -1036,7 +1036,11 @@ def first_party_start(text: str) -> int | None:
 _TITLE_WORD_BEFORE = re.compile(r"ხელშეკრულება(?![ა-ჰ])[ \t]*(?:(?:N|№)[ \t]*\S+[ \t]*)?$")
 #: ... the parties joined by "-სა და ... -ს შორის" (between), on one line, no clause between ...
 _TITLE_TEXT = r"(?:(?![.;:]\s)[^\n(])*?"
-_BETWEEN = re.compile(rf"{_TITLE_TEXT}(?<![ა-ჰ])და(?![ა-ჰ]){_TITLE_TEXT}(?<![ა-ჰ])შორის(?![ა-ჰ])")
+#: The first "და" only (atomic): no "შორის" the first cannot reach can a later one, and trying
+#: each "და" in turn cost a scan of the rest of the line apiece (the regex budget harness).
+_BETWEEN = re.compile(
+    rf"(?>{_TITLE_TEXT}(?<![ა-ჰ])და(?![ა-ჰ])){_TITLE_TEXT}(?<![ა-ჰ])შორის(?![ა-ჰ])"
+)
 #: ... or the contract word after the parties: "... შორის გაფორმებული (მომსახურების)
 #: ხელშეკრულება".
 _TITLE_WORD_AFTER = re.compile(
