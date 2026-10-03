@@ -290,6 +290,15 @@ reach every copy of the data, which is why the volume belongs on an encrypted di
   `torch` and `torchvision` come from the PyTorch CPU index and OpenCV is the headless build, so
   the lock holds no CUDA wheels and no GUI libraries - 19 fewer packages that would be unpacked
   into the image and could not be used on a server without a GPU.
+* What ships is listed in `docs/sbom.cdx.json`, a CycloneDX 1.5 SBOM of the production closure of
+  `uv.lock` (for linux/x86_64: no dev group, no extras; each package with its purl, the
+  SHA-256 of every file the lock records, its licence and its place in the dependency graph).
+  `scripts/sbom.py` writes it without timestamps or random ids, so two runs give the same bytes;
+  `tests/unit/test_sbom.py` fails when it no longer matches `uv.lock`, and the fix is
+  `uv run python scripts/sbom.py --out docs/sbom.cdx.json`. It lists what the lock pins; it does
+  not see the Debian packages in the image (Tesseract and its libraries) or the native libraries
+  bundled inside wheels (OpenSSL 1.1.1k inside `opencv-python-headless`, for one), which
+  `pip-audit` cannot see either.
 * Documents cannot reach the repository: `scripts/check_no_documents.sh` blocks any document,
   archive, database, key, `.env` or client directory (a link to one included, which is how a git
   worktree holds them) outside `tests/fixtures/` - as a CI job (`repo-guard`, which runs after a
