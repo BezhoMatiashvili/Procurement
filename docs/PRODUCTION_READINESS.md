@@ -33,7 +33,7 @@ deployer duty or an open item.
 | Files created owner-only (umask 077, data dir 0700), no core dumps | [x] | `security/hardening.py`, `db.py`, `config.py`, compose `ulimits` |
 | Air-gap, four layers: internal Docker networks (no route out), offline flags force-set before any ML import, an in-process egress guard, Ollama URL = this machine / the compose service (LAN only by opt-in), cloud models refused, only two model-server requests possible, `trust_env=False`, no redirects | [x] | `docker-compose.yml`, `procurement_agent/__init__.py`, `security/egress.py`, `config.py`, `llm/ollama_client.py` |
 | Proof of the air-gap: the whole product flow in a loopback-only network namespace | [x] | `scripts/verify_offline.sh` (CI job `offline`) |
-| Model files verified against `MANIFEST.sha256` at every prod start | [x] | `security/models_manifest.py`, `cli models-manifest` |
+| Model files verified against `MANIFEST.sha256` at every prod start; a file the app user cannot read is a named refusal, not a traceback | [x] | `security/models_manifest.py`, `cli models-manifest` |
 | Container hardening: non-root, read-only rootfs, `cap_drop: ALL`, `no-new-privileges`, tmpfs `/tmp` (noexec), memory/PID/CPU limits, no core dumps, init | [x] | `Dockerfile`, `docker-compose.yml`; `tests/unit/test_deployment_policy.py` |
 | Trusted-proxy handling for `X-Forwarded-For` (never `*`) | [x] | `FORWARDED_ALLOW_IPS` (image default loopback; compose trusts only its relay) |
 | Prod start-up refuses: a dev key, missing or unverified Docling models, the egress guard off, no host allow-list, `FORWARDED_ALLOW_IPS=*` | [x] | `Settings.validate_for_prod` |
@@ -163,6 +163,18 @@ the relay cannot reach Ollama; verify with the command in SECURITY.md §2.
   (`python -m procurement_agent.cli models-manifest write`): production verifies it at every
   start and refuses to run on a changed, missing or extra model file. The spelling dictionary is not among them: the image carries
   it, fetched and hash-checked by `docker compose build`, which needs the network anyway.
+- [ ] **Copied models must be readable by the app user** (uid 999 in the image): after the copy
+  run `chmod -R a+rX models` (or own the tree as uid 999). `cp -a` keeps the owner and mode of
+  the source, and the huggingface cache files in it (`.cache/huggingface/trees/*.json`) are mode
+  600: the host user reads them, the container does not. Measured with such a copy (three files):
+  before, a production start died with a raw `PermissionError` traceback (exit 3); now it
+  refuses with one cause and the fix, `Refusing to start: 3 model file(s) cannot be read by this
+  process (<the paths, relative to the models directory>); the models tree must be readable by
+  the app user (uid 999 in the container image) - on the host run: chmod -R a+rX models`.
+  `models-manifest write` warns about every path another user cannot read, and
+  `docker compose run --rm --no-deps --entrypoint python app -m procurement_agent.cli
+  models-manifest verify` checks the tree as the app user (66 files, 0 problems on the checked
+  copy after the `chmod`).
 - [ ] Reference data, loaded the same way - prepared on a connected machine, copied in, imported,
   the copy removed:
   - NBG exchange rates (rule 9): `python3 scripts/fetch_nbg_rates.py --from <first day needed>

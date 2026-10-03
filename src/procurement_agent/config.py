@@ -410,7 +410,18 @@ class Settings(BaseSettings):
             from procurement_agent.security import models_manifest
 
             checked = models_manifest.verify(self.docling_artifacts_path)
-            if not checked.ok:
+            if checked.unreadable:
+                # The digests of those files are unknown, so any mismatch reported beside them
+                # would be a guess: one cause, and the way to remove it.
+                names = checked.unreadable
+                hidden = len(names) - 3
+                problems.append(
+                    f"{len(names)} model file(s) cannot be read by this process "
+                    f"({', '.join(names[:3])}{f', and {hidden} more' if hidden > 0 else ''}); "
+                    "the models tree must be readable by the app user (uid 999 in the container "
+                    "image) - on the host run: chmod -R a+rX models"
+                )
+            elif not checked.ok:
                 shown = "; ".join(checked.problems[:5])
                 more = len(checked.problems) - 5
                 problems.append(

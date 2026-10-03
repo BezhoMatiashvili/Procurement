@@ -67,7 +67,9 @@ Three independent layers, then a proof. Each has a test (§11).
 * Docling runs with remote services disabled and Tesseract as the only OCR engine (the other
   engines would try to download models). Model files must be pre-downloaded (production requires
   `PA_DOCLING_ARTIFACTS_PATH`) and are verified against `MANIFEST.sha256` at every production
-  start (`cli models-manifest write|verify`); a changed, missing or extra file stops the start.
+  start (`cli models-manifest write|verify`); a changed, missing or extra file stops the start, and
+  so does one the app user cannot read (named by its path under the models directory, with the
+  `chmod -R a+rX` that fixes it).
 
 **The model server is the only thing the application talks to.**
 
