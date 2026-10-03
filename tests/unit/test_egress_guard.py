@@ -124,6 +124,36 @@ def test_other_families_than_the_internet_and_unix_are_not_judged() -> None:
     EgressGuard().check_address(socket.AF_NETLINK, (0, 0))
 
 
+CANONICAL = "/run/parser/parser.sock"
+
+#: Every way to write something the kernel would take for CANONICAL, or for something else, that is
+#: not CANONICAL spelled exactly. The kernel resolves a path its own way (symlinks first, then
+#: ``..``), so a lexical clean-up in the guard would be a different parser from the kernel's.
+OTHER_SPELLINGS = [
+    "run/parser/parser.sock",
+    "./run/parser/parser.sock",
+    "parser.sock",
+    "/run/parser/../parser/parser.sock",
+    "/run/parser/./parser.sock",
+    "/run/parser/parser.sock/.",
+    "//run/parser/parser.sock",
+    "/run//parser/parser.sock",
+    "/run/parser/parser.sock/",
+    "/run/parser/parser.sock\0",
+    "/run/parser\0/parser.sock",
+    "\0/run/parser/parser.sock",
+    "\0parser",
+    "",
+    "/RUN/parser/parser.sock",
+    " /run/parser/parser.sock",
+    "/run/parser/parser.sock ",
+    "/run/parser/parser.sock.bak",
+    "/run/parser/other.sock",
+    "/run/parser",
+    "/run/parser/parser.sock/x",
+]
+
+
 def test_a_unix_socket_is_refused_unless_its_exact_path_was_allowed() -> None:
     """The parser's socket is the one Unix address the application may connect to: a deliberate,
     pinned entry (``main.py`` adds it when the parser mode is ``socket``), not "Unix sockets are
@@ -132,28 +162,203 @@ def test_a_unix_socket_is_refused_unless_its_exact_path_was_allowed() -> None:
     for path in ("/tmp/some.sock", b"/tmp/some.sock", "relative.sock", "\0abstract"):
         with pytest.raises(EgressBlockedError):
             guard.check_address(socket.AF_UNIX, path)
-    guard.allow_unix("/run/parser/parser.sock")
-    guard.check_address(socket.AF_UNIX, "/run/parser/parser.sock")
-    guard.check_address(socket.AF_UNIX, b"/run/parser/parser.sock")
-    guard.check_address(socket.AF_UNIX, "/run/parser/../parser/parser.sock")
-    guard.check_address(socket.AF_UNIX, Path("/run/parser/parser.sock"))
-    for path in (
-        "/run/parser/other.sock",
-        "/run/parser/parser.sock.bak",
-        "/run/parser",
-        "/run/parser/parser.sock/x",
-        "\0/run/parser/parser.sock",
-        b"\0parser",
-    ):
-        with pytest.raises(EgressBlockedError):
-            guard.check_address(socket.AF_UNIX, path)
+    guard.allow_unix(CANONICAL)
+    guard.check_address(socket.AF_UNIX, CANONICAL)
+    guard.check_address(socket.AF_UNIX, CANONICAL.encode())
+    guard.check_address(socket.AF_UNIX, bytearray(CANONICAL.encode()))
+    guard.check_address(socket.AF_UNIX, Path(CANONICAL))
+
+
+@pytest.mark.parametrize("spelling", OTHER_SPELLINGS)
+@pytest.mark.parametrize("as_bytes", [False, True])
+def test_every_other_spelling_of_the_address_is_refused_and_reported_without_content(
+    spelling: str, as_bytes: bool
+) -> None:
+    events: list[tuple[str, str]] = []
+    guard = EgressGuard(on_block=lambda kind, destination: events.append((kind, destination)))
+    guard.allow_unix(CANONICAL)
+    address: str | bytes = spelling.encode() if as_bytes else spelling
+    with pytest.raises(EgressBlockedError):
+        guard.check_address(socket.AF_UNIX, address)
+    assert events == [("connect", "a unix socket")], "reported, and nothing of the address in it"
+    assert guard.blocked == 1
+
+
+@pytest.mark.parametrize("address", [None, 5, ("127.0.0.1", 80), ["/run/parser/parser.sock"]])
+def test_an_address_that_is_not_a_path_is_refused(address: object) -> None:
+    guard = EgressGuard()
+    guard.allow_unix(CANONICAL)
+    with pytest.raises(EgressBlockedError):
+        guard.check_address(socket.AF_UNIX, address)
+
+
+#: What cannot be allowed at all: relative, not clean, with a NUL, empty, or no file name.
+NOT_ALLOWABLE = [
+    "run/parser/parser.sock",
+    "./run/parser/parser.sock",
+    "parser.sock",
+    "/run/parser/../parser/parser.sock",
+    "/run/parser/./parser.sock",
+    "/run/parser/parser.sock/.",
+    "//run/parser/parser.sock",
+    "/run//parser/parser.sock",
+    "/run/parser/parser.sock/",
+    "/run/parser/parser.sock\0",
+    "/run/parser\0/parser.sock",
+    "\0/run/parser/parser.sock",
+    "\0parser",
+    "",
+    "/",
+]
+
+
+@pytest.mark.parametrize("path", NOT_ALLOWABLE)
+@pytest.mark.parametrize("as_bytes", [False, True])
+def test_only_an_absolute_canonical_path_can_be_allowed(path: str, as_bytes: bool) -> None:
+    guard = EgressGuard()
+    with pytest.raises(ValueError, match="absolute and canonical"):
+        guard.allow_unix(path.encode() if as_bytes else path)
+    assert guard.unix_paths == frozenset()
+
+
+def test_the_message_of_a_refused_path_does_not_repeat_it() -> None:
+    with pytest.raises(ValueError) as refused:
+        EgressGuard().allow_unix("/run/../secret-name/x.sock")
+    assert "secret-name" not in str(refused.value)
+
+
+def test_a_path_is_allowed_as_text_bytes_or_a_path_object_and_stored_the_same_way() -> None:
+    for form in (CANONICAL, CANONICAL.encode(), Path(CANONICAL)):
+        guard = EgressGuard()
+        guard.allow_unix(form)
+        assert guard.unix_paths == frozenset({CANONICAL})
+
+
+def test_the_kernel_resolves_dot_dot_after_symlinks_so_the_guard_never_does_it_at_all() -> None:
+    """``<d>/link/../real/s.sock`` is, to a lexical clean-up, the allowed ``<d>/real/s.sock``; to
+    the kernel, with ``link`` pointing at ``<d>/elsewhere/sub``, it is
+    ``<d>/elsewhere/real/s.sock``: another socket. Both exist here, and only the one at the exact
+    allowed spelling is reachable."""
+    base = Path(tempfile.mkdtemp(prefix="pa-eg-"))
+    servers: list[socket.socket] = []
+    try:
+        (base / "real").mkdir()
+        (base / "elsewhere" / "sub").mkdir(parents=True)
+        (base / "elsewhere" / "real").mkdir()
+        (base / "link").symlink_to(base / "elsewhere" / "sub")
+        (base / "alias").symlink_to(base / "real")
+        for directory in (base / "real", base / "elsewhere" / "real"):
+            srv_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            srv_sock.bind(str(directory / "s.sock"))
+            srv_sock.listen(1)
+            servers.append(srv_sock)
+        allowed = base / "real" / "s.sock"
+        guard = egress.installed()
+        assert guard is not None
+        guard.allow_unix(allowed)
+        for spelling in (
+            f"{base}/link/../real/s.sock",  # lexically the allowed path, really the other socket
+            f"{base}/alias/s.sock",  # the same socket through a symlink, spelled differently
+            f"{base}/real/../real/s.sock",
+            f"{base}/real//s.sock",
+            f"{base}/real/./s.sock",
+        ):
+            with (
+                socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client,
+                pytest.raises(EgressBlockedError),
+            ):
+                client.connect(spelling)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.connect(str(allowed))
+    finally:
+        for srv_sock in servers:
+            srv_sock.close()
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_the_guard_does_not_depend_on_the_working_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    guard = EgressGuard()
+    guard.allow_unix(CANONICAL)
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(EgressBlockedError):
+        guard.check_address(socket.AF_UNIX, "parser.sock")
+    monkeypatch.chdir("/")
+    with pytest.raises(EgressBlockedError):
+        guard.check_address(socket.AF_UNIX, "run/parser/parser.sock")
 
 
 def test_an_abstract_namespace_name_cannot_be_allowed() -> None:
-    with pytest.raises(ValueError, match="Unix socket path"):
+    with pytest.raises(ValueError, match="absolute and canonical"):
         EgressGuard().allow_unix("\0parser")
-    with pytest.raises(ValueError, match="Unix socket path"):
+    with pytest.raises(ValueError, match="absolute and canonical"):
         EgressGuard().allow_unix("")
+
+
+def test_internet_addresses_are_judged_as_before_whatever_unix_paths_are_allowed() -> None:
+    guard = EgressGuard()
+    guard.allow_unix(CANONICAL)
+    guard.check_address(socket.AF_INET, ("127.0.0.1", 80))
+    with pytest.raises(EgressBlockedError):
+        guard.check_address(socket.AF_INET, ("8.8.8.8", 53))
+    with pytest.raises(EgressBlockedError):
+        guard.check_address(socket.AF_INET6, ("2001:4860:4860::8888", 53))
+
+
+# --- nothing else relied on every Unix connect being allowed -----------------------------------
+
+
+def test_the_event_loops_and_the_test_client_never_connect_a_unix_socket(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The guard used to wave every ``AF_UNIX`` address through. ``asyncio`` (and ``uvicorn``'s
+    loop, and ``anyio``'s portal) make their wake-up pipe with ``socketpair``, which is never
+    connected through ``socket.connect``: this records every address the guard is asked about while
+    an event loop, an anyio portal and the whole application start, run a request and stop."""
+    import asyncio
+
+    from fastapi.testclient import TestClient
+
+    import procurement_agent.db as dbmod
+    from procurement_agent.config import Settings, get_settings
+    from procurement_agent.main import create_app
+
+    asked: list[int] = []
+    real = EgressGuard.check_address
+
+    def spy(self: EgressGuard, family: int, address: object, kind: str = "connect") -> None:
+        asked.append(family)
+        real(self, family, address, kind)
+
+    monkeypatch.setattr(EgressGuard, "check_address", spy)
+
+    async def tick() -> int:
+        await asyncio.sleep(0)
+        return 1
+
+    assert asyncio.run(tick()) == 1
+    left, right = socket.socketpair()  # what a loop wakes itself with: not a connect
+    left.close()
+    right.close()
+    settings = Settings(
+        env="dev",
+        data_dir=tmp_path / "data",
+        ollama_base_url="http://127.0.0.1:1",
+        rate_limit="10000/minute",
+    )
+    get_settings.cache_clear()
+    app = create_app(settings)
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200
+    dbmod._engine = None
+    dbmod._SessionLocal = None
+    get_settings.cache_clear()
+    assert socket.AF_UNIX not in asked, "something in the application connects a Unix socket"
+    # the control: the recording does see a Unix connect when there is one
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as c, pytest.raises(EgressBlockedError):
+        c.connect(str(tmp_path / "nobody.sock"))
+    assert asked[-1] == socket.AF_UNIX
 
 
 def test_an_allowed_unix_path_is_not_an_allowed_host() -> None:

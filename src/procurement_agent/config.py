@@ -361,14 +361,26 @@ class Settings(BaseSettings):
             return v.strip().lower() or None
         return v
 
+    @field_validator("parser_socket", mode="before")
+    @classmethod
+    def _socket_spelling(cls, v: object) -> object:
+        """The path as it was written, before ``Path`` tidies it: the egress guard lets the
+        application connect to exactly this string, so it has to be a canonical one."""
+        if isinstance(v, str):
+            from procurement_agent.security.egress import canonical_unix_path
+
+            canonical_unix_path(v)
+        return v
+
     @field_validator("parser_socket")
     @classmethod
     def _socket_path(cls, v: Path) -> Path:
         """A Unix socket address holds 107 bytes; a longer path fails at bind time, deep in a
-        container start. Absolute, because the two containers must name the same file."""
-        if not v.is_absolute():
-            msg = f"PA_PARSER_SOCKET must be an absolute path, got {str(v)!r}"
-            raise ValueError(msg)
+        container start. Absolute and canonical, because the two containers must name the same
+        file and the egress guard compares the spelling (``security/egress.py``)."""
+        from procurement_agent.security.egress import canonical_unix_path
+
+        canonical_unix_path(v)
         if len(os.fsencode(v)) > _UNIX_PATH_MAX:
             msg = f"PA_PARSER_SOCKET is too long for a Unix socket ({_UNIX_PATH_MAX} bytes at most)"
             raise ValueError(msg)

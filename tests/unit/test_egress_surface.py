@@ -206,6 +206,42 @@ def test_the_unix_only_check_sees_what_it_is_meant_to_see() -> None:
     assert _not_unix_only(good) == []
 
 
+#: Names with which Python code reaches a Unix socket (``uds`` is what httpx and aiohttp call it).
+UNIX_NAMES = {
+    "AF_UNIX",
+    "create_unix_connection",
+    "open_unix_connection",
+    "create_unix_server",
+    "start_unix_server",
+    "UnixSocketTransport",
+    "uds",
+}
+
+
+def test_only_the_parser_modules_and_the_guard_name_a_unix_socket() -> None:
+    """The guard used to let every Unix address through; now it lets one path through. If another
+    module of ``src`` connected to a Unix socket it would have been working by that exemption."""
+    owners = UNIX_ONLY | {"security/egress.py"}
+    offenders: list[str] = []
+    for path in _modules():
+        relative = str(path.relative_to(SRC))
+        if relative in owners:
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            name = (
+                node.attr
+                if isinstance(node, ast.Attribute)
+                else node.id
+                if isinstance(node, ast.Name)
+                else node.arg
+                if isinstance(node, ast.keyword)
+                else None
+            )
+            if name in UNIX_NAMES:
+                offenders.append(f"{relative}:{node.lineno} uses {name}")
+    assert offenders == []
+
+
 def test_the_wire_format_opens_nothing() -> None:
     names = _imports(ast.parse((SRC / "parser_service/protocol.py").read_text("utf-8")))
     assert not {n for n in names if _under(n, {"socket", "ssl", "httpx", "os", "subprocess"})}

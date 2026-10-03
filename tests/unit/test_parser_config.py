@@ -55,6 +55,30 @@ def test_the_defaults_name_the_compose_socket_and_bound_the_result() -> None:
     assert s.parser_kill_grace_s >= 1
 
 
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        "/run/parser/../parser/parser.sock",
+        "/run/parser/./parser.sock",
+        "/run//parser/parser.sock",
+        "//run/parser/parser.sock",
+        "/run/parser/parser.sock/",
+        "/run/parser/parser.sock/.",
+    ],
+)
+def test_the_socket_is_named_in_its_canonical_spelling_or_the_start_fails(
+    spelling: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The egress guard lets the application connect to this one string, as written (the kernel
+    does not clean a path up the way a string function does): any other spelling of the same file
+    is refused at start-up, not discovered when the first document is parsed."""
+    with pytest.raises(ValidationError, match="canonical"):
+        Settings(parser_socket=spelling)  # type: ignore[arg-type]
+    monkeypatch.setenv("PA_PARSER_SOCKET", spelling)
+    with pytest.raises(ValidationError, match="canonical"):
+        Settings()
+
+
 def test_the_socket_has_to_be_an_absolute_path_that_fits_a_unix_address() -> None:
     with pytest.raises(ValidationError, match="absolute"):
         Settings(parser_socket=Path("run/parser.sock"))

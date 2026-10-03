@@ -27,10 +27,16 @@ import os
 import socket
 import threading
 from collections.abc import Callable, Iterable
-from pathlib import Path
 from typing import Any
 
-__all__ = ["EgressBlockedError", "EgressGuard", "ensure_installed", "installed", "uninstall"]
+__all__ = [
+    "EgressBlockedError",
+    "EgressGuard",
+    "canonical_unix_path",
+    "ensure_installed",
+    "installed",
+    "uninstall",
+]
 
 #: Names that always resolve to this machine.
 _LOCAL_NAMES = frozenset({"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"})
@@ -38,6 +44,32 @@ _LOCAL_NAMES = frozenset({"localhost", "localhost.localdomain", "ip6-localhost",
 
 class EgressBlockedError(PermissionError):
     """A connection or a lookup that would have left this machine."""
+
+
+def canonical_unix_path(path: str | bytes | os.PathLike[str]) -> str:
+    """``path`` as text if it is an absolute path in canonical form, else ``ValueError``.
+
+    Canonical: starts with a single ``/``, names a file, has no ``.`` or ``..`` segment, no ``//``,
+    no trailing ``/``, no NUL byte - the string ``os.path.normpath`` would leave as it is. Anything
+    else could mean one thing to a string comparison and another to the kernel.
+    """
+    try:
+        text = os.fsdecode(path)
+    except TypeError:
+        text = ""
+    if (
+        not text.startswith("/")
+        or text.startswith("//")
+        or text.endswith("/")
+        or "\0" in text
+        or text != os.path.normpath(text)
+    ):
+        msg = (
+            "a Unix socket path must be absolute and canonical: from the root, with no '.' or '..' "
+            "segment, no '//' and no trailing '/'"
+        )
+        raise ValueError(msg)
+    return text
 
 
 def _ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
@@ -87,13 +119,13 @@ class EgressGuard:
     def allow_unix(self, path: str | bytes | os.PathLike[str]) -> None:
         """Allow connecting to this one Unix socket path - the parser's (``parser_service``).
 
-        A pinned entry, not a family: every other Unix address, and the abstract namespace, stays
-        refused. The path is compared as an absolute, normalised path, exactly.
+        A pinned entry, not a family, and compared as the exact string the caller of ``connect``
+        passes: the kernel resolves a path its own way (symlinks first, then ``..``), so a guard
+        that tidied the path up before comparing would be a different parser from the one that
+        decides where the connection goes. Hence only an absolute, already canonical spelling can be
+        allowed (``canonical_unix_path``), and ``check_address`` accepts that spelling and no other.
         """
-        key = self._unix_key(path)
-        if key is None:
-            msg = "a Unix socket path is needed (the abstract namespace is not allowed)"
-            raise ValueError(msg)
+        key = canonical_unix_path(path)
         with self._lock:
             self._unix.add(key)
 
@@ -102,16 +134,15 @@ class EgressGuard:
         return frozenset(self._unix)
 
     @staticmethod
-    def _unix_key(address: Any) -> str | None:
-        """The comparable form of a Unix socket address, or ``None`` for one that is not a path
-        (an abstract-namespace name starts with a NUL byte)."""
+    def _unix_spelling(address: Any) -> str | None:
+        """The address exactly as the kernel will be given it, or ``None`` for something that is
+        not a path (a tuple, a number): never cleaned up, never made absolute."""
+        if isinstance(address, bytearray | memoryview):
+            address = bytes(address)
         try:
-            text = os.fsdecode(address)
+            return os.fsdecode(address)
         except TypeError:
             return None
-        if not text or text.startswith("\0"):
-            return None
-        return os.path.normpath(Path(text).absolute())
 
     def _block(self, kind: str, destination: str) -> None:
         self.blocked += 1
@@ -142,9 +173,8 @@ class EgressGuard:
 
     def check_address(self, family: int, address: Any, kind: str = "connect") -> None:
         if family == socket.AF_UNIX:
-            key = self._unix_key(address)
-            if key is None or key not in self._unix:
-                self._block(kind, "a unix socket")
+            if self._unix_spelling(address) not in self._unix:
+                self._block(kind, "a unix socket")  # not the address: it is the caller's string
             return
         if family not in (socket.AF_INET, socket.AF_INET6):
             return  # socketpairs and the like stay on this machine
