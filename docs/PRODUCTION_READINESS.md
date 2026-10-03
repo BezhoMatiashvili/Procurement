@@ -28,6 +28,7 @@ deployer duty or an open item.
 | Append-only audit trail (DB table with triggers that abort UPDATE/DELETE + JSON log line); reads, key operations, denied probes and refused outbound attempts included | [x] | `db.py`, `security/audit.py`, `cli audit`, `cli audit-prune`; see SECURITY.md §4 for the actions |
 | Content-free logs and stored errors, proven by a canary test through every input path | [x] | `security/safe_errors.py`, `security/logscrub.py`, `tests/integration/test_log_canary.py` |
 | Retention: row first, files second, a reconciler that retries what failed, derived outputs and caches removed, overwrite + fsync, SQLite `secure_delete` | [x] | `jobs/retention.py`, `jobs/worker.py` sweep every 10 min, `cli sweep`, `PA_RETENTION_DAYS` |
+| Versioned schema: the version lives in the database (`PRAGMA user_version`); a start applies pending migrations in order, each in its own transaction, after a consistent copy of a database that holds rows; a database newer than the release is refused; the upgrade is audited (`db.migrate`) | [x] | `migrations.py`, `cli db-status`, `tests/unit/test_migrations.py`; 5.6 |
 | Files created owner-only (umask 077, data dir 0700), no core dumps | [x] | `security/hardening.py`, `db.py`, `config.py`, compose `ulimits` |
 | Air-gap, four layers: internal Docker networks (no route out), offline flags force-set before any ML import, an in-process egress guard, Ollama URL = this machine / the compose service (LAN only by opt-in), cloud models refused, only two model-server requests possible, `trust_env=False`, no redirects | [x] | `docker-compose.yml`, `procurement_agent/__init__.py`, `security/egress.py`, `config.py`, `llm/ollama_client.py` |
 | Proof of the air-gap: the whole product flow in a loopback-only network namespace | [x] | `scripts/verify_offline.sh` (CI job `offline`) |
@@ -51,6 +52,12 @@ deployer duty or an open item.
   job; compose gives the container `stop_grace_period: 60s` and runs an init process, so
   SIGTERM reaches uvicorn. Measured: `docker compose stop app` completes in about 0.5 s when
   idle, with a clean "Application shutdown complete".
+- [x] **Upgrades fail safe.** A schema change runs one migration at a time, in a transaction that
+  also records the new version (SQLite rolls DDL back with it), under the database's write lock:
+  a failed upgrade leaves the last version that worked, a process killed in the middle leaves the
+  version before, and two processes starting together migrate once. Tested by killing a process
+  inside a migration and by concurrent starts on a new, an old and a behind database
+  (`tests/unit/test_migrations.py`).
 - [x] **Start order.** The app waits for Ollama's healthcheck (`ollama list`); the relay starts
   after the app.
 - [x] **Restart when hung.** Compose marks an unready container `unhealthy` but never restarts
@@ -197,19 +204,103 @@ docker compose up -d
 Both procedures were exercised against the current image with a WAL-mode database on a
 read-only container with tmpfs `/tmp`.
 
+A release that changes the schema takes one more copy by itself before it does (5.6). It sits on
+the same disk as the database, so it does not replace this backup.
+
 ### 5.6 Upgrade procedure
 
-1. Back up `app.db` (5.5).
+1. Back up `app.db` (5.5). The release takes a copy of its own before it changes a database that
+   holds data (below), but that copy is on the same disk: it covers an upgrade that goes wrong,
+   not a lost disk.
 2. Build the new image on a connected machine, `docker save` it, move it, `docker load`.
-3. `docker compose up -d` — the worker stops within its timeout, the new process recovers
-   interrupted jobs, `create_all` adds new tables. There is no migration framework: a release
-   that changes an existing table must ship its own migration step (none has so far).
-4. `docker compose ps` shows all three services healthy; sign in once.
-5. Re-run `scripts/evaluate.py` if Ollama, Docling or the models changed.
+3. See what the start will do before it does it: `docker compose run --rm --no-deps app python -m
+   procurement_agent.cli db-status`. It prints the database's schema version, the image's, and the
+   migrations still pending, from a read-only look that changes nothing and prints no row. Exit
+   status 1 means the database is **newer** than this image (a later release wrote it: do not start
+   this one) or damaged.
+4. `docker compose up -d` - the worker stops within its timeout, the new process recovers
+   interrupted jobs and brings the database to the image's schema version (below).
+5. `docker compose ps` shows all three services healthy; sign in once. `db-status` now says
+   `up to date`, and `cli audit --action db.migrate` shows what ran.
+6. Re-run `scripts/evaluate.py` if Ollama, Docling or the models changed.
+
+**Schema versions.** The version is stored in the database file (`PRAGMA user_version`, no table of
+its own). At start:
+
+| The database | The start |
+|---|---|
+| does not exist, or has no tables | creates it at the image's version; nothing to migrate, no copy |
+| written before versions existed (version 0) | checks the tables and columns against the version-1 schema, adds tables that are missing, records version 1 |
+| older than the image | takes a copy (if it holds rows), then applies each pending migration in order, each in a transaction of its own that also records the new version |
+| the same version | nothing to migrate: the version is read, no migration lock is taken |
+| newer than the image | refuses to start ("database schema version N is newer than this release") and touches nothing, so an older image cannot damage it |
+
+A migration that fails is undone with its own transaction: the database stays at the last version
+that succeeded, the start fails with the migration's number and name and the *kind* of failure
+(never a value), and the next start resumes from there. A version-0 database that is not shaped as
+expected - a table without a column the image needs, a column it does not know - is refused with
+the table named (an unknown column is counted, not named: the name came from the file) and left as
+it was. The check is of names, not of types or indexes, and nothing is ever altered by guesswork:
+restore a backup from a release that wrote the expected tables, or export what is needed and start
+a new database. Two processes starting together (the app and a `cli` command) take the write lock
+in turn; the second finds the work done, and waits at most 30 s for the first.
+
+**The copy.** Before the first migration of a database that holds rows (a schema with no rows in it
+is not copied), SQLite's online backup API writes a consistent copy to
+`/data/db-backups/app-v<version>-<UTC time>.db` - the directory `0700`, the file `0600`, the version
+the one the database stood at. It is checked (`PRAGMA quick_check`) before anything changes; if it
+cannot be made or fails the check, the upgrade does not start. The three newest are kept; older
+ones are overwritten, then deleted. The copy holds what `app.db` held - **including document names
+and job questions that retention has removed from the live database since** - so it is neither a
+backup (5.5) nor covered by the retention promise: once the upgrade is confirmed good, remove it
+(`docker compose run --rm --no-deps --entrypoint sh app -c 'rm -rf /data/db-backups'`).
+
+**Going back.** There are no down-migrations. An older image will not start on a newer database
+(`db-status` says so first). To return, stop the stack, restore the copy taken before the upgrade
+(`<N>` is the version you are returning to) and start the older image; what was written after the
+upgrade is lost with it:
+
+```bash
+docker compose stop proxy app
+docker compose run --rm --no-deps -T --entrypoint sh app -c \
+  'rm -f /data/app.db-wal /data/app.db-shm && cp /data/db-backups/app-v<N>-<time>.db /data/app.db && chmod 600 /data/app.db'
+docker compose up -d                  # with the older image loaded
+```
 
 **Upgrading to the release with server-side sessions signs every UI user out once**: the old
 cookie held the API key itself and is no longer accepted. API clients using `X-API-Key` are
 unaffected.
+
+#### Adding a migration (developers)
+
+1. Change the model in `models.py` as usual.
+2. Write the step in `migrations.py` and append it to `MIGRATIONS` with the next number. DDL by
+   hand - not `create_all`, not the live models, which move on with every release:
+
+   ```python
+   def _add_note(conn: Connection) -> None:
+       conn.exec_driver_sql("ALTER TABLE documents ADD COLUMN note VARCHAR(255)")
+
+
+   MIGRATIONS = (Migration(2, "document_note", _add_note),)
+   ```
+
+   `LATEST_VERSION` follows from the list; a name is a lower-case identifier (it is audited).
+3. `python scripts/freeze_schema.py tests/fixtures/schema_v2.json`, and commit the file.
+4. `pytest tests/unit/test_migrations.py`: a new database must have exactly the recorded schema,
+   and the version-1 record upgraded through every migration must have what a new one has - so a
+   migration that disagrees with the model fails, and so does a model change without a migration.
+
+The rules for a step: the connection is the transaction's, so it does not commit, roll back or
+begin one. Foreign keys are off on it (a table can be rebuilt - create, copy, drop, rename -
+without deleting what references it) and `PRAGMA foreign_key_check` must be empty afterwards, or
+the step is undone. `audit_log` is guarded by triggers that abort `UPDATE` and `DELETE`: a step
+that has to change audit rows drops the trigger and puts it back in the same transaction, as
+`prune_audit` does. Nothing a step raises is quoted (the start shows its class name), and it must
+not log a row's content. `BASELINE_SCHEMA` is the frozen version-1 shape that a version-0 file is
+held to: leave it. `create_all` still runs after the migrations on every start, as it did before
+versions, and creates a table that is missing; do not rely on it - the test above is what notices
+a table that was added to the models without a migration.
 
 ### 5.7 Pinning
 
@@ -237,6 +328,10 @@ that environment; the comparison is in `docs/SECURITY.md` §11.
   restart, not by a hard limit; the input limits are a bound, not a proof. SECURITY.md §10 has
   the full list of what the security work does not cover.
 - One uvicorn worker and one job thread by design; the rate limiter's counters live in memory.
+- Migrations only go forward. Going back is restoring the copy taken before the upgrade (5.6), and
+  what was written since is lost. That copy is on the volume it protects and outlives the
+  retention promise until it is removed. A database from before schema versions is held to the
+  version-1 table and column names, not to types, indexes or constraints.
 - OCR runs only inside the image (no host Tesseract), so scanned PDFs are not in the host eval.
 - The accuracy numbers are fitted to the client's own set, not held-out (ACCURACY.md).
 - pip-audit (needs network access) and gitleaks run in CI. pip-audit was also run by hand on

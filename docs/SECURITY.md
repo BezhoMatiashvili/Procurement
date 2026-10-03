@@ -172,8 +172,9 @@ pixels, and the application's own uses of pdfium are serialised by one lock.
   extraction start, a result read (API and UI), a document's content shown as text or as a page
   image, check results and exports, delete and retention delete, sign-in (ok/denied) and logout,
   refused cross-origin requests, probes of other users' ids, key creation and revocation, the
-  retention sweep, the model-manifest write, outbound attempts the egress guard refused, and
-  shortening the trail itself. Fields: actor, action, outcome, document id, job id, client IP,
+  retention sweep, the model-manifest write, outbound attempts the egress guard refused, a schema
+  upgrade of the database (`db.migrate`: the versions and the migrations' names), and shortening
+  the trail itself. Fields: actor, action, outcome, document id, job id, client IP,
   timestamp, and a content-free detail. Read it with `python -m procurement_agent.cli audit`.
   The table is append-only **in the database**: triggers abort any `UPDATE` or `DELETE`, so a bug
   or an injection through the application cannot rewrite history; the one deliberate way to
@@ -228,7 +229,9 @@ memory, PID and (`PA_APP_CPUS`) CPU limits, `ulimits.core: 0`, an init process. 
 `nobody` with the same restrictions (it keeps only `NET_BIND_SERVICE`, which its binary's file
 capability needs to execute at all). The process itself sets `umask(0o077)` and `RLIMIT_CORE=0`
 (a crash in a native parser must not leave a core file of document text), creates `/data` as
-`0700`, and opens SQLite with `secure_delete`, `trusted_schema=OFF` and `cell_size_check`.
+`0700`, and opens SQLite with `secure_delete`, `trusted_schema=OFF` and `cell_size_check`. The
+database's schema version is checked at start: one written by a newer release is refused, not
+opened (`migrations.py`, PRODUCTION_READINESS.md 5.6).
 One worker thread processes jobs, so a malicious document cannot fan out CPU/memory consumption.
 Docling conversion has a timeout.
 
@@ -274,6 +277,11 @@ and on `python -m procurement_agent.cli sweep`. Users can delete immediately fro
   (`secure_delete`) and the write-ahead log is truncated after every sweep.
 
 The metadata row is kept (name replaced by `[deleted]`) so the audit trail stays consistent.
+One copy of the database outlives all this, on purpose: before a schema upgrade changes a database
+that holds rows, the release copies it into `/data/db-backups/` (owner-only, the three newest kept,
+older ones overwritten before they are deleted). The copy still holds the document names and job
+questions retention has since removed, until it is deleted or later upgrades push it out; remove
+the directory once an upgrade is confirmed good (PRODUCTION_READINESS.md 5.6).
 The overwrite is best-effort: on a journaling or copy-on-write filesystem or an SSD it does not
 reach every copy of the data, which is why the volume belongs on an encrypted disk (§10).
 
@@ -370,6 +378,8 @@ What this does not do, so nobody has to discover it:
 * **Secure deletion is best-effort** (§8): journaling, copy-on-write, snapshots and SSD wear
   levelling can keep old copies; encryption at rest is the control.
 * **The audit trail is protected against the application, not the disk's owner** (§4).
+* **Pre-upgrade database copies stay on the data volume** and hold what retention has since
+  removed from the live database (§8); they are the operator's to delete.
 * **AI coding tools can read whatever they are allowed to.** On a developer machine, an
   assistant that reads client files sends them to its provider. On the machine this was
   developed on, `.claude/settings.json` deny rules and a `.cursorignore` name the client's
@@ -398,7 +408,7 @@ at the end; it is never counted as a pass.
 | `repo_*`, `machine_*` | no document/database/key/`.env` in git; no credential-shaped string in any commit or the tree (a small stand-in for gitleaks, which CI runs); the client-identifier canary over the tree; hooks installed; client directories not readable by group/others; the AI-tool deny rules |
 | `egress_policy` | the single outbound-capable code path is pinned; the guard, URL, model and Host policies |
 | `offline_kernel` | the whole product flow with only loopback up (`unshare --net`) |
-| `security_suite` | authz/IDOR/CSRF/header/cookie matrix over every route, hostile ids and hostile request bodies (19 kinds, on every route that reads one: always a 4xx, never a 500); pre-auth; hostile uploads; retention; hardening; the XML, DOCX, manifest, text-limit and capacity tests |
+| `security_suite` | authz/IDOR/CSRF/header/cookie matrix over every route, hostile ids and hostile request bodies (19 kinds, on every route that reads one: always a 4xx, never a 500); pre-auth; hostile uploads; retention; schema upgrades (the copies' modes, the refusal of a newer database); hardening; the XML, DOCX, manifest, text-limit and capacity tests |
 | `log_canary` | a marker planted in every input reaches 0 log lines and 0 database columns |
 | `deploy_policy` | compose, Dockerfile, build context and supervisor; the supervisor restarts a hung real server |
 | `regex_budget`, `regex_controls` | directed search for super-linear patterns through the input limits; the same search still finds the pre-fix pattern |
