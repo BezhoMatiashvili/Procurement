@@ -98,6 +98,17 @@ one message at a time in `pyproject.toml`, never by category.
 
 ## 5. Deployment
 
+**The compose project name is fixed**: `name: procurement-agent` at the top of
+`docker-compose.yml`. Compose names the volumes after the project, and without a `name:` it names
+the project after the folder it is started from; a release unpacked into a new folder
+(`procurement-agent-0.2.0-abc1234/`) would then start on empty volumes - no documents, no API
+keys, no audit trail - and say nothing. The volumes are now always `procurement-agent_app-data`
+and `procurement-agent_ollama`, whatever the folder is called (checked: `docker compose config`
+from two differently named folders prints the same volume and network names). `-p <name>` and
+`COMPOSE_PROJECT_NAME` still override it (checked), which is what a second, separate stack needs
+and what 5.6 uses for a host that ran an earlier release. Never start the same installation
+under two names: each name has its own volumes.
+
 ### 5.1 Topology
 
 ```
@@ -140,7 +151,8 @@ the relay cannot reach Ollama; verify with the command in SECURITY.md §2.
 
 ### 5.3 Host and volumes
 
-- [ ] `/data` (the `app-data` volume) on an encrypted disk (LUKS or equivalent).
+- [ ] `/data` (the `app-data` volume, `procurement-agent_app-data`) on an encrypted disk (LUKS or
+  equivalent).
 - [ ] `.env` readable only by the operator (`chmod 600`); `PA_ENV=prod`, `PA_DEV_API_KEY`
   empty, `PA_ALLOWED_HOSTS` set. `PA_APP_CPUS` / `PA_OLLAMA_CPUS` below the host's core count keep
   one runaway parse from starving the host (no default: Docker refuses a number above the cores).
@@ -207,11 +219,46 @@ read-only container with tmpfs `/tmp`.
 
 1. Back up `app.db` (5.5).
 2. Build the new image on a connected machine, `docker save` it, move it, `docker load`.
-3. `docker compose up -d` — the worker stops within its timeout, the new process recovers
-   interrupted jobs, `create_all` adds new tables. There is no migration framework: a release
+3. `docker compose up -d` (from any folder: the project name is fixed, §5) — the worker stops
+   within its timeout, the new process recovers interrupted jobs, `create_all` adds new tables. There is no migration framework: a release
    that changes an existing table must ship its own migration step (none has so far).
 4. `docker compose ps` shows all three services healthy; sign in once.
 5. Re-run `scripts/evaluate.py` if Ollama, Docling or the models changed.
+
+**A host that ran the stack before the project name was fixed** has volumes named after the
+folder it was started from: `<folder>_app-data` and `<folder>_ollama` (the folder name in lower
+case; `docker volume ls` shows them). The first start of a release with the fixed name would use
+new, empty `procurement-agent_*` volumes and leave the old ones untouched and unused. Neither of
+these deletes anything:
+
+- *Keep the old name.* Put `COMPOSE_PROJECT_NAME=<folder>` in `.env` (or give every `docker
+  compose` command `-p <folder>`). Nothing is copied and the stack keeps its volumes.
+- *Move to the fixed name.* Copy the two volumes; the old ones stay as the fallback.
+
+  ```bash
+  OLD=<folder>                      # as in `docker volume ls`, without the _app-data suffix
+  IMAGE=procurement-agent:<tag>     # the image you run, already loaded on this host
+  docker compose -p "$OLD" down     # stops the old stack; no -v, that would delete the volumes
+  for v in app-data ollama; do
+    docker volume create --label com.docker.compose.project=procurement-agent \
+      --label com.docker.compose.volume=$v procurement-agent_$v
+    docker run --rm --user 0 --entrypoint cp -v "${OLD}_$v:/from:ro" \
+      -v procurement-agent_$v:/to "$IMAGE" -a /from/. /to/
+  done
+  docker compose up -d
+  ```
+
+  Then sign in with an existing key (`docker compose exec -T app python -m procurement_agent.cli
+  list-keys` lists them). The `ollama` volume holds the models, several GB, so the copy needs
+  that much free space on the same disk. Once the new stack is confirmed, remove the old
+  volumes yourself (`docker volume rm "${OLD}_app-data" "${OLD}_ollama"`): the old `app-data`
+  still holds a copy of the documents and would outlive their retention period.
+
+  Exercised on a running stack with `pa-stackfix_*` as the old volumes and `pa-stackfix-copy_*`
+  as the new: the copy keeps the owner (uid 999) and the modes (700 and 600), and an API key made
+  before the copy is accepted after it and the uploaded document is listed. The `--label` options
+  keep Compose quiet: without them it still uses the volume but warns that it "was not created
+  by Docker Compose".
 
 **Upgrading to the release with server-side sessions signs every UI user out once**: the old
 cookie held the API key itself and is no longer accepted. API clients using `X-API-Key` are

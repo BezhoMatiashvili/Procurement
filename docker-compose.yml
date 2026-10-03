@@ -19,6 +19,13 @@
 #
 # Compose reads ${VARIABLES} below from the shell or from .env next to this file.
 
+# A fixed project name. Compose otherwise names the project after the directory it is started
+# from, and the volumes (`app-data`: documents, API keys, the audit trail; `ollama`: the models)
+# after the project: a release unpacked into a new folder would start on EMPTY volumes, without an
+# error. With this, the volumes are always procurement-agent_app-data and procurement-agent_ollama.
+# `-p <name>` and COMPOSE_PROJECT_NAME still override it (see docs/PRODUCTION_READINESS.md 5.6).
+name: procurement-agent
+
 services:
   app:
     build: .
