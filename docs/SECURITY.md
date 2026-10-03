@@ -138,6 +138,50 @@ contract-number reader froze the whole process on a 62-character string).
 A page image is rendered with finite, clamped highlight boxes (at most 20) and at most 25 M
 pixels, and the application's own uses of pdfium are serialised by one lock.
 
+### Input that was not read
+
+Untrusted input also fails quietly: a scan with no OCR, a conversion that ran out of time, a
+database that would not commit. The rule is that **a document, or part of one, that was not read
+never yields a result that looks like "all clear", and the user always sees what was not read.**
+
+* Every parse is assessed once (`ingestion/read_quality.py`) and the answer is stored beside the
+  parse as `results/<id>/read_quality.json`: the file kind, pages in the file, pages with
+  readable text, characters of text, whether the conversion reported errors or only part of the
+  work, and whether OCR could run. Numbers and flags only; it goes with the document when the
+  document is deleted or expires. A document stored before this existed gets the same answer
+  worked out from its parse.
+* A document with **no readable text at all** - a PDF of page images on a host without
+  Tesseract, a workbook with no cell text - does not become `ready`. The parse job and the
+  document are `failed` with the code **`NO_TEXT`**, and with **`OCR_UNAVAILABLE`** or
+  **`IMAGE_ONLY`** when the cause is known; the API returns them as `error_code` and
+  `error_hint`, the pages say them in Georgian and English. Every check and extraction refuses a
+  document that is not ready with 409.
+* A document with **some pages unread** (the conversion ended partial, reported errors, or pages
+  carry no text - a picture among text pages, a timeout that cut the page table) stays `ready`
+  and is **partial**. The act check, the comparison and the extraction then carry
+  `read_quality` and a **`DOC.PARTIAL`** note first among what could not be checked: "N of M
+  pages had no readable text (a scan without OCR, or a page the reader could not process);
+  findings may be incomplete". The pages put it at the top; a comparison of two documents that
+  match in what could be read is not called identical.
+* An act checked against a contract that holds no text says so (`AOA.CONTRACT_UNREADABLE`); it
+  is not reported as "no contract supplied". A workbook cut at the reader's caps adds an
+  `AOA.TRUNCATED` note to the act report, as `CMP.TRUNCATED` does to a comparison.
+* A stored parse that is missing or damaged is **409 `DOCUMENT_UNREADABLE`** ("upload it again"),
+  and the document becomes `failed`; it is never a bare 500 with the document still `ready`.
+* A job that exists to get the model's answer (the act review, the comparison explanation) ends
+  `failed` with **`LLM_UNAVAILABLE`** when the model does not answer, and is asked again rather
+  than reused. An extraction keeps the rules' and labels' facts but is `done` with
+  `degraded: true`, a warning, and a banner on the page.
+* A database failure while a parse is settled fails the document as well as the job, and the
+  periodic sweep fails a document left `parsing` with no job to account for it for longer than
+  `PA_DOCLING_TIMEOUT_S` plus five minutes.
+* The audit row of a report or a read is committed **before** the body is returned. If it
+  cannot be stored the answer is **503 `AUDIT_UNAVAILABLE`** (bilingual, with `Retry-After`,
+  nothing of the report in it) and the log says the row was lost; no log line says it was
+  recorded.
+* A write-ahead-log checkpoint that fails or is blocked is logged (`checkpoint_failed`,
+  `checkpoint_busy`); it never stops the caller.
+
 ## 4. Authentication, authorisation, audit
 
 * API keys: 256-bit random, shown once, stored as SHA-256; constant-time comparison; revocable
@@ -179,7 +223,7 @@ pixels, and the application's own uses of pdfium are serialised by one lock.
   `/api/v1/status` shows a caller only their own jobs.
 * Audit trail: an append-only table plus a JSON log line for upload (accepted/denied),
   extraction start, a result read (API and UI), a document's content shown as text or as a page
-  image, check results and exports, delete and retention delete, sign-in (ok/denied) and logout,
+  image (these are committed before the body is returned), check results and exports, delete and retention delete, sign-in (ok/denied) and logout,
   refused cross-origin requests, probes of other users' ids, key creation and revocation, the
   retention sweep, the model-manifest write, outbound attempts the egress guard refused, and
   shortening the trail itself. Fields: actor, action, outcome, document id, job id, client IP,
@@ -398,8 +442,10 @@ What this does not do, so nobody has to discover it:
   one uvicorn worker by design; running several would multiply the effective limit.
 * GET requests write bookkeeping rows (check history); `SameSite=Strict` is what keeps another
   site from causing them.
-* OCR (Tesseract) runs only inside the container image; scanned PDFs processed on a host
-  without Tesseract yield no text and the API reports that in the document status.
+* OCR (Tesseract) runs only inside the container image. On a host without it a PDF of page
+  images yields no text, and the document is `failed` with `NO_TEXT` and the hint
+  `OCR_UNAVAILABLE`; a PDF with some text pages and some pictures is `ready` but partial
+  (`DOC.PARTIAL`, "Input that was not read" above).
 * Git history: see `PRODUCTION_READINESS.md` §7.
 
 ## 11. Verification and measured results
