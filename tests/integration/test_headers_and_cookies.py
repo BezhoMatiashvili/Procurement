@@ -65,6 +65,7 @@ def prod(tmp_path: Path) -> Iterator[tuple[TestClient, Settings]]:
         docling_artifacts_path=tmp_path / "models",
         allowed_hosts=(HOST,),
         models_manifest_required=False,  # no models in a test; see test_models_manifest.py
+        parser_mode="inline",  # no parser container in a test; see test_parser_worker.py
     )
 
 

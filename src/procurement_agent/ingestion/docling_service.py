@@ -9,6 +9,7 @@ import shutil
 import tempfile
 import threading
 from bisect import bisect_left, bisect_right
+from collections.abc import Callable
 from importlib.metadata import PackageNotFoundError, version
 from itertools import pairwise
 from pathlib import Path
@@ -368,13 +369,24 @@ def save_document(doc: DoclingDocument, out_dir: Path) -> Path:
     would be loaded later and fail - or, in the evaluation cache, be trusted forever. The JSON
     is written to a private temporary file in the same directory and renamed into place.
     """
+    return _write_atomically(out_dir, doc.save_as_json)
+
+
+def save_document_bytes(data: bytes, out_dir: Path) -> Path:
+    """Store a ``docling.json`` that was made elsewhere - by the parser container - exactly as
+    ``save_document`` stores one made here: the same file, the same write to a temporary file and
+    rename, the same modes."""
+    return _write_atomically(out_dir, lambda tmp: tmp.write_bytes(data))
+
+
+def _write_atomically(out_dir: Path, write: Callable[[Path], object]) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     target = out_dir / "docling.json"
     fd, tmp_name = tempfile.mkstemp(prefix=".docling.", suffix=".json.tmp", dir=out_dir)
     os.close(fd)  # mkstemp creates the file 0600; docling reopens it by name
     tmp = Path(tmp_name)
     try:
-        doc.save_as_json(tmp)
+        write(tmp)
         tmp.chmod(0o600)
         tmp.replace(target)  # atomic within one directory
     except BaseException:

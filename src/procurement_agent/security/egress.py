@@ -7,8 +7,9 @@ Python process, for every Python-level way of opening a connection - ``connect``
 telemetry, a model download or an update check would come from (``requests``, ``urllib3``,
 ``httpx``, ``http.client``, ``huggingface_hub`` all end in those calls).
 
-What is allowed: the loopback addresses, Unix sockets, and the names the process was told to talk
-to (the Ollama server), together with the addresses those names resolve to. Everything else raises
+What is allowed: the loopback addresses, the names the process was told to talk to (the Ollama
+server), together with the addresses those names resolve to, and the Unix socket paths it was told
+of (``allow_unix``: the parser's, and no other). Everything else raises
 ``EgressBlockedError`` - an ``OSError``, so a library sees an ordinary network failure - and is
 reported through ``on_block`` (content-free: what kind of call, which destination).
 
@@ -22,9 +23,11 @@ from __future__ import annotations
 
 import contextlib
 import ipaddress
+import os
 import socket
 import threading
 from collections.abc import Callable, Iterable
+from pathlib import Path
 from typing import Any
 
 __all__ = ["EgressBlockedError", "EgressGuard", "ensure_installed", "installed", "uninstall"]
@@ -59,6 +62,7 @@ class EgressGuard:
     ) -> None:
         self._names: set[str] = set(_LOCAL_NAMES)
         self._ips: set[str] = set()
+        self._unix: set[str] = set()
         self._on_block = on_block
         self._resolver = resolver
         self._lock = threading.Lock()
@@ -79,6 +83,35 @@ class EgressGuard:
                 self._ips.add(str(ip))
             else:
                 self._names.add(host.lower().rstrip("."))
+
+    def allow_unix(self, path: str | bytes | os.PathLike[str]) -> None:
+        """Allow connecting to this one Unix socket path - the parser's (``parser_service``).
+
+        A pinned entry, not a family: every other Unix address, and the abstract namespace, stays
+        refused. The path is compared as an absolute, normalised path, exactly.
+        """
+        key = self._unix_key(path)
+        if key is None:
+            msg = "a Unix socket path is needed (the abstract namespace is not allowed)"
+            raise ValueError(msg)
+        with self._lock:
+            self._unix.add(key)
+
+    @property
+    def unix_paths(self) -> frozenset[str]:
+        return frozenset(self._unix)
+
+    @staticmethod
+    def _unix_key(address: Any) -> str | None:
+        """The comparable form of a Unix socket address, or ``None`` for one that is not a path
+        (an abstract-namespace name starts with a NUL byte)."""
+        try:
+            text = os.fsdecode(address)
+        except TypeError:
+            return None
+        if not text or text.startswith("\0"):
+            return None
+        return os.path.normpath(Path(text).absolute())
 
     def _block(self, kind: str, destination: str) -> None:
         self.blocked += 1
@@ -108,8 +141,13 @@ class EgressGuard:
             self._block(kind, text)
 
     def check_address(self, family: int, address: Any, kind: str = "connect") -> None:
+        if family == socket.AF_UNIX:
+            key = self._unix_key(address)
+            if key is None or key not in self._unix:
+                self._block(kind, "a unix socket")
+            return
         if family not in (socket.AF_INET, socket.AF_INET6):
-            return  # Unix sockets, socketpairs and the like stay on this machine
+            return  # socketpairs and the like stay on this machine
         host = address[0] if isinstance(address, tuple) else address
         text = host.decode("idna") if isinstance(host, bytes) else str(host)
         if not self._address_allowed(text.rstrip(".")):

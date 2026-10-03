@@ -148,6 +148,8 @@ def test_the_set_of_classes_that_keep_their_messages_is_this_one() -> None:
         "procurement_agent.llm.ollama_client.PromptTooLongError",
         "procurement_agent.checks.compare.DocumentTooLargeError",
         "procurement_agent.ingestion.docling_service.ConversionError",
+        # a fixed sentence under a fixed code (ParserCode), nothing interpolated
+        "procurement_agent.ingestion.parser_client.ParserError",
         "procurement_agent.ingestion.xlsx_size.WorkbookTooLargeError",
         "procurement_agent.ingestion.render.PageTooLargeError",
         "procurement_agent.security.upload_guard.UploadRejectedError",
@@ -201,6 +203,7 @@ def test_the_messages_of_the_marked_classes_only_interpolate_what_is_known_to_be
         "PromptTooLongError",
         "DocumentTooLargeError",
         "ConversionError",
+        "ParserError",
         "WorkbookTooLargeError",
         "PageTooLargeError",
         "UploadRejectedError",

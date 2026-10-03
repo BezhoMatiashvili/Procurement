@@ -158,6 +158,7 @@ def main(data_dir: str, summary_path: str) -> int:
     os.environ.update(
         {
             "PA_ENV": "dev",
+            "PA_PARSER_MODE": "inline",  # no parser container in this run
             "PA_DEV_API_KEY": KEY,
             "PA_DATA_DIR": data_dir,
             "PA_RATE_LIMIT": "100000/minute",

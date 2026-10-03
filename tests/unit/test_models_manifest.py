@@ -159,6 +159,7 @@ def _prod(models: Path, **overrides: object) -> Settings:
         "env": "prod",
         "docling_artifacts_path": models,
         "allowed_hosts": ("tasks.company.test",),
+        "parser_mode": "inline",  # the parser's own settings have their tests
     }
     base.update(overrides)
     return Settings(**base)  # type: ignore[arg-type]

@@ -18,6 +18,9 @@ def _prod(**overrides: object) -> Settings:
         # these tests are about hosts, the egress guard and the proxy; the models have their own
         # (tests/unit/test_models_manifest.py)
         "models_manifest_required": False,
+        # parsing in the web process, chosen on purpose: production refuses to guess
+        # (tests/unit/test_parser_config.py)
+        "parser_mode": "inline",
     }
     base.update(overrides)
     return Settings(**base)  # type: ignore[arg-type]

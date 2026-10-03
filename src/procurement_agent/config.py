@@ -34,6 +34,8 @@ _INTERNAL_NAMES = frozenset({"localhost", "ollama", "host.docker.internal"})
 #: ``.lan`` and ``.internal``).
 _INTERNAL_SUFFIXES = (".local", ".internal", ".lan")
 _HOSTNAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$")
+#: The longest path a Unix socket address holds on Linux (``sun_path`` is 108 bytes with its NUL).
+_UNIX_PATH_MAX = 107
 
 
 def _is_internal_host(host: str) -> bool:
@@ -264,6 +266,24 @@ class Settings(BaseSettings):
     docling_timeout_s: int = Field(default=900, ge=10)
     ocr_langs: Annotated[tuple[str, ...], NoDecode] = ("kat", "eng")
 
+    # --- the parser sandbox (docs/SECURITY.md section 2) ---
+    #: Where Docling runs. ``socket``: in the parser container, over ``parser_socket``
+    #: (``procurement_agent/parser_service``); ``inline``: in this process, which is what a
+    #: developer's machine and the tests do. Unset is ``inline``, and production refuses it unset:
+    #: running the parser in the web process is a choice somebody makes, not a default.
+    parser_mode: Literal["inline", "socket"] | None = None
+    #: The parser's Unix socket: on a volume only the app and the parser containers share.
+    parser_socket: Path = Path("/run/parser/parser.sock")
+    #: Most a converted document (``docling.json``) may weigh on the wire, checked by both sides
+    #: before they allocate for it. The largest real parse measured is a few megabytes.
+    parser_max_result_mb: int = Field(default=64, ge=1, le=1024)
+    #: How long a parse job waits for the parser to accept a connection. The parser is killed on a
+    #: wedge and restarted by Docker, and loads its models before it listens (about a minute).
+    parser_connect_wait_s: float = Field(default=90.0, ge=0.0, le=600.0)
+    #: How long past ``docling_timeout_s`` a conversion may run before the kernel kills the parser
+    #: (Docling's own timeout is cooperative: it stops between steps, and saves what it has).
+    parser_kill_grace_s: int = Field(default=30, ge=1, le=600)
+
     # --- business registry snapshot (optional; absent means registry rules are skipped) ---
     registry_db: Path | None = None
 
@@ -333,6 +353,27 @@ class Settings(BaseSettings):
             out.append(host)
         return tuple(out)
 
+    @field_validator("parser_mode", mode="before")
+    @classmethod
+    def _blank_mode_is_unset(cls, v: object) -> object:
+        """``PA_PARSER_MODE=`` in a .env file is the mode left unset, not an invalid one."""
+        if isinstance(v, str):
+            return v.strip().lower() or None
+        return v
+
+    @field_validator("parser_socket")
+    @classmethod
+    def _socket_path(cls, v: Path) -> Path:
+        """A Unix socket address holds 107 bytes; a longer path fails at bind time, deep in a
+        container start. Absolute, because the two containers must name the same file."""
+        if not v.is_absolute():
+            msg = f"PA_PARSER_SOCKET must be an absolute path, got {str(v)!r}"
+            raise ValueError(msg)
+        if len(os.fsencode(v)) > _UNIX_PATH_MAX:
+            msg = f"PA_PARSER_SOCKET is too long for a Unix socket ({_UNIX_PATH_MAX} bytes at most)"
+            raise ValueError(msg)
+        return v
+
     @field_validator("ollama_base_url")
     @classmethod
     def _internal_only(cls, v: str) -> str:
@@ -391,6 +432,20 @@ class Settings(BaseSettings):
         """
         return MAX_FILES_PER_REQUEST * self.max_file_bytes + 1024 * 1024
 
+    @property
+    def use_parser_socket(self) -> bool:
+        """Docling runs in the parser container (unset, like ``inline``, means in this process)."""
+        return self.parser_mode == "socket"
+
+    @property
+    def parser_max_result_bytes(self) -> int:
+        return self.parser_max_result_mb * 1024 * 1024
+
+    @property
+    def parser_max_request_bytes(self) -> int:
+        """Largest request the parser reads: one file, and a megabyte for the frame around it."""
+        return self.max_file_bytes + 1024 * 1024
+
     def ensure_dirs(self) -> None:
         for d in (self.data_dir, self.upload_dir, self.results_dir):
             d.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -404,9 +459,41 @@ class Settings(BaseSettings):
         problems: list[str] = []
         if self.dev_api_key:
             problems.append("PA_DEV_API_KEY must be empty in prod")
+        problems += self._model_problems()
+        if not self.egress_guard:
+            problems.append("PA_EGRESS_GUARD must stay on in prod")
+        if not self.allowed_hosts:
+            problems.append("PA_ALLOWED_HOSTS must list the host names users reach this server by")
+        if os.environ.get("FORWARDED_ALLOW_IPS", "").strip() == "*":
+            problems.append(
+                "FORWARDED_ALLOW_IPS must not be '*': any caller could then choose the client "
+                "address the audit log and the rate limiter record"
+            )
+        if self.parser_mode is None:
+            problems.append(
+                "PA_PARSER_MODE is not set: set PA_PARSER_MODE=socket (compose) or inline "
+                "(degraded: parsing runs in the web process)"
+            )
+        if problems:
+            raise RuntimeError("Refusing to start: " + "; ".join(problems))
+
+    def validate_for_parser(self) -> None:
+        """The parser container's start-up check: what ``validate_for_prod`` asks that a process
+        with no web server, no host list and no database can be held to - the models are the ones
+        that were evaluated, and the egress guard is on."""
+        if self.env != "prod":
+            return
+        problems = self._model_problems()
+        if not self.egress_guard:
+            problems.append("PA_EGRESS_GUARD must stay on in prod")
+        if problems:
+            raise RuntimeError("Refusing to start the parser: " + "; ".join(problems))
+
+    def _model_problems(self) -> list[str]:
+        problems: list[str] = []
         if self.docling_artifacts_path is None:
             problems.append("PA_DOCLING_ARTIFACTS_PATH must point to pre-downloaded models in prod")
-        if self.models_manifest_required and self.docling_artifacts_path is not None:
+        elif self.models_manifest_required:
             from procurement_agent.security import models_manifest
 
             checked = models_manifest.verify(self.docling_artifacts_path)
@@ -419,17 +506,7 @@ class Settings(BaseSettings):
                     + "); restore them, or rewrite the manifest after a deliberate change "
                     "(procurement-agent models-manifest write)"
                 )
-        if not self.egress_guard:
-            problems.append("PA_EGRESS_GUARD must stay on in prod")
-        if not self.allowed_hosts:
-            problems.append("PA_ALLOWED_HOSTS must list the host names users reach this server by")
-        if os.environ.get("FORWARDED_ALLOW_IPS", "").strip() == "*":
-            problems.append(
-                "FORWARDED_ALLOW_IPS must not be '*': any caller could then choose the client "
-                "address the audit log and the rate limiter record"
-            )
-        if problems:
-            raise RuntimeError("Refusing to start: " + "; ".join(problems))
+        return problems
 
 
 @lru_cache(maxsize=1)

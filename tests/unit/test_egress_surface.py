@@ -21,9 +21,21 @@ SRC = Path(procurement_agent.__file__).resolve().parent
 
 #: Modules that can reach a network, and the only file that may import each.
 NETWORK_IMPORTS = {
-    "httpx": {"llm/ollama_client.py"},  # the one outbound path: the model server
-    "socket": {"security/egress.py"},  # the guard that watches every other one
+    "httpx": {"llm/ollama_client.py"},  # the one outbound path to a host: the model server
+    "socket": {
+        "security/egress.py",  # the guard that watches every other one
+        # The second sanctioned path, and Unix sockets only (``UNIX_ONLY`` below): the parser
+        # container's socket, from the client in the web process and in the service itself. The
+        # framing (``parser_service/protocol.py``) opens nothing and imports no socket.
+        "ingestion/parser_client.py",
+        "parser_service/server.py",
+    },
 }
+#: The modules that open a socket for the parser, and the only ``socket`` names they may use: one
+#: stream socket of the Unix family. An internet socket, a lookup or ``create_connection`` in
+#: either would be a second way out that nothing below would notice.
+UNIX_ONLY = {"ingestion/parser_client.py", "parser_service/server.py"}
+UNIX_ONLY_NAMES = {"socket.socket", "socket.AF_UNIX", "socket.SOCK_STREAM", "socket.SHUT_WR"}
 #: Raw C bindings, and the only file that may import each. PDFium's own API, for what its Python
 #: wrapper does not offer: the highlights and notes the annotated PDF carries. Fixed setters on
 #: annotations the module itself creates, under PDFIUM_LOCK - no library is loaded, nothing
@@ -142,6 +154,61 @@ def test_each_network_capable_module_is_imported_by_its_one_owner(module: str) -
         if any(_under(n, {module}) for n in _imports(ast.parse(p.read_text(encoding="utf-8"))))
     }
     assert importers == NETWORK_IMPORTS[module]
+
+
+def _not_unix_only(tree: ast.AST) -> list[str]:
+    """What a module reaches in ``socket`` beyond ``UNIX_ONLY_NAMES``, and every ``socket.socket``
+    call that does not name the Unix family first."""
+    found: list[str] = []
+    for node in ast.walk(tree):
+        reached = _dotted(node) if isinstance(node, ast.Attribute) else ""
+        if reached.startswith("socket.") and reached not in UNIX_ONLY_NAMES:
+            found.append(reached)
+        elif (
+            isinstance(node, ast.Call)
+            and _dotted(node.func) == "socket.socket"
+            and (not node.args or _dotted(node.args[0]) != "socket.AF_UNIX")
+        ):
+            found.append("socket.socket() without socket.AF_UNIX first")
+    return found
+
+
+@pytest.mark.parametrize("module", sorted(UNIX_ONLY))
+def test_the_parser_sockets_are_unix_stream_sockets_and_nothing_else(module: str) -> None:
+    tree = ast.parse((SRC / module).read_text(encoding="utf-8"))
+    assert _not_unix_only(tree) == []
+    opened = [
+        n for n in ast.walk(tree) if isinstance(n, ast.Call) and _dotted(n.func) == "socket.socket"
+    ]
+    assert opened, "the module opens a socket: if it no longer does, drop it from UNIX_ONLY"
+    assert not any(
+        isinstance(n, ast.ImportFrom) and n.module == "socket" for n in ast.walk(tree)
+    ), "import the module, not names from it: the check above reads `socket.<name>`"
+
+
+def test_the_unix_only_check_sees_what_it_is_meant_to_see() -> None:
+    bad = ast.parse(
+        "\n".join(
+            [
+                "import socket",
+                "socket.socket(socket.AF_INET, socket.SOCK_STREAM)",
+                "socket.create_connection(('x', 1))",
+                "socket.getaddrinfo('x', 1)",
+                "socket.socket()",
+            ]
+        )
+    )
+    found = _not_unix_only(bad)
+    assert "socket.AF_INET" in found and "socket.create_connection" in found
+    assert "socket.getaddrinfo" in found
+    assert found.count("socket.socket() without socket.AF_UNIX first") == 2
+    good = ast.parse("import socket\nsocket.socket(socket.AF_UNIX, socket.SOCK_STREAM)")
+    assert _not_unix_only(good) == []
+
+
+def test_the_wire_format_opens_nothing() -> None:
+    names = _imports(ast.parse((SRC / "parser_service/protocol.py").read_text("utf-8")))
+    assert not {n for n in names if _under(n, {"socket", "ssl", "httpx", "os", "subprocess"})}
 
 
 def test_no_code_is_run_from_data() -> None:

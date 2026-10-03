@@ -6,9 +6,12 @@ reaches for the network fails here instead of quietly working on a machine that 
 
 from __future__ import annotations
 
+import shutil
 import socket
+import tempfile
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import httpx
 import pytest
@@ -117,8 +120,69 @@ def test_named_hosts_and_the_addresses_they_resolve_to_are_allowed() -> None:
         guard.check_name("ollama.example.com")
 
 
-def test_unix_sockets_and_other_families_are_not_judged() -> None:
-    EgressGuard().check_address(socket.AF_UNIX, "/tmp/some.sock")
+def test_other_families_than_the_internet_and_unix_are_not_judged() -> None:
+    EgressGuard().check_address(socket.AF_NETLINK, (0, 0))
+
+
+def test_a_unix_socket_is_refused_unless_its_exact_path_was_allowed() -> None:
+    """The parser's socket is the one Unix address the application may connect to: a deliberate,
+    pinned entry (``main.py`` adds it when the parser mode is ``socket``), not "Unix sockets are
+    on this machine, so any of them"."""
+    guard = EgressGuard()
+    for path in ("/tmp/some.sock", b"/tmp/some.sock", "relative.sock", "\0abstract"):
+        with pytest.raises(EgressBlockedError):
+            guard.check_address(socket.AF_UNIX, path)
+    guard.allow_unix("/run/parser/parser.sock")
+    guard.check_address(socket.AF_UNIX, "/run/parser/parser.sock")
+    guard.check_address(socket.AF_UNIX, b"/run/parser/parser.sock")
+    guard.check_address(socket.AF_UNIX, "/run/parser/../parser/parser.sock")
+    guard.check_address(socket.AF_UNIX, Path("/run/parser/parser.sock"))
+    for path in (
+        "/run/parser/other.sock",
+        "/run/parser/parser.sock.bak",
+        "/run/parser",
+        "/run/parser/parser.sock/x",
+        "\0/run/parser/parser.sock",
+        b"\0parser",
+    ):
+        with pytest.raises(EgressBlockedError):
+            guard.check_address(socket.AF_UNIX, path)
+
+
+def test_an_abstract_namespace_name_cannot_be_allowed() -> None:
+    with pytest.raises(ValueError, match="Unix socket path"):
+        EgressGuard().allow_unix("\0parser")
+    with pytest.raises(ValueError, match="Unix socket path"):
+        EgressGuard().allow_unix("")
+
+
+def test_an_allowed_unix_path_is_not_an_allowed_host() -> None:
+    guard = EgressGuard()
+    guard.allow_unix("/run/parser/parser.sock")
+    with pytest.raises(EgressBlockedError):
+        guard.check_address(socket.AF_INET, ("8.8.8.8", 53))
+    assert guard.unix_paths == frozenset({"/run/parser/parser.sock"})
+
+
+def test_a_real_unix_connect_goes_through_the_guard() -> None:
+    short = Path(tempfile.mkdtemp(prefix="pa-eg-"))
+    try:
+        path = short / "s.sock"
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+            server.bind(str(path))
+            server.listen(1)
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                with pytest.raises(EgressBlockedError):
+                    client.connect(str(path))
+                with pytest.raises(EgressBlockedError):
+                    client.connect_ex(str(path))
+            guard = egress.installed()
+            assert guard is not None
+            guard.allow_unix(path)
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.connect(str(path))
+    finally:
+        shutil.rmtree(short, ignore_errors=True)
 
 
 def test_a_refusal_is_reported_without_content() -> None:

@@ -92,6 +92,7 @@ def test_a_real_server_that_stops_answering_is_killed_and_started_again(
     python_path = os.pathsep.join(p for p in (str(ROOT / "src"), os.environ.get("PYTHONPATH")) if p)
     for name, value in {
         "PA_ENV": "dev",
+        "PA_PARSER_MODE": "inline",
         "PA_DEV_API_KEY": "pa_supervisor_test_key_0123456789abcdef",
         "PA_DATA_DIR": str(tmp_path / "data"),
         "PA_OLLAMA_BASE_URL": "http://127.0.0.1:9",  # never called: /ready does not ask the model
