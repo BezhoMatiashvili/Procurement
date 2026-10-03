@@ -68,6 +68,9 @@ SECURITY_TESTS=(
   tests/unit/test_retention.py tests/unit/test_upload_guard.py tests/unit/test_upload_guard_hostile.py
   tests/unit/test_xml_safety.py tests/unit/test_docx_sanitize.py tests/unit/test_models_manifest.py
   tests/unit/test_capacity_and_pdfium.py tests/unit/test_text_limits.py tests/unit/test_repo_guards.py
+  tests/unit/test_parser_protocol.py tests/unit/test_parser_server.py tests/unit/test_parser_client.py
+  tests/unit/test_parser_kill.py tests/unit/test_parser_config.py tests/unit/test_parser_worker.py
+  tests/unit/test_parser_cli.py tests/unit/test_parser_store.py
 )
 LOG_TESTS=(tests/integration/test_log_canary.py tests/unit/test_logscrub.py tests/unit/test_safe_errors.py)
 DEPLOY_TESTS=(

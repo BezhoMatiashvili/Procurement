@@ -28,6 +28,14 @@ Three independent layers, then a proof. Each has a test (§11).
 * `docker-compose.yml` has two networks with `internal: true`: `internal` (relay ↔ app) and `llm`
   (app ↔ Ollama). Containers on such a network have **no default route**; an outbound connection
   fails in the kernel. The relay cannot reach Ollama and Ollama cannot reach the relay.
+* **The parser container has no network at all** (`network_mode: none`: a loopback interface and
+  nothing else, not an internal network). It is the same image as the app, started as
+  `python -m procurement_agent.parser_service`, and it converts PDF and DOCX with Docling for the
+  app over a **Unix socket** on a volume (`parser-sock`) that only those two containers mount. It
+  gets no `env_file` (only the handful of settings listed in the compose file, the app's limits
+  among them), **no `/data` and no database**, the models read-only, and no published port. The
+  one thing the two share is that socket. See §7 for how it is limited and killed and §10 for
+  exactly what it does and does not cover.
 * No container publishes a port except the small relay (`proxy`, Caddy, plain HTTP, no state),
   bound to `127.0.0.1:8000`; the company's TLS reverse proxy sits in front of that. The relay's
   second network (`edge`) has outbound NAT disabled, so it cannot reach the internet either.
@@ -46,11 +54,30 @@ Three independent layers, then a proof. Each has a test (§11).
   turn them off (`tests/unit/test_offline_pinning.py` checks every import order in fresh
   interpreters, including a pre-set `HF_HUB_OFFLINE=0`).
 * An egress guard (`security/egress.py`) refuses every Python-level outbound connection
-  (`connect`, `connect_ex`, `sendto`) and every name lookup except loopback, Unix sockets and the
-  configured model server; each refusal is audited (`egress.blocked`, content-free). It is on by
-  default, cannot be turned off in production, and is active in every test.
-  *It cannot see* code that opens sockets outside Python's `socket` module (uvloop, native
+  (`connect`, `connect_ex`, `sendto`) and every name lookup except loopback, the configured model
+  server and **one Unix socket path - the parser's**; each refusal is audited (`egress.blocked`,
+  content-free). It is on by default, cannot be turned off in production, and is active in every
+  test. *It cannot see* code that opens sockets outside Python's `socket` module (uvloop, native
   libraries): for those the kernel is the boundary, and §11 proves it there.
+  * **The Unix socket is a pinned entry, not a family.** The guard used to wave every `AF_UNIX`
+    address through; now a Unix connect is allowed only to the path `main.py` hands it when
+    `PA_PARSER_MODE=socket` (`allow_unix`), and in inline mode to none. The comparison is on the
+    **exact string** given to `connect`, never on a tidied-up one: the kernel resolves a path its
+    own way (symlinks first, then `..`), so `<dir>/link/../parser.sock` can name a different
+    socket than the one a lexical clean-up would produce. Only an absolute, canonical path (no
+    `.`/`..` segment, no `//`, no trailing `/`, no NUL) can be allowed, and `PA_PARSER_SOCKET` that
+    is not one stops the start; relative paths, other spellings, symlinked spellings and the
+    abstract namespace are refused (`tests/unit/test_egress_guard.py` has each, with two live
+    sockets for the `..` case).
+  * **Nothing else relied on the old exemption.** Verified, not assumed: `asyncio`, `uvicorn`'s
+    loop and `anyio` wake themselves with `socket.socketpair()`, which never goes through
+    `connect`; a test records every address the guard is asked about while an event loop, the test
+    client and the whole application start, serve a request and stop, and no `AF_UNIX` is among
+    them (with a control that proves the recording sees one when it happens); and an AST scan
+    (`tests/unit/test_egress_surface.py`) fails if any module outside the parser's two socket
+    modules and the guard names a Unix socket. The parser client and server are the second
+    sanctioned socket users in `src/`; that test pins them to `AF_UNIX` stream sockets and nothing
+    else (no `AF_INET`, no lookup, no `create_connection`).
 * Docling runs with remote services disabled and Tesseract as the only OCR engine (the other
   engines would try to download models). Model files must be pre-downloaded (production requires
   `PA_DOCLING_ARTIFACTS_PATH`) and are verified against `MANIFEST.sha256` at every production
@@ -232,6 +259,51 @@ capability needs to execute at all). The process itself sets `umask(0o077)` and 
 One worker thread processes jobs, so a malicious document cannot fan out CPU/memory consumption.
 Docling conversion has a timeout.
 
+**The parser container** (Docling's PDF and DOCX conversion, §2; what stays in the web process is
+listed in §10) has the same restrictions as the app - non-root, read-only root filesystem,
+`cap_drop: ALL`, `no-new-privileges`, `noexec` tmpfs `/tmp` (2 GB, where the document being converted
+is written, mode `0600` in a `0700` directory, removed afterwards), `ulimits.core: 0`, `init: true`
+- plus no network, its own memory limit (10 GB) and PID limit (256), and **no `/data`**: the image
+declares no `VOLUME`, so Docker does not give it an anonymous one either. It is one service
+(`python -m procurement_agent.parser_service`), single-threaded, **one request at a time**, and
+checks everything it is sent: the frame (`parser_service/protocol.py`: a 17-byte prefix, a JSON
+header of at most 4 KiB with a fixed set of keys and types, a raw payload) is judged from its prefix
+and header before the payload is read, a request over `PA_MAX_FILE_MB` + 1 MB is refused unread, a
+result over `PA_PARSER_MAX_RESULT_MB` (64) is never sent, and the web process applies the same cap
+to what it receives before it allocates for it. Errors cross the socket as one of seven codes and
+nothing else, so a parser's message about the document it choked on cannot reach a log.
+
+*A wedged conversion is ended by the kernel, with no second supervisor.* Docling's own timeout
+(`PA_DOCLING_TIMEOUT_S`, 900 s) is cooperative - checked between steps - and a native parser stuck
+inside a page holds the interpreter's lock, so no Python code in the process, a watchdog thread
+included, can run to stop it. Before each conversion the parser arms `signal.alarm` for
+`PA_DOCLING_TIMEOUT_S` + `PA_PARSER_KILL_GRACE_S` (30 s) with **`SIGALRM` left at its default
+action**: no Python handler stands between the signal and the kernel, which ends the process
+wherever it is. `arm` refuses to run if anything has installed a handler, and a conversion never
+starts without it. A soft `RLIMIT_CPU` (CPU time used so far plus the deadline per Docling thread)
+is the backstop, and an out-of-memory kill inside the container's cgroup ends the same way.
+`init: true` is part of this: the kernel ignores a default-action signal sent to PID 1 of a
+namespace, and Python must not be that. Docker's `restart: unless-stopped` starts the container
+again; the job that was waiting sees the connection close and fails with `PARSER_CRASHED`, is not
+retried (a document that kills the parser is sent once), and the next job waits for the restart
+(`PA_PARSER_CONNECT_WAIT_S`, 90 s). The order of the deadlines is a tested invariant: Docling's
+timeout < the kill < the 10 s more the web process waits for an answer, so a kill is reported as a
+crash and never as the client giving up on a parser that is still running.
+`tests/unit/test_parser_kill.py` shows it with a real process wedged in a native call that holds
+the GIL and ignores signals (killed at the deadline by `SIGALRM`, exit status `-SIGALRM`), the
+control that a Python handler would not have run, and the CPU limit on its own.
+
+*What a kill costs.* The parser loads both pipelines' models before it listens, after verifying
+the manifest, so a restarted parser is not ready for as long as that takes: measured here with 669 MB
+of models, running again 0.8 s after its process was killed and **healthy 19 s after it**. A parse
+job submitted in that window waits and succeeds (it finished 19.2 s after the kill); one that was
+being converted fails at once (0.45 s) and the document is marked failed. The web process is not
+touched: `/ready` answered 200 for every one of the 45 probes across the first kill, and after the second. A parser that is converting
+answers its health check (`--ping`) only when it is done, so the check allows five misses at 30 s
+before `docker ps` says unhealthy, and nothing acts on that; the app waits for a healthy parser
+only at start-up. (Note for whoever tests recovery: `docker kill` is a manual stop, which
+`unless-stopped` does not undo. Kill the process inside the container, or let the alarm fire.)
+
 Health: `/health` is liveness only. `/ready` returns 503 when the database does not answer or
 the job worker is dead or has not shown progress for longer than its longest legitimate step;
 the container healthcheck uses `/ready`. Neither endpoint needs a key or reveals configuration.
@@ -351,14 +423,41 @@ reach every copy of the data, which is why the volume belongs on an encrypted di
 
 What this does not do, so nobody has to discover it:
 
-* **Parsing runs in the web process.** Docling, pdfium, Tesseract and the XML parsers run in
-  the same process as the web server and the database connection, on one daemon thread. There is
-  no way to stop a runaway native call from inside the process; the supervisor (§7) restarts it
-  after a minute or two instead. A memory-corruption bug in a parser would run with the
-  process's access to every stored document. The structural fix is a parser sandbox - parsing in
-  a child process with its own memory and CPU limits, a hard kill, no database or secrets, and
-  pdfium moved out - which is **designed but not built**. Until then pdfium has one more
-  exposure: the lock in §3 serialises the application's own uses of it, but not Docling's.
+* **Only Docling's conversion runs in the parser container; the rest of what touches an upload
+  still runs in the web process.** With `PA_PARSER_MODE=socket` (what compose sets) PDF and DOCX
+  parse jobs are converted in the parser container (§2, §7). These are **not** sandboxed, and run
+  in the web server's process, with its access to every stored document and the database:
+  the pdfium upload guard (`security/upload_guard.py`), the page-image renderer
+  (`ingestion/render.py`) and the text-layer probe; the registry extract reader
+  (`registry/extract.py`); both annotators - python-docx and lxml for Word
+  (`report/docx_annotate.py`) and raw pdfium for PDF (`report/pdf_annotate.py`); the openpyxl,
+  python-docx and lxml readers (workbooks, the comparison and the bill of quantities); and the
+  XLSX validation (`ingestion/xlsx_size.py`). A memory-corruption bug in any of them runs with the
+  process's access, and a runaway call in any of them is still stopped only by the supervisor's
+  restart (§7), a minute or two later, not by a hard limit. Moving them has not been done, and
+  the application is not to be described as having a parser sandbox beyond Docling's conversion.
+  * What crosses from the parser into the web process is parsed there: the `docling.json` it
+    returns is read with `json.loads` (it must be a JSON object that names the Docling document
+    schema and has exactly the pages its header says, at most `PA_PARSER_MAX_RESULT_MB`), written,
+    and loaded later by the same pydantic loader as before. A compromised parser can therefore
+    hand the web process a document of its choosing, not run code in it - but the loaders see it.
+    `PA_MAX_TEXT_CHARS` is enforced inside the parser only; the web process does not recount it.
+  * `PA_PARSER_MODE=inline` is today's behaviour (parsing in the web process, Docling included),
+    and what development and the tests use when the mode is unset. **Production refuses an unset
+    mode** and says what to set, so running the parser inside the web process is a decision;
+    chosen, it is logged at every start (`parser_inline_in_production`).
+  * The two containers run the same image and the same unprivileged user id (`app`): the
+    boundary is the container (namespaces, cgroup limits, no capabilities, read-only root, no
+    network, no shared data), not a second user. They share one Unix socket (a volume only they
+    mount, directory mode `0750`, the socket `0660`). The web container still mounts the models,
+    which it no longer loads in socket mode (it verifies their manifest at start-up as before).
+  * A conversion the parser refuses reaches the user as a code and one fixed sentence
+    (`PARSER_CONVERT_FAILED`, `PARSER_TOO_MANY_PAGES`, ...), not Docling's own wording: for example
+    the text-size limit's "the document holds N characters of text..." is now
+    `PARSER_CONVERT_FAILED`. That is the price of never letting a parser's message cross.
+  * Pdfium: in socket mode the lock in §3 covers every use of it in the web process (Docling's use,
+    which the lock never serialised, is in the other process); in inline mode the old exposure
+    stands.
 * **The input limits are a bound, not a proof.** They stop the long-run shapes that made
   patterns quadratic (and the fixed patterns were exponential); the regular-expression scan
   (`tests/regex_budget.py`) searches for super-linear patterns with strings built from each
@@ -400,13 +499,16 @@ at the end; it is never counted as a pass.
 | `offline_kernel` | the whole product flow with only loopback up (`unshare --net`) |
 | `security_suite` | authz/IDOR/CSRF/header/cookie matrix over every route, hostile ids and hostile request bodies (19 kinds, on every route that reads one: always a 4xx, never a 500); pre-auth; hostile uploads; retention; hardening; the XML, DOCX, manifest, text-limit and capacity tests |
 | `log_canary` | a marker planted in every input reaches 0 log lines and 0 database columns |
-| `deploy_policy` | compose, Dockerfile, build context and supervisor; the supervisor restarts a hung real server |
+| `deploy_policy` | compose, Dockerfile, build context and supervisor; the supervisor restarts a hung real server; the parser container has no network, no `/data` or app data, no `env_file`, one shared volume, and the limits of the app |
+| `parser_sandbox` | (in `security_suite`) the wire format and its caps, the service, the client and the worker on a fake converter; the kill switch in a real process; the egress guard's one Unix path |
 | `regex_budget`, `regex_controls` | directed search for super-linear patterns through the input limits; the same search still finds the pre-fix pattern |
 | `resources` | worst-case inputs (bounding boxes, page-size and zip bombs, 20 MB of separators, a 54,000-character paragraph, 400,000-cell workbooks) finish inside time and memory ceilings, each in a fresh process |
 | `mutation` | one security property of a copy of `src/` is broken at a time (ownership not checked, a header dropped, an outbound lookup allowed, error text unscrubbed, ...); a test must fail each time |
 
 Change one of these properties and a test fails - that is what `mutation` demonstrates, and CI
-runs it. A mutation counts as caught only when a test *fails* (one that stops the tests from
+runs it. (The harness copies the compose file and the Dockerfile beside the `src/` copy, so it
+breaks the deployment's properties too: the parser container given the app's data, given a
+network, run without `init`, the image given a `VOLUME /data`.) A mutation counts as caught only when a test *fails* (one that stops the tests from
 running does not count), and the unmodified copy must pass the same tests first. Its blind spot,
 stated in the harness: a test that starts its own interpreter on the real source (the log-canary
 flow, the offline smoke, the real-server supervisor test) cannot see a mutation, so it can only

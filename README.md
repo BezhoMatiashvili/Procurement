@@ -284,12 +284,18 @@ as a guardrail rather than a boundary (docs/SECURITY.md section 10).
 cp .env.example .env                  # PA_ENV=prod, PA_ALLOWED_HOSTS (required), retention, limits
 python -m procurement_agent.cli models-manifest write   # on the connected machine, once, before copying ./models
 docker compose build && docker compose up -d
-docker compose ps                     # app, ollama and proxy should all turn "healthy"
+docker compose ps                     # app, parser, ollama and proxy should all turn "healthy"
 docker compose exec app python -m procurement_agent.cli create-key alice
 ```
 
 `docker-compose.yml` runs the app and Ollama on an `internal` network with no internet route,
-non-root, read-only filesystem, dropped capabilities. Docker will not publish a port from an
+non-root, read-only filesystem, dropped capabilities. Docling's PDF and DOCX conversion runs in a
+fourth container, `parser`, with no network at all, none of the app's data, no database or
+secrets and its own memory limit, reached over a Unix socket; a conversion that never returns is
+ended by the kernel and Docker restarts the container (`PA_PARSER_MODE=socket`, which compose sets;
+production refuses to start with it unset, and `inline` parses in the web process, degraded).
+Only Docling is moved: pdfium, the annotators and the other readers still run in the web process
+(docs/SECURITY.md section 10). Docker will not publish a port from an
 internal-only network, so a stateless relay (`proxy`) is the one container listening on the
 host, at `127.0.0.1:8000`. Put the TLS reverse proxy in front of that, have it set
 `X-Forwarded-For` (audit IPs and rate limiting depend on it), and mount `/data` on an

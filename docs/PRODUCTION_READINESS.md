@@ -34,7 +34,9 @@ deployer duty or an open item.
 | Model files verified against `MANIFEST.sha256` at every prod start | [x] | `security/models_manifest.py`, `cli models-manifest` |
 | Container hardening: non-root, read-only rootfs, `cap_drop: ALL`, `no-new-privileges`, tmpfs `/tmp` (noexec), memory/PID/CPU limits, no core dumps, init | [x] | `Dockerfile`, `docker-compose.yml`; `tests/unit/test_deployment_policy.py` |
 | Trusted-proxy handling for `X-Forwarded-For` (never `*`) | [x] | `FORWARDED_ALLOW_IPS` (image default loopback; compose trusts only its relay) |
-| Prod start-up refuses: a dev key, missing or unverified Docling models, the egress guard off, no host allow-list, `FORWARDED_ALLOW_IPS=*` | [x] | `Settings.validate_for_prod` |
+| Prod start-up refuses: a dev key, missing or unverified Docling models, the egress guard off, no host allow-list, `FORWARDED_ALLOW_IPS=*`, `PA_PARSER_MODE` unset (set `socket`, or `inline` knowing it is degraded) | [x] | `Settings.validate_for_prod` |
+| Docling's PDF/DOCX conversion in its own container: no network (`network_mode: none`), no `/data`, no database, no secrets or `env_file`, read-only root, `cap_drop: ALL`, own memory (10 GB) and PID limits, reached over a Unix socket only the two containers share; a conversion that does not return is ended by the kernel (`SIGALRM` at its default action, `init: true`), Docker restarts the container, the waiting job fails with a code. **Only Docling is moved**: pdfium, the annotators, the registry reader and the workbook/Word readers stay in the web process (SECURITY.md §10) | [x] | `parser_service/`, `ingestion/parser_client.py`, compose service `parser`; `tests/unit/test_parser_*.py`, `test_deployment_policy.py`; `tests/integration/test_parser_docling.py` (byte-identical to inline, with the models) |
+| The egress guard allows one Unix socket path, compared as the exact canonical string | [x] | `security/egress.py` (`allow_unix`), `tests/unit/test_egress_guard.py` |
 | Authorisation matrix over every route (401 / 404-for-others / CSRF / headers / cookie flags), and a harness that breaks each guard to prove a test fails | [x] | `tests/integration/test_security_matrix.py`, `scripts/mutate_security.py` (CI job `mutation`) |
 | Client documents kept out of the repository (generic block in the hook and CI) and the client's identifiers out of commits (salted-hash canary, local hook) | [x] | `scripts/check_no_documents.sh`, `scripts/client_canary.py` |
 
@@ -51,8 +53,22 @@ deployer duty or an open item.
   job; compose gives the container `stop_grace_period: 60s` and runs an init process, so
   SIGTERM reaches uvicorn. Measured: `docker compose stop app` completes in about 0.5 s when
   idle, with a clean "Application shutdown complete".
-- [x] **Start order.** The app waits for Ollama's healthcheck (`ollama list`); the relay starts
-  after the app.
+- [x] **Start order.** The app waits for Ollama's healthcheck (`ollama list`) and the parser's
+  (`python -m procurement_agent.parser_service --ping`, a ping over the socket; the parser verifies
+  the models' manifest and loads them before it listens, so healthy means ready: 19 s here); the
+  relay starts after the app.
+- [x] **The parser restarts, the web process does not notice.** If the parser dies (killed by its
+  deadline alarm, out of memory, a crash), Docker restarts it; the job that was running fails with
+  `PARSER_CRASHED` and is not retried, and a job submitted meanwhile waits up to
+  `PA_PARSER_CONNECT_WAIT_S` (90 s) for it. Measured with the process killed inside the container:
+  running again after 0.8 s, healthy after 19 s, the in-flight job failed after 0.45 s, a job
+  submitted 0.3 s after the kill finished 19.2 s after it, and `/ready` answered 200 throughout.
+  The kernel's deadline alarm was shown with the real image: a conversion past its (shortened)
+  deadline ended with exit status 142 (`SIGALRM`), the client got `PARSER_CRASHED` at 11.4 s of an
+  11 s deadline, and the container came back. (`docker kill` is a manual stop that
+  `restart: unless-stopped` does not undo - kill the process inside, or `docker start` it.)
+  A parser that is busy converting answers its health check only when done: expect `docker ps` to
+  say `unhealthy` for a while during a very long parse, and wire monitoring to jobs, not to that.
 - [x] **Restart when hung.** Compose marks an unready container `unhealthy` but never restarts
   it, and a request that spins in a regular expression or a native parser freezes the process
   from inside. The compose command is `scripts/supervise.py`, a standard-library process that
@@ -103,6 +119,11 @@ browser ──TLS──► company reverse proxy (host) ──► 127.0.0.1:8000
                                                                         │ internal network,
                                                                         ▼ no default route
                                                           app:8000 ◄──► ollama:11434
+                                                             │
+                                                             │ Unix socket (volume parser-sock)
+                                                             ▼
+                                                          parser  (network_mode: none; Docling's
+                                                                   PDF/DOCX conversion only; no /data)
 ```
 
 Docker does not publish ports of a container whose only network is `internal: true` (checked
@@ -111,7 +132,12 @@ the only container on a second network (`edge`), holds no state, and forwards to
 `edge` has outbound NAT disabled, so the published port answers but the relay cannot reach the
 internet (measured: outbound `wget` times out). The app and Ollama have no route at all, and
 they sit on two different internal networks (`internal` with the relay, `llm` with each other) so
-the relay cannot reach Ollama; verify with the command in SECURITY.md §2.
+the relay cannot reach Ollama; verify with the command in SECURITY.md §2. The `parser` container is
+on no network at all (`network_mode: none`: loopback only); it talks to the app only through a
+Unix socket on the `parser-sock` volume, which only those two containers mount. Measured on the
+running stack: the parser's only interface is `lo`, a connection to a public address fails with
+`Network is unreachable`, and `docker inspect` lists two mounts - the models (read-only) and the
+socket volume - and no `/data`.
 
 ### 5.2 Reverse proxy duties (deployer)
 
@@ -140,6 +166,14 @@ the relay cannot reach Ollama; verify with the command in SECURITY.md §2.
   one runaway parse from starving the host (no default: Docker refuses a number above the cores).
 - [ ] If `172.30.231.0/24` or `172.30.232.0/24` collides with a host network, set `PA_INTERNAL_SUBNET`/`PA_EDGE_SUBNET`/`PA_EDGE_GATEWAY` and
   `PA_PROXY_IP` in `.env` together.
+- [ ] The `parser` container's cap is `PA_PARSER_CPUS` (it follows `PA_APP_CPUS` when unset); give
+  it the cores a Docling run should use (`PA_DOCLING_NUM_THREADS`). Its memory limit (10 GB) is not
+  a tuning knob: measured peaks were 1.5 GiB for the fixtures (OCR included) and 3.2 GiB for an
+  invented 80-page document, with 88 of the 256 processes allowed.
+- [ ] The model files must be **readable by the container's unprivileged user** (`chmod -R a+rX
+  models`): a copy that kept mode `0600` on some of Hugging Face's cache files made the manifest
+  check fail at start-up with `Permission denied` - in the parser, and it would be the same in the
+  app. Both containers mount `./models` read-only.
 - [ ] Copy `./models` and the `ollama` volume from the connected machine that ran
   `scripts/prefetch_models.sh`, after writing the checksum manifest there
   (`python -m procurement_agent.cli models-manifest write`): production verifies it at every
@@ -232,10 +266,13 @@ that environment; the comparison is in `docs/SECURITY.md` §11.
 
 - API keys only; no directory (LDAP/AD/OIDC) integration yet.
 - No application-level encryption at rest; relies on disk encryption.
-- Parsing runs inside the web process (no sandbox), so a native-parser bug runs with the
-  process's access to the stored documents, and a runaway parse is stopped by the supervisor's
-  restart, not by a hard limit; the input limits are a bound, not a proof. SECURITY.md §10 has
-  the full list of what the security work does not cover.
+- Docling's conversion runs in its own container; **everything else that parses an upload still
+  runs inside the web process** (the pdfium upload guard, page renderer and text-layer probe, the
+  registry extract reader, both annotators, the workbook and Word readers, XLSX validation), so a
+  native-parser bug there runs with the process's access to the stored documents, and a runaway
+  call there is stopped by the supervisor's restart, not by a hard limit. In `inline` mode (a
+  deliberate, logged choice in production) Docling is among them. The input limits are a bound, not
+  a proof. SECURITY.md §10 has the full list of what the security work does not cover.
 - One uvicorn worker and one job thread by design; the rate limiter's counters live in memory.
 - OCR runs only inside the image (no host Tesseract), so scanned PDFs are not in the host eval.
 - The accuracy numbers are fitted to the client's own set, not held-out (ACCURACY.md).

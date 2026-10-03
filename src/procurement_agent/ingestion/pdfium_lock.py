@@ -9,8 +9,9 @@ users uploading and viewing PDFs at the same time were two threads in pdfium.
 Each of those holds this lock for the few milliseconds it touches pdfium. What it cannot cover is
 Docling, whose PDF backend calls pdfium from the job worker's thread for as long as a conversion
 takes (minutes): serialising against that would make every upload and page view wait for it. That
-overlap is the reason the plan names a parser sandbox - parsing in a child process, with its own
-copy of the library - as the structural fix (docs/SECURITY.md, "Known gaps").
+overlap is gone when Docling runs in the parser container (``PA_PARSER_MODE=socket``: another
+process, with its own copy of the library); it remains in ``inline`` mode (docs/SECURITY.md,
+"Known gaps").
 """
 
 from __future__ import annotations
