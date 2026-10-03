@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import structlog
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
@@ -17,6 +18,9 @@ from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 class Base(DeclarativeBase):
     pass
 
+
+#: The application's own log (``security.audit`` configures it; importing that here is circular).
+_log = structlog.get_logger("procurement_agent")
 
 _engine: Engine | None = None
 _SessionLocal: sessionmaker[Session] | None = None
@@ -93,12 +97,22 @@ def checkpoint(truncate: bool = True) -> None:
     """Write the write-ahead log back into the database and empty it.
 
     Deleted rows (a retention sweep, a scrubbed job) would otherwise stay readable in the WAL file
-    until SQLite next recycles it, which on a quiet server can be a long time.
+    until SQLite next recycles it, which on a quiet server can be a long time. A checkpoint that
+    fails, or that a reader holding the log kept from finishing, leaves them there: it never
+    stops the caller, but it is said in the log (the kind of failure, never its message).
     """
     if _engine is None:
         return
-    with contextlib.suppress(Exception), _engine.connect() as conn:
-        conn.exec_driver_sql(f"PRAGMA wal_checkpoint({'TRUNCATE' if truncate else 'PASSIVE'})")
+    try:
+        with _engine.connect() as conn:
+            row = conn.exec_driver_sql(
+                f"PRAGMA wal_checkpoint({'TRUNCATE' if truncate else 'PASSIVE'})"
+            ).fetchone()
+    except Exception as e:
+        _log.warning("checkpoint_failed", error=type(e).__name__)
+        return
+    if row is not None and row[0]:  # busy: the log could not be emptied, a reader holds it
+        _log.warning("checkpoint_busy", log_pages=row[1], written_back=row[2])
 
 
 def init_db(db_path: Path) -> Engine:
