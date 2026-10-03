@@ -43,7 +43,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Before the worker (and with it Docling and the LLM client) exists: from here on, this
         # process opens connections to loopback and to the model server, and to nothing else.
         model_host = urlparse(settings.ollama_base_url).hostname or ""
-        egress.ensure_installed([model_host], on_block=report_blocked_egress)
+        guard = egress.ensure_installed([model_host], on_block=report_blocked_egress)
+        if settings.use_parser_socket:
+            # The one Unix address this process may connect to: the parser container's socket.
+            guard.allow_unix(settings.parser_socket)
     settings.ensure_dirs()
     init_db(settings.db_path)
     llm = OllamaClient(settings)
@@ -52,6 +55,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     worker.start()
     app.state.worker = worker
     log.info("startup", env=settings.env, model=settings.llm_model)
+    if settings.env == "prod" and not settings.use_parser_socket:
+        log.warning("parser_inline_in_production", detail="parsing runs in the web process")
     try:
         yield
     finally:

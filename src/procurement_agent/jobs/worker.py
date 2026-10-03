@@ -47,7 +47,7 @@ from procurement_agent.extraction.pipeline import (
 )
 from procurement_agent.extraction.schemas import FactType
 from procurement_agent.history import forget_runs
-from procurement_agent.ingestion import docling_service
+from procurement_agent.ingestion import docling_service, parser_client
 from procurement_agent.jobs.retention import delete_document_files, reconcile
 from procurement_agent.llm.base import LLMClient
 from procurement_agent.models import Document, DocumentStatus, Job, JobStatus, UiSession
@@ -326,9 +326,14 @@ class Worker:
                 self._set_progress(job_id, 90, f"{len(chunks)} table chunks")
             else:
                 self._set_progress(job_id, 10, "converting")
-                result = docling_service.convert(path, self._s)
-                docling_service.save_document(result.document, result_dir(self._s, doc_id))
-                page_count = len(result.document.pages) or None
+                if self._s.use_parser_socket:  # Docling runs in the parser container
+                    page_count = parser_client.convert_through_parser(
+                        path, doc_kind, result_dir(self._s, doc_id), self._s, beat=self._beat
+                    )
+                else:
+                    result = docling_service.convert(path, self._s)
+                    docling_service.save_document(result.document, result_dir(self._s, doc_id))
+                    page_count = len(result.document.pages) or None
                 self._set_progress(job_id, 90, "saved")
         except Exception as e:
             # The exception's own text may quote the document; only its kind is kept, in the log
