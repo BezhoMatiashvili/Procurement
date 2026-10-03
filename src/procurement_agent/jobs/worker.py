@@ -50,6 +50,7 @@ from procurement_agent.history import forget_runs
 from procurement_agent.ingestion import docling_service
 from procurement_agent.jobs.retention import delete_document_files, reconcile
 from procurement_agent.llm.base import LLMClient
+from procurement_agent.migrations import expire_backups
 from procurement_agent.models import Document, DocumentStatus, Job, JobStatus, UiSession
 from procurement_agent.security.audit import audit, log
 from procurement_agent.security.caches import forget_cached_text
@@ -548,6 +549,9 @@ class Worker:
         if ids:
             log.info("retention_sweep", deleted=len(ids), incomplete=incomplete)
         self._beat()
+        gone = expire_backups(self._s.db_path, self._s.db_backup_keep_days)
+        if gone:
+            log.info("db_backups_expired", count=gone)
         reconcile(self._s)
         checkpoint()  # a deleted row must not stay readable in the write-ahead log
         return len(ids)

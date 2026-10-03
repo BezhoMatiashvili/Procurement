@@ -28,7 +28,7 @@ deployer duty or an open item.
 | Append-only audit trail (DB table with triggers that abort UPDATE/DELETE + JSON log line); reads, key operations, denied probes and refused outbound attempts included | [x] | `db.py`, `security/audit.py`, `cli audit`, `cli audit-prune`; see SECURITY.md §4 for the actions |
 | Content-free logs and stored errors, proven by a canary test through every input path | [x] | `security/safe_errors.py`, `security/logscrub.py`, `tests/integration/test_log_canary.py` |
 | Retention: row first, files second, a reconciler that retries what failed, derived outputs and caches removed, overwrite + fsync, SQLite `secure_delete` | [x] | `jobs/retention.py`, `jobs/worker.py` sweep every 10 min, `cli sweep`, `PA_RETENTION_DAYS` |
-| Versioned schema: the version lives in the database (`PRAGMA user_version`); a start applies pending migrations in order, each in its own transaction, after a consistent copy of a database that holds rows; a database newer than the release is refused; the upgrade is audited (`db.migrate`) | [x] | `migrations.py`, `cli db-status`, `tests/unit/test_migrations.py`; 5.6 |
+| Versioned schema: the version lives in the database (`PRAGMA user_version`); a start applies pending migrations in order, each in its own transaction, after a consistent copy of a database that holds rows, with file names and typed text blanked and removed after `PA_DB_BACKUP_KEEP_DAYS`; a database newer than the release is refused; the upgrade is audited (`db.migrate`) | [x] | `migrations.py`, `cli db-status`, `tests/unit/test_migrations.py`; 5.6 |
 | Files created owner-only (umask 077, data dir 0700), no core dumps | [x] | `security/hardening.py`, `db.py`, `config.py`, compose `ulimits` |
 | Air-gap, four layers: internal Docker networks (no route out), offline flags force-set before any ML import, an in-process egress guard, Ollama URL = this machine / the compose service (LAN only by opt-in), cloud models refused, only two model-server requests possible, `trust_env=False`, no redirects | [x] | `docker-compose.yml`, `procurement_agent/__init__.py`, `security/egress.py`, `config.py`, `llm/ollama_client.py` |
 | Proof of the air-gap: the whole product flow in a loopback-only network namespace | [x] | `scripts/verify_offline.sh` (CI job `offline`) |
@@ -205,7 +205,8 @@ Both procedures were exercised against the current image with a WAL-mode databas
 read-only container with tmpfs `/tmp`.
 
 A release that changes the schema takes one more copy by itself before it does (5.6). It sits on
-the same disk as the database, so it does not replace this backup.
+the same disk as the database and has file names and typed text blanked, so it does not replace
+this backup.
 
 ### 5.6 Upgrade procedure
 
@@ -246,19 +247,42 @@ a new database. Two processes starting together (the app and a `cli` command) ta
 in turn; the second finds the work done, and waits at most 30 s for the first.
 
 **The copy.** Before the first migration of a database that holds rows (a schema with no rows in it
-is not copied), SQLite's online backup API writes a consistent copy to
-`/data/db-backups/app-v<version>-<UTC time>.db` - the directory `0700`, the file `0600`, the version
-the one the database stood at. It is checked (`PRAGMA quick_check`) before anything changes; if it
-cannot be made or fails the check, the upgrade does not start. The three newest are kept; older
-ones are overwritten, then deleted. The copy holds what `app.db` held - **including document names
-and job questions that retention has removed from the live database since** - so it is neither a
-backup (5.5) nor covered by the retention promise: once the upgrade is confirmed good, remove it
-(`docker compose run --rm --no-deps --entrypoint sh app -c 'rm -rf /data/db-backups'`).
+is not copied), SQLite's online backup API reads a consistent snapshot into memory, and what is
+written to `/data/db-backups/app-v<version>-<UTC time>.db` is that snapshot with every column that
+holds text a person typed, a file name or a value derived from a document **blanked**:
+`documents.display_name` (becomes `[scrubbed]`), `documents.sha256`, `documents.error`,
+`jobs.params` (the question and options typed; becomes `{}`), `jobs.message` and
+`check_runs.params`. The blanking happens before anything is written, so the text is never in the
+directory. What stays is what a copy needs to be worth restoring - key hashes, session-token hashes,
+account names, ids, statuses, sizes, times and the audit trail. The directory is `0700`, the file
+`0600`, the version in the name the one the database stood at. The copy is checked (`PRAGMA
+quick_check`) before anything changes; if it cannot be made or fails the check, the upgrade does not
+start.
+
+A copy is kept only when the upgrade succeeded, and then the three newest; a start that failed
+before changing anything removes the copy it took (it is the file as it stands), so a start that is
+retried again and again does not push out the copy from before the upgrade, which is the one to go
+back to. Older ones are overwritten, then deleted.
+
+**How long a copy lives: `PA_DB_BACKUP_KEEP_DAYS`** (default 3; 0 to 365). The retention sweep (every
+10 minutes and `cli sweep`) overwrites and deletes a copy taken more than that many days ago, so
+what a copy keeps is bounded like the documents are. In the worst case: a file name, typed text or a
+document hash is in a copy for 0 days; an audit row removed by `audit-prune`, or a key revoked since
+the copy, is in it for at most `PA_DB_BACKUP_KEEP_DAYS` days plus the sweep interval (and while the
+stack is stopped, until its first sweep after it starts). **0 trades the way back for the shortest
+lifetime:** the first sweep after the new release is up removes the copy, so if the release turns
+out wrong the only way back is your own backup (5.5). A start that fails does not bring the
+application up, so no sweep runs: the copy of an upgrade that was partly applied is still there. To
+remove copies at once:
+`docker compose run --rm --no-deps --entrypoint sh app -c 'rm -rf /data/db-backups'`.
 
 **Going back.** There are no down-migrations. An older image will not start on a newer database
 (`db-status` says so first). To return, stop the stack, restore the copy taken before the upgrade
 (`<N>` is the version you are returning to) and start the older image; what was written after the
-upgrade is lost with it:
+upgrade is lost with it. The restored database has the blanked columns as above: documents show
+`[scrubbed]` for their names, the parameters of jobs that were queued or running when the copy was
+taken are gone (they fail on the restart), and the key list is the one of the copy - **a key revoked
+since is active again until it is revoked once more** (`cli revoke-key`):
 
 ```bash
 docker compose stop proxy app
@@ -290,6 +314,11 @@ unaffected.
 4. `pytest tests/unit/test_migrations.py`: a new database must have exactly the recorded schema,
    and the version-1 record upgraded through every migration must have what a new one has - so a
    migration that disagrees with the model fails, and so does a model change without a migration.
+
+A column that will hold text a person typed, a file name or a value derived from a document's
+content also goes into `SCRUBBED_COLUMNS` in `migrations.py` - never remove an entry, a copy is of
+the schema before the migration - and `tests/unit/test_migrations.py` fails until every column is
+either there or on its list of kept ones.
 
 The rules for a step: the connection is the transaction's, so it does not commit, roll back or
 begin one. Foreign keys are off on it (a table can be rebuilt - create, copy, drop, rename -
@@ -329,8 +358,8 @@ that environment; the comparison is in `docs/SECURITY.md` §11.
   the full list of what the security work does not cover.
 - One uvicorn worker and one job thread by design; the rate limiter's counters live in memory.
 - Migrations only go forward. Going back is restoring the copy taken before the upgrade (5.6), and
-  what was written since is lost. That copy is on the volume it protects and outlives the
-  retention promise until it is removed. A database from before schema versions is held to the
+  what was written since is lost. That copy is on the volume it protects, blanked of typed text, and
+  removed after `PA_DB_BACKUP_KEEP_DAYS`. A database from before schema versions is held to the
   version-1 table and column names, not to types, indexes or constraints.
 - OCR runs only inside the image (no host Tesseract), so scanned PDFs are not in the host eval.
 - The accuracy numbers are fitted to the client's own set, not held-out (ACCURACY.md).

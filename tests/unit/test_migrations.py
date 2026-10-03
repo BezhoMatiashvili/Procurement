@@ -20,22 +20,26 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Connection, Engine
 
 import procurement_agent.db as dbmod
 from procurement_agent import cli, migrations
-from procurement_agent.config import get_settings
+from procurement_agent.config import Settings, get_settings
+from procurement_agent.jobs.worker import Worker
 from procurement_agent.migrations import (
     BASELINE_SCHEMA,
     LATEST_VERSION,
     Migration,
     MigrationError,
     apply_migrations,
+    expire_backups,
     inspect_database,
 )
 from procurement_agent.security import secure_delete
@@ -659,7 +663,9 @@ def test_a_consistent_copy_is_taken_before_the_first_migration_of_a_database_wit
     assert sql_rows(result.backup, "PRAGMA integrity_check") == [("ok",)]
     assert user_version(result.backup) == 1, "the copy is of the version it was taken at"
     assert "note" not in columns(result.backup, "documents"), "taken before the first step"
-    assert seeded_rows(result.backup) == before
+    copied = seeded_rows(result.backup)
+    assert copied["api_keys"] == before["api_keys"] and copied["audit_log"] == before["audit_log"]
+    assert [r[2] for r in copied["documents"]] == ["[scrubbed]"], "a file name is not kept"
     assert sql_rows(result.backup, "PRAGMA journal_mode") == [("delete",)]
 
 
@@ -683,7 +689,7 @@ def test_the_copy_and_the_look_survive_an_awkward_directory_name(
     assert inspect_database(relative, ()).state == "legacy"
     copy = migrations._take_backup(relative, 0)
     assert copy.exists() and copy.parent.name == "db-backups" and user_version(copy) == 0
-    assert seeded_rows(copy) == seeded_rows(awkward / "app.db")
+    assert seeded_rows(copy)["api_keys"] == seeded_rows(awkward / "app.db")["api_keys"]
 
 
 def test_a_relative_data_directory_upgrades_with_its_copy(
@@ -800,6 +806,409 @@ def test_retention_and_the_copies_zero_files_with_the_same_function() -> None:
     from procurement_agent.jobs import retention
 
     assert retention.overwrite is secure_delete.overwrite is migrations.overwrite
+
+
+# --- a copy is only as safe as what it keeps ---------------------------------------------------
+
+
+def test_a_start_that_keeps_failing_does_not_wear_out_the_copy_the_rollback_needs(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Step 2 succeeds, step 3 fails, and the supervisor restarts the start again and again.
+    Each attempt takes a copy of what it found; the one from before the upgrade began is the one
+    ``Going back`` (PRODUCTION_READINESS.md 5.6) restores, and must not be pushed out by them."""
+    at_version_one(db_path)
+    overwritten: list[str] = []
+    real = secure_delete.overwrite
+    monkeypatch.setattr(
+        migrations, "overwrite", lambda path: (overwritten.append(path.name), real(path))
+    )
+    for _ in range(5):
+        with pytest.raises(MigrationError, match="migration 3"):
+            apply(db_path, registry(failing=True))
+    kept = sorted((db_path.parent / "db-backups").iterdir())
+    assert [p.name.split("-")[1] for p in kept] == ["v1"], "only the copy from before step 2"
+    assert user_version(kept[0]) == 1
+    assert len(overwritten) == 4 and all(n.startswith("app-v2-") for n in overwritten)
+
+
+def test_a_refused_legacy_database_takes_no_copy(db_path: Path) -> None:
+    build_legacy(db_path)
+    con = sqlite3.connect(db_path)
+    con.execute("ALTER TABLE jobs DROP COLUMN message")
+    con.close()
+    for _ in range(3):
+        with pytest.raises(MigrationError, match="does not match this release"):
+            apply(db_path, registry())
+    assert not (db_path.parent / "db-backups").exists()
+
+
+def test_copies_are_pruned_only_once_an_upgrade_has_succeeded(db_path: Path) -> None:
+    at_version_one(db_path)
+    backups = db_path.parent / "db-backups"
+    backups.mkdir(mode=0o700)
+    old = [f"app-v1-2024010{n}T000000000000Z.db" for n in (1, 2, 3)]
+    for name in old:
+        (backups / name).write_bytes(b"older")
+    with pytest.raises(MigrationError):
+        apply(db_path, registry(failing=True))
+    assert len(list(backups.iterdir())) == 4, "a failed upgrade removes nothing"
+    apply(db_path, registry())
+    kept = sorted(p.name for p in backups.iterdir())
+    assert len(kept) == 3 and old[2] in kept and old[0] not in kept and old[1] not in kept
+
+
+# --- what a copy keeps: no text a person typed -------------------------------------------------
+
+#: Every column of the schema is either blanked in a copy or kept, and which is a decision made
+#: here, in review: a column added to a model fails ``test_every_column_is_either_scrubbed_or_kept``
+#: until it is put on one of the two lists (and, if it holds text, on the module's).
+SCRUBBED = {
+    "documents": {"display_name", "sha256", "error"},
+    "jobs": {"params", "message"},
+    "check_runs": {"params"},
+}
+#: Whole tables that are kept, and why.
+KEPT_TABLES = {
+    "api_keys": "who has a key and its hash: a copy that restores a working database needs them",
+    "audit_log": "ids, actions, outcomes and addresses; content-free by construction (§5)",
+    "check_run_documents": "ids and a role word",
+    "ui_sessions": "token hashes and times; expired ones are forgotten by the sweep",
+}
+#: Single columns that are kept, in tables that also have columns that are not.
+KEPT_COLUMNS = {
+    "documents": {
+        "id": "id",
+        "owner": "an account name, not a document's text",
+        "kind": "pdf / docx / xlsx",
+        "size_bytes": "a number",
+        "page_count": "a number",
+        "status": "a status word",
+        "created_at": "a time",
+        "parsed_at": "a time",
+        "expires_at": "a time",
+    },
+    "jobs": {
+        "id": "id",
+        "document_id": "id",
+        "owner": "an account name",
+        "kind": "a job kind word",
+        "status": "a status word",
+        "progress": "a number",
+        "created_at": "a time",
+        "started_at": "a time",
+        "finished_at": "a time",
+    },
+    "check_runs": {
+        "id": "id",
+        "owner": "an account name",
+        "kind": "aoa / boq / compare",
+        "key": "a hash of the kind and the ids",
+        "created_at": "a time",
+        "last_opened_at": "a time",
+    },
+}
+
+
+def test_every_column_is_either_scrubbed_or_kept() -> None:
+    from procurement_agent.db import Base
+
+    live = {(t.name, c.name) for t in Base.metadata.sorted_tables for c in t.columns}
+    scrubbed = {(t, c) for t, cols in SCRUBBED.items() for c in cols}
+    kept = {(t, c) for (t, c) in live if t in KEPT_TABLES}
+    kept |= {(t, c) for t, cols in KEPT_COLUMNS.items() for c in cols}
+    assert scrubbed.isdisjoint(kept)
+    assert live == scrubbed | kept, f"decide for: {sorted(live - scrubbed - kept)}"
+    assert {t: set(c) for t, c in migrations.SCRUBBED_COLUMNS.items()} == SCRUBBED
+
+
+def _every_row(path: Path) -> dict[str, list[tuple[Any, ...]]]:
+    return {
+        t: sql_rows(path, f"SELECT * FROM {t} ORDER BY 1, 2")
+        for t in sorted(tables(path))
+        if not t.startswith("sqlite_")
+    }
+
+
+def _with_free_text_everywhere(path: Path) -> None:
+    """The rows ``build_legacy`` seeds, and a canary in every other column that holds text."""
+    con = sqlite3.connect(path)
+    con.execute("UPDATE documents SET error = ?", (f"{CANARY}-error",))
+    con.execute("UPDATE jobs SET message = ?", (f"{CANARY}-message",))
+    con.execute(
+        "INSERT INTO check_runs (id, owner, kind, key, params, created_at, last_opened_at) "
+        "VALUES ('r1', 'alice', 'aoa', ?, ?, '2026-01-01 00:00:00.000000', "
+        "'2026-01-01 00:00:00.000000')",
+        ("c" * 64, json.dumps({"advance_amount": f"{CANARY}-option"})),
+    )
+    con.execute(
+        "INSERT INTO check_run_documents (run_id, document_id, role) VALUES ('r1', 'd1', 'act')"
+    )
+    con.execute(
+        "INSERT INTO ui_sessions (id, token_hash, api_key_id, user, created_at, expires_at) "
+        "VALUES ('s1', ?, 'k1', 'alice', '2026-01-01 00:00:00.000000', "
+        "'2099-01-01 00:00:00.000000')",
+        ("d" * 64,),
+    )
+    con.commit()
+    con.close()
+
+
+def _bytes_of(path: Path) -> bytes:
+    """The file, and every file SQLite keeps beside it."""
+    return b"".join(
+        Path(f"{path}{suffix}").read_bytes()
+        for suffix in ("", "-wal", "-shm", "-journal")
+        if Path(f"{path}{suffix}").exists()
+    )
+
+
+def test_a_copy_holds_no_text_a_person_typed_and_nothing_else_is_changed(db_path: Path) -> None:
+    at_version_one(db_path)
+    _with_free_text_everywhere(db_path)
+    before = _every_row(db_path)
+    assert CANARY.encode() in _bytes_of(db_path), "the live database does hold it"
+    result = apply(db_path, registry())
+    assert result.backup is not None
+    for leftover in (db_path.parent / "db-backups").iterdir():
+        assert CANARY.encode() not in _bytes_of(leftover), leftover.name
+    assert CANARY.encode() in _bytes_of(db_path), "and the live database still does"
+    copy = _every_row(result.backup)
+    assert copy.keys() == before.keys()
+    placeholder = {
+        ("documents", "display_name"): "[scrubbed]",
+        ("documents", "sha256"): "0" * 64,
+        ("documents", "error"): None,
+        ("jobs", "params"): "{}",
+        ("jobs", "message"): None,
+        ("check_runs", "params"): "{}",
+    }
+    for table_name, rows in before.items():
+        names = columns(result.backup, table_name)
+        assert len(copy[table_name]) == len(rows), table_name
+        for old_row, new_row in zip(rows, copy[table_name], strict=True):
+            for name, was, now in zip(names, old_row, new_row, strict=True):
+                expected = placeholder.get((table_name, name), was)
+                assert now == expected, f"{table_name}.{name}"
+
+
+def test_a_scrubbed_copy_is_a_working_database(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    at_version_one(db_path)
+    _with_free_text_everywhere(db_path)
+    result = apply(db_path, registry()[:1])
+    assert result.backup is not None
+    assert sql_rows(result.backup, "PRAGMA integrity_check") == [("ok",)]
+    assert user_version(result.backup) == 1
+    # db-status reads it like any other database ...
+    restored = tmp_path / "restored" / "app.db"
+    restored.parent.mkdir()
+    restored.write_bytes(result.backup.read_bytes())
+    assert inspect_database(restored, ()).state == "current"
+    monkeypatch.setenv("PA_DATA_DIR", str(restored.parent))
+    monkeypatch.setenv("PA_OLLAMA_BASE_URL", "http://127.0.0.1:1")
+    get_settings.cache_clear()
+    try:
+        assert cli.main(["db-status"]) == 0
+        # ... and the application starts on it: the keys and sessions are there
+        engine = dbmod.init_db(restored)
+        engine.dispose()
+    finally:
+        get_settings.cache_clear()
+    assert sql_rows(restored, "SELECT user FROM api_keys") == [("alice",)]
+    assert sql_rows(restored, "SELECT display_name FROM documents") == [("[scrubbed]",)]
+
+
+def test_a_copy_of_a_database_that_lacks_a_table_or_a_column_is_still_made(
+    db_path: Path,
+) -> None:
+    build_legacy(db_path, without=("check_runs", "check_run_documents"))
+    result = apply(db_path, registry())
+    assert result.backup is not None
+    assert "check_runs" not in tables(result.backup)
+    assert sql_rows(result.backup, "SELECT display_name FROM documents") == [("[scrubbed]",)]
+
+
+def test_a_copy_of_a_damaged_database_blanks_what_is_there_and_is_still_made(
+    db_path: Path,
+) -> None:
+    at_version_one(db_path)
+    con = sqlite3.connect(db_path)
+    con.execute("ALTER TABLE check_runs DROP COLUMN params")  # a table with nothing to blank
+    con.close()
+    result = apply(db_path, registry())
+    assert result.backup is not None and "params" not in columns(result.backup, "check_runs")
+    assert sql_rows(result.backup, "SELECT params FROM jobs") == [("{}",)]
+
+
+def test_the_text_is_still_not_in_the_copy_after_a_sweep(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Raw bytes of the copy and of every file SQLite keeps beside it, before and after the
+    retention sweep has run (and left the young copy alone)."""
+    at_version_one(db_path)
+    _with_free_text_everywhere(db_path)
+    result = apply(db_path, registry())
+    assert result.backup is not None
+    monkeypatch.setattr(migrations, "MIGRATIONS", registry())
+    settings = Settings(
+        env="dev",
+        data_dir=db_path.parent,
+        ollama_base_url="http://127.0.0.1:1",
+        db_backup_keep_days=3,
+    )
+    engine = dbmod.init_db(settings.db_path)  # the database is at the test registry's latest
+    try:
+        Worker(settings, None).sweep_expired()
+    finally:
+        engine.dispose()
+    assert result.backup.exists(), "three days have not passed"
+    for blob in (_bytes_of(f) for f in (db_path.parent / "db-backups").iterdir()):
+        assert CANARY.encode() not in blob
+    assert CANARY.encode() in _bytes_of(db_path), "while the live database still holds it"
+
+
+def test_the_unscrubbed_database_never_reaches_the_backup_directory(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The copy is read into memory, blanked there and only then written: a process killed in
+    between leaves nothing with text in it. Watched from outside, at the moment of writing."""
+    at_version_one(db_path)
+    seen: list[bytes] = []
+    real = migrations._copy_is_sound
+
+    def look(path: Path) -> bool:
+        seen.append(_bytes_of(path))
+        return real(path)
+
+    monkeypatch.setattr(migrations, "_copy_is_sound", look)
+    apply(db_path, registry())
+    assert seen and all(CANARY.encode() not in blob for blob in seen)
+
+
+# --- how long a copy lives ---------------------------------------------------------------------
+
+
+def _fake_copy(directory: Path, age: timedelta, version: int = 1) -> Path:
+    stamp = (datetime.now(UTC) - age).strftime("%Y%m%dT%H%M%S%fZ")
+    path = directory / f"app-v{version}-{stamp}.db"
+    path.write_bytes(b"a copy")
+    return path
+
+
+def test_a_copy_older_than_the_keep_days_is_overwritten_and_removed_a_younger_one_stays(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backups = db_path.parent / "db-backups"
+    backups.mkdir(parents=True)
+    old, middling, young = (
+        _fake_copy(backups, timedelta(days=5)),
+        _fake_copy(backups, timedelta(days=3, hours=1)),
+        _fake_copy(backups, timedelta(days=2, hours=23)),
+    )
+    bystander = backups / "notes.txt"
+    bystander.write_text("not ours")
+    seen: list[tuple[str, bool]] = []
+    real = secure_delete.overwrite
+    monkeypatch.setattr(
+        migrations, "overwrite", lambda p: (seen.append((p.name, p.exists())), real(p))
+    )
+    assert expire_backups(db_path, 3) == 2
+    assert sorted(seen) == sorted([(old.name, True), (middling.name, True)])
+    assert not old.exists() and not middling.exists()
+    assert young.exists() and bystander.read_text() == "not ours"
+    assert expire_backups(db_path, 3) == 0, "nothing more to do"
+
+
+def test_zero_keep_days_expires_every_copy(db_path: Path) -> None:
+    backups = db_path.parent / "db-backups"
+    backups.mkdir(parents=True)
+    copies = [_fake_copy(backups, timedelta(minutes=m)) for m in (1, 30)]
+    assert expire_backups(db_path, 0) == 2
+    assert not any(c.exists() for c in copies)
+
+
+def test_expiry_leaves_alone_what_is_not_a_copy_of_this_database(db_path: Path) -> None:
+    backups = db_path.parent / "db-backups"
+    backups.mkdir(parents=True)
+    stamp = (datetime.now(UTC) - timedelta(days=30)).strftime("%Y%m%dT%H%M%S%fZ")
+    other = backups / f"other-v1-{stamp}.db"
+    other.write_bytes(b"another database's")
+    link = backups / f"app-v1-{stamp}.db"
+    link.symlink_to(other)
+    directory = backups / f"app-v2-{stamp}.db"
+    directory.mkdir()
+    assert expire_backups(db_path, 0) == 0
+    assert other.exists() and link.is_symlink() and directory.is_dir()
+    assert expire_backups(db_path.parent / "no" / "such" / "app.db", 0) == 0  # no directory
+    (backups / ".app-v1-20240101T000000000000Z.db.partial").symlink_to(backups / "nothing")
+    assert expire_backups(db_path, 0) == 0, "a dangling link is skipped, not a reason to stop"
+
+
+def test_a_half_written_copy_left_by_a_crash_is_cleared_once_it_is_stale(
+    db_path: Path,
+) -> None:
+    backups = db_path.parent / "db-backups"
+    backups.mkdir(parents=True)
+    stale = backups / ".app-v1-20240101T000000000000Z.db.partial"
+    fresh = backups / ".app-v1-20990101T000000000000Z.db.partial"
+    stale.write_bytes(b"x")
+    fresh.write_bytes(b"x")
+    two_hours_ago = time.time() - 2 * 3600
+    os.utime(stale, (two_hours_ago, two_hours_ago))
+    assert expire_backups(db_path, 3) == 1
+    assert not stale.exists() and fresh.exists()
+
+
+def test_the_retention_sweep_expires_copies_by_age(tmp_path: Path) -> None:
+    settings = Settings(
+        env="dev",
+        data_dir=tmp_path / "data",
+        ollama_base_url="http://127.0.0.1:1",
+        db_backup_keep_days=1,
+    )
+    settings.ensure_dirs()
+    dbmod.init_db(settings.db_path)
+    backups = settings.data_dir / "db-backups"
+    backups.mkdir(mode=0o700)
+    old, young = _fake_copy(backups, timedelta(days=2)), _fake_copy(backups, timedelta(hours=2))
+    Worker(settings, None).sweep_expired()
+    assert not old.exists() and young.exists()
+
+
+def test_the_sweep_command_expires_copies_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("PA_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("PA_OLLAMA_BASE_URL", "http://127.0.0.1:1")
+    monkeypatch.setenv("PA_DB_BACKUP_KEEP_DAYS", "0")
+    get_settings.cache_clear()
+    try:
+        (tmp_path / "data").mkdir()
+        backups = tmp_path / "data" / "db-backups"
+        backups.mkdir()
+        copy = _fake_copy(backups, timedelta(minutes=5))
+        assert cli.main(["sweep"]) == 0
+    finally:
+        get_settings.cache_clear()
+    assert not copy.exists()
+
+
+def test_the_keep_days_setting_has_the_shape_of_the_retention_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert Settings(ollama_base_url="http://127.0.0.1:1").db_backup_keep_days == 3
+    assert (
+        Settings(ollama_base_url="http://127.0.0.1:1", db_backup_keep_days=0).db_backup_keep_days
+        == 0
+    )
+    for bad in (-1, 366):
+        with pytest.raises(ValidationError):
+            Settings(ollama_base_url="http://127.0.0.1:1", db_backup_keep_days=bad)
+    monkeypatch.setenv("PA_DB_BACKUP_KEEP_DAYS", "9")
+    assert Settings(ollama_base_url="http://127.0.0.1:1").db_backup_keep_days == 9
+    assert "PA_DB_BACKUP_KEEP_DAYS=" in (ROOT / ".env.example").read_text(encoding="utf-8")
 
 
 # --- two processes, a crash, a lock ------------------------------------------------------------

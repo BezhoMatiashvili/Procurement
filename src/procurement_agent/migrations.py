@@ -15,9 +15,26 @@ SQLite's ``PRAGMA user_version`` (no table of its own), and a start meets one of
 * **equal**: nothing to do.
 
 Before the first migration of a database that holds rows, a consistent copy is taken with SQLite's
-online backup API into ``<data dir>/db-backups/`` (owner-only, the three newest kept; the ones
-that go are overwritten, as retention does). The copy and the first migration happen under one
-write lock, so the copy is of the version it is named for even with two processes starting.
+online backup API into ``<data dir>/db-backups/`` (owner-only). The copy and the first migration
+happen under one write lock, so the copy is of the version it is named for even with two processes
+starting.
+
+**A copy keeps no text a person typed.** It is read into memory and blanked there, and only the
+blanked database is written (``VACUUM INTO``): the unblanked bytes never reach the backup
+directory, so a process killed half-way leaves nothing behind that retention would have removed.
+``SCRUBBED_COLUMNS`` is the list - ``documents.display_name`` (the file name), ``documents.sha256``
+(a hash of the document), ``documents.error``, ``jobs.params`` (the question and the options typed),
+``jobs.message`` and ``check_runs.params`` (the options of a check) - and what is left (key hashes,
+ids, statuses, times, sizes, the audit trail) is bounded by ``PA_DB_BACKUP_KEEP_DAYS``:
+``expire_backups``, called by the retention sweep, overwrites and removes a copy older than that.
+A copy is of the schema *before* the migrations, so the list never loses an entry (a column a
+migration renames keeps its old name here), and a column that will hold text a person typed, a file
+name or a value derived from a document's content goes on it; ``tests/unit/test_migrations.py``
+fails until every column of every table is either on it or on that test's list of kept ones.
+
+A copy is kept only if the upgrade succeeded, and then the newest three; a start that changed
+nothing before failing removes the copy it took (it is the file as it stands), so a start that is
+retried does not wear out the copy from before the upgrade, which is the one to go back to.
 
 Adding a migration is a function and a line - and the model change it describes::
 
@@ -48,11 +65,11 @@ import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import create_engine, event, literal_column, select, table
+from sqlalchemy import column, create_engine, event, literal_column, select, table, update
 from sqlalchemy.engine import URL, Connection, Engine, RootTransaction
 from sqlalchemy.exc import DatabaseError, OperationalError
 from sqlalchemy.pool import NullPool
@@ -67,6 +84,7 @@ __all__ = [
     "BASELINE_SCHEMA",
     "LATEST_VERSION",
     "MIGRATIONS",
+    "SCRUBBED_COLUMNS",
     "DatabaseStatus",
     "Migration",
     "MigrationError",
@@ -74,6 +92,7 @@ __all__ = [
     "apply_migrations",
     "check_registry",
     "columns_of",
+    "expire_backups",
     "inspect_database",
     "latest_version",
     "record_migration",
@@ -144,6 +163,21 @@ BASELINE_SCHEMA: Mapping[str, tuple[str, ...]] = {
         "last_seen_at",
     ),
 }
+
+#: What a pre-upgrade copy has blanked: table -> column -> what it is set to. The columns that hold
+#: a file name, a question or an option a person typed, or a value derived from a document's
+#: content, plus the free-text ones whose contents are only known to be harmless today. Never
+#: remove an entry - see the module docstring.
+SCRUBBED_NAME = "[scrubbed]"
+SCRUBBED_COLUMNS: Mapping[str, Mapping[str, str | None]] = {
+    "documents": {"display_name": SCRUBBED_NAME, "sha256": "0" * 64, "error": None},
+    "jobs": {"params": "{}", "message": None},
+    "check_runs": {"params": "{}"},
+}
+#: The time in a copy's name: UTC, with microseconds so that two starts never choose one name.
+_STAMP = "%Y%m%dT%H%M%S%fZ"
+#: A half-written copy older than this is debris from a crash.
+_STALE_PARTIAL_S = 3600
 
 #: A migration's name goes into the audit trail and the logs: an identifier, never free text.
 _NAME = re.compile(r"[a-z][a-z0-9_]{0,39}")
@@ -276,9 +310,9 @@ def _schema_problem(conn: Connection, expected: Mapping[str, Sequence[str]]) -> 
         if kind != "table":
             return f"{name} exists but is not a table"
         have = columns_of(conn, name)
-        for column in wanted:
-            if column not in have:
-                return f"table {name} has no column {column}"
+        for wanted_column in wanted:
+            if wanted_column not in have:
+                return f"table {name} has no column {wanted_column}"
         extra = len(set(have) - set(wanted))
         if extra:
             return f"table {name} has {extra} column(s) this release does not know"
@@ -321,12 +355,41 @@ def _copy_is_sound(path: Path) -> bool:
         return False
 
 
+def _scrub(scratch: sqlite3.Connection) -> None:
+    """Blank ``SCRUBBED_COLUMNS`` in the in-memory copy - those of them the database has: a copy
+    of an old file may lack a table, and a damaged one a column, and neither stops the copy."""
+    present = {r[0] for r in scratch.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    for name, assignments in SCRUBBED_COLUMNS.items():
+        if name not in present:
+            continue
+        have = {r[0] for r in scratch.execute("SELECT name FROM pragma_table_info(?)", (name,))}
+        wanted = {c: v for c, v in assignments.items() if c in have}
+        if not wanted:
+            continue
+        # ``UPDATE documents SET display_name=:display_name, ...``: the bind names are the columns'
+        statement = update(table(name, *(column(c) for c in wanted))).values(wanted)
+        scratch.execute(str(statement), wanted)
+
+
+def _write_scrubbed_copy(source: Path, target: Path) -> None:
+    """A consistent snapshot of the live database (SQLite's online backup API) read into memory,
+    blanked there, and written compact: the file holds only what is left."""
+    with (
+        contextlib.closing(sqlite3.connect(_read_only_uri(source), uri=True)) as live,
+        contextlib.closing(sqlite3.connect(":memory:")) as scratch,
+    ):
+        scratch.execute("PRAGMA temp_store=MEMORY")
+        live.backup(scratch)
+        _scrub(scratch)
+        scratch.commit()
+        scratch.execute("VACUUM INTO ?", (str(target),))
+
+
 def _take_backup(db_path: Path, from_version: int) -> Path:
-    """SQLite's online backup API: a consistent snapshot of a live database, written owner-only
-    under a name that carries the version and the time (microseconds, so two starts never meet).
+    """The scrubbed copy, written owner-only under a name that carries the version and the time.
     It is checked before it is trusted, and nothing is left behind if it cannot be made."""
     directory = _backup_directory(db_path)
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    stamp = datetime.now(UTC).strftime(_STAMP)
     final = directory / f"{db_path.stem}-v{from_version}-{stamp}.db"
     partial = directory / f".{final.name}.partial"
     done = False
@@ -334,12 +397,7 @@ def _take_backup(db_path: Path, from_version: int) -> Path:
         directory.mkdir(mode=0o700, exist_ok=True)
         directory.chmod(0o700)  # a directory that already existed keeps its old mode
         os.close(os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
-        with (
-            contextlib.closing(sqlite3.connect(_read_only_uri(db_path), uri=True)) as reader,
-            contextlib.closing(sqlite3.connect(partial)) as writer,
-        ):
-            reader.backup(writer)
-            writer.execute("PRAGMA journal_mode=DELETE")  # one plain file, not one wanting a -wal
+        _write_scrubbed_copy(db_path, partial)
         if not _copy_is_sound(partial):
             msg = (
                 "the pre-upgrade copy of the database failed its integrity check; "
@@ -349,7 +407,7 @@ def _take_backup(db_path: Path, from_version: int) -> Path:
         partial.replace(final)
         done = True
         return final
-    except (OSError, sqlite3.Error) as e:
+    except (OSError, sqlite3.Error, MemoryError) as e:
         error_kind = type(e).__name__
         msg = (
             f"could not back up the database before upgrading it ({error_kind}); "
@@ -363,30 +421,59 @@ def _take_backup(db_path: Path, from_version: int) -> Path:
                     Path(f"{partial}{suffix}").unlink()
 
 
-def _prune_backups(db_path: Path) -> None:
-    """Keep the newest ``KEEP_BACKUPS`` copies of this database; overwrite the rest, then unlink.
-
-    Only a regular file named exactly as this module names its copies is touched, and the order is
-    the time in the name (``v9`` sorts after ``v10`` as text)."""
+def _our_copies(db_path: Path) -> list[tuple[datetime, Path]]:
+    """The copies of this database in its backup directory, oldest first, by the time in the name
+    (``v9`` sorts after ``v10`` as text). Only a regular file named exactly as this module names
+    its copies counts; anything else in the directory is not ours to touch."""
     ours = re.compile(rf"{re.escape(db_path.stem)}-v\d+-(?P<stamp>\d{{8}}T\d{{12}}Z)\.db")
+    found: list[tuple[datetime, Path]] = []
+    for path in _backup_directory(db_path).iterdir():
+        match = ours.fullmatch(path.name)
+        if match and path.is_file() and not path.is_symlink():
+            with contextlib.suppress(ValueError):  # digits that are not a date
+                found.append((datetime.strptime(match["stamp"], _STAMP).replace(tzinfo=UTC), path))
+    return sorted(found)
+
+
+def _remove_copy(path: Path) -> None:
+    overwrite(path)
     with contextlib.suppress(OSError):
-        found = sorted(
-            (m["stamp"], p)
-            for p in _backup_directory(db_path).iterdir()
-            if (m := ours.fullmatch(p.name)) and p.is_file() and not p.is_symlink()
-        )
-        for _, path in found[:-KEEP_BACKUPS]:
-            overwrite(path)
-            path.unlink(missing_ok=True)
+        path.unlink(missing_ok=True)
+
+
+def _prune_backups(db_path: Path) -> None:
+    """Keep the newest ``KEEP_BACKUPS`` copies; overwrite the rest, then unlink them."""
+    with contextlib.suppress(OSError):
+        for _, path in _our_copies(db_path)[:-KEEP_BACKUPS]:
+            _remove_copy(path)
+
+
+def expire_backups(db_path: Path, keep_days: int) -> int:
+    """Remove the copies taken more than ``keep_days`` days ago, and half-written ones a crash left;
+    returns how many files went. Called by the retention sweep, so what a copy still holds after
+    blanking - key hashes, ids, the audit trail - lives at most ``keep_days`` plus a sweep interval.
+    ``keep_days=0`` removes every copy: the first sweep after an upgrade takes the one it made."""
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(days=keep_days)
+    removed = 0
+    with contextlib.suppress(OSError):  # no directory, no copies
+        for taken, path in _our_copies(db_path):
+            if taken < cutoff:
+                _remove_copy(path)
+                removed += 1
+        debris = re.compile(rf"\.{re.escape(db_path.stem)}-v\d+-\d{{8}}T\d{{12}}Z\.db\.partial")
+        for path in _backup_directory(db_path).iterdir():
+            if not (debris.fullmatch(path.name) and path.is_file() and not path.is_symlink()):
+                continue  # not ours; and nothing is statted before it is known to be
+            if now.timestamp() - path.stat().st_mtime > _STALE_PARTIAL_S:
+                _remove_copy(path)
+                removed += 1
+    return removed
 
 
 def _copy_first(conn: Connection, db_path: Path, version: int) -> Path | None:
     """Called under the write lock, before the first step that changes anything."""
-    if not _holds_data(conn):
-        return None
-    path = _take_backup(db_path, version)
-    _prune_backups(db_path)
-    return path
+    return _take_backup(db_path, version) if _holds_data(conn) else None
 
 
 # --- applying ----------------------------------------------------------------------------------
@@ -472,13 +559,17 @@ def _create_current(conn: Connection, latest: int) -> None:
     _stamp(conn, latest)
 
 
-def _adopt_baseline(conn: Connection) -> None:
-    """Version 0 becomes version 1: the tables there are must be the baseline's, the tables there
-    are not are made. The check comes first, so a refusal has changed nothing."""
+def _check_baseline(conn: Connection) -> None:
+    """The tables a version-0 file has must be the baseline's. Before anything is copied or made,
+    so a refusal has changed nothing and left nothing behind."""
     problem = _schema_problem(conn, BASELINE_SCHEMA)
     if problem is not None:
         msg = f"the database does not match this release: {problem}; left unchanged"
         raise MigrationError(msg)
+
+
+def _adopt_baseline(conn: Connection) -> None:
+    """Version 0 becomes version 1: the baseline's tables the file lacks are made."""
     wanted = [t for t in Base.metadata.sorted_tables if t.name in BASELINE_SCHEMA]
     Base.metadata.create_all(conn, tables=wanted)
     _stamp(conn, BASELINE_VERSION)
@@ -517,31 +608,39 @@ def _upgrade(
     applied: list[str] = []
     backup: Path | None = None
     copy_settled = False  # whether the question of a copy has been put, and answered, this run
-    if start == 0:
-        with _exclusive(runner, timeout_s) as conn:
-            version = _version(conn)
-            _refuse_newer(version, latest)
-            if version == 0 and not _has_schema(conn):
-                _create_current(conn, latest)
-                return MigrationResult(0, latest, (), None)
-            if version == 0:
-                if latest > BASELINE_VERSION:  # a migration will follow: copy what it will change
-                    backup, copy_settled = _copy_first(conn, db_path, 0), True
-                _adopt_baseline(conn)
-                applied.append(BASELINE_NAME)
-        if applied:
-            log.info("db_migration_applied", version=BASELINE_VERSION, migration=BASELINE_NAME)
-    for m in registry:
-        with _exclusive(runner, timeout_s) as conn:
-            current = _version(conn)  # again, under the lock: another process may have been here
-            _refuse_newer(current, latest)
-            if current >= m.version:
-                continue
-            if not copy_settled:
-                backup, copy_settled = _copy_first(conn, db_path, current), True
-            _run_migration(conn, m, current)
-        applied.append(m.name)
-        log.info("db_migration_applied", version=m.version, migration=m.name)
+    try:
+        if start == 0:
+            with _exclusive(runner, timeout_s) as conn:
+                version = _version(conn)
+                _refuse_newer(version, latest)
+                if version == 0 and not _has_schema(conn):
+                    _create_current(conn, latest)
+                    return MigrationResult(0, latest, (), None)
+                if version == 0:
+                    _check_baseline(conn)
+                    if latest > BASELINE_VERSION:  # a migration will follow: copy what it changes
+                        backup, copy_settled = _copy_first(conn, db_path, 0), True
+                    _adopt_baseline(conn)
+                    applied.append(BASELINE_NAME)
+            if applied:
+                log.info("db_migration_applied", version=BASELINE_VERSION, migration=BASELINE_NAME)
+        for m in registry:
+            with _exclusive(runner, timeout_s) as conn:
+                current = _version(conn)  # again, under the lock: another process may have run
+                _refuse_newer(current, latest)
+                if current >= m.version:
+                    continue
+                if not copy_settled:
+                    backup, copy_settled = _copy_first(conn, db_path, current), True
+                _run_migration(conn, m, current)
+                applied.append(m.name)
+            log.info("db_migration_applied", version=m.version, migration=m.name)
+    except BaseException:
+        if backup is not None and not applied:
+            _remove_copy(backup)  # nothing changed, so the copy is the file as it stands
+        raise
+    if backup is not None:
+        _prune_backups(db_path)  # only now: a failing start must not wear out the copies
     return MigrationResult(start, latest, tuple(applied), backup)
 
 
