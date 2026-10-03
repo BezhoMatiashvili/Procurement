@@ -102,6 +102,12 @@ Every upload is treated as hostile (`security/upload_guard.py`):
   those routes first and answers 401/403 itself. Measured over a real socket: an anonymous
   upload declaring 90 MB is answered 401 and the connection closed while its body is still
   unsent; a 5 MB JSON post to a route that takes 1 MiB is answered 413 the same way;
+* **where an upload's bytes are while it is handled.** Starlette keeps a file part in memory up
+  to 1 MiB and moves anything larger to an unnamed temporary file in `/tmp` - the container's
+  2 GB `noexec` tmpfs (§7), so those pages count against its memory - which the request closes
+  when it ends, accepted or refused (`tests/integration/test_hardening_web.py`). The route
+  then copies the part into memory (up to the file limit plus a 1 MiB chunk, and once more as
+  `bytes`), and only an accepted upload is written to the data directory;
 * OOXML archives: at most 10,000 entries, 512 MiB inflated in total and 256 MiB per entry, a
   200:1 compression ratio, `[Content_Types].xml` at most 1 MiB; duplicate and overlapping
   entries, path-traversal names, encrypted entries, any VBA part or macro content type, and any

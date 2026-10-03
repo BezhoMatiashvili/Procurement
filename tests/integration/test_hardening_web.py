@@ -837,6 +837,58 @@ def test_a_failed_commit_overwrites_the_uploaded_file_before_removing_it(
     assert left and left == b"\0" * len(left), "the upload was unlinked with its bytes in place"
 
 
+def _big_docx() -> bytes:
+    """A Word file over 1 MiB however well it compresses: random letters do not compress to
+    much less than half."""
+    import random
+
+    from docx import Document as WordDocument
+
+    rng = random.Random(7)
+    doc = WordDocument()
+    for _ in range(60):
+        doc.add_paragraph("".join(rng.choices("abcdefghijklmnopqrstuvwxyz ", k=60_000)))
+    out = io.BytesIO()
+    doc.save(out)
+    assert len(out.getvalue()) > 1024 * 1024
+    return out.getvalue()
+
+
+@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="reads the open files from /proc")
+@pytest.mark.parametrize("accepted", [False, True], ids=["refused", "accepted"])
+def test_a_large_upload_is_spooled_to_the_temp_directory_and_closed_with_the_request(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, accepted: bool
+) -> None:
+    """Starlette keeps a file part in memory up to 1 MiB and then moves it to an unnamed file in
+    the temp directory (``/tmp``, a tmpfs in the container). The request closes it, whether the
+    upload is accepted or refused, so nothing of it outlives the request."""
+    import contextlib
+    import tempfile
+
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(spool))
+    rolled: list[bool] = []
+    real_rollover = tempfile.SpooledTemporaryFile.rollover
+
+    def spy(self: tempfile.SpooledTemporaryFile[bytes]) -> None:
+        rolled.append(True)
+        real_rollover(self)
+
+    monkeypatch.setattr(tempfile.SpooledTemporaryFile, "rollover", spy)
+    upload = ("a.docx", _big_docx()) if accepted else ("a.xlsx", b"x" * (3 * 1024 * 1024))
+    r = client.post("/api/v1/documents", headers=H, files={"file": upload})
+    # a workbook that is none is refused after the whole body was read; the Word file is stored
+    assert r.status_code == (201 if accepted else 400)
+    assert rolled, "a part over 1 MiB is moved out of memory"
+    assert list(spool.iterdir()) == [], "and the file has no name in the directory"
+    still_open = []
+    for fd in list(Path("/proc/self/fd").iterdir()):
+        with contextlib.suppress(OSError):  # the directory's own descriptor is already gone
+            still_open.append(str(fd.readlink()))
+    assert not [path for path in still_open if str(spool) in path], "and is closed"
+
+
 # --- 8. UI refusals render pages -----------------------------------------------------------
 
 
