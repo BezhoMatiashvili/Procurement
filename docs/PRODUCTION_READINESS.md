@@ -21,6 +21,7 @@ deployer duty or an open item.
 | Per-user cap on queued + running jobs | [x] | `PA_MAX_ACTIVE_JOBS_PER_USER` |
 | Upload validation: extension allow-list, magic bytes, zip-bomb limits, macro/VBA refusal, page limit, encrypted PDFs refused | [x] | `security/upload_guard.py` |
 | Request-body cap per route, counted on streamed bytes (chunked bodies included): 1 MiB on every route that takes no file, 2 × `PA_MAX_FILE_MB` + 1 MB on the upload routes, where the caller is authenticated *before* the body is read | [x] | `security/body_limit.py`, `security/preauth.py`; live-socket check in `scripts/offline_smoke.py` |
+| The relay applies the same table first and answers the same 413 itself, from the announced length (a chunked body is cut off by `request_body`); the oversize body is never forwarded. Without it the app's early 413 and close showed through the relay as 502 (measured on the three-container stack: 29 of 30 requests with a 1.2 MB body; with it, 30 of 30 are 413) | [x] | `docker-compose.yml` (`proxy`), `tests/unit/test_relay_policy.py` fails when the two tables drift |
 | Hostile-input bounds: no exponential or quadratic reading of document text (patterns fixed, runs and tokens bounded, text/cell budgets), bounded rendering, workbook cell count refused before load, one lock around the app's own pdfium use | [x] | `ingestion/text_limits.py`, `ingestion/xlsx_size.py`, `ingestion/render.py`, `ingestion/pdfium_lock.py`; `tests/regex_budget.py`, `scripts/audit_resources.py` |
 | Bounded report work: at most `PA_MAX_CONCURRENT_REPORTS` computed at once, the rest 503 + `Retry-After` | [x] | `security/capacity.py` |
 | Annotated Word output drops external relationships, embedded objects, risky fields | [x] | `report/docx_sanitize.py` |
@@ -129,7 +130,9 @@ the relay cannot reach Ollama; verify with the command in SECURITY.md §2.
   `Host`, and a rewritten `Host` would refuse every UI form post. The relay passes `Host`
   through unchanged.
 - [ ] Allow request bodies of at least 2 × `PA_MAX_FILE_MB` + 1 MB (101 MB at the default) and
-  keep read timeouts long enough for a 100 MB upload on the slowest client link.
+  keep read timeouts long enough for a 100 MB upload on the slowest client link. (The relay
+  behind your proxy refuses anything larger with the app's 413; it reads `PA_MAX_FILE_MB` from
+  the same `.env` and will not start on a value that is not a whole number.)
 - [ ] Do not cache `/api/` responses (the app already sends `Cache-Control: no-store`).
 
 ### 5.3 Host and volumes

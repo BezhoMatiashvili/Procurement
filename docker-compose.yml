@@ -128,8 +128,18 @@ services:
     # more thing to copy to the air-gapped server.
     entrypoint: ["/bin/sh", "-c"]
     command:
-      - printf '%s' "$$CADDYFILE" > /config/Caddyfile && exec caddy run --adapter caddyfile --config /config/Caddyfile
+      # The upload cap is 2 x PA_MAX_FILE_MB + 1 MiB, the app's own formula (Settings.
+      # max_request_bytes), from the same .env variable. Caddy cannot do arithmetic, so it is
+      # worked out here and handed over as an exact byte count. A value the app would not accept
+      # as a whole number of megabytes stops the relay instead of leaving the uploads uncapped.
+      - |
+        case "$$PA_MAX_FILE_MB" in
+          ''|0*|*[!0-9]*) echo "relay: PA_MAX_FILE_MB must be a whole number of megabytes, no leading zero" >&2; exit 1;;
+        esac
+        export PA_UPLOAD_MAX_BYTES=$$(( (2 * PA_MAX_FILE_MB + 1) * 1048576 ))
+        printf '%s' "$$CADDYFILE" > /config/Caddyfile && exec caddy run --adapter caddyfile --config /config/Caddyfile
     environment:
+      PA_MAX_FILE_MB: ${PA_MAX_FILE_MB:-50}
       CADDYFILE: |
         {
           admin off
@@ -155,10 +165,57 @@ services:
             }
           }
         }
-        :8080 {
+        (capped) {
+          # {args[0]} is the most bytes a request may carry, an exact count (Caddy would read "MB"
+          # as 10^6). A body that announces more is refused with the app's own answer before one
+          # byte of it is forwarded; a chunked body, which announces nothing, is cut off by
+          # request_body once it has delivered more.
+          @over expression `size({http.request.header.Content-Length}) > 0 && int({http.request.header.Content-Length}) > {args[0]}`
+          header @over {
+            Content-Type application/json
+            Cache-Control no-store
+            Content-Security-Policy "default-src 'none'; frame-ancestors 'none'"
+            X-Content-Type-Options nosniff
+            X-Frame-Options DENY
+            Referrer-Policy no-referrer
+            Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), bluetooth=(), accelerometer=(), gyroscope=(), magnetometer=(), interest-cohort=()"
+            Cross-Origin-Opener-Policy same-origin
+            Cross-Origin-Resource-Policy same-origin
+            X-Permitted-Cross-Domain-Policies none
+            Strict-Transport-Security "max-age=31536000; includeSubDomains"
+          }
+          respond @over `{"detail":"request body too large"}` 413 {
+            close
+          }
+          request_body {
+            max_size {args[0]}
+          }
+          # The app sends no Server header (uvicorn --no-server-header); neither does the relay,
+          # and it adds no Via: there is nothing to tell a caller which software answered.
+          header -Server
+          header -Via
           reverse_proxy app:8000 {
             # One value, the resolved client address: the app trusts this hop only.
             header_up X-Forwarded-For {client_ip}
+          }
+        }
+        :8080 {
+          # Body caps, the same table the app enforces (security/body_limit.py, security/preauth.py;
+          # tests/unit/test_relay_policy.py fails if they drift). They are applied here as well
+          # because the app answers 413 as soon as it has counted past its cap and closes the
+          # connection while the relay is still sending: the relay turned that reset into a 502
+          # (11-14 of 15 requests over 1 MiB). Refused here, the caller gets the 413 and the
+          # oversize body is never forwarded. Only the routes that take a file may carry more
+          # than 1 MiB (1048576 bytes); every other path, listed or not, is held to it.
+          @upload {
+            method POST
+            path /api/v1/documents /ui/documents/upload /ui/start/aoa /ui/start/compare
+          }
+          handle @upload {
+            import capped {$$PA_UPLOAD_MAX_BYTES}
+          }
+          handle {
+            import capped 1048576
           }
         }
     ports:
