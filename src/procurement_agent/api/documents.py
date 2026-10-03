@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import math
-from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, status
@@ -19,6 +18,7 @@ from procurement_agent.api.deps import (
     owned_documents,
 )
 from procurement_agent.api.refusals import audit_or_503
+from procurement_agent.api.timefmt import UtcTime
 from procurement_agent.config import Settings, get_settings
 from procurement_agent.db import get_session
 from procurement_agent.extraction.pipeline import upload_path
@@ -55,8 +55,8 @@ class DocumentOut(BaseModel):
     #: how much of the document was read (``ingestion.read_quality``); None while it is not
     #: parsed, and for a document parsed before this was recorded
     read_quality: ReadQuality | None = None
-    created_at: datetime
-    expires_at: datetime | None
+    created_at: UtcTime
+    expires_at: UtcTime | None
 
 
 class UploadOut(BaseModel):

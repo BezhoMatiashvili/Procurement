@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -16,6 +15,7 @@ from procurement_agent.api.deps import (
     owned_job,
 )
 from procurement_agent.api.refusals import audit_or_503, require_readable
+from procurement_agent.api.timefmt import UtcTime
 from procurement_agent.config import Settings, get_settings
 from procurement_agent.db import get_session
 from procurement_agent.extraction.export import to_xlsx
@@ -47,9 +47,9 @@ class JobOut(BaseModel):
     status: JobStatus
     progress: int
     message: str | None
-    created_at: datetime
-    started_at: datetime | None
-    finished_at: datetime | None
+    created_at: UtcTime
+    started_at: UtcTime | None
+    finished_at: UtcTime | None
     #: the job is done, but the model that was asked did not answer: the result is the rules'
     #: alone (``LLM_UNAVAILABLE`` in its message and its warnings)
     degraded: bool = False

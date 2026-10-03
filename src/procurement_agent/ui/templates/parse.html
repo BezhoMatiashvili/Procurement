@@ -45,7 +45,7 @@
 <ul class="recent">
   {% for j in earlier %}
   <li><a href="/ui/jobs/{{ j.id }}">{{ icon("file-search") }}
-    <span class="name">{{ j.created_at.strftime("%Y-%m-%d %H:%M") }}</span>
+    <span class="name">{{ j.created_at | utc }}</span>
     <span class="when">{{ j.message or "" }}</span></a></li>
   {% endfor %}
 </ul>

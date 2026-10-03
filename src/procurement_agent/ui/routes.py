@@ -48,6 +48,7 @@ from procurement_agent.api.deps import (
 )
 from procurement_agent.api.extraction import ExtractRequest, start_extraction
 from procurement_agent.api.refusals import audit_or_503
+from procurement_agent.api.timefmt import stamp
 from procurement_agent.checks.aoa import ContractorType
 from procurement_agent.checks.compare import ComparisonReport, Hunk, ValueDelta
 from procurement_agent.checks.findings import CheckReport, Finding
@@ -131,6 +132,7 @@ def _money(value: float | None) -> str:
 _env.globals["icon"] = _icon
 _env.globals["asset_v"] = _ASSET_V
 _env.filters["money"] = _money
+_env.filters["utc"] = stamp
 
 
 def _render(request: Request, name: str, **ctx: object) -> Response:
