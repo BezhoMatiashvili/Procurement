@@ -51,16 +51,36 @@ deployer duty or an open item.
   queued jobs are re-queued; a document stuck in `parsing` is released.
 - [x] **Graceful shutdown.** The worker gets `PA_WORKER_STOP_TIMEOUT_S` (30 s) to finish its
   job; compose gives the container `stop_grace_period: 60s` and runs an init process, so
-  SIGTERM reaches uvicorn. Measured: `docker compose stop app` completes in about 0.5 s when
-  idle, with a clean "Application shutdown complete".
+  SIGTERM reaches the supervisor and, at once, uvicorn (the supervisor waits on an event, not in
+  a sleep, which Python resumes after a signal handler returns). Measured on the three-container
+  stack: `docker compose stop app` on an idle app takes 0.7 s (0.66, 0.68 and 0.73 s), exit
+  code 0, with a clean "Application shutdown complete". Before the wait was made interruptible
+  the same command took 7.9 to 11.0 s (9.8 to 15.2 s in an earlier run): whatever was left of the
+  15 s probe interval.
+- [x] **What Docker restarts, and what it does not.** `restart: unless-stopped` restarts the
+  container when its main process exits by itself: a crash, an out-of-memory kill, the
+  supervisor giving up. Measured: SIGKILL of the supervisor inside the container, and the
+  container was running again after 0.8 s and reported healthy after 17.3 s; the API key made
+  before and the uploaded document were still there (they are on the volume). It does **not**
+  restart a container that was stopped by hand: `docker stop`, `docker compose stop` and
+  `docker kill` all count as a manual stop, Docker's semantics, not a fault of this product
+  (measured: after `docker kill` the app stayed `exited (137)`, RestartCount unchanged, for
+  60 s, until `docker compose start app`). Docker's documentation adds that such a container
+  also stays stopped across a restart of the Docker daemon or a reboot of the host (not
+  measured here), so after any maintenance stop run `docker compose up -d` and look at
+  `docker compose ps`.
 - [x] **Start order.** The app waits for Ollama's healthcheck (`ollama list`); the relay starts
   after the app.
 - [x] **Restart when hung.** Compose marks an unready container `unhealthy` but never restarts
   it, and a request that spins in a regular expression or a native parser freezes the process
   from inside. The compose command is `scripts/supervise.py`, a standard-library process that
   probes `/ready` over loopback and restarts the server after three failed probes in a row (see
-  SECURITY.md §7). The running job is failed; nothing else is lost. Still wire `/ready` into
-  whatever monitoring the client runs, so a restart loop is noticed.
+  SECURITY.md §7). The running job is failed; nothing else is lost. Measured hang drill
+  (SIGSTOP of uvicorn once it was past its 180 s start-up): the three failed probes at 17.5,
+  37.5 and 57.5 s, SIGKILL at 107.6 s (a stopped process cannot act on SIGTERM, so the full
+  50 s wait is spent), the new server started at once and the relay answered `/ready` again
+  124.2 s after the stop: one restart, none after it. Still wire `/ready` into whatever
+  monitoring the client runs, so a restart loop is noticed.
 
 ## 3. Observability
 

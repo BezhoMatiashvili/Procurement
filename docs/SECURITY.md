@@ -274,10 +274,16 @@ thread included - can run to notice, and Docker restarts on exit, not on a faile
 The compose command is therefore `scripts/supervise.py`: a small standard-library process that
 probes `/ready` over loopback every 15 s, and after three consecutive failures (once the
 180 s model-loading start-up is over) sends SIGTERM, then SIGKILL after 50 s, and starts the
-server again; after five restarts in ten minutes it exits non-zero rather than loop. A restart
-fails the job that was running and loses nothing else.
+server again; after five restarts in ten minutes it exits non-zero, and Docker's restart policy
+then starts the container again, as after any exit (the log shows `giving_up`). A restart fails
+the job that was running and loses nothing else. Every wait of the supervisor is on an event that
+the SIGTERM handler sets, so `docker compose stop` reaches the server at once (measured: 0.7 s
+on an idle app); a probe to a server that does not answer is abandoned when the stop arrives.
 `tests/integration/test_supervisor_real_app.py` freezes the real server (`SIGSTOP`, which is what
-a wedged interpreter looks like from outside) and checks it is killed and comes back.
+a wedged interpreter looks like from outside) and checks it is killed and comes back; on the
+three-container stack the same drill measured one restart, 107.6 s after the stop, the relay
+answering again at 124.2 s. A restart is Docker's only on an exit by itself: a container stopped
+by hand (`docker kill`, `docker compose stop`) stays stopped until `docker compose start` or `up`.
 The supervisor cannot tell a hang from any other reason `/ready` does not answer 200: a
 `database` or `worker_stalled` answer restarts the server too, and so would a thread pool held
 for a minute by other requests (`/ready` runs on it), which also fails the running job. The
