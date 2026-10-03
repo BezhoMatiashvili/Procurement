@@ -138,6 +138,28 @@ def test_a_failed_cache_write_leaves_no_partial_file(
     assert list((tmp_path / "out").iterdir()) == []
 
 
+def test_a_failed_cache_write_overwrites_the_partial_file_before_removing_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    from docling_core.types.doc.document import DoclingDocument
+
+    kept = tmp_path / "alias"
+
+    def half_write(self: DoclingDocument, filename: Path, **_: object) -> None:
+        Path(filename).write_text('{"text": "half of a document\'s text', encoding="utf-8")
+        os.link(filename, kept)  # another name for the bytes: unlinking leaves them
+        raise OSError("disk full")
+
+    monkeypatch.setattr(DoclingDocument, "save_as_json", half_write)
+    with pytest.raises(OSError, match="disk full"):
+        docling_service.save_document(DoclingDocument(name="x"), tmp_path / "out")
+    assert list((tmp_path / "out").iterdir()) == []
+    left = kept.read_bytes()
+    assert left and left == b"\0" * len(left), "the partial parse was unlinked with its text"
+
+
 # --- converter singleton follows the settings (audit 25) ----------------------------------------
 
 

@@ -48,7 +48,7 @@ from procurement_agent.extraction.pipeline import (
 from procurement_agent.extraction.schemas import FactType
 from procurement_agent.history import forget_runs
 from procurement_agent.ingestion import docling_service
-from procurement_agent.jobs.retention import delete_document_files, reconcile
+from procurement_agent.jobs.retention import delete_document_files, reconcile, remove_file
 from procurement_agent.llm.base import LLMClient
 from procurement_agent.models import Document, DocumentStatus, Job, JobStatus, UiSession
 from procurement_agent.security.audit import audit, log
@@ -261,7 +261,7 @@ class Worker:
         a live one only loses this job's own output file.
         """
         if output is not None:
-            output.unlink(missing_ok=True)
+            remove_file(output)
         with session_scope() as s:
             gone = [
                 (doc_id, kind)

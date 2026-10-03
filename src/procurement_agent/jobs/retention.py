@@ -33,7 +33,14 @@ from procurement_agent.models import Document, DocumentStatus, Job, JobStatus
 from procurement_agent.security.audit import log
 from procurement_agent.security.safe_errors import safe_exc
 
-__all__ = ["GRACE_S", "Reconciled", "delete_document_files", "overwrite", "reconcile"]
+__all__ = [
+    "GRACE_S",
+    "Reconciled",
+    "delete_document_files",
+    "overwrite",
+    "reconcile",
+    "remove_file",
+]
 
 #: A file whose document is not in the database is an orphan only after this long.
 GRACE_S = 15 * 60
@@ -71,7 +78,9 @@ def overwrite(path: Path) -> None:
         pass
 
 
-def _remove_file(path: Path) -> None:
+def remove_file(path: Path) -> None:
+    """Overwrite a file, then unlink it: how anything document-derived leaves the data directory,
+    whether a deletion removes it or a job discards it."""
     overwrite(path)
     path.unlink(missing_ok=True)
 
@@ -88,7 +97,7 @@ def delete_document_files(settings: Settings, doc_id: str, kind: str) -> bool:
     quote it. Keeps going past a failure; returns True only when nothing is left."""
     complete = True
     for action in (
-        lambda: _remove_file(upload_path(settings, doc_id, kind)),
+        lambda: remove_file(upload_path(settings, doc_id, kind)),
         lambda: (
             _remove_tree(result_dir(settings, doc_id))
             if result_dir(settings, doc_id).exists()
@@ -115,7 +124,7 @@ def forget_derived_outputs(settings: Settings, doc_id: str) -> int:
                 continue
             output = result_dir(settings, job.document_id) / "jobs" / f"{job.id}.json"
             if output.exists():
-                _remove_file(output)
+                remove_file(output)
                 removed += 1
             job.params = {}
     return removed
@@ -182,7 +191,7 @@ def reconcile(
         for path in settings.upload_dir.iterdir():
             named = _UPLOAD_NAME.fullmatch(path.name)
             if named and path.is_file() and not path.is_symlink() and orphan(named.group(1), path):
-                found.files += attempt(path, _remove_file)
+                found.files += attempt(path, remove_file)
     if settings.results_dir.is_dir():
         for path in settings.results_dir.iterdir():
             if (
@@ -197,11 +206,11 @@ def reconcile(
             continue
         output = result_dir(settings, document_id) / "jobs" / f"{job_id}.json"
         if output.exists():
-            found.derived += attempt(output, _remove_file)
+            found.derived += attempt(output, remove_file)
     if settings.results_dir.is_dir():
         for tmp in settings.results_dir.glob("*/.docling.*.json.tmp"):
             if _age(tmp, now) > STALE_TMP_S:
-                found.debris += attempt(tmp, _remove_file)
+                found.debris += attempt(tmp, remove_file)
     if found.total or found.failed:
         log.info(
             "retention_reconciled",

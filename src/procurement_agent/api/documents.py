@@ -22,7 +22,7 @@ from procurement_agent.config import Settings, get_settings
 from procurement_agent.db import get_session
 from procurement_agent.extraction.pipeline import upload_path
 from procurement_agent.ingestion.render import MAX_BOXES, PageTooLargeError, render_page
-from procurement_agent.jobs.retention import delete_document_files
+from procurement_agent.jobs.retention import delete_document_files, remove_file
 from procurement_agent.jobs.worker import (
     Worker,
     mark_deleted,
@@ -168,7 +168,7 @@ def _store_upload(
         target.chmod(0o600)
         session.commit()
     except BaseException:
-        target.unlink(missing_ok=True)
+        remove_file(target)
         raise
     worker.submit(job.id)
     return UploadOut(document=_out(doc), parse_job_id=job.id)

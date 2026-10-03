@@ -140,14 +140,14 @@ def test_a_file_that_will_not_go_does_not_stop_the_rest(
     settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     doc_id = _doc(settings)
-    real = retention._remove_file
+    real = retention.remove_file
 
     def refuse_the_upload(path: Path) -> None:
         if path.parent == settings.upload_dir:
             raise PermissionError(13, "denied", str(path))
         real(path)
 
-    monkeypatch.setattr(retention, "_remove_file", refuse_the_upload)
+    monkeypatch.setattr(retention, "remove_file", refuse_the_upload)
     assert delete_document_files(settings, doc_id, "docx") is False
     upload_left, results_left = _exists(settings, doc_id)
     assert upload_left is True  # the one that was refused is still there...
@@ -159,7 +159,7 @@ def test_a_failure_is_logged_by_kind_never_by_path(
 ) -> None:
     doc_id = _doc(settings)
     monkeypatch.setattr(
-        retention, "_remove_file", lambda p: (_ for _ in ()).throw(PermissionError(13, "x", str(p)))
+        retention, "remove_file", lambda p: (_ for _ in ()).throw(PermissionError(13, "x", str(p)))
     )
     delete_document_files(settings, doc_id, "docx")
     out = capsys.readouterr().out
@@ -180,7 +180,7 @@ def test_one_failing_document_does_not_strand_the_rest_and_is_retried(
     settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ids = [_doc(settings, expired=True) for _ in range(3)]
-    real = retention._remove_file
+    real = retention.remove_file
     broken = {"on": True}
 
     def flaky(path: Path) -> None:
@@ -188,7 +188,7 @@ def test_one_failing_document_does_not_strand_the_rest_and_is_retried(
             raise PermissionError(13, "denied")
         real(path)
 
-    monkeypatch.setattr(retention, "_remove_file", flaky)
+    monkeypatch.setattr(retention, "remove_file", flaky)
     worker = _worker(settings)
     assert worker.sweep_expired() == 3
     assert _exists(settings, ids[0]) == (False, False)
@@ -298,10 +298,10 @@ def test_a_removal_that_fails_is_counted_and_does_not_stop_the_pass(
     settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ids = [_doc(settings, status=DocumentStatus.deleted) for _ in range(3)]
-    real = retention._remove_file
+    real = retention.remove_file
     monkeypatch.setattr(
         retention,
-        "_remove_file",
+        "remove_file",
         lambda p: (_ for _ in ()).throw(OSError(5, "io")) if ids[0] in p.name else real(p),
     )
     found = reconcile(settings)
@@ -468,6 +468,31 @@ def test_forget_cached_text_empties_exactly_the_text_keyed_caches() -> None:
     assert all(c.cache_info().currsize >= 1 for c in cached)
     caches.forget_cached_text()
     assert all(c.cache_info().currsize == 0 for c in cached)
+
+
+# --- what a job discards is overwritten, not only unlinked --------------------------------------
+
+
+def _alias(path: Path, into: Path) -> Path:
+    """A second name for the file's bytes. Unlinking the first name leaves them as they were; only
+    a removal that overwrites the file in place changes what this one reads."""
+    alias = into / f"alias-{path.name}"
+    os.link(path, alias)
+    return alias
+
+
+def test_a_job_output_that_lost_the_race_with_a_deletion_is_overwritten(
+    settings: Settings, tmp_path: Path
+) -> None:
+    doc_id = _doc(settings)
+    worker = _worker(settings)
+    out = worker._write_output(doc_id, "j1", MARKER.decode() * 20)
+    size = out.stat().st_size
+    alias = _alias(out, tmp_path)
+    worker._discard([(doc_id, "docx")], out)  # the document is alive: only this output goes
+    assert not out.exists()
+    assert alias.read_bytes() == b"\0" * size, "the output was unlinked with its text on the disk"
+    assert upload_path(settings, doc_id, "docx").exists()
 
 
 # --- the speller's word memos --------------------------------------------------------------------

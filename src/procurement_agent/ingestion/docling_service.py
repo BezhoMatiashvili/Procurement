@@ -378,8 +378,11 @@ def save_document(doc: DoclingDocument, out_dir: Path) -> Path:
         tmp.chmod(0o600)
         tmp.replace(target)  # atomic within one directory
     except BaseException:
+        # imported here: retention reads the pipeline, which imports this module
+        from procurement_agent.jobs.retention import remove_file
+
         with contextlib.suppress(OSError):
-            tmp.unlink()
+            remove_file(tmp)  # a half-written parse is document text: overwritten, then removed
         raise
     return target
 

@@ -275,8 +275,12 @@ and on `python -m procurement_agent.cli sweep`. Users can delete immediately fro
   user typed (a job's parameters), and the in-process caches that hold document text (the
   acceptance-act check's two text-keyed caches and the words the spelling dictionary was asked
   about; the dictionary itself stays loaded);
-* overwrites a file and syncs it before unlinking it, and SQLite zeroes deleted cells
-  (`secure_delete`) and the write-ahead log is truncated after every sweep.
+* overwrites a file and syncs it before unlinking it - every file of the document, and every
+  document-derived file the application drops under the data directory (the output of a job
+  that lost the race with a deletion, an upload whose database commit failed, a half-written
+  parse) - and SQLite zeroes deleted cells (`secure_delete`) and the write-ahead log is
+  truncated after every sweep. The annotated and merged files built for a download live in
+  `/tmp` (a tmpfs, §7) and are only unlinked.
 
 The metadata row is kept (name replaced by `[deleted]`) so the audit trail stays consistent.
 The overwrite is best-effort: on a journaling or copy-on-write filesystem or an SSD it does not

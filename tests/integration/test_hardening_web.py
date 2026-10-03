@@ -807,6 +807,36 @@ def test_a_failed_commit_takes_the_uploaded_file_with_it(
     assert not list(_settings_of(client).upload_dir.glob("*"))
 
 
+def test_a_failed_commit_overwrites_the_uploaded_file_before_removing_it(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import os
+
+    from sqlalchemy.orm import Session
+
+    uploads = _settings_of(client).upload_dir
+    kept: list[Path] = []
+
+    real_commit = Session.commit
+
+    def failing_commit(self: Session) -> None:
+        written = list(uploads.glob("*"))
+        if not written:  # a commit before the upload is stored: not the one that fails
+            real_commit(self)
+            return
+        kept.append(tmp_path / "alias")  # another name for the bytes: unlinking leaves them
+        os.link(written[0], kept[0])
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(Session, "commit", failing_commit)
+    with pytest.raises(RuntimeError, match="disk full"):
+        client.post("/api/v1/documents", headers=H, files={"file": ("a.xlsx", _xlsx())})
+    monkeypatch.undo()
+    assert not list(uploads.glob("*"))
+    left = kept[0].read_bytes()
+    assert left and left == b"\0" * len(left), "the upload was unlinked with its bytes in place"
+
+
 # --- 8. UI refusals render pages -----------------------------------------------------------
 
 
