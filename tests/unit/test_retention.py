@@ -554,3 +554,51 @@ def test_forgetting_word_memos_is_safe_when_no_speller_is_loaded() -> None:
     aoa_spelling._load.cache_clear()  # as on a server with no dictionary: nothing was loaded
     gc.collect()  # and a speller another test built directly is gone too
     assert caches.forget_cached_text() == 0
+
+
+# --- the read-quality sidecar goes with its document ------------------------------------------
+
+
+def _with_sidecar(settings: Settings, doc_id: str) -> Path:
+    from procurement_agent.ingestion.read_quality import ReadQuality, write_quality
+
+    return write_quality(
+        settings,
+        doc_id,
+        ReadQuality(
+            kind="docx", pages_total=None, pages_with_text=None, text_chars=9, partial=False
+        ),
+    )
+
+
+def test_deleting_a_document_removes_its_read_quality_sidecar(settings: Settings) -> None:
+    doc_id = _doc(settings)
+    sidecar = _with_sidecar(settings, doc_id)
+    assert sidecar.exists()
+    assert delete_document_files(settings, doc_id, "docx")
+    assert not sidecar.exists()
+    assert not result_dir(settings, doc_id).exists()
+
+
+def test_the_sweep_removes_the_sidecar_of_a_deleted_or_unknown_document(settings: Settings) -> None:
+    gone = _doc(settings, status=DocumentStatus.deleted)
+    stray = "f" * 32
+    _files(settings, stray)
+    sidecars = [_with_sidecar(settings, gone), _with_sidecar(settings, stray)]
+    _old(result_dir(settings, stray), GRACE_S + 60)
+    reconcile(settings)
+    assert not any(p.exists() for p in sidecars)
+
+
+def test_a_half_written_sidecar_is_debris_after_an_hour_like_a_half_written_parse(
+    settings: Settings,
+) -> None:
+    doc_id = _doc(settings)
+    old = result_dir(settings, doc_id) / ".read_quality.abc123.json.tmp"
+    new = result_dir(settings, doc_id) / ".read_quality.def456.json.tmp"
+    old.write_text("{}")
+    new.write_text("{}")
+    _old(old, 2 * 3600)
+    found = reconcile(settings)
+    assert not old.exists() and new.exists()
+    assert found.debris == 1

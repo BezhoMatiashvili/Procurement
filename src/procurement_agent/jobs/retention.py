@@ -46,6 +46,8 @@ __all__ = [
 GRACE_S = 15 * 60
 #: Half-written parse output (``docling_service.save_document``) older than this is debris.
 STALE_TMP_S = 60 * 60
+#: What a crash mid-write leaves in a document's results: the parse and its read-quality sidecar.
+_DEBRIS = ("*/.docling.*.json.tmp", "*/.read_quality.*.json.tmp")
 #: Overwritten in blocks this size, so a large file is not read into memory.
 _BLOCK = 1024 * 1024
 #: What this application names its files: a document id, with the kind for an upload. Anything
@@ -208,9 +210,10 @@ def reconcile(
         if output.exists():
             found.derived += attempt(output, remove_file)
     if settings.results_dir.is_dir():
-        for tmp in settings.results_dir.glob("*/.docling.*.json.tmp"):
-            if _age(tmp, now) > STALE_TMP_S:
-                found.debris += attempt(tmp, remove_file)
+        for pattern in _DEBRIS:
+            for tmp in settings.results_dir.glob(pattern):
+                if _age(tmp, now) > STALE_TMP_S:
+                    found.debris += attempt(tmp, remove_file)
     if found.total or found.failed:
         log.info(
             "retention_reconciled",
