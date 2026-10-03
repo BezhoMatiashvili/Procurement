@@ -31,7 +31,7 @@ from procurement_agent.api.deps import (
     owned_document,
 )
 from procurement_agent.api.extraction import JobOut, _job_out
-from procurement_agent.api.refusals import require_readable, unreadable
+from procurement_agent.api.refusals import audit_or_503, require_readable, unreadable
 from procurement_agent.checks.aoa import ContractorType, check_aoa, scope_review_items
 from procurement_agent.checks.aoa_llm import ScopeReviewSet, review_digest
 from procurement_agent.checks.aoa_spelling import open_speller
@@ -478,7 +478,7 @@ def check_acceptance_act(
         registry_docs=extracts,
     )
 
-    audit(
+    audit_or_503(
         session,
         actor=principal.user,
         action=f"check.aoa.{fmt}",
@@ -690,7 +690,7 @@ def compare_documents(
     explain = owned_explain_job(session, principal, body.explain_job_id, left, right)
     report = run_compare(settings, left, right, explain_job_id=explain.id if explain else None)
 
-    audit(
+    audit_or_503(
         session,
         actor=principal.user,
         action=f"check.compare.{fmt}",
@@ -1137,7 +1137,7 @@ def check_boq(
         if f.severity == "error"
     )
 
-    audit(
+    audit_or_503(
         session,
         actor=principal.user,
         action=f"check.boq.{fmt}",

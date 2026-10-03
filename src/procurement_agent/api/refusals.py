@@ -9,19 +9,25 @@ client reads ``detail.code``.
 from __future__ import annotations
 
 from fastapi import HTTPException, status
+from sqlalchemy.orm import Session
 
 from procurement_agent.config import Settings
 from procurement_agent.ingestion import read_quality as rq
 from procurement_agent.ingestion.read_quality import ReadQuality, StoredParseError
 from procurement_agent.jobs.stuck import fail_unreadable
 from procurement_agent.models import Document, DocumentStatus
+from procurement_agent.security.audit import AuditUnavailableError, audit_committed
 from procurement_agent.ui.i18n import STRINGS
 
-__all__ = ["refusal", "require_readable", "unreadable"]
+__all__ = ["audit_or_503", "refusal", "require_readable", "unreadable"]
 
 
 def refusal(
-    code: str, http_status: int = status.HTTP_409_CONFLICT, *, document_id: str | None = None
+    code: str,
+    http_status: int = status.HTTP_409_CONFLICT,
+    *,
+    document_id: str | None = None,
+    headers: dict[str, str] | None = None,
 ) -> HTTPException:
     """A structured, content-free refusal: ``detail`` is ``{code, message_en, message_ka}``.
 
@@ -32,7 +38,7 @@ def refusal(
     detail: dict[str, str] = {"code": code, "message_en": en, "message_ka": ka}
     if document_id is not None:
         detail["document_id"] = document_id
-    return HTTPException(http_status, detail)
+    return HTTPException(http_status, detail, headers=headers)
 
 
 def unreadable(e: StoredParseError) -> HTTPException:
@@ -60,3 +66,43 @@ def require_readable(settings: Settings, doc: Document) -> ReadQuality:
     if not quality.has_text:
         raise refusal(rq.NO_TEXT, document_id=doc.id)
     return quality
+
+
+#: What a 503 for a lost audit row tells the client to wait.
+_AUDIT_RETRY_AFTER_S = "5"
+
+
+def audit_or_503(
+    session: Session,
+    *,
+    actor: str,
+    action: str,
+    outcome: str = "ok",
+    document_id: str | None = None,
+    job_id: str | None = None,
+    ip: str | None = None,
+    detail: str | None = None,
+) -> None:
+    """Record that a report or a read is about to be served, committed before it is.
+
+    When the record cannot be stored the request fails with a structured 503
+    (``AUDIT_UNAVAILABLE``, in both languages) and serves nothing: a read of client documents
+    that left no trace is not something to hand over. Nothing about the report is in the refusal.
+    """
+    try:
+        audit_committed(
+            session,
+            actor=actor,
+            action=action,
+            outcome=outcome,
+            document_id=document_id,
+            job_id=job_id,
+            ip=ip,
+            detail=detail,
+        )
+    except AuditUnavailableError:
+        raise refusal(
+            "AUDIT_UNAVAILABLE",
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            headers={"Retry-After": _AUDIT_RETRY_AFTER_S},
+        ) from None

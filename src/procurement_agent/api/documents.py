@@ -18,6 +18,7 @@ from procurement_agent.api.deps import (
     owned_document,
     owned_documents,
 )
+from procurement_agent.api.refusals import audit_or_503
 from procurement_agent.config import Settings, get_settings
 from procurement_agent.db import get_session
 from procurement_agent.extraction.pipeline import upload_path
@@ -267,7 +268,7 @@ def page_image(
     except ValueError as e:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(e)) from e
     # A rendered page is document content, so reading it is audited like reading a result.
-    audit(
+    audit_or_503(
         session,
         actor=principal.user,
         action="document.page_view",

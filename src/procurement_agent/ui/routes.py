@@ -47,6 +47,7 @@ from procurement_agent.api.deps import (
     owned_job,
 )
 from procurement_agent.api.extraction import ExtractRequest, start_extraction
+from procurement_agent.api.refusals import audit_or_503
 from procurement_agent.checks.aoa import ContractorType
 from procurement_agent.checks.compare import ComparisonReport, Hunk, ValueDelta
 from procurement_agent.checks.findings import CheckReport, Finding
@@ -463,14 +464,17 @@ def job_page(
         else:
             # Showing the extracted values is reading the document's content, like the API's
             # ``result.read.*`` and the reading page's ``document.content_view``.
-            audit(
-                session,
-                actor=principal.user,
-                action="result.read.ui",
-                document_id=job.document_id,
-                job_id=job.id,
-                ip=client_ip(request),
-            )
+            if (
+                refused := _audited(
+                    request,
+                    principal,
+                    session,
+                    action="result.read.ui",
+                    document_id=job.document_id,
+                    job_id=job.id,
+                )
+            ) is not None:
+                return refused
     return _render(
         request,
         "job.html",
@@ -517,15 +521,18 @@ def _reading_page(
                 fail_unreadable(doc.id)
             view, notes, scanned = None, [], False
         else:
-            audit(
-                session,
-                actor=principal.user,
-                action="document.content_view",
-                document_id=doc.id,
-                job_id=job.id,
-                ip=client_ip(request),
-                detail=f"part {view.part} of {view.parts}",
-            )
+            if (
+                refused := _audited(
+                    request,
+                    principal,
+                    session,
+                    action="document.content_view",
+                    document_id=doc.id,
+                    job_id=job.id,
+                    detail=f"part {view.part} of {view.parts}",
+                )
+            ) is not None:
+                return refused
     earlier = sorted(
         (j for j in doc.jobs if j.kind == "extract" and j.status == JobStatus.done),
         key=lambda j: j.created_at,
@@ -703,14 +710,17 @@ def aoa_report(
         typed_link,
         extracts,
     )
-    audit(
-        session,
-        actor=principal.user,
-        action="check.aoa.json",
-        document_id=aoa_doc.id,
-        ip=client_ip(request),
-        detail=f"{len(report.errors)} error(s), {len(report.findings)} finding(s)",
-    )
+    if (
+        refused := _audited(
+            request,
+            principal,
+            session,
+            action="check.aoa.json",
+            document_id=aoa_doc.id,
+            detail=f"{len(report.errors)} error(s), {len(report.findings)} finding(s)",
+        )
+    ) is not None:
+        return refused
     review_status = review_row.status.value if review_row is not None else None
     resp = _render(
         request,
@@ -825,14 +835,17 @@ def _aoa_file(
         resp = writer(settings, aoa_doc, report)
     except HTTPException as e:
         return _http_error(request, principal, e, "/ui/start/aoa")
-    audit(
-        session,
-        actor=principal.user,
-        action=f"check.aoa.{fmt}",
-        document_id=aoa_doc.id,
-        ip=client_ip(request),
-        detail=f"{len(report.errors)} error(s), {len(report.findings)} finding(s)",
-    )
+    if (
+        refused := _audited(
+            request,
+            principal,
+            session,
+            action=f"check.aoa.{fmt}",
+            document_id=aoa_doc.id,
+            detail=f"{len(report.errors)} error(s), {len(report.findings)} finding(s)",
+        )
+    ) is not None:
+        return refused
     return resp
 
 
@@ -924,14 +937,17 @@ def boq_report(
         documents=[(template_doc.id, "template"), *((d.id, "bid") for d in bid_docs)],
         params={"template": template_doc.id, "bids": [d.id for d in bid_docs]},
     )
-    audit(
-        session,
-        actor=principal.user,
-        action="check.boq.json",
-        document_id=template_doc.id,
-        ip=client_ip(request),
-        detail=f"{len(bid_docs)} bidder(s)",
-    )
+    if (
+        refused := _audited(
+            request,
+            principal,
+            session,
+            action="check.boq.json",
+            document_id=template_doc.id,
+            detail=f"{len(bid_docs)} bidder(s)",
+        )
+    ) is not None:
+        return refused
     # Red and green are decided by ``compare_all`` on the common-scope total - the positions
     # every bidder priced - so a bid that left sections out is still coloured, fairly, and ties
     # share a colour. The page only shows what was decided; it never ranks on its own.
@@ -969,14 +985,17 @@ def boq_merged(
         report, book, books, comparisons = run_boq(settings, template_doc, bid_docs)
     except HTTPException as e:
         return _http_error(request, principal, e, "/ui/start/boq")
-    audit(
-        session,
-        actor=principal.user,
-        action="check.boq.xlsx",
-        document_id=template_doc.id,
-        ip=client_ip(request),
-        detail=f"{len(bid_docs)} bidder(s)",
-    )
+    if (
+        refused := _audited(
+            request,
+            principal,
+            session,
+            action="check.boq.xlsx",
+            document_id=template_doc.id,
+            detail=f"{len(bid_docs)} bidder(s)",
+        )
+    ) is not None:
+        return refused
     return merged_xlsx(book, books, comparisons, template_doc, report)
 
 
@@ -1171,14 +1190,17 @@ def compare_report(
         params={"left": left_doc.id, "right": right_doc.id, **({"job": job} if job else {})},
         keep=("job",),
     )
-    audit(
-        session,
-        actor=principal.user,
-        action="check.compare.json",
-        document_id=right_doc.id,
-        ip=client_ip(request),
-        detail=f"{report.counts.total_changes} change(s), {len(report.errors)} critical",
-    )
+    if (
+        refused := _audited(
+            request,
+            principal,
+            session,
+            action="check.compare.json",
+            document_id=right_doc.id,
+            detail=f"{report.counts.total_changes} change(s), {len(report.errors)} critical",
+        )
+    ) is not None:
+        return refused
     query = urlencode({"left": left_doc.id, "right": right_doc.id, **({"job": job} if job else {})})
     resp = _render(
         request,
@@ -1307,14 +1329,17 @@ def compare_annotated(
         resp = compare_annotated_docx(settings, right_doc, report)
     except HTTPException as e:
         return _http_error(request, principal, e, "/ui/start/compare")
-    audit(
-        session,
-        actor=principal.user,
-        action="check.compare.docx",
-        document_id=right_doc.id,
-        ip=client_ip(request),
-        detail=f"{len(report.findings)} finding(s)",
-    )
+    if (
+        refused := _audited(
+            request,
+            principal,
+            session,
+            action="check.compare.docx",
+            document_id=right_doc.id,
+            detail=f"{len(report.findings)} finding(s)",
+        )
+    ) is not None:
+        return refused
     return resp
 
 
@@ -1336,14 +1361,17 @@ def compare_differences(
         )
     except HTTPException as e:
         return _http_error(request, principal, e, "/ui/start/compare")
-    audit(
-        session,
-        actor=principal.user,
-        action="check.compare.xlsx",
-        document_id=right_doc.id,
-        ip=client_ip(request),
-        detail=f"{report.counts.total_changes} change(s)",
-    )
+    if (
+        refused := _audited(
+            request,
+            principal,
+            session,
+            action="check.compare.xlsx",
+            document_id=right_doc.id,
+            detail=f"{report.counts.total_changes} change(s)",
+        )
+    ) is not None:
+        return refused
     return compare_xlsx(report)
 
 
@@ -1416,6 +1444,36 @@ def _expired(request: Request, principal: Principal, again: str) -> Response:
     special-cases 401.
     """
     return _render(request, "expired.html", user=principal.user, again=again)
+
+
+def _audited(
+    request: Request,
+    principal: Principal,
+    session: Session,
+    *,
+    action: str,
+    document_id: str | None = None,
+    job_id: str | None = None,
+    detail: str | None = None,
+) -> Response | None:
+    """Record that a report or a read is about to be served, and commit the record first.
+
+    None when it is stored. When it cannot be (a locked database, a full disk) the answer is a
+    503 page instead of the report: a read of client documents that left no trace is not served.
+    """
+    try:
+        audit_or_503(
+            session,
+            actor=principal.user,
+            action=action,
+            document_id=document_id,
+            job_id=job_id,
+            ip=client_ip(request),
+            detail=detail,
+        )
+    except HTTPException as e:
+        return _http_error(request, principal, e, "/ui/")
+    return None
 
 
 def _error(

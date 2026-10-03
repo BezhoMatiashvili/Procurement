@@ -15,7 +15,7 @@ from procurement_agent.api.deps import (
     owned_document,
     owned_job,
 )
-from procurement_agent.api.refusals import require_readable
+from procurement_agent.api.refusals import audit_or_503, require_readable
 from procurement_agent.config import Settings, get_settings
 from procurement_agent.db import get_session
 from procurement_agent.extraction.export import to_xlsx
@@ -137,7 +137,7 @@ def get_result(
     if not path.exists():
         raise HTTPException(status.HTTP_404_NOT_FOUND, "result no longer available")
     raw = path.read_text()
-    audit(
+    audit_or_503(
         session,
         actor=principal.user,
         action=f"result.read.{fmt}",

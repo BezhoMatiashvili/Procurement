@@ -233,3 +233,44 @@ def sidecar(client: TestClient, doc_id: str) -> dict[str, object]:
 
 def skip_ids(report: dict[str, object]) -> list[str]:
     return [s["rule_id"] for s in report["skipped"]]  # type: ignore[index, union-attr]
+
+
+def break_audit_commits(
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> dict[str, bool]:
+    """While ``state["on"]``, a commit that would store an audit row fails the way a locked or
+    full database does; every other commit works. Returns the switch.
+
+    The audit row is noticed when it is flushed (the session holds it only weakly after), by an
+    event on the session class that is removed again when the test ends.
+    """
+    from sqlalchemy import event
+    from sqlalchemy.exc import OperationalError
+    from sqlalchemy.orm import Session
+
+    from procurement_agent.models import AuditLog
+
+    state = {"on": False}
+    real = Session.commit
+
+    def noticing(session: Session, *_: object) -> None:
+        if any(isinstance(o, AuditLog) for o in session.new):
+            session.info["audit_pending"] = True
+
+    def forgetting(session: Session) -> None:
+        session.info.pop("audit_pending", None)
+
+    def commit(self: Session) -> None:
+        if state["on"]:
+            self.flush()
+            if self.info.get("audit_pending"):
+                raise OperationalError("COMMIT", {}, Exception("database is locked"))
+        self.info.pop("audit_pending", None)
+        real(self)
+
+    event.listen(Session, "before_flush", noticing)
+    event.listen(Session, "after_rollback", forgetting)
+    request.addfinalizer(lambda: event.remove(Session, "before_flush", noticing))
+    request.addfinalizer(lambda: event.remove(Session, "after_rollback", forgetting))
+    monkeypatch.setattr(Session, "commit", commit)
+    return state

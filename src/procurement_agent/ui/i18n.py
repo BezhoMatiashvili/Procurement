@@ -75,6 +75,12 @@ STRINGS: dict[str, tuple[str, str]] = {
         "What was read from this document is missing or damaged; upload it again.",
         "ამ დოკუმენტიდან წაკითხული მასალა დაკარგულია ან დაზიანებულია; ატვირთეთ თავიდან.",
     ),
+    "error.AUDIT_UNAVAILABLE": (
+        "The record that this was read could not be stored, so it is not shown. Try again in a "
+        "moment.",
+        "ჩანაწერი იმის შესახებ, რომ ეს წაიკითხეს, ვერ შეინახა, ამიტომ ის არ ნაჩვენებია. "
+        "სცადეთ ცოტა ხანში.",
+    ),
     "readq.title": ("Part of a document was not read", "დოკუმენტის ნაწილი არ წაკითხულა"),
     "aoa.verdict.partial": (
         "No findings in what could be read",
