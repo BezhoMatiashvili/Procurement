@@ -269,7 +269,9 @@ and on `python -m procurement_agent.cli sweep`. Users can delete immediately fro
   forgotten;
 * removes what is *derived* from the document: explain/review outputs that live in another
   document's directory and quote it, the record of the checks it took part in, the question a
-  user typed (a job's parameters), and the in-process caches that hold document text;
+  user typed (a job's parameters), and the in-process caches that hold document text (the
+  acceptance-act check's two text-keyed caches and the words the spelling dictionary was asked
+  about; the dictionary itself stays loaded);
 * overwrites a file and syncs it before unlinking it, and SQLite zeroes deleted cells
   (`secure_delete`) and the write-ahead log is truncated after every sweep.
 

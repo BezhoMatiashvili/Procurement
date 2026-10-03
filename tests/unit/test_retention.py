@@ -8,6 +8,7 @@ stayed on the disk for good.
 
 from __future__ import annotations
 
+import gc
 import importlib
 import os
 import pkgutil
@@ -22,7 +23,8 @@ from sqlalchemy import select
 
 import procurement_agent
 import procurement_agent.db as dbmod
-from procurement_agent.checks import aoa
+from procurement_agent.checks import aoa, aoa_spelling
+from procurement_agent.checks.aoa_spelling import Speller, load_speller
 from procurement_agent.config import Settings
 from procurement_agent.db import init_db, session_scope
 from procurement_agent.extraction.pipeline import result_dir, upload_path
@@ -466,3 +468,64 @@ def test_forget_cached_text_empties_exactly_the_text_keyed_caches() -> None:
     assert all(c.cache_info().currsize >= 1 for c in cached)
     caches.forget_cached_text()
     assert all(c.cache_info().currsize == 0 for c in cached)
+
+
+# --- the speller's word memos --------------------------------------------------------------------
+
+
+@pytest.fixture
+def speller(tmp_path: Path) -> Speller:
+    """A real spylls dictionary of one word: loading and the memos run for real."""
+    (tmp_path / "ka_GE.aff").write_text("SET UTF-8\nTRY აბგდევზთიკლმნოპრსტუფქღყშჩცძწჭხჯჰ\n", "utf8")
+    (tmp_path / "ka_GE.dic").write_text("1\nსახლი\n", encoding="utf-8")
+    loaded = load_speller(tmp_path)
+    assert isinstance(loaded, Speller), loaded
+    return loaded
+
+
+def _ask(speller: Speller) -> None:
+    """What a check does with a document's words: asks whether each is known and what is near."""
+    assert speller.known("სახლი")
+    assert not speller.known("სახლო")
+    assert speller.neighbours("სახლო") == ("სახლი",)
+
+
+def test_the_speller_remembers_the_words_a_check_asks_about(speller: Speller) -> None:
+    _ask(speller)
+    assert speller._known
+    assert speller._near
+
+
+def test_forget_cached_text_empties_the_speller_word_memos(speller: Speller) -> None:
+    _ask(speller)
+    assert caches.forget_cached_text() >= 2
+    assert not speller._known
+    assert not speller._near
+    assert speller.known("სახლი"), "the dictionary stays loaded: only the memos go"
+
+
+def test_mark_deleted_empties_the_speller_word_memos(settings: Settings, speller: Speller) -> None:
+    doc_id = _doc(settings)
+    _ask(speller)
+    with session_scope() as s:
+        doc = s.get(Document, doc_id)
+        assert doc is not None
+        mark_deleted(doc)
+    assert not speller._known
+    assert not speller._near
+
+
+def test_the_retention_sweep_empties_the_speller_word_memos(
+    settings: Settings, speller: Speller
+) -> None:
+    _doc(settings, expired=True)
+    _ask(speller)
+    assert _worker(settings).sweep_expired() == 1
+    assert not speller._known
+    assert not speller._near
+
+
+def test_forgetting_word_memos_is_safe_when_no_speller_is_loaded() -> None:
+    aoa_spelling._load.cache_clear()  # as on a server with no dictionary: nothing was loaded
+    gc.collect()  # and a speller another test built directly is gone too
+    assert caches.forget_cached_text() == 0
