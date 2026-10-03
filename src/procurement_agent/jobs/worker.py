@@ -45,6 +45,7 @@ from procurement_agent.extraction.pipeline import (
     run_extraction,
     upload_path,
 )
+from procurement_agent.extraction.read_status import stored_extraction
 from procurement_agent.extraction.schemas import FactType
 from procurement_agent.history import forget_runs
 from procurement_agent.ingestion import docling_service, read_quality
@@ -394,6 +395,9 @@ class Worker:
         notes: list[str] = []
         try:
             chunks = load_chunks(self._s, doc_id, doc_kind, notes=notes)
+            quality = read_quality.read_quality(
+                self._s, StoredDocument(id=doc_id, kind=doc_kind, name="")
+            )
         except Exception as e:  # reported to the user, never swallowed
             failure = safe_exc(e)
             log.warning("chunking_failed", job=job_id, document=doc_id, error=failure)
@@ -411,7 +415,9 @@ class Worker:
         )
         # What the workbook reader left out belongs in front of the user, not only in the log.
         result.warnings[:0] = [f"not read (size limit): {n}" for n in notes]
-        out = self._write_output(doc_id, job_id, result.model_dump_json())
+        out = self._write_output(
+            doc_id, job_id, stored_extraction(result, quality).model_dump_json()
+        )
         msg = f"{len(result.facts)} facts, {result.llm_calls} LLM calls"
         if not self._settle(job_id, JobStatus.done, msg, documents=(doc_id,)):
             self._discard([(doc_id, doc_kind)], out)

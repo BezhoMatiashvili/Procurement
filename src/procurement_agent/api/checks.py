@@ -31,6 +31,7 @@ from procurement_agent.api.deps import (
     owned_document,
 )
 from procurement_agent.api.extraction import JobOut, _job_out
+from procurement_agent.api.refusals import require_readable
 from procurement_agent.checks.aoa import ContractorType, check_aoa, scope_review_items
 from procurement_agent.checks.aoa_llm import ScopeReviewSet, review_digest
 from procurement_agent.checks.aoa_spelling import open_speller
@@ -60,6 +61,12 @@ from procurement_agent.extraction.pipeline import (
     load_document_text,
     result_dir,
     upload_path,
+)
+from procurement_agent.extraction.read_status import (
+    ReadAwareComparison,
+    ReadAwareReport,
+    read_aware_comparison,
+    read_aware_report,
 )
 from procurement_agent.fx.provider import open_rate_provider
 from procurement_agent.ingestion.docling_service import load_document
@@ -212,7 +219,7 @@ def run_aoa(
     review_job_id: str | None = None,
     entered_rates: Mapping[tuple[str, date], Decimal] | None = None,
     registry_docs: Sequence[Document] = (),
-) -> CheckReport:
+) -> ReadAwareReport:
     """The whole act check. Shared by the JSON API, the DOCX download and the UI page, so the
     registry snapshot and the exchange-rate source are opened and closed in exactly one place.
 
@@ -220,7 +227,12 @@ def run_aoa(
     ``owned_review_job``; its answers are checked again against the notes this run leaves open.
     ``entered_rates`` are the exchange rates the user typed in, by (currency, day), lari per unit.
     ``registry_docs`` are the parties' uploaded registry extracts, read before the snapshot.
+
+    A document with no readable text is refused (409 ``NO_TEXT``); one that was only partly read
+    is checked, and the report says how much of it was (``DOC.PARTIAL``, ``read_quality``).
     """
+    aoa_quality = require_readable(settings, aoa)
+    contract_quality = require_readable(settings, contract) if contract is not None else None
     review = (
         load_review(settings, aoa.id, review_job_id)
         if review_job_id and contract is not None
@@ -235,7 +247,7 @@ def run_aoa(
     try:
         rates = open_rate_provider(settings, entered_rates)
         try:
-            return check_aoa(
+            report = check_aoa(
                 aoa_text=_document_text(settings, aoa),
                 aoa_id=aoa.id,
                 contract_text=_document_text(settings, contract) if contract else None,
@@ -252,6 +264,7 @@ def run_aoa(
                 ),
                 speller=open_speller(settings),
             )
+            return read_aware_report(report, {"act": aoa_quality, "contract": contract_quality})
         finally:
             rates.close()
     finally:
@@ -340,6 +353,8 @@ def queue_aoa_review(
         raise HTTPException(status.HTTP_409_CONFLICT, "the model review is disabled on this server")
     if llm is None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "no LLM backend is configured")
+    require_readable(settings, aoa)
+    require_readable(settings, contract)
     items = scope_review_items(
         aoa_text=_document_text(settings, aoa), contract_text=_document_text(settings, contract)
     )
@@ -595,10 +610,7 @@ def load_explanations(settings: Settings, doc_id: str, job_id: str) -> Explanati
         return None  # a job of another kind wrote here; not an explanation set
 
 
-def _ready(doc: Document) -> StoredDocument:
-    if doc.status != DocumentStatus.ready:
-        msg = f"document {doc.id} is {doc.status.value}, not ready"
-        raise HTTPException(status.HTTP_409_CONFLICT, msg)
+def _stored(doc: Document) -> StoredDocument:
     return StoredDocument(id=doc.id, kind=doc.kind, name=doc.display_name)
 
 
@@ -609,7 +621,7 @@ def run_compare(
     right: Document,
     *,
     explain_job_id: str | None = None,
-) -> ComparisonReport:
+) -> ReadAwareComparison:
     """The whole comparison. Shared by the JSON API, both downloads and the UI page.
 
     Deterministic and recomputed on every call — it costs milliseconds on Word documents and a
@@ -621,15 +633,17 @@ def run_compare(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "the two documents are the same; a document compared with itself has no differences",
         )
+    left_quality = require_readable(settings, left)
+    right_quality = require_readable(settings, right)
     try:
-        report = compare_stored(settings, _ready(left), _ready(right))
+        report = compare_stored(settings, _stored(left), _stored(right))
     except DocumentTooLargeError as e:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(e)) from e
     if explain_job_id:
         stored = load_explanations(settings, right.id, explain_job_id)
         if stored is not None:
             report = apply_explanations(report, stored)
-    return report
+    return read_aware_comparison(report, {"left": left_quality, "right": right_quality})
 
 
 @router.post("/compare")
@@ -889,7 +903,7 @@ def _no_basis_note(comp: BidComparison) -> SkipNote | None:
 
 
 def boq_documents(
-    session: Session, principal: Principal, body: BoqCheckRequest
+    session: Session, principal: Principal, body: BoqCheckRequest, settings: Settings
 ) -> tuple[Document, list[Document]]:
     """Resolve and validate the template plus every bid, before any workbook is opened."""
     if body.template_document_id in body.bid_document_ids:
@@ -906,9 +920,7 @@ def boq_documents(
         if doc.kind != "xlsx":
             msg = f"BOQ comparison needs .xlsx workbooks; {doc.display_name} is a {doc.kind}"
             raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, msg)
-        if doc.status != DocumentStatus.ready:
-            msg = f"document {doc.id} is {doc.status.value}, not ready"
-            raise HTTPException(status.HTTP_409_CONFLICT, msg)
+        require_readable(settings, doc)  # not ready, or ready with no text in it: 409
     return template, docs
 
 
@@ -1084,7 +1096,7 @@ def check_boq(
     event loop. It creates no job - a BOQ run spans N+1 documents, and ``Job.document_id`` is a
     single FK, so a job would have to pick one arbitrarily.
     """
-    template_doc, bid_docs = boq_documents(session, principal, body)
+    template_doc, bid_docs = boq_documents(session, principal, body, settings)
     report, template, books, comparisons = run_boq(settings, template_doc, bid_docs)
     errors = sum(
         1

@@ -33,7 +33,13 @@
    something: two unrelated documents, or a pair the line diff could not run on, get the
    caveat in the verdict's place instead of a confident red headline built on noise. #}
 {% set line_skipped = report.skipped | selectattr("rule_id", "equalto", "CMP.LINE_DIFF") | list %}
-{% if report.identical %}
+{% set partial_notes = report.skipped | selectattr("rule_id", "equalto", "DOC.PARTIAL") | list %}
+{{ f.read_banner(partial_notes, t, why) }}
+{% if report.identical and partial_notes %}
+<div class="verdict is-warn caveat">{{ icon("alert") }}<div>
+  <h2>{{ t("compare.unconfirmed") }}</h2>
+  <p>{{ t("compare.unconfirmed.lead") }}</p></div></div>
+{% elif report.identical %}
 <div class="verdict is-ok ok-state">{{ icon("check-circle") }}<div><h2>{{ t("compare.identical") }}</h2></div></div>
 {% elif report.alignment == "unrelated" %}
 <div class="verdict is-warn caveat">{{ icon("alert") }}<div>

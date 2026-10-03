@@ -9,6 +9,7 @@
    raises AOA.IBAN_CHECKSUM as info, because their sample IBANs are anonymised - see
    docs/ACCURACY.md. Treating that as a finding would make the good document look bad. #}
 {% set actionable = errors + warnings %}
+{% set partial_notes = report.skipped | selectattr("rule_id", "equalto", "DOC.PARTIAL") | list %}
 {% set currency = report.summary["currency"] if "currency" in report.summary else "" %}
 
 <a class="back" href="/ui/">{{ icon("arrow-left") }}{{ t("nav.home") }}</a>
@@ -47,6 +48,8 @@
 <p class="muted small">{{ icon("info") }} {{ t("aoa.download.unavailable", kind=act.kind) }}</p>
 {% endif %}
 
+{{ f.read_banner(partial_notes, t, why) }}
+
 {% if errors %}
 <div class="verdict is-bad">{{ icon("alert") }}<div>
   <h2>{{ t("aoa.verdict.bad", n=actionable | length) }}</h2>
@@ -55,6 +58,10 @@
 <div class="verdict is-warn">{{ icon("alert") }}<div>
   <h2>{{ t("aoa.verdict.warn", n=warnings | length) }}</h2>
   <p>{{ t("aoa.verdict.warn.lead") }}</p></div></div>
+{% elif partial_notes %}
+<div class="verdict is-warn">{{ icon("alert") }}<div>
+  <h2>{{ t("aoa.verdict.partial") }}</h2>
+  <p>{{ t("aoa.verdict.partial.lead") }}</p></div></div>
 {% else %}
 <div class="verdict is-ok ok-state">{{ icon("check-circle") }}<div>
   <h2>{{ t("report.none") }}</h2>

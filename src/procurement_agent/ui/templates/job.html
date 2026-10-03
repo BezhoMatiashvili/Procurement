@@ -26,6 +26,12 @@
 {% endif %}
 
 {% if result %}
+{% if read_notes %}
+<section class="card caveat" id="read-quality" role="alert">
+  <p class="caveat-title">{{ icon("alert") }}<span><strong>{{ t("readq.title") }}</strong></span></p>
+  <ul class="small">{% for n in read_notes %}<li>{{ why(n) }}</li>{% endfor %}</ul>
+</section>
+{% endif %}
 <div class="result-head">
   <p class="muted small">{{ t("extract.meta", n=result.facts | length, model=result.model or t("extract.rules_only"), calls=result.llm_calls, s=result.seconds) }}</p>
   <a class="btn" href="/api/v1/jobs/{{ job.id }}/result?format=xlsx">{{ icon("download") }}{{ t("extract.download") }}</a>

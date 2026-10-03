@@ -15,6 +15,7 @@ from procurement_agent.api.deps import (
     owned_document,
     owned_job,
 )
+from procurement_agent.api.refusals import require_readable
 from procurement_agent.config import Settings, get_settings
 from procurement_agent.db import get_session
 from procurement_agent.extraction.export import to_xlsx
@@ -81,6 +82,7 @@ def start_extraction(
     if doc.status != DocumentStatus.ready:
         msg = f"document is not ready (status: {doc.status.value})"
         raise HTTPException(status.HTTP_409_CONFLICT, msg)
+    require_readable(settings, doc)  # ready, but holding no text: 409 NO_TEXT
     ensure_job_capacity(session, settings, principal)
     params: dict[str, object] = {"fast": body.fast, "use_llm": body.use_llm or bool(body.question)}
     if body.targets:

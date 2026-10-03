@@ -75,6 +75,23 @@ STRINGS: dict[str, tuple[str, str]] = {
         "What was read from this document is missing or damaged; upload it again.",
         "ამ დოკუმენტიდან წაკითხული მასალა დაკარგულია ან დაზიანებულია; ატვირთეთ თავიდან.",
     ),
+    "readq.title": ("Part of a document was not read", "დოკუმენტის ნაწილი არ წაკითხულა"),
+    "aoa.verdict.partial": (
+        "No findings in what could be read",
+        "წაკითხულ ნაწილში შენიშვნა არ არის",
+    ),
+    "aoa.verdict.partial.lead": (
+        "Part of a document could not be read (see above); the unread part has not been checked.",
+        "დოკუმენტის ნაწილი ვერ წაიკითხა (იხ. ზემოთ), ამიტომ წაუკითხავი ნაწილი არ შემოწმებულა.",
+    ),
+    "compare.unconfirmed": (
+        "No differences in what could be read; this cannot confirm the two documents are the same.",
+        "წაკითხულ ნაწილში სხვაობა არ არის; ეს ვერ ადასტურებს, რომ ორივე დოკუმენტი ერთნაირია.",
+    ),
+    "compare.unconfirmed.lead": (
+        "Part of a document could not be read (see above), and the unread part may differ.",
+        "დოკუმენტის ნაწილი ვერ წაიკითხა (იხ. ზემოთ) და წაუკითხავ ნაწილში სხვაობა შეიძლება იყოს.",
+    ),
     # --- picker ---
     "picker.title": ("What do you want to do?", "რისი გაკეთება გსურთ?"),
     "picker.lead": (

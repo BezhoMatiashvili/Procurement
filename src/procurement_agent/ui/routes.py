@@ -58,7 +58,8 @@ from procurement_agent.config import Settings, get_settings
 from procurement_agent.db import get_session
 from procurement_agent.extraction.labels import LABELS
 from procurement_agent.extraction.pipeline import is_scanned_pdf, load_segments, result_dir
-from procurement_agent.extraction.schemas import DEFAULT_TARGETS, ExtractionResult, FactType
+from procurement_agent.extraction.read_status import StoredExtraction, partial_notes
+from procurement_agent.extraction.schemas import DEFAULT_TARGETS, FactType
 from procurement_agent.ingestion import read_quality
 from procurement_agent.jobs.worker import Worker
 from procurement_agent.models import CheckRun, Document, DocumentStatus, Job, JobStatus
@@ -346,8 +347,12 @@ def document_page(
     doc_id: str,
     principal: Annotated[Principal, Depends(authenticate)],
     session: Annotated[Session, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> Response:
     doc = owned_document(session, principal, doc_id)
+    stored = (
+        read_quality.read_sidecar(settings, doc.id) if doc.status == DocumentStatus.ready else None
+    )
     jobs = sorted(doc.jobs, key=lambda j: j.created_at, reverse=True)
     targets = [(t.value, LABELS[t][0], LABELS[t][1]) for t in DEFAULT_TARGETS]
     return _render(
@@ -358,6 +363,7 @@ def document_page(
         jobs=jobs,
         targets=targets,
         checks=_checks_for(session, principal, doc),
+        read_notes=partial_notes({"document": stored}),
     )
 
 
@@ -440,12 +446,12 @@ def job_page(
         )
     if job.kind == "parse":
         return _reading_page(request, principal, session, settings, job, reading.parse_part(part))
-    result: ExtractionResult | None = None
+    result: StoredExtraction | None = None
     gone = False
     if job.kind == "extract" and job.status == JobStatus.done:
         path = result_dir(settings, job.document_id) / "jobs" / f"{job.id}.json"
         try:
-            result = ExtractionResult.model_validate_json(path.read_text())
+            result = StoredExtraction.model_validate_json(path.read_text())
         except (OSError, ValueError):
             gone = True  # swept or damaged: say so, rather than a header and nothing under it
         else:
@@ -466,6 +472,7 @@ def job_page(
         job=job,
         doc=job.document,
         result=result,
+        read_notes=partial_notes(result.read_quality) if result is not None else [],
         gone=gone,
         # the stored label is English; the Georgian page names each field in Georgian
         labels=LABELS,
@@ -888,7 +895,7 @@ def boq_report(
     """Plain ``def``: reading N workbooks is seconds of blocking CPU that belongs on the
     threadpool, not on the event loop."""
     try:
-        template_doc, bid_docs = _boq_inputs(session, principal, template, bids)
+        template_doc, bid_docs = _boq_inputs(session, principal, template, bids, settings)
     except ValidationError:
         return _error(request, principal, t("error.boq_inputs", _lang(request)))
     except HTTPException as e:
@@ -940,7 +947,7 @@ def boq_merged(
     bids: str,
 ) -> Response:
     try:
-        template_doc, bid_docs = _boq_inputs(session, principal, template, bids)
+        template_doc, bid_docs = _boq_inputs(session, principal, template, bids, settings)
     except ValidationError:
         return _error(request, principal, t("error.boq_inputs", _lang(request)))
     except HTTPException as e:
@@ -1377,12 +1384,12 @@ def _fx_days(report: CheckReport) -> list[dict[str, str]]:
 
 
 def _boq_inputs(
-    session: Session, principal: Principal, template: str, bids: str
+    session: Session, principal: Principal, template: str, bids: str, settings: Settings
 ) -> tuple[Document, list[Document]]:
     """Raises ``ValidationError`` for an empty bid list or an over-long template id - both
     reachable by editing the URL - which the callers turn into a page, not a 500."""
     body = BoqCheckRequest(template_document_id=template, bid_document_ids=_ids(bids, 10))
-    return boq_documents(session, principal, body)
+    return boq_documents(session, principal, body, settings)
 
 
 def _expired(request: Request, principal: Principal, again: str) -> Response:
@@ -1396,15 +1403,27 @@ def _expired(request: Request, principal: Principal, again: str) -> Response:
     return _render(request, "expired.html", user=principal.user, again=again)
 
 
-def _error(request: Request, principal: Principal, message: object) -> Response:
-    return _render(request, "error.html", user=principal.user, message=message)
+def _error(
+    request: Request, principal: Principal, message: object, status_code: int = status.HTTP_200_OK
+) -> Response:
+    resp = _render(request, "error.html", user=principal.user, message=message)
+    resp.status_code = status_code
+    return resp
 
 
 def _http_error(request: Request, principal: Principal, exc: HTTPException, again: str) -> Response:
     """Map an API refusal onto a page: 404 means the documents are gone (or never were the
-    caller's), anything else - not ready yet, wrong file type, too many jobs - says why."""
+    caller's), anything else - not ready yet, wrong file type, too many jobs - says why.
+
+    A refusal with a code (``api.refusals``: a document that holds no text, one that cannot be
+    read again) is said in the page's language, the code kept so it can be quoted, and the page
+    carries the refusal's own status - it is not a success that happens to show a sentence."""
     if exc.status_code == status.HTTP_404_NOT_FOUND:
         return _expired(request, principal, again)
+    detail: object = exc.detail
+    if isinstance(detail, dict):
+        text = detail["message_ka" if _lang(request) == "ka" else "message_en"]
+        return _error(request, principal, f"{detail['code']}: {text}", exc.status_code)
     return _error(request, principal, exc.detail)
 
 

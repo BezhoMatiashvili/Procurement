@@ -14,6 +14,13 @@
 </div>
 {% if doc.error %}<div class="card notice is-error">{{ icon("alert") }}<div><p>{{ doc.error | doc_error(lang) }}</p></div></div>{% endif %}
 
+{% if read_notes %}
+<section class="card caveat" id="read-quality" role="alert">
+  <p class="caveat-title">{{ icon("alert") }}<span><strong>{{ t("readq.title") }}</strong></span></p>
+  <ul class="small">{% for n in read_notes %}<li>{{ why(n) }}</li>{% endfor %}</ul>
+</section>
+{% endif %}
+
 {# The reports this file went into. Each is recomputed when opened, from the stored files; the
    link carries the same documents and options the person opened it with. #}
 <h2>{{ t("checks.title") }}</h2>
