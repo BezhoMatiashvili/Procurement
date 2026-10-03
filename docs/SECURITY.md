@@ -327,6 +327,30 @@ hour old. A copy is not a backup (PRODUCTION_READINESS.md 5.5).
   `torch` and `torchvision` come from the PyTorch CPU index and OpenCV is the headless build, so
   the lock holds no CUDA wheels and no GUI libraries - 19 fewer packages that would be unpacked
   into the image and could not be used on a server without a GPU.
+* What ships is listed in `docs/sbom.cdx.json`, a CycloneDX 1.5 SBOM of the production closure of
+  `uv.lock` (for linux/x86_64: no dev group, no extras; each package with its purl, the
+  SHA-256 of every file the lock records, its licence and its place in the dependency graph).
+  `scripts/sbom.py` writes it without timestamps or random ids, so two runs give the same bytes;
+  `tests/unit/test_sbom.py` fails when it no longer matches `uv.lock`, and the fix is
+  `uv run python scripts/sbom.py --out docs/sbom.cdx.json`. It lists what the lock pins; it does
+  not see the Debian packages in the image (Tesseract and its libraries) or the native libraries
+  bundled inside wheels (OpenSSL 1.1.1k inside `opencv-python-headless`, for one), which
+  `pip-audit` cannot see either.
+* The licences of those packages, of the components outside Python (base images, Tesseract, the
+  spelling dictionary, Caddy, Ollama) and of the models are in `docs/THIRD_PARTY.md`, written by
+  `scripts/third_party.py` from the lock and the installed metadata. It lists what it cannot
+  classify as unknown instead of guessing, names the copyleft libraries bundled inside wheels
+  (GEOS in `shapely`, FFmpeg in `opencv-python-headless`, `libquadmath` and `libgfortran` in
+  `numpy` and `scipy`, for example) and says what each licence asks of someone shipping the
+  product. `tests/unit/test_third_party.py` fails when it no longer lists exactly the production
+  packages of `uv.lock`, and when a copyleft or unknown licence appears that nobody has read;
+  the fix is `uv run python scripts/third_party.py --out docs/THIRD_PARTY.md` plus, for a new
+  licence, a reviewed entry in the script.
+* A release leaves the repository as a bundle (`scripts/make_release_bundle.sh`,
+  docs/PRODUCTION_READINESS.md 5.8): built from a clean commit, from a fixed list of files, with
+  `SHA256SUMS` over every file and a `RELEASE.txt` that records the commit and the hashes of
+  `uv.lock` and of the SBOM. The checksums show the bundle arrived as built; they do not show who
+  built it, so hand over the hash of `RELEASE.txt` or of the bundle by another route.
 * Documents cannot reach the repository: `scripts/check_no_documents.sh` blocks any document,
   archive, database, key, `.env` or client directory (a link to one included, which is how a git
   worktree holds them) outside `tests/fixtures/` - as a CI job (`repo-guard`, which runs after a
