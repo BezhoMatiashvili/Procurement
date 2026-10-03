@@ -147,9 +147,28 @@ services:
     environment:
       PA_MAX_FILE_MB: ${PA_MAX_FILE_MB:-50}
       CADDYFILE: |
+        (logfilter) {
+          # What may reach a log. Caddy redacts Authorization and Cookie itself and writes every
+          # other header as it came, X-Api-Key (the API credential) included: a request that made
+          # Caddy log an error - an app that is down, a reset - put the key in clear on stdout.
+          # No header is logged at all, nor the response's Set-Cookie, nor a query string (the
+          # report pages carry document and job ids, amounts and dates there). Status, method,
+          # host, path and duration stay. tests/unit/test_relay_policy.py checks this.
+          output stdout
+          format filter {
+            wrap json
+            request>headers delete
+            resp_headers delete
+            request>uri regexp \?.* ""
+          }
+        }
         {
           admin off
           auto_https off
+          # The default logger carries the error log; the site's `log` below carries the access log.
+          log {
+            import logfilter
+          }
           servers {
             # Only the host's reverse proxy reaches this port (published on 127.0.0.1), and
             # Docker delivers it from the `edge` network's gateway. Trust exactly that address:
@@ -206,6 +225,12 @@ services:
           }
         }
         :8080 {
+          log {
+            import logfilter
+          }
+          # The container healthcheck and the host proxy's probes are not worth a line each.
+          @probe path /health /ready
+          log_skip @probe
           # Body caps, the same table the app enforces (security/body_limit.py, security/preauth.py;
           # tests/unit/test_relay_policy.py fails if they drift). They are applied here as well
           # because the app answers 413 as soon as it has counted past its cap and closes the

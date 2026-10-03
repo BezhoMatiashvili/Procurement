@@ -42,6 +42,8 @@ Three independent layers, then a proof. Each has a test (§11).
   resolution`, as before. `tests/unit/test_relay_policy.py` checks the setting. Docker refuses
   `gateway_mode_ipv4=isolated` (no route at all) on a network that is not internal, and a
   published port needs one, so the relay keeps a default route; what stops it is the missing NAT.
+* The relay's own logs hold no header and no query string (§5): Caddy would otherwise have
+  written the caller's `X-Api-Key` in clear into its error log.
 * Ollama runs with `OLLAMA_NO_CLOUD=1`: its hosted-model features (remote inference, web search)
   are off, so a `...-cloud` model cannot forward a prompt to ollama.com through the local server.
 * The app answers only to the host names in `PA_ALLOWED_HOSTS` (production refuses to start
@@ -217,6 +219,19 @@ This is kept at three levels:
   a cell, a file name, form fields, a query string, and in model replies that are garbage or an
   error, and asserts the marker is in no log line and no database column.
   A library's own message text cannot be inspected; the test is what notices when one leaks.
+
+The relay (Caddy) has logs of its own, and they are held to the same rule. Caddy redacts
+`Authorization` and `Cookie` by itself and writes every other header as it came, so an error it
+logged - an app that is down, a connection reset - put the caller's `X-Api-Key` on stdout in
+clear (measured: the key in one line per failed request). Both its loggers, the default one
+(the error log) and the site's access log, now pass through a `filter` encoder that drops every
+request and response header, and the whole query string (the report pages carry document and job
+ids, amounts and dates there). What stays is time, client address, method, host, path, status,
+size and duration. The container's health probes are not logged. Measured on the stack with a
+marker in `X-Api-Key`, `Cookie`, `Authorization`, `Proxy-Authorization`, a made-up
+`X-Auth-Token` and the query string, on requests the app answered, refused, and could not be
+reached for: no marker in the relay's, the app's or Ollama's log. `tests/unit/test_relay_policy.py`
+fails when a log loses the filter or the filter loses a field.
 
 ## 6. The LLM is a tool, not an agent
 

@@ -303,3 +303,89 @@ def test_the_relay_still_finds_the_app_by_the_name_the_embedded_resolver_serves(
     assert "reverse_proxy app:8000" in _interpolate(PROXY["environment"]["CADDYFILE"])
     shared = set(PROXY["networks"]) & set(PROD["services"]["app"]["networks"])
     assert shared == {"internal"}
+
+
+# --- F3: no credential reaches a relay log -------------------------------------------------------
+
+#: What the app accepts as a credential, and what a browser sends it in.
+CREDENTIAL_HEADERS = ("X-Api-Key", "Cookie", "Authorization", "Proxy-Authorization")
+
+
+def _options() -> Node:
+    (options,) = [n for n in caddyfile().body if n.head == ""]
+    return options
+
+
+def _log_blocks() -> dict[str, Node]:
+    """The default logger (it carries the relay's error log) and the site's access log."""
+    return {"default": _options().only("log"), "access": _site().only("log")}
+
+
+def _filter_fields(log: Node) -> dict[str, str]:
+    (fmt,) = log.find("format")
+    assert fmt.head == "format filter", fmt.head
+    fields = {}
+    for node in fmt.body:
+        name, _, rule = node.head.partition(" ")
+        fields[name] = rule
+    return fields
+
+
+@pytest.mark.parametrize("which", ["default", "access"])
+def test_the_error_log_and_the_access_log_both_run_through_a_filter(which: str) -> None:
+    """Caddy redacts the standard credential headers itself and logs ``X-Api-Key`` in clear;
+    the key is the one credential this app takes besides the cookie. The default logger carries
+    the error log (an app that is down makes every request an error), the site's logger the
+    access log, and each has its own encoder, so each needs the filter."""
+    log = _log_blocks()[which]
+    assert _filter_fields(log)["wrap"] == "json"
+    assert [n.head for n in log.find("output")] == ["output stdout"], "no file, no network sink"
+    assert not log.find("include") and not log.find("exclude"), "nothing may bypass the filter"
+
+
+@pytest.mark.parametrize("which", ["default", "access"])
+def test_no_header_of_a_request_or_a_response_is_logged(which: str) -> None:
+    """Every header is dropped, not a list of known credentials: a header added to the app or to a
+    client tomorrow cannot leak through a name nobody thought of. (A list would have to hold every
+    name the app takes - ``X-Api-Key`` and ``Cookie`` - and ``Set-Cookie`` on the way out.)"""
+    fields = _filter_fields(_log_blocks()[which])
+    assert fields.get("request>headers") == "delete"
+    assert fields.get("resp_headers") == "delete"
+
+
+@pytest.mark.parametrize("which", ["default", "access"])
+def test_the_query_string_never_reaches_a_relay_log(which: str) -> None:
+    """The app puts document and job ids, amounts and dates in query strings (the UI report
+    pages); its own access log cuts them off, and so must the relay's."""
+    rule = _filter_fields(_log_blocks()[which])["request>uri"]
+    kind, pattern, quoted = rule.split(" ")  # shlex would eat the backslash of the pattern
+    assert kind == "regexp" and quoted == '""'
+    replacement = ""
+    for uri, path in [
+        ("/ui/checks/aoa?act=abc&advance_amount=1500000&review=j1", "/ui/checks/aoa"),
+        ("/api/v1/documents?token=pa_secret", "/api/v1/documents"),
+        ("/ui/login?next=/ui/documents", "/ui/login"),
+        ("/api/v1/documents/abc?", "/api/v1/documents/abc"),
+        ("/health", "/health"),
+    ]:
+        assert re.sub(pattern, replacement, uri) == path, uri
+
+
+@pytest.mark.parametrize("which", ["default", "access"])
+def test_the_filter_keeps_what_an_operator_reads_a_log_for(which: str) -> None:
+    fields = _filter_fields(_log_blocks()[which])
+    kept = {"status", "duration", "msg", "request>method", "request>host", "request>uri"}
+    assert not kept & {name for name, rule in fields.items() if rule == "delete"}
+
+
+def test_the_relay_never_turns_on_credential_logging_or_a_debug_log() -> None:
+    text = _interpolate(PROXY["environment"]["CADDYFILE"])
+    assert not re.search(r"^\s*log_credentials\b", text, re.M)
+    assert not re.search(r"^\s*debug\b", text, re.M)
+    assert "level DEBUG" not in text
+
+
+def test_the_health_probes_do_not_fill_the_access_log() -> None:
+    site = _site()
+    assert site.only("@probe").head == "@probe path /health /ready"
+    assert [n.head for n in site.find("log_skip")] == ["log_skip @probe"]
