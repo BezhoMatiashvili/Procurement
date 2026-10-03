@@ -56,6 +56,7 @@ __all__ = [
     "assess_chunks",
     "assess_docling",
     "compute_quality",
+    "load_stored",
     "parse_error",
     "partial_note",
     "pdf_page_count",
@@ -95,7 +96,11 @@ class NoTextError(ContentFree, RuntimeError):
 
 
 class StoredParseError(ContentFree, RuntimeError):
-    """The parse stored for a document is missing or cannot be loaded."""
+    """The parse stored for a document is missing or cannot be loaded. ``document_id`` is ours."""
+
+    def __init__(self, message: str, document_id: str | None = None) -> None:
+        super().__init__(message)
+        self.document_id = document_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,20 +296,32 @@ def read_sidecar(settings: Settings, doc_id: str) -> ReadQuality | None:
     )
 
 
+def load_stored(settings: Settings, doc_id: str) -> DoclingDocument:
+    """The parse stored for a document. A file that is missing, truncated or not a parse at all
+    is one thing to the caller - ``StoredParseError``, naming the document and the kind of
+    failure, never what the file held - so every reader of a stored parse refuses the same way."""
+    try:
+        return load_document(settings.results_dir / doc_id / "docling.json")
+    except Exception as e:
+        msg = f"the stored reading of the document cannot be loaded ({type(e).__name__})"
+        raise StoredParseError(msg, doc_id) from e
+
+
 def compute_quality(settings: Settings, doc: _Identified) -> ReadQuality:
     """The quality of a stored document worked out from its files: for one parsed before the
     sidecar existed. Raises ``StoredParseError`` when the parse cannot be loaded."""
     upload = settings.upload_dir / f"{doc.id}.{doc.kind}"
-    try:
-        if doc.kind == "xlsx":
+    if doc.kind == "xlsx":
+        try:
             chunks = sheet_chunks(read_workbook(upload.read_bytes()), doc_id=doc.id)
-            return assess_chunks(chunks)
-        parsed = load_document(settings.results_dir / doc.id / "docling.json")
-    except Exception as e:  # a missing, truncated or foreign file: all one thing to the caller
-        msg = f"the stored reading of the document cannot be loaded ({type(e).__name__})"
-        raise StoredParseError(msg) from e
+        except Exception as e:
+            msg = f"the stored workbook cannot be read ({type(e).__name__})"
+            raise StoredParseError(msg, doc.id) from e
+        return assess_chunks(chunks)
     return assess_docling(
-        parsed, doc.kind, pdf_pages=pdf_page_count(upload) if doc.kind == "pdf" else None
+        load_stored(settings, doc.id),
+        doc.kind,
+        pdf_pages=pdf_page_count(upload) if doc.kind == "pdf" else None,
     )
 
 

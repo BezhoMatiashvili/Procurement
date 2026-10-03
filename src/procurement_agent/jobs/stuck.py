@@ -24,7 +24,7 @@ from procurement_agent.db import session_scope
 from procurement_agent.models import Document, DocumentStatus, Job, JobStatus
 from procurement_agent.security.audit import audit, log
 
-__all__ = ["STUCK_MARGIN_S", "fail_stuck_parses"]
+__all__ = ["STUCK_MARGIN_S", "fail_stuck_parses", "fail_unreadable"]
 
 #: Added to ``docling_timeout_s``: the time to save a parse and settle the job.
 STUCK_MARGIN_S = 300.0
@@ -74,3 +74,20 @@ def fail_stuck_parses(settings: Settings, *, running_too: bool, now: datetime | 
     if failed:
         log.warning("stuck_parses_failed", documents=failed)
     return failed
+
+
+def fail_unreadable(doc_id: str) -> None:
+    """A ready document whose stored reading is missing or damaged is no longer ready.
+
+    Committed on its own, before the refusal that follows: the request's session is rolled back
+    when the exception propagates, and a document that stayed ``ready`` would be offered to the
+    next check as if nothing were wrong with it.
+    """
+    with session_scope() as s:
+        doc = s.get(Document, doc_id)
+        if doc is None or doc.status != DocumentStatus.ready:
+            return
+        doc.status = DocumentStatus.failed
+        doc.error = "DOCUMENT_UNREADABLE"
+        audit(s, actor="system", action="document.unreadable", outcome="error", document_id=doc_id)
+    log.warning("document_unreadable", document_id=doc_id)

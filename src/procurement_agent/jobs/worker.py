@@ -50,7 +50,7 @@ from procurement_agent.extraction.schemas import FactType
 from procurement_agent.history import forget_runs
 from procurement_agent.ingestion import docling_service, read_quality
 from procurement_agent.jobs.retention import delete_document_files, reconcile, remove_file
-from procurement_agent.jobs.stuck import fail_stuck_parses
+from procurement_agent.jobs.stuck import fail_stuck_parses, fail_unreadable
 from procurement_agent.llm.base import LLMClient
 from procurement_agent.models import Document, DocumentStatus, Job, JobStatus, UiSession
 from procurement_agent.security.audit import audit, log
@@ -401,6 +401,8 @@ class Worker:
         except Exception as e:  # reported to the user, never swallowed
             failure = safe_exc(e)
             log.warning("chunking_failed", job=job_id, document=doc_id, error=failure)
+            if isinstance(e, read_quality.StoredParseError):
+                fail_unreadable(doc_id)  # its reading is gone: the document is not 'ready' any more
             self._finish(job_id, JobStatus.failed, f"could not read the document: {failure}"[:200])
             return
         result = run_extraction(

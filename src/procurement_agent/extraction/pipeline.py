@@ -26,8 +26,13 @@ from procurement_agent.extraction.schemas import (
 )
 from procurement_agent.extraction.selector import score_chunks, select_chunks
 from procurement_agent.ingestion.chunker import Chunk, chunk_docling_document
-from procurement_agent.ingestion.docling_service import load_document
-from procurement_agent.ingestion.excel_reader import read_formulas, read_workbook, sheet_chunks
+from procurement_agent.ingestion.excel_reader import (
+    Sheet,
+    read_formulas,
+    read_workbook,
+    sheet_chunks,
+)
+from procurement_agent.ingestion.read_quality import StoredParseError, load_stored
 from procurement_agent.ingestion.segmenter import (
     Segment,
     pdf_has_text_layer,
@@ -47,6 +52,19 @@ def result_dir(settings: Settings, doc_id: str) -> Path:
     return settings.results_dir / doc_id
 
 
+def _stored_workbook(
+    settings: Settings, doc_id: str, kind: str, notes: list[str] | None
+) -> tuple[list[Sheet], bytes]:
+    """The stored workbook, read; ``StoredParseError`` when the upload is gone or not a workbook
+    any more (the same refusal as for a parse that will not load)."""
+    try:
+        data = upload_path(settings, doc_id, kind).read_bytes()
+        return read_workbook(data, notes=notes), data
+    except Exception as e:
+        msg = f"the stored workbook cannot be read ({type(e).__name__})"
+        raise StoredParseError(msg, doc_id) from e
+
+
 def load_chunks(
     settings: Settings, doc_id: str, kind: str, *, notes: list[str] | None = None
 ) -> list[Chunk]:
@@ -57,10 +75,9 @@ def load_chunks(
     file.
     """
     if kind == "xlsx":
-        data = upload_path(settings, doc_id, kind).read_bytes()
-        return sheet_chunks(read_workbook(data, notes=notes), doc_id=doc_id)
-    doc = load_document(result_dir(settings, doc_id) / "docling.json")
-    return chunk_docling_document(doc, doc_id=doc_id)
+        sheets, _ = _stored_workbook(settings, doc_id, kind, notes)
+        return sheet_chunks(sheets, doc_id=doc_id)
+    return chunk_docling_document(load_stored(settings, doc_id), doc_id=doc_id)
 
 
 def chunks_text(chunks: Sequence[Chunk]) -> str:
@@ -88,9 +105,9 @@ def load_segments(
     artifact, so a fact and a diff hunk can never disagree about what the document says.
     """
     if kind == "xlsx":
-        data = upload_path(settings, doc_id, kind).read_bytes()
-        return segments_from_workbook(read_workbook(data, notes=notes), read_formulas(data))
-    return segments_from_docling(load_document(result_dir(settings, doc_id) / "docling.json"))
+        sheets, data = _stored_workbook(settings, doc_id, kind, notes)
+        return segments_from_workbook(sheets, read_formulas(data))
+    return segments_from_docling(load_stored(settings, doc_id))
 
 
 def is_scanned_pdf(settings: Settings, doc_id: str, kind: str) -> bool:

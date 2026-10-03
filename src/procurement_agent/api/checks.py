@@ -31,7 +31,7 @@ from procurement_agent.api.deps import (
     owned_document,
 )
 from procurement_agent.api.extraction import JobOut, _job_out
-from procurement_agent.api.refusals import require_readable
+from procurement_agent.api.refusals import require_readable, unreadable
 from procurement_agent.checks.aoa import ContractorType, check_aoa, scope_review_items
 from procurement_agent.checks.aoa_llm import ScopeReviewSet, review_digest
 from procurement_agent.checks.aoa_spelling import open_speller
@@ -69,7 +69,7 @@ from procurement_agent.extraction.read_status import (
     read_aware_report,
 )
 from procurement_agent.fx.provider import open_rate_provider
-from procurement_agent.ingestion.docling_service import load_document
+from procurement_agent.ingestion.read_quality import StoredParseError, load_stored
 from procurement_agent.ingestion.xlsx_size import WorkbookTooLargeError
 from procurement_agent.jobs.worker import Worker
 from procurement_agent.llm.base import LLMClient
@@ -203,7 +203,10 @@ def reported[**P, R](
     @functools.wraps(fn)
     def limited(settings: Settings, /, *args: P.args, **kwargs: P.kwargs) -> R:
         with report_capacity(settings.max_concurrent_reports, settings.report_wait_s).slot():
-            return fn(settings, *args, **kwargs)
+            try:
+                return fn(settings, *args, **kwargs)
+            except StoredParseError as e:  # a stored reading gone or damaged: 409, not a 500
+                raise unreadable(e) from None
 
     return limited
 
@@ -515,10 +518,11 @@ def annotated_pdf(settings: Settings, aoa: Document, report: CheckReport) -> Res
         )
     source = upload_path(settings, aoa.id, aoa.kind)
     items: list[PdfItem] = []
-    if is_scanned_pdf(settings, aoa.id, aoa.kind):
-        stored = result_dir(settings, aoa.id) / "docling.json"
-        if stored.exists():
-            items = docling_items(load_document(stored))
+    if (
+        is_scanned_pdf(settings, aoa.id, aoa.kind)
+        and (result_dir(settings, aoa.id) / "docling.json").exists()
+    ):
+        items = docling_items(load_stored(settings, aoa.id))
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "annotated.pdf"
         try:
@@ -939,6 +943,9 @@ def _read_book(settings: Settings, doc: Document) -> BoqWorkbook:
         )
     except WorkbookTooLargeError as e:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"template: {e}") from e
+    except Exception as e:  # the upload is gone or is no workbook: one refusal, not a 500
+        msg = f"the stored workbook cannot be read ({type(e).__name__})"
+        raise StoredParseError(msg, doc.id) from e
 
 
 def _read_bid(settings: Settings, doc: Document) -> BoqWorkbook:

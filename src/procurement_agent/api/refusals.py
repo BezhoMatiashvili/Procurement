@@ -12,11 +12,12 @@ from fastapi import HTTPException, status
 
 from procurement_agent.config import Settings
 from procurement_agent.ingestion import read_quality as rq
-from procurement_agent.ingestion.read_quality import ReadQuality
+from procurement_agent.ingestion.read_quality import ReadQuality, StoredParseError
+from procurement_agent.jobs.stuck import fail_unreadable
 from procurement_agent.models import Document, DocumentStatus
 from procurement_agent.ui.i18n import STRINGS
 
-__all__ = ["refusal", "require_readable"]
+__all__ = ["refusal", "require_readable", "unreadable"]
 
 
 def refusal(
@@ -34,6 +35,14 @@ def refusal(
     return HTTPException(http_status, detail)
 
 
+def unreadable(e: StoredParseError) -> HTTPException:
+    """The refusal for a document whose stored reading is gone or damaged: it is marked failed
+    (so nothing offers it again) and the user is told to upload it again."""
+    if e.document_id is not None:
+        fail_unreadable(e.document_id)
+    return refusal(rq.DOCUMENT_UNREADABLE, document_id=e.document_id)
+
+
 def require_readable(settings: Settings, doc: Document) -> ReadQuality:
     """The quality of a ready document, or the refusal to build a check on it.
 
@@ -44,7 +53,10 @@ def require_readable(settings: Settings, doc: Document) -> ReadQuality:
     if doc.status != DocumentStatus.ready:
         msg = f"document {doc.id} is {doc.status.value}, not ready"
         raise HTTPException(status.HTTP_409_CONFLICT, msg)
-    quality = rq.read_quality(settings, doc)
+    try:
+        quality = rq.read_quality(settings, doc)
+    except StoredParseError as e:
+        raise unreadable(e) from None
     if not quality.has_text:
         raise refusal(rq.NO_TEXT, document_id=doc.id)
     return quality

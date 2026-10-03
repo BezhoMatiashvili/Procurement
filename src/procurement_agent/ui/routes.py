@@ -61,6 +61,7 @@ from procurement_agent.extraction.pipeline import is_scanned_pdf, load_segments,
 from procurement_agent.extraction.read_status import StoredExtraction, partial_notes
 from procurement_agent.extraction.schemas import DEFAULT_TARGETS, FactType
 from procurement_agent.ingestion import read_quality
+from procurement_agent.jobs.stuck import fail_unreadable
 from procurement_agent.jobs.worker import Worker
 from procurement_agent.models import CheckRun, Document, DocumentStatus, Job, JobStatus
 from procurement_agent.security.audit import audit, audit_now, log
@@ -507,6 +508,8 @@ def _reading_page(
             log.warning(
                 "reading_unavailable", job_id=job.id, document_id=doc.id, error=type(e).__name__
             )
+            if isinstance(e, read_quality.StoredParseError):
+                fail_unreadable(doc.id)
             view, notes, scanned = None, [], False
         else:
             audit(
