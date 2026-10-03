@@ -151,6 +151,12 @@ class Settings(BaseSettings):
     max_text_chars: int = Field(default=6_000_000, ge=10_000, le=200_000_000)
     allowed_kinds: Annotated[tuple[DocumentKind, ...], NoDecode] = ("pdf", "docx", "xlsx")
     retention_days: int = Field(default=7, ge=0, le=365)
+    #: How long the copy taken before a schema upgrade (``migrations.py``, ``db-backups/``) stays.
+    #: Every column of it that holds text a person typed, or a file name, is blanked, so this
+    #: bounds what is left in it - key hashes, ids, the audit trail - not documents. 0: the first
+    #: retention sweep after the upgrade removes it, and there is nothing to go back to but the
+    #: operator's own backup.
+    db_backup_keep_days: int = Field(default=3, ge=0, le=365)
     rate_limit: str = Field(default="120/minute", description="requests per client address")
     #: Queued plus running jobs one user may have at once. The worker is a single thread, so
     #: an unbounded queue is one user's script starving everybody else for hours.

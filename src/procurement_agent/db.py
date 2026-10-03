@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import create_engine, event
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 
@@ -40,10 +40,15 @@ _AUDIT_TRIGGERS = {
 }
 
 
+def create_audit_triggers(conn: Connection) -> None:
+    """The append-only triggers, on ``conn`` and inside whatever transaction it is in."""
+    for ddl in _AUDIT_TRIGGERS.values():
+        conn.exec_driver_sql(ddl)
+
+
 def install_audit_triggers(engine: Engine) -> None:
     with engine.begin() as conn:
-        for ddl in _AUDIT_TRIGGERS.values():
-            conn.exec_driver_sql(ddl)
+        create_audit_triggers(conn)
 
 
 def prune_audit(older_than: datetime) -> int:
@@ -101,8 +106,35 @@ def checkpoint(truncate: bool = True) -> None:
         conn.exec_driver_sql(f"PRAGMA wal_checkpoint({'TRUNCATE' if truncate else 'PASSIVE'})")
 
 
+def configure_connection(dbapi_conn: Any, db_path: Path, *, foreign_keys: bool = True) -> None:
+    """What every connection to the database runs with, and the file modes that follow.
+
+    ``foreign_keys`` is off only for the connection a migration runs on (``migrations``): the
+    pragma is ignored inside a transaction, and with it on, rebuilding a table - drop the old one,
+    rename the new - would delete every row that references it.
+    """
+    cur = dbapi_conn.cursor()
+    cur.execute("PRAGMA journal_mode=WAL")
+    cur.execute(f"PRAGMA foreign_keys={'ON' if foreign_keys else 'OFF'}")
+    cur.execute("PRAGMA synchronous=NORMAL")
+    # A deleted value is overwritten with zeros instead of left in the page: a retention sweep
+    # that removes a row should not leave its text in the file for a later read.
+    cur.execute("PRAGMA secure_delete=ON")
+    # A database file is data, not a program: no function or view it defines may run.
+    cur.execute("PRAGMA trusted_schema=OFF")
+    cur.execute("PRAGMA cell_size_check=ON")
+    cur.close()
+    secure_database_files(db_path)
+
+
 def init_db(db_path: Path) -> Engine:
-    """Create the engine, enable WAL + foreign keys, create tables, lock down file perms."""
+    """Create the engine, bring the schema to this release's version, lock down file perms.
+
+    The schema is ``migrations.apply_migrations``' business: a new file is created at the latest
+    version, one an earlier release wrote is adopted or upgraded (a copy first), one a later
+    release wrote is refused. ``create_all`` and the audit triggers still run on every start,
+    after that, for whatever no migration is responsible for.
+    """
     global _engine, _SessionLocal
     db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with contextlib.suppress(OSError):
@@ -115,26 +147,22 @@ def init_db(db_path: Path) -> Engine:
 
     @event.listens_for(engine, "connect")
     def _pragmas(dbapi_conn: object, _: object) -> None:
-        cur = dbapi_conn.cursor()  # type: ignore[attr-defined]
-        cur.execute("PRAGMA journal_mode=WAL")
-        cur.execute("PRAGMA foreign_keys=ON")
-        cur.execute("PRAGMA synchronous=NORMAL")
-        # A deleted value is overwritten with zeros instead of left in the page: a retention sweep
-        # that removes a row should not leave its text in the file for a later read.
-        cur.execute("PRAGMA secure_delete=ON")
-        # A database file is data, not a program: no function or view it defines may run.
-        cur.execute("PRAGMA trusted_schema=OFF")
-        cur.execute("PRAGMA cell_size_check=ON")
-        cur.close()
-        secure_database_files(db_path)
+        configure_connection(dbapi_conn, db_path)
 
-    from procurement_agent import models  # noqa: F401  (register tables)
+    from procurement_agent import migrations, models  # noqa: F401  (register tables)
 
-    Base.metadata.create_all(engine)
-    install_audit_triggers(engine)
+    try:
+        result = migrations.apply_migrations(engine, db_path)
+        Base.metadata.create_all(engine)
+        install_audit_triggers(engine)
+    except BaseException:
+        engine.dispose()  # a refused start leaves no open file behind
+        raise
     secure_database_files(db_path)
     _engine = engine
     _SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
+    if result.applied:
+        migrations.record_migration(result)  # the audit trail needs the session factory above
     return engine
 
 

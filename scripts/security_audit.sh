@@ -65,7 +65,8 @@ SECURITY_TESTS=(
   tests/integration/test_headers_and_cookies.py tests/integration/test_audit_trail.py
   tests/integration/test_export_formula_safety.py tests/integration/test_availability_web.py
   tests/integration/test_hardening_web.py tests/unit/test_hardening.py tests/unit/test_hardening_checks.py
-  tests/unit/test_retention.py tests/unit/test_upload_guard.py tests/unit/test_upload_guard_hostile.py
+  tests/unit/test_retention.py tests/unit/test_migrations.py tests/unit/test_upload_guard.py
+  tests/unit/test_upload_guard_hostile.py
   tests/unit/test_xml_safety.py tests/unit/test_docx_sanitize.py tests/unit/test_models_manifest.py
   tests/unit/test_capacity_and_pdfium.py tests/unit/test_text_limits.py tests/unit/test_repo_guards.py
 )

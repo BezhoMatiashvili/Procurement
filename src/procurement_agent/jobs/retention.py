@@ -17,7 +17,6 @@ its file after the row is flushed and before the commit, and must not lose it to
 
 from __future__ import annotations
 
-import os
 import re
 import shutil
 import time
@@ -32,6 +31,7 @@ from procurement_agent.extraction.pipeline import result_dir, upload_path
 from procurement_agent.models import Document, DocumentStatus, Job, JobStatus
 from procurement_agent.security.audit import log
 from procurement_agent.security.safe_errors import safe_exc
+from procurement_agent.security.secure_delete import overwrite, remove_file
 
 __all__ = [
     "GRACE_S",
@@ -46,8 +46,6 @@ __all__ = [
 GRACE_S = 15 * 60
 #: Half-written parse output (``docling_service.save_document``) older than this is debris.
 STALE_TMP_S = 60 * 60
-#: Overwritten in blocks this size, so a large file is not read into memory.
-_BLOCK = 1024 * 1024
 #: What this application names its files: a document id, with the kind for an upload. Anything
 #: else in the data directory is not ours to remove.
 _UPLOAD_NAME = re.compile(r"([0-9a-f]{32})\.(?:pdf|docx|xlsx)")
@@ -57,32 +55,6 @@ _DERIVED = {"compare_explain": "left", "aoa_review": "contract"}
 #: Only a job that has finished may be scrubbed: a queued or running one still needs its parameters
 #: to notice that its document is gone, and cancels itself (``Worker._compare_explain``).
 _FINISHED = (JobStatus.done, JobStatus.failed, JobStatus.cancelled)
-
-
-def overwrite(path: Path) -> None:
-    """Zero a file's blocks, flush them to the device, before it is unlinked.
-
-    Best effort, and said so: on a copy-on-write filesystem or an SSD the old blocks may survive,
-    which is why the deployment's protection is an encrypted disk (docs/SECURITY.md). It costs a
-    few milliseconds and removes the plain read of an undeleted-file tool on an ordinary one.
-    """
-    try:
-        remaining = path.stat().st_size
-        with path.open("r+b") as fh:
-            while remaining > 0:
-                fh.write(b"\0" * min(remaining, _BLOCK))
-                remaining -= _BLOCK
-            fh.flush()
-            os.fsync(fh.fileno())
-    except OSError:
-        pass
-
-
-def remove_file(path: Path) -> None:
-    """Overwrite a file, then unlink it: how anything document-derived leaves the data directory,
-    whether a deletion removes it or a job discards it."""
-    overwrite(path)
-    path.unlink(missing_ok=True)
 
 
 def _remove_tree(directory: Path) -> None:

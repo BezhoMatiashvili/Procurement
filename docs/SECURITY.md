@@ -12,6 +12,7 @@ either a mechanism with a test that fails when it is removed, or is listed as a 
 | Uploaded documents | `/data/uploads/<uuid>.<ext>`, mode `0600`, owned by the unprivileged `app` user | **Never** |
 | Parsed structure (Docling JSON), extraction results, and the outputs of explain/review jobs | `/data/results/<uuid>/`, mode `0600` | **Never** |
 | Metadata (owner, size, SHA-256, status, timestamps), the audit trail, and the list of checks run (which check, over which document ids, with which options — never document content; removed with the documents) | SQLite `/data/app.db` (and its `-wal`/`-shm` files), mode `0600`; the directory is `0700` | **Never** |
+| Copies of the database taken before a schema upgrade, with file names, typed questions and options and document hashes blanked (§8) | `/data/db-backups/`, files `0600`, directory `0700`; removed `PA_DB_BACKUP_KEEP_DAYS` (default 3) days after they were made | **Never** |
 | LLM prompts | HTTP to the Ollama container over a Docker **internal** network (no route to the internet) | **Never** |
 | Logs | stdout of the container (JSON), content-free — see §5 | Only if the operator ships them |
 
@@ -181,8 +182,9 @@ pixels, and the application's own uses of pdfium are serialised by one lock.
   extraction start, a result read (API and UI), a document's content shown as text or as a page
   image, check results and exports, delete and retention delete, sign-in (ok/denied) and logout,
   refused cross-origin requests, probes of other users' ids, key creation and revocation, the
-  retention sweep, the model-manifest write, outbound attempts the egress guard refused, and
-  shortening the trail itself. Fields: actor, action, outcome, document id, job id, client IP,
+  retention sweep, the model-manifest write, outbound attempts the egress guard refused, a schema
+  upgrade of the database (`db.migrate`: the versions and the migrations' names), and shortening
+  the trail itself. Fields: actor, action, outcome, document id, job id, client IP,
   timestamp, and a content-free detail. Read it with `python -m procurement_agent.cli audit`.
   The table is append-only **in the database**: triggers abort any `UPDATE` or `DELETE`, so a bug
   or an injection through the application cannot rewrite history; the one deliberate way to
@@ -237,7 +239,9 @@ memory, PID and (`PA_APP_CPUS`) CPU limits, `ulimits.core: 0`, an init process. 
 `nobody` with the same restrictions (it keeps only `NET_BIND_SERVICE`, which its binary's file
 capability needs to execute at all). The process itself sets `umask(0o077)` and `RLIMIT_CORE=0`
 (a crash in a native parser must not leave a core file of document text), creates `/data` as
-`0700`, and opens SQLite with `secure_delete`, `trusted_schema=OFF` and `cell_size_check`.
+`0700`, and opens SQLite with `secure_delete`, `trusted_schema=OFF` and `cell_size_check`. The
+database's schema version is checked at start: one written by a newer release is refused, not
+opened (`migrations.py`, PRODUCTION_READINESS.md 5.6).
 One worker thread processes jobs, so a malicious document cannot fan out CPU/memory consumption.
 Docling conversion has a timeout.
 
@@ -289,8 +293,26 @@ and on `python -m procurement_agent.cli sweep`. Users can delete immediately fro
   `/tmp` (a tmpfs, §7) and are only unlinked.
 
 The metadata row is kept (name replaced by `[deleted]`) so the audit trail stays consistent.
-The overwrite is best-effort: on a journaling or copy-on-write filesystem or an SSD it does not
-reach every copy of the data, which is why the volume belongs on an encrypted disk (§10).
+**Copies of the database follow the same promise.** Before a schema upgrade changes a database that
+holds rows, the release copies it into `/data/db-backups/` (`0600`, directory `0700`). The copy is read
+into memory and blanked there, and only the blanked database is written, so the text never reaches
+the directory - a process killed half-way leaves nothing that retention would have removed. Blanked:
+`documents.display_name` (the file name; set to `[scrubbed]`), `documents.sha256` (a hash of the
+document), `documents.error`, `jobs.params` (the question and the options a person typed),
+`jobs.message` and `check_runs.params` (the options of a check). A test fails until every column of
+every table is either on that list or on the test's own list of columns that are kept, so a column
+added later gets a decision. Kept, because a copy is useless for going back without them: key and
+session-token hashes, account names, ids, statuses, sizes and times, the audit trail.
+
+The lifetime of what is kept is bounded by age, like documents: the retention sweep (every 10 minutes,
+and `cli sweep`) overwrites and removes a copy taken more than `PA_DB_BACKUP_KEEP_DAYS` days ago
+(default 3; 0 removes it at the first sweep after the upgrade, at the cost of having nothing to go
+back to but the operator's own backup), and at most the three newest are kept. Worst case, then: a
+file name, a typed question, an option or a document hash is in a copy for **0 days**; an audit row
+that `audit-prune` has removed, or a key that has been revoked, is in a copy for at most
+`PA_DB_BACKUP_KEEP_DAYS` days plus a sweep interval (and, while the stack is stopped, until its first
+sweep after it starts). The same sweep removes a half-written copy a crash left, once it is an
+hour old. A copy is not a backup (PRODUCTION_READINESS.md 5.5).
 
 ## 9. Supply chain
 
@@ -387,6 +409,9 @@ What this does not do, so nobody has to discover it:
 * **Secure deletion is best-effort** (§8): journaling, copy-on-write, snapshots and SSD wear
   levelling can keep old copies; encryption at rest is the control.
 * **The audit trail is protected against the application, not the disk's owner** (§4).
+* **Pre-upgrade database copies stay on the data volume** for `PA_DB_BACKUP_KEEP_DAYS` days. They
+  hold no file name, typed text or document hash (§8), but they do hold key hashes, ids and the
+  audit trail as they were, and a copy restored later brings a revoked key back.
 * **AI coding tools can read whatever they are allowed to.** On a developer machine, an
   assistant that reads client files sends them to its provider. On the machine this was
   developed on, `.claude/settings.json` deny rules and a `.cursorignore` name the client's
@@ -415,7 +440,7 @@ at the end; it is never counted as a pass.
 | `repo_*`, `machine_*` | no document/database/key/`.env` in git; no credential-shaped string in any commit or the tree (a small stand-in for gitleaks, which CI runs); the client-identifier canary over the tree; hooks installed; client directories not readable by group/others; the AI-tool deny rules |
 | `egress_policy` | the single outbound-capable code path is pinned; the guard, URL, model and Host policies |
 | `offline_kernel` | the whole product flow with only loopback up (`unshare --net`) |
-| `security_suite` | authz/IDOR/CSRF/header/cookie matrix over every route, hostile ids and hostile request bodies (19 kinds, on every route that reads one: always a 4xx, never a 500); pre-auth; hostile uploads; retention; hardening; the XML, DOCX, manifest, text-limit and capacity tests |
+| `security_suite` | authz/IDOR/CSRF/header/cookie matrix over every route, hostile ids and hostile request bodies (19 kinds, on every route that reads one: always a 4xx, never a 500); pre-auth; hostile uploads; retention; schema upgrades (the copies' modes, the refusal of a newer database); hardening; the XML, DOCX, manifest, text-limit and capacity tests |
 | `log_canary` | a marker planted in every input reaches 0 log lines and 0 database columns |
 | `deploy_policy` | compose, Dockerfile, build context and supervisor; the supervisor restarts a hung real server |
 | `regex_budget`, `regex_controls` | directed search for super-linear patterns through the input limits; the same search still finds the pre-fix pattern |

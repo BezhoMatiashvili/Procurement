@@ -1,0 +1,203 @@
+{
+ "version": 1,
+ "objects": [
+  {
+   "type": "index",
+   "name": "ix_api_keys_prefix",
+   "table": "api_keys",
+   "sql": "CREATE INDEX ix_api_keys_prefix ON api_keys (prefix)"
+  },
+  {
+   "type": "index",
+   "name": "ix_api_keys_user",
+   "table": "api_keys",
+   "sql": "CREATE INDEX ix_api_keys_user ON api_keys (user)"
+  },
+  {
+   "type": "index",
+   "name": "ix_audit_log_action",
+   "table": "audit_log",
+   "sql": "CREATE INDEX ix_audit_log_action ON audit_log (action)"
+  },
+  {
+   "type": "index",
+   "name": "ix_audit_log_actor",
+   "table": "audit_log",
+   "sql": "CREATE INDEX ix_audit_log_actor ON audit_log (actor)"
+  },
+  {
+   "type": "index",
+   "name": "ix_audit_log_at",
+   "table": "audit_log",
+   "sql": "CREATE INDEX ix_audit_log_at ON audit_log (at)"
+  },
+  {
+   "type": "index",
+   "name": "ix_audit_log_document_id",
+   "table": "audit_log",
+   "sql": "CREATE INDEX ix_audit_log_document_id ON audit_log (document_id)"
+  },
+  {
+   "type": "index",
+   "name": "ix_check_run_documents_document_id",
+   "table": "check_run_documents",
+   "sql": "CREATE INDEX ix_check_run_documents_document_id ON check_run_documents (document_id)"
+  },
+  {
+   "type": "index",
+   "name": "ix_check_runs_last_opened_at",
+   "table": "check_runs",
+   "sql": "CREATE INDEX ix_check_runs_last_opened_at ON check_runs (last_opened_at)"
+  },
+  {
+   "type": "index",
+   "name": "ix_check_runs_owner",
+   "table": "check_runs",
+   "sql": "CREATE INDEX ix_check_runs_owner ON check_runs (owner)"
+  },
+  {
+   "type": "index",
+   "name": "ix_documents_owner",
+   "table": "documents",
+   "sql": "CREATE INDEX ix_documents_owner ON documents (owner)"
+  },
+  {
+   "type": "index",
+   "name": "ix_documents_sha256",
+   "table": "documents",
+   "sql": "CREATE INDEX ix_documents_sha256 ON documents (sha256)"
+  },
+  {
+   "type": "index",
+   "name": "ix_jobs_owner",
+   "table": "jobs",
+   "sql": "CREATE INDEX ix_jobs_owner ON jobs (owner)"
+  },
+  {
+   "type": "index",
+   "name": "ix_ui_sessions_api_key_id",
+   "table": "ui_sessions",
+   "sql": "CREATE INDEX ix_ui_sessions_api_key_id ON ui_sessions (api_key_id)"
+  },
+  {
+   "type": "index",
+   "name": "ix_ui_sessions_expires_at",
+   "table": "ui_sessions",
+   "sql": "CREATE INDEX ix_ui_sessions_expires_at ON ui_sessions (expires_at)"
+  },
+  {
+   "type": "index",
+   "name": "ix_ui_sessions_user",
+   "table": "ui_sessions",
+   "sql": "CREATE INDEX ix_ui_sessions_user ON ui_sessions (user)"
+  },
+  {
+   "type": "index",
+   "name": "sqlite_autoindex_api_keys_1",
+   "table": "api_keys",
+   "sql": null
+  },
+  {
+   "type": "index",
+   "name": "sqlite_autoindex_api_keys_2",
+   "table": "api_keys",
+   "sql": null
+  },
+  {
+   "type": "index",
+   "name": "sqlite_autoindex_check_run_documents_1",
+   "table": "check_run_documents",
+   "sql": null
+  },
+  {
+   "type": "index",
+   "name": "sqlite_autoindex_check_runs_1",
+   "table": "check_runs",
+   "sql": null
+  },
+  {
+   "type": "index",
+   "name": "sqlite_autoindex_check_runs_2",
+   "table": "check_runs",
+   "sql": null
+  },
+  {
+   "type": "index",
+   "name": "sqlite_autoindex_documents_1",
+   "table": "documents",
+   "sql": null
+  },
+  {
+   "type": "index",
+   "name": "sqlite_autoindex_jobs_1",
+   "table": "jobs",
+   "sql": null
+  },
+  {
+   "type": "index",
+   "name": "sqlite_autoindex_ui_sessions_1",
+   "table": "ui_sessions",
+   "sql": null
+  },
+  {
+   "type": "index",
+   "name": "sqlite_autoindex_ui_sessions_2",
+   "table": "ui_sessions",
+   "sql": null
+  },
+  {
+   "type": "table",
+   "name": "api_keys",
+   "table": "api_keys",
+   "sql": "CREATE TABLE api_keys (\n\tid VARCHAR(32) NOT NULL, \n\tuser VARCHAR(128) NOT NULL, \n\tkey_hash VARCHAR(64) NOT NULL, \n\tprefix VARCHAR(12) NOT NULL, \n\tcreated_at DATETIME NOT NULL, \n\trevoked_at DATETIME, \n\tlast_used_at DATETIME, \n\tPRIMARY KEY (id), \n\tUNIQUE (key_hash)\n)"
+  },
+  {
+   "type": "table",
+   "name": "audit_log",
+   "table": "audit_log",
+   "sql": "CREATE TABLE audit_log (\n\tid INTEGER NOT NULL, \n\tat DATETIME NOT NULL, \n\tactor VARCHAR(128) NOT NULL, \n\taction VARCHAR(64) NOT NULL, \n\tdocument_id VARCHAR(32), \n\tjob_id VARCHAR(32), \n\tip VARCHAR(64), \n\toutcome VARCHAR(16) NOT NULL, \n\tdetail VARCHAR(255), \n\tPRIMARY KEY (id)\n)"
+  },
+  {
+   "type": "table",
+   "name": "check_run_documents",
+   "table": "check_run_documents",
+   "sql": "CREATE TABLE check_run_documents (\n\trun_id VARCHAR(32) NOT NULL, \n\tdocument_id VARCHAR(32) NOT NULL, \n\trole VARCHAR(16) NOT NULL, \n\tPRIMARY KEY (run_id, document_id), \n\tFOREIGN KEY(run_id) REFERENCES check_runs (id) ON DELETE CASCADE, \n\tFOREIGN KEY(document_id) REFERENCES documents (id) ON DELETE CASCADE\n)"
+  },
+  {
+   "type": "table",
+   "name": "check_runs",
+   "table": "check_runs",
+   "sql": "CREATE TABLE check_runs (\n\tid VARCHAR(32) NOT NULL, \n\towner VARCHAR(128) NOT NULL, \n\tkind VARCHAR(16) NOT NULL, \n\t\"key\" VARCHAR(64) NOT NULL, \n\tparams JSON NOT NULL, \n\tcreated_at DATETIME NOT NULL, \n\tlast_opened_at DATETIME NOT NULL, \n\tPRIMARY KEY (id), \n\tUNIQUE (owner, \"key\")\n)"
+  },
+  {
+   "type": "table",
+   "name": "documents",
+   "table": "documents",
+   "sql": "CREATE TABLE documents (\n\tid VARCHAR(32) NOT NULL, \n\towner VARCHAR(128) NOT NULL, \n\tdisplay_name VARCHAR(255) NOT NULL, \n\tkind VARCHAR(8) NOT NULL, \n\tsize_bytes INTEGER NOT NULL, \n\tsha256 VARCHAR(64) NOT NULL, \n\tpage_count INTEGER, \n\tstatus VARCHAR(16) NOT NULL, \n\terror TEXT, \n\tcreated_at DATETIME NOT NULL, \n\tparsed_at DATETIME, \n\texpires_at DATETIME, \n\tPRIMARY KEY (id)\n)"
+  },
+  {
+   "type": "table",
+   "name": "jobs",
+   "table": "jobs",
+   "sql": "CREATE TABLE jobs (\n\tid VARCHAR(32) NOT NULL, \n\tdocument_id VARCHAR(32) NOT NULL, \n\towner VARCHAR(128) NOT NULL, \n\tkind VARCHAR(32) NOT NULL, \n\tparams JSON NOT NULL, \n\tstatus VARCHAR(16) NOT NULL, \n\tprogress INTEGER NOT NULL, \n\tmessage TEXT, \n\tcreated_at DATETIME NOT NULL, \n\tstarted_at DATETIME, \n\tfinished_at DATETIME, \n\tPRIMARY KEY (id), \n\tFOREIGN KEY(document_id) REFERENCES documents (id) ON DELETE CASCADE\n)"
+  },
+  {
+   "type": "table",
+   "name": "ui_sessions",
+   "table": "ui_sessions",
+   "sql": "CREATE TABLE ui_sessions (\n\tid VARCHAR(32) NOT NULL, \n\ttoken_hash VARCHAR(64) NOT NULL, \n\tapi_key_id VARCHAR(32), \n\tuser VARCHAR(128) NOT NULL, \n\tcreated_at DATETIME NOT NULL, \n\texpires_at DATETIME NOT NULL, \n\trevoked_at DATETIME, \n\tlast_seen_at DATETIME, \n\tPRIMARY KEY (id), \n\tUNIQUE (token_hash), \n\tFOREIGN KEY(api_key_id) REFERENCES api_keys (id) ON DELETE CASCADE\n)"
+  },
+  {
+   "type": "trigger",
+   "name": "audit_log_no_delete",
+   "table": "audit_log",
+   "sql": "CREATE TRIGGER audit_log_no_delete BEFORE DELETE ON audit_log BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END"
+  },
+  {
+   "type": "trigger",
+   "name": "audit_log_no_update",
+   "table": "audit_log",
+   "sql": "CREATE TRIGGER audit_log_no_update BEFORE UPDATE ON audit_log BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END"
+  }
+ ]
+}
