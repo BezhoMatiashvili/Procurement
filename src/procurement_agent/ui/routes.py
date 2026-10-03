@@ -510,10 +510,13 @@ def _reading_page(
     view: reading.Reading | None = None
     notes: list[str] = []
     scanned = False
+    ocr: bool | None = None
     if job.status == JobStatus.done and doc.status == DocumentStatus.ready:
         try:
             segments = load_segments(settings, doc.id, doc.kind, notes=notes)
             scanned = is_scanned_pdf(settings, doc.id, doc.kind)
+            stored = read_quality.read_sidecar(settings, doc.id)
+            ocr = stored.ocr if stored is not None else None
             view = reading.build(segments, part, max_items=settings.compare_max_segments)
         except Exception as e:  # a stored parse can be missing or damaged: the page says so
             log.warning(
@@ -521,7 +524,7 @@ def _reading_page(
             )
             if isinstance(e, read_quality.StoredParseError):
                 fail_unreadable(doc.id)
-            view, notes, scanned = None, [], False
+            view, notes, scanned, ocr = None, [], False, None
         else:
             if (
                 refused := _audited(
@@ -549,6 +552,7 @@ def _reading_page(
         view=view,
         notes=notes,
         scanned=scanned,
+        ocr=ocr,
         earlier=earlier,
     )
 

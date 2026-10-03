@@ -167,6 +167,7 @@ def _stub_reading() -> dict[str, object]:
         ),
         "notes": ["sheet 'BOQ': only the first 20000 rows were read"],
         "scanned": True,
+        "ocr": True,
         "earlier": [
             SimpleNamespace(id="d" * 32, created_at=datetime(2026, 9, 25, 13, 7), message="3 facts")
         ],

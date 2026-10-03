@@ -816,6 +816,17 @@ STRINGS: dict[str, tuple[str, str]] = {
         "ამ PDF-ს საკუთარი ტექსტი არ აქვს; ქვემოთ მოცემული ტექსტი გვერდების გამოსახულებიდან "
         "არის ამოცნობილი (OCR). ციფრები და კოდები გადაამოწმეთ გვერდზე.",
     ),
+    "reading.scanned.no_ocr": (
+        "This PDF has no text of its own, and OCR was not available when it was read: only the "
+        "text the file itself carries is shown, and the pages without any were not read.",
+        "ამ PDF-ს საკუთარი ტექსტი არ აქვს, წაკითხვისას კი ტექსტის ამოცნობა (OCR) ხელმისაწვდომი "
+        "არ იყო: ნაჩვენებია მხოლოდ ტექსტი, რომელიც თავად ფაილშია; ტექსტის გარეშე გვერდები არ "
+        "წაკითხულა.",
+    ),
+    "reading.scanned.unknown": (
+        "This PDF has no text of its own. Check figures and codes against the page.",
+        "ამ PDF-ს საკუთარი ტექსტი არ აქვს. ციფრები და კოდები გადაამოწმეთ გვერდზე.",
+    ),
     "reading.truncated": (
         "Not read (size limit): {note}",
         "არ წაიკითხა (ზომის ლიმიტი): {note}",
