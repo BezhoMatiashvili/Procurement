@@ -711,9 +711,12 @@ def _as_meant(text: str, reference: str = "") -> str:
     return "".join(out)
 
 
-#: The unit a count of time is in, right after the count: "სამუშაო დღის", "თვის", "წლის".
+#: The unit a count of time is in, right after the count: "სამუშაო დღის", "თვის", "წლის". The
+#: spaces are taken whole (atomic): what follows them is a letter, so giving one back never helps,
+#: and trying to cost a step a space at every place a run of them starts.
 _TIME_UNIT = re.compile(
-    r"\s+(?:(?:სამუშაო|კალენდარულ[ა-ჰ]*|საბანკო)\s+)?(?:დღ|თვ[ეი]|წ[ელ]|კვირ)", re.IGNORECASE
+    r"(?>\s+)(?:(?:სამუშაო|კალენდარულ[ა-ჰ]*|საბანკო)(?>\s+))?(?:დღ|თვ[ეი]|წ[ელ]|კვირ)",
+    re.IGNORECASE,
 )
 #: A unit of time right after a word: where a count written in words may end.
 _AFTER_A_WORD_UNIT = re.compile(r"(?<=[ა-ჰ])" + _TIME_UNIT.pattern, re.IGNORECASE)
