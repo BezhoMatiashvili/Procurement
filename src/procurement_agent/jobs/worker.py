@@ -45,7 +45,7 @@ from procurement_agent.extraction.pipeline import (
     run_extraction,
     upload_path,
 )
-from procurement_agent.extraction.read_status import stored_extraction
+from procurement_agent.extraction.read_status import LLM_UNAVAILABLE, stored_extraction
 from procurement_agent.extraction.schemas import FactType
 from procurement_agent.history import forget_runs
 from procurement_agent.ingestion import docling_service, read_quality
@@ -67,6 +67,8 @@ _LLM_CALLS_PER_BEAT = 3
 _STOP = object()
 _ACTIVE = (JobStatus.queued, JobStatus.running)
 _DELETED_MESSAGE = "document was deleted while the job ran"
+#: How a job whose whole purpose is the model's answer ends when there was none.
+_NO_ANSWER = f"{LLM_UNAVAILABLE}: the model did not answer"
 
 
 class Worker:
@@ -417,11 +419,26 @@ class Worker:
         )
         # What the workbook reader left out belongs in front of the user, not only in the log.
         result.warnings[:0] = [f"not read (size limit): {n}" for n in notes]
+        # Each passage sent to the model is one call; one that raised is not counted. A model
+        # that was asked and did not answer leaves the rules' facts - kept, and said to be so.
+        unanswered = result.chunks_selected - result.llm_calls if result.model is not None else 0
         out = self._write_output(
-            doc_id, job_id, stored_extraction(result, quality).model_dump_json()
+            doc_id,
+            job_id,
+            stored_extraction(result, quality, unanswered=max(unanswered, 0)).model_dump_json(),
         )
         msg = f"{len(result.facts)} facts, {result.llm_calls} LLM calls"
-        if not self._settle(job_id, JobStatus.done, msg, documents=(doc_id,)):
+        apply: Callable[[Session], None] | None = None
+        if unanswered > 0:
+            msg += f"; {LLM_UNAVAILABLE}: the model was unavailable for {unanswered} passage(s)"
+
+            def mark_degraded(s: Session) -> None:
+                job = s.get(Job, job_id)
+                if job is not None:
+                    job.params = {**job.params, "degraded": True}
+
+            apply = mark_degraded
+        if not self._settle(job_id, JobStatus.done, msg, documents=(doc_id,), apply=apply):
             self._discard([(doc_id, doc_kind)], out)
 
     def _compare_explain(self, job_id: str, doc_id: str, params: dict[str, object]) -> None:
@@ -480,6 +497,10 @@ class Worker:
             model=self._s.llm_fast_model,
             max_hunks=self._s.compare_llm_max_hunks,
         )
+        if stored.error is not None:  # the model's answer was the whole job, and it did not come
+            log.warning("compare_explain_unanswered", job=job_id, error=stored.error)
+            self._finish(job_id, JobStatus.failed, _NO_ANSWER)
+            return
         out = self._write_output(doc_id, job_id, stored.model_dump_json())
         msg = f"{len(stored.items)} change(s) described"
         if not self._settle(job_id, JobStatus.done, msg, documents=(pair[0][0], pair[1][0])):
@@ -538,6 +559,10 @@ class Worker:
             max_items=self._s.aoa_llm_max_items,
             max_chars=self._s.aoa_llm_max_chars,
         )
+        if stored.error is not None:  # the model's answer was the whole job, and it did not come
+            log.warning("aoa_review_unanswered", job=job_id, error=stored.error)
+            self._finish(job_id, JobStatus.failed, _NO_ANSWER)
+            return
         out = self._write_output(doc_id, job_id, stored.model_dump_json())
         msg = f"{len(stored.items)} answer(s) about {len(stored.asked)} note(s)"
         if not self._settle(job_id, JobStatus.done, msg, documents=(pair[0][0], pair[1][0])):

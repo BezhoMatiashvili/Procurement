@@ -26,6 +26,11 @@
 {% endif %}
 
 {% if result %}
+{% if result.degraded %}
+<section class="card caveat" id="degraded" role="alert">
+  <p class="caveat-title">{{ icon("alert") }}<span>{{ t("extract.degraded") }}</span></p>
+</section>
+{% endif %}
 {% if read_notes %}
 <section class="card caveat" id="read-quality" role="alert">
   <p class="caveat-title">{{ icon("alert") }}<span><strong>{{ t("readq.title") }}</strong></span></p>

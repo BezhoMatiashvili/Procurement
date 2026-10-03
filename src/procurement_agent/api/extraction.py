@@ -50,6 +50,9 @@ class JobOut(BaseModel):
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
+    #: the job is done, but the model that was asked did not answer: the result is the rules'
+    #: alone (``LLM_UNAVAILABLE`` in its message and its warnings)
+    degraded: bool = False
 
 
 def _job_out(j: Job) -> JobOut:
@@ -63,6 +66,7 @@ def _job_out(j: Job) -> JobOut:
         created_at=j.created_at,
         started_at=j.started_at,
         finished_at=j.finished_at,
+        degraded=bool(j.params.get("degraded")),
     )
 
 

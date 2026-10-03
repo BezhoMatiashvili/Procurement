@@ -28,6 +28,7 @@ from procurement_agent.api.checks import (
     boq_documents,
     compare_annotated_docx,
     compare_xlsx,
+    explain_answered,
     merged_xlsx,
     owned_explain_job,
     owned_review_job,
@@ -58,7 +59,11 @@ from procurement_agent.config import Settings, get_settings
 from procurement_agent.db import get_session
 from procurement_agent.extraction.labels import LABELS
 from procurement_agent.extraction.pipeline import is_scanned_pdf, load_segments, result_dir
-from procurement_agent.extraction.read_status import StoredExtraction, partial_notes
+from procurement_agent.extraction.read_status import (
+    LLM_UNAVAILABLE,
+    StoredExtraction,
+    partial_notes,
+)
 from procurement_agent.extraction.schemas import DEFAULT_TARGETS, FactType
 from procurement_agent.ingestion import read_quality
 from procurement_agent.jobs.stuck import fail_unreadable
@@ -729,6 +734,10 @@ def aoa_report(
         review_status=review_status,
         review_running=review_status in (JobStatus.queued.value, JobStatus.running.value),
         review_state=report.summary.get("review"),
+        # a review that failed because the model did not answer is asked again, not reused
+        review_retry=review_row is not None
+        and review_row.status == JobStatus.failed
+        and (review_row.message or "").startswith(LLM_UNAVAILABLE),
         review_marked=any(f.reviewed_by for f in report.findings),
         review_auto=settings.aoa_llm_auto,
     )
@@ -1187,6 +1196,7 @@ def compare_report(
         unexplained=len(report.unexplained),
         explain_job=job,
         explain_running=running,
+        explain_failed=explain_row is not None and explain_row.status == JobStatus.failed,
         d={
             "t": lambda key, **kw: t(key, lang).format(**kw) if kw else t(key, lang),
             "hunks": {h.id: h for h in report.hunks},
@@ -1239,7 +1249,9 @@ def compare_explain(
             (
                 j
                 for j in same_pair
-                if j.params.get("left") == left_doc.id and j.params.get("right") == right_doc.id
+                if j.params.get("left") == left_doc.id
+                and j.params.get("right") == right_doc.id
+                and explain_answered(settings, right_doc.id, j)
             ),
             None,
         )

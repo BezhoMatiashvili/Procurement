@@ -113,7 +113,14 @@
 {# "current" means the review belongs here, not that any answer passed its checks #}
 <div class="card explain-box"><p class="muted small">{% if review_marked %}{{ t("aoa.review.done") }}{% else %}{{ t("aoa.review.unused") }}{% endif %}</p></div>
 {% elif review_job and review_state != "stale" %}
-<div class="card explain-box"><p class="muted small">{{ t("aoa.review.failed") }}</p></div>
+<div class="card explain-box"><p class="muted small">{{ t("aoa.review.failed") }}</p>
+  {# a review that failed because the model did not answer is asked again, not reused #}
+  {% if review_retry and review_items %}
+  <form method="post" action="/ui/checks/aoa/review?{{ query }}">
+    <button type="submit" class="secondary">{{ icon("sparkle") }}{{ t("aoa.review.again") }}</button>
+  </form>
+  {% endif %}
+</div>
 {% elif review_items %}
 <div class="card explain-box">
   <p class="muted small">{% if review_state == "stale" %}{{ t("aoa.review.stale") }}{% else %}{{ t("aoa.review.lead") }}{% endif %}<br>{{ t("aoa.review.slow") }}</p>

@@ -183,6 +183,7 @@ _NO_REVIEW: dict[str, object] = {
     "review_state": None,
     "review_marked": False,
     "review_auto": False,
+    "review_retry": False,
     # and no foreign-currency invoice whose days could take a typed rate
     "fx_days": [],
     # nor registry extracts riding along
@@ -233,6 +234,7 @@ def test_every_new_template_renders_under_strict_undefined(name: str) -> None:
         unexplained=0,
         explain_job=None,
         explain_running=False,
+        explain_failed=False,
         d={
             "t": lambda key, **kw: key,
             "hunks": {},
@@ -795,8 +797,9 @@ def test_a_failed_review_is_not_queued_again(client: TestClient) -> None:
 
 
 def test_a_review_the_model_did_not_answer_does_not_say_it_answered(client: TestClient) -> None:
-    """A model that is down still ends the job - with a note, not a failure - and the card must
-    not contradict that note by claiming the model answered."""
+    """A model that is down ends the job failed - it used to end 'done' with a note, and the
+    next request reused it - and the card says the review did not finish and offers to ask
+    again, never that the model answered."""
     from procurement_agent.llm.base import LLMUnavailableError
 
     _with_model(client, ReadingLLM(error=LLMUnavailableError("down")))
@@ -807,10 +810,10 @@ def test_a_review_the_model_did_not_answer_does_not_say_it_answered(client: Test
         follow_redirects=False,
     )
     [job] = parse_qs(urlsplit(r.headers["location"]).query)["review"]
-    assert _wait_for_job(client, job) == "done"
+    assert _wait_for_job(client, job) == "failed"
     body = client.get(r.headers["location"]).text
-    assert "მოდელმა ვერ უპასუხა: LLMUnavailableError" in body  # the note says what happened
-    assert "მოდელით გადამოწმებამ არცერთი შენიშვნა არ მონიშნა" in body
+    assert "მოდელით გადამოწმება ვერ დასრულდა" in body
+    assert "/ui/checks/aoa/review?" in body  # asked again, not reused
     assert "მოდელმა უპასუხა" not in body
 
 
@@ -900,6 +903,12 @@ def _render_review_card(**review: object) -> str:
             ["/ui/checks/aoa/review?", "data-poll-job"],
         ),
         (
+            # the model did not answer: asking again is what the card offers
+            {"review_job": "j1", "review_status": "failed", "review_retry": True},
+            ["aoa.review.failed", "aoa.review.again", "/ui/checks/aoa/review?"],
+            ["data-poll-job"],
+        ),
+        (
             {
                 "review_job": "j1",
                 "review_status": "done",
@@ -929,6 +938,7 @@ def _render_review_card(**review: object) -> str:
         "done",
         "unused",
         "failed",
+        "failed-unanswered",
         "stale",
         "off",
         "nothing-open",
@@ -985,6 +995,7 @@ def test_the_compare_explain_card_polls_its_running_job(running: bool) -> None:
         unexplained=1,
         explain_job="j1" if running else None,
         explain_running=running,
+        explain_failed=False,
         d={
             "t": lambda key, **kw: key,
             "hunks": {},

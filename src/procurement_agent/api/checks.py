@@ -63,6 +63,7 @@ from procurement_agent.extraction.pipeline import (
     upload_path,
 )
 from procurement_agent.extraction.read_status import (
+    LLM_UNAVAILABLE,
     ReadAwareComparison,
     ReadAwareReport,
     read_aware_comparison,
@@ -73,7 +74,7 @@ from procurement_agent.ingestion.read_quality import StoredParseError, load_stor
 from procurement_agent.ingestion.xlsx_size import WorkbookTooLargeError
 from procurement_agent.jobs.worker import Worker
 from procurement_agent.llm.base import LLMClient
-from procurement_agent.models import Document, DocumentStatus, Job
+from procurement_agent.models import Document, DocumentStatus, Job, JobStatus
 from procurement_agent.registry.extract import NotAnExtractError, read_extract
 from procurement_agent.registry.snapshot import RegistryEntry, open_snapshot
 from procurement_agent.registry.source import RefusedExtract, RegistrySource
@@ -324,6 +325,18 @@ def load_review(settings: Settings, doc_id: str, job_id: str) -> ScopeReviewSet 
         return None  # a job of another kind wrote here; not a review
 
 
+def _answered(settings: Settings, aoa_id: str, job: Job) -> bool:
+    """Whether an earlier review is worth handing back: a failed one is (the same failure would
+    come again), unless the failure was that the model did not answer - then asking again is the
+    point, and so for a review stored by an older version as 'done' with the failure inside."""
+    if job.status == JobStatus.failed:
+        return not (job.message or "").startswith(LLM_UNAVAILABLE)
+    if job.status == JobStatus.done:
+        stored = load_review(settings, aoa_id, job.id)
+        return stored is None or stored.error is None
+    return True
+
+
 @dataclass(frozen=True)
 class QueuedReview:
     """What asking for a review came to: its job - just queued, or the earlier one that asked
@@ -370,7 +383,11 @@ def queue_aoa_review(
         .order_by(Job.created_at.desc())
     )
     for job in earlier:
-        if job.params.get("contract") == contract.id and job.params.get("digest") == digest:
+        if (
+            job.params.get("contract") == contract.id
+            and job.params.get("digest") == digest
+            and _answered(settings, aoa.id, job)
+        ):
             return QueuedReview(job, len(items))
 
     ensure_job_capacity(session, settings, principal)
@@ -595,6 +612,15 @@ def owned_explain_job(
     ):
         return None
     return job
+
+
+def explain_answered(settings: Settings, doc_id: str, job: Job) -> bool:
+    """Whether a queued, running or finished explain job stands for the model's answer. A run
+    stored as 'done' by an older version, with the model's failure inside, does not."""
+    if job.status != JobStatus.done:
+        return True
+    stored = load_explanations(settings, doc_id, job.id)
+    return stored is None or stored.error is None
 
 
 def load_explanations(settings: Settings, doc_id: str, job_id: str) -> ExplanationSet | None:

@@ -118,6 +118,7 @@
   {% if explain_running %}
   <p role="status" aria-live="polite"><span class="status running">{{ t("compare.explain.running") }}</span></p>
   {% else %}
+  {% if explain_failed %}<p class="small">{{ icon("alert") }} {{ t("compare.explain.failed") }}</p>{% endif %}
   <p class="muted small">{{ t("compare.explain.lead") }}<br>{{ t("compare.explain.slow") }}</p>
   <form method="post" action="/ui/checks/compare/explain?{{ query }}">
     <button type="submit" class="secondary">{{ icon("sparkle") }}{{ t("compare.explain", n=unexplained) }}</button>

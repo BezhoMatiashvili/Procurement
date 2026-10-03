@@ -27,6 +27,7 @@ from procurement_agent.ingestion import read_quality as rq
 from procurement_agent.ingestion.read_quality import ReadQuality
 
 __all__ = [
+    "LLM_UNAVAILABLE",
     "ReadAwareComparison",
     "ReadAwareReport",
     "StoredExtraction",
@@ -41,6 +42,12 @@ def partial_notes(qualities: Mapping[str, ReadQuality | None]) -> list[SkipNote]
     """The ``DOC.PARTIAL`` note of each side that was only partly read, in the order given."""
     notes = (rq.partial_note(q, who) for who, q in qualities.items() if q is not None)
     return [n for n in notes if n is not None]
+
+
+#: The code of a job that exists only to get the model's answer and did not get it, and of a
+#: result that lacks the model's part of the work. Content-free: the model's failure is named by
+#: its kind in the log, never in the message.
+LLM_UNAVAILABLE = "LLM_UNAVAILABLE"
 
 
 class ReadAwareReport(CheckReport):
@@ -93,15 +100,22 @@ def read_aware_comparison(
 
 
 def stored_extraction(
-    result: ExtractionResult, quality: ReadQuality, *, degraded: bool = False
+    result: ExtractionResult, quality: ReadQuality, *, unanswered: int = 0
 ) -> StoredExtraction:
-    """``result`` as it is stored: with what was read of the document, and - first among its
-    warnings, where the page and the workbook export both show it - the note that part of it
-    was not."""
+    """``result`` as it is stored: with what was read of the document, whether the model failed
+    to answer (``unanswered`` passages it was asked about), and - first among its warnings, where
+    the page and the workbook export both show them - the notes that say so."""
     note = rq.partial_note(quality)
     fields = {name: getattr(result, name) for name in ExtractionResult.model_fields}
+    first: list[str] = []
     if note is not None:
-        fields["warnings"] = [f"{note.rule_id}: {note.reason_en}", *result.warnings]
+        first.append(f"{note.rule_id}: {note.reason_en}")
+    if unanswered:
+        first.append(
+            f"{LLM_UNAVAILABLE}: the model was unavailable for {unanswered} of "
+            f"{result.chunks_selected} passages; this result has the rules' findings only"
+        )
+    fields["warnings"] = [*first, *result.warnings]
     return StoredExtraction.model_construct(
-        **fields, read_quality={"document": quality}, degraded=degraded
+        **fields, read_quality={"document": quality}, degraded=bool(unanswered)
     )

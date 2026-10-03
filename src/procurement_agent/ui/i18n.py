@@ -735,6 +735,18 @@ STRINGS: dict[str, tuple[str, str]] = {
         "The model review did not finish; the notes above are the rules' alone.",
         "მოდელით გადამოწმება ვერ დასრულდა; ზემოთ მხოლოდ წესების შენიშვნებია.",
     ),
+    "aoa.review.again": ("Ask the model again", "მოდელისთვის თავიდან კითხვა"),
+    "extract.degraded": (
+        "The model was unavailable, so this result holds only what the rules and labels found. "
+        "Run the extraction again when the model is back.",
+        "მოდელი მიუწვდომელი იყო, ამიტომ შედეგში მხოლოდ ის არის, რაც წესებმა და ველების "
+        "წარწერებმა იპოვა. მოდელის დაბრუნების შემდეგ ამოღება თავიდან გაუშვით.",
+    ),
+    "compare.explain.failed": (
+        "The model did not answer, so the changes above are the rules' alone. You can ask again.",
+        "მოდელმა არ უპასუხა, ამიტომ ზემოთ მხოლოდ წესებით ნაპოვნი ცვლილებებია. შეგიძლიათ "
+        "თავიდან ჰკითხოთ.",
+    ),
     "docs.lead": (
         "Everything you have uploaded. Open a document to see what was read from it, the checks "
         "it took part in, or to extract fields from it.",
