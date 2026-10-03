@@ -30,6 +30,7 @@ from datetime import date
 from pathlib import Path
 
 from procurement_agent.extraction.normalize import normalize_spaces
+from procurement_agent.ingestion.text_limits import bound_text
 from procurement_agent.registry.snapshot import RegistryEntry, normalize_code
 
 __all__ = [
@@ -45,6 +46,8 @@ __all__ = [
 MAX_PAGES = 30
 #: The most text read from one file.
 MAX_CHARS = 400_000
+#: The most authorised persons read from one extract: a company lists a handful.
+MAX_PERSONS = 200
 
 #: The extract's title: "ამონაწერი მეწარმეთა და არასამეწარმეო (არაკომერციული) იურიდიული პირების
 #: რეესტრიდან" - the first words are enough, whatever the wrapping.
@@ -103,7 +106,9 @@ _SECTIONS = re.compile("|".join(f"(?P<{key}>{pattern})" for key, pattern in _SEC
 #: break: the footer between two of its lines ends nothing (red team R6, R6-04).
 _PAGE_FURNITURE = re.compile(
     r"^[^\n]*http://public\.reestri\.gov\.ge[^\n]*$"
-    r"|^[ \t]*(?:გვერდი[ \t]*:?[ \t]*)?\d{1,3}[ \t]*\([ \t]*\d{1,3}[ \t]*\)[ \t]*$",
+    # the colon's own blanks follow it inside the group: "[ \t]*:?[ \t]*" is two ways to read
+    # the same blanks, tried against each other on every line of them (security review, ReDoS)
+    r"|^[ \t]*(?:გვერდი[ \t]*(?::[ \t]*)?)?\d{1,3}[ \t]*\([ \t]*\d{1,3}[ \t]*\)[ \t]*$",
     re.MULTILINE,
 )
 _ALL_LABELS = re.compile(
@@ -166,21 +171,27 @@ def _docx_text(path: Path) -> str:
     from procurement_agent.report.docx_annotate import paragraphs_in_order
 
     try:
+        # SyntaxError: lxml's XMLSyntaxError, for a package whose document part is not well-formed
         doc = Document(str(path))
-    except (ValueError, KeyError, zipfile.BadZipFile, PackageNotFoundError) as e:
-        msg = f"not a Word document: {e}"
+    except (ValueError, KeyError, zipfile.BadZipFile, PackageNotFoundError, SyntaxError) as e:
+        msg = f"not a Word document ({type(e).__name__})"
         raise NotAnExtractError(msg) from e
     return "\n".join(p.text for p in paragraphs_in_order(doc))[:MAX_CHARS]
 
 
 def text_of_file(path: Path, kind: str) -> str:
-    """The extract's text in its drawing order: a PDF's text layer, or a Word file's paragraphs."""
+    """The extract's text in its drawing order: a PDF's text layer, or a Word file's paragraphs,
+    each line within the text limits every other document's text is held to (``bound_text``):
+    the patterns that read it were measured on text so bounded. Line by line, since the reader
+    reads lines, and a cut run of blanks must not join two of them."""
     if kind == "pdf":
-        return _pdf_text(path)
-    if kind == "docx":
-        return _docx_text(path)
-    msg = f"a registry extract is a PDF or a Word file, not {kind}"
-    raise NotAnExtractError(msg)
+        text = _pdf_text(path)
+    elif kind == "docx":
+        text = _docx_text(path)
+    else:
+        msg = f"a registry extract is a PDF or a Word file, not {kind}"
+        raise NotAnExtractError(msg)
+    return "\n".join(bound_text(line) for line in text.split("\n"))
 
 
 # --- reading the text -------------------------------------------------------------------------
@@ -247,10 +258,11 @@ def persons(block: str) -> list[Person]:
     shows which, by what comes first - a position line before the first person, or not.
     """
     lines = _lines(block)
-    numbered = [i for i, ln in enumerate(lines) if _PERSONAL_NUMBER.search(ln)]
+    numbered = [i for i, ln in enumerate(lines) if _PERSONAL_NUMBER.search(ln)][:MAX_PERSONS]
     if not numbered:
         return []
     before_style = numbered[0] > 0 and _is_position(lines[numbered[0] - 1])
+    is_numbered = set(numbered)
     out: list[Person] = []
     for i in numbered:
         line = lines[i]
@@ -262,7 +274,7 @@ def persons(block: str) -> list[Person]:
             continue
         j = i - 1 if before_style else i + 1
         position = None
-        if 0 <= j < len(lines) and j not in numbered and _is_position(lines[j]):
+        if 0 <= j < len(lines) and j not in is_numbered and _is_position(lines[j]):
             position = normalize_spaces(lines[j].rstrip(" ,"))
         out.append(Person(name, m.group(0), position, representation))
     return out

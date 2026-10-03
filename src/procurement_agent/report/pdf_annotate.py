@@ -15,12 +15,13 @@ highlighted, and the note says the line is marked, not the word.
 Findings no words of the act stand for, and the summary of what could not be checked, go in a
 note on the first page. Nothing but annotations is added: no action, no link, no script.
 
-The annotated copy is a new document holding the act's pages, each with its own annotations
-drawn into it, and the notes - never the act's file with notes added: what a PDF runs or carries
-when it opens (an action, a script, an attached file, a form, a link that launches a program)
-stays behind, since a reviewer opens the copy as the application's own output (red team R6,
-R6-08). A page that runs an action itself when opened or closed is refused: nothing can take it
-off the page.
+The annotated copy is a new document of new pages, each showing what the act's page shows - its
+content, its own annotations drawn into it - and the notes: never the act's file with notes
+added. What a PDF runs or carries when it opens stays behind, since a reviewer opens the copy as
+the application's own output (red team R6, R6-08): the document's actions, scripts, attached
+files and forms, and every entry of the page itself - its annotations and their actions, its
+associated files, its metadata - for each page is drawn anew from its content alone (security
+review). A page that runs an action itself when opened or closed is refused.
 """
 
 from __future__ import annotations
@@ -39,12 +40,17 @@ from procurement_agent.checks.findings import Finding
 from procurement_agent.ingestion.pdfium_lock import PDFIUM_LOCK
 from procurement_agent.report.docx_annotate import (
     AUTHOR,
+    MAX_PLACES,
+    MAX_PLACES_PER_FINDING,
+    MAX_SEARCHED,
     UnsupportedDocumentError,
     _candidates,
+    _cut_short_note,
     _normalised_index,
     _offending,
     comment_text,
 )
+from procurement_agent.security.audit import log
 
 #: A box on a page in PDF points, its origin at the bottom left: (left, bottom, right, top).
 Box = tuple[float, float, float, float]
@@ -56,8 +62,9 @@ _SCANNED_NOTE = (
     "(სკანირებული გვერდი: მონიშნულია სტრიქონი, სადაც ეს სიტყვები წერია / "
     "a scanned page: the line holding these words is marked, not the words alone)"
 )
-#: Characters a PDF string should not carry: a note quotes the document, which may hold any.
-_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+#: Characters a PDF string should not carry: a note quotes the document, which may hold any. A
+#: lone surrogate has no UTF-16 form at all; U+FFFE and U+FFFF are no characters.
+_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,7 +171,7 @@ class _TextPages:
                 lines = _lines(boxes)
                 if lines:
                     out.append(_Place(page, tuple(lines), exact=True))
-                    if not every:
+                    if not every or len(out) > MAX_SEARCHED:
                         return out
         return out
 
@@ -187,7 +194,7 @@ class _ScannedPages:
         for item, flat in self.items:
             if next(_found(flat, flat_needle, whole=whole), None) is not None:
                 out.append(_Place(item.page - 1, (item.box,), exact=False))
-                if not every:
+                if not every or len(out) > MAX_SEARCHED:
                     return out
         return out
 
@@ -198,11 +205,12 @@ def _places_for(
     """Every place a finding should be marked, as ``docx_annotate._places_for`` decides it: the
     finding's own words wherever they stand, as whole words first; the correction, searched
     last, at its first place only. The places a finding names (``Finding.places``) are chosen
-    among its quote's places when the PDF shows as many as the checked text did."""
+    among its quote's places when the PDF shows as many as the checked text did (and no more
+    than a search reads, ``MAX_SEARCHED``)."""
     if finding.places is not None and finding.quote and finding.quote.strip():
         found = pages.places(finding.quote.strip(), whole=True, every=True)
         wanted, total = finding.places
-        if found and len(found) == total:
+        if found and len(found) == total <= MAX_SEARCHED:
             return [found[i] for i in wanted if 0 <= i < len(found)]
     offending = _offending(finding, text)
     for needle in _candidates(finding, text):
@@ -304,6 +312,86 @@ def _sticky_note(page: Any, note: str) -> None:
 
 _SEVERITY_ORDER = {"error": 0, "warning": 1, "info": 2}
 
+#: Names a PDF uses only to run something, reach out, or carry a file or a form: none belongs in
+#: the annotated copy, whose pages are drawn anew and whose notes are highlights and text notes.
+_ACTIVE_NAMES = frozenset(
+    {
+        "AA",
+        "AF",
+        "AcroForm",
+        "EmbeddedFile",
+        "EmbeddedFiles",
+        "FileAttachment",
+        "GoToE",
+        "GoToR",
+        "ImportData",
+        "JS",
+        "JavaScript",
+        "Launch",
+        "Movie",
+        "OpenAction",
+        "Rendition",
+        "RichMedia",
+        "Sound",
+        "SubmitForm",
+        "URI",
+        "XFA",
+    }
+)
+_PDF_SPACE = frozenset(b"\x00\t\n\x0c\r ")
+_PDF_DELIMITERS = frozenset(b"()<>[]{}/%")
+_NAME_ESCAPE = re.compile(rb"#([0-9A-Fa-f]{2})")
+_LENGTH = re.compile(rb"[\x00\t\n\x0c\r ]*(\d+)(?![\x00\t\n\x0c\r ]+\d+[\x00\t\n\x0c\r ]+R)")
+
+
+def active_names(data: bytes) -> set[str]:
+    """The names in ``_ACTIVE_NAMES`` a PDF's objects use, read as PDF reads them: outside every
+    string and every stream's data, an escaped name (``/J#53``) decoded. The backstop under the
+    redrawing (``_redrawn``): what a page's resources might still carry - a form of its own with
+    an attached file, say - is caught here, and the copy is not handed out."""
+    found: set[str] = set()
+    i, n = 0, len(data)
+    length: int | None = None  # the last direct /Length read: the next stream's
+    while i < n:
+        c = data[i]
+        if c == 0x25:  # % a comment, to the end of its line
+            while i < n and data[i] not in (0x0A, 0x0D):
+                i += 1
+        elif c == 0x28:  # ( a literal string, balanced, with escapes
+            depth, i = 1, i + 1
+            while i < n and depth:
+                ch = data[i]
+                if ch == 0x5C:
+                    i += 2
+                    continue
+                depth += (ch == 0x28) - (ch == 0x29)
+                i += 1
+        elif c == 0x3C:  # << a dictionary, or a <hex string>
+            if data[i + 1 : i + 2] == b"<":
+                i += 2
+                continue
+            end = data.find(b">", i)
+            i = n if end < 0 else end + 1
+        elif c == 0x2F:  # /name
+            j = i + 1
+            while j < n and data[j] not in _PDF_SPACE and data[j] not in _PDF_DELIMITERS:
+                j += 1
+            name = _NAME_ESCAPE.sub(lambda m: bytes([int(m.group(1), 16)]), data[i + 1 : j])
+            text = name.decode("latin-1")
+            if text in _ACTIVE_NAMES:
+                found.add(text)
+            if text == "Length" and (m := _LENGTH.match(data, j)) is not None:
+                length, j = int(m.group(1)), m.end()
+            i = j
+        elif data.startswith(b"stream", i) and data[i + 6 : i + 7] in (b"\r", b"\n"):
+            start = i + 6 + (2 if data[i + 6 : i + 8] == b"\r\n" else 1)
+            end = data.find(b"endstream", start + (length or 0))
+            i = n if end < 0 else end + len(b"endstream")
+            length = None
+        else:
+            i += 1
+    return found
+
 
 def annotate_pdf(
     source: Path,
@@ -334,11 +422,10 @@ def annotate_pdf(
             try:
                 pages.import_pages(source_pdf)
                 _cleared(pages)
-                # and again: the annotations the pages no longer hold stay behind as well -
-                # a document saves every object it was ever given
-                pdf = pdfium.PdfDocument.new()
+                # and again, each page drawn anew from what it shows: the annotations the pages
+                # no longer hold, and whatever else a page's own entries carry, stay behind
+                pdf = _redrawn(pages)
                 try:
-                    pdf.import_pages(pages)
                     return _annotate(pdf, findings, out_path, text, summary, items)
                 finally:
                     pdf.close()
@@ -348,16 +435,68 @@ def annotate_pdf(
             source_pdf.close()
 
 
+def _page_matrix(page: Any) -> tuple[float, ...]:
+    """PDFium's own transform from a page's space to the page as shown - the crop box (within
+    the media box) turned upright, its corner at the origin: what a page drawn as a form
+    (``page_as_xobject``) is drawn through."""
+    ml, mb, mr, mt = page.get_mediabox()
+    cl, cb, cr, ct = page.get_cropbox()
+    left, bottom = max(ml, min(cl, cr)), max(mb, min(cb, ct))
+    right, top = min(mr, max(cl, cr)), min(mt, max(cb, ct))
+    if right <= left or top <= bottom:
+        left, bottom, right, top = ml, mb, mr, mt
+    return {
+        90: (0.0, -1.0, 1.0, 0.0, -bottom, right),
+        180: (-1.0, 0.0, 0.0, -1.0, right, top),
+        270: (0.0, 1.0, -1.0, 0.0, top, -left),
+    }.get(int(page.get_rotation()) % 360, (1.0, 0.0, 0.0, 1.0, -left, -bottom))
+
+
+def _inverse(m: tuple[float, ...]) -> tuple[float, ...]:
+    a, b, c, d, e, f = m
+    det = a * d - b * c
+    return (d / det, -b / det, -c / det, a / det, (c * f - d * e) / det, (b * e - a * f) / det)
+
+
+def _redrawn(pages: pdfium.PdfDocument) -> pdfium.PdfDocument:
+    """A new document whose every page is a new page with the same boxes and turn, showing the
+    page's content drawn as one form (``page_as_xobject``), placed where the page drew it. A
+    page's dictionary is not copied - its annotations, their actions, its associated files, its
+    metadata and whatever else it names stay behind (security review) - and a highlight sits on
+    the same words as on the page itself."""
+    pdf = pdfium.PdfDocument.new()
+    try:
+        for i in range(len(pages)):
+            page = pages[i]
+            try:
+                form = pages.page_as_xobject(i, pdf)
+                left, bottom, right, top = page.get_mediabox()
+                new = pdf.new_page(right - left, top - bottom)
+                new.set_mediabox(left, bottom, right, top)
+                new.set_cropbox(*page.get_cropbox())
+                new.set_rotation(int(page.get_rotation()) % 360)
+                shown = form.as_pageobject()
+                shown.transform(pdfium.PdfMatrix(*_inverse(_page_matrix(page))))
+                new.insert_obj(shown)
+                new.gen_content()
+                new.close()
+                form.close()
+            finally:
+                page.close()
+    except BaseException:
+        pdf.close()
+        raise
+    return pdf
+
+
 _PAGE_ACTIONS = (pdfium_c.FPDFPAGE_AACTION_OPEN, pdfium_c.FPDFPAGE_AACTION_CLOSE)
 
 
 def _cleared(pdf: pdfium.PdfDocument) -> None:
     """Each page's own annotations - links, form fields, notes - drawn into the page, their
-    actions gone with them; ``UnsupportedDocumentError`` for a document that still runs or
-    carries anything: a page's own action on opening or closing, which nothing takes off it."""
-    if pdfium_c.FPDFDoc_GetJavaScriptActionCount(pdf) or pdfium_c.FPDFDoc_GetAttachmentCount(pdf):
-        msg = "the PDF carries a script or an attached file: no annotated copy of it is made"
-        raise UnsupportedDocumentError(msg)
+    actions gone with them; ``UnsupportedDocumentError`` for a page that runs an action of its
+    own on opening or closing. (The document's own scripts and attached files are no page's:
+    importing the pages into a new document left them behind.)"""
     for i in range(len(pdf)):
         page = pdf[i]
         try:
@@ -396,19 +535,30 @@ def _annotate(
         # one highlight a place, its note every finding there, the gravest one's colour
         notes: dict[tuple[int, tuple[tuple[float, ...], ...]], tuple[_Place, list[Finding]]] = {}
         unanchored: list[Finding] = []
+        cut_short: list[str] = []
+        marked = 0
         for finding in findings:
             places = _places_for(pages, finding, text)
+            # as many places as a Word file is marked in (``docx_annotate.MAX_PLACES``)
+            room = max(0, min(MAX_PLACES_PER_FINDING, MAX_PLACES - marked))
+            if len(places) > room:
+                cut_short.append(_cut_short_note(finding, room, len(places)))
+                places = places[:room]
             if not places:
                 unanchored.append(finding)
                 continue
+            marked += len(places)
             for place in places:
                 key = (place.page, tuple(tuple(round(v, 1) for v in b) for b in place.boxes))
                 notes.setdefault(key, (place, []))[1].append(finding)
     finally:
         text_pages.close()
+    opened: dict[int, Any] = {}  # each page loaded once, however many places it holds
     for place, here in notes.values():
         note = "\n\n".join(comment_text(f) for f in here)
-        page = pdf[place.page]
+        if place.page not in opened:
+            opened[place.page] = pdf[place.page]
+        page = opened[place.page]
         boxes = place.boxes
         if not place.exact:
             # a scanned page's line is Docling's, on the page as shown
@@ -416,8 +566,16 @@ def _annotate(
             note = f"{note}\n\n{_SCANNED_NOTE}"
         severity = min((f.severity for f in here), key=lambda s: _SEVERITY_ORDER[s])
         _highlight(page, boxes, note, severity)
-    extra = [*([summary] if summary else []), *(comment_text(f) for f in unanchored)]
+    extra = [*([summary] if summary else []), *cut_short, *(comment_text(f) for f in unanchored)]
     if extra and len(pdf):
-        _sticky_note(pdf[0], "\n\n".join(extra))
+        _sticky_note(opened.get(0) or pdf[0], "\n\n".join(extra))
     pdf.save(str(out_path))
+    if active := active_names(out_path.read_bytes()):
+        out_path.unlink(missing_ok=True)
+        log.info("pdf_annotation_refused", names=sorted(active))  # names from a fixed set
+        msg = (
+            "the PDF's pages carry an action, a script or an attached file: no annotated copy "
+            "of it is made"
+        )
+        raise UnsupportedDocumentError(msg)
     return out_path, unanchored

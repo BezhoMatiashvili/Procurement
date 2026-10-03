@@ -10,7 +10,11 @@ between digits for that one, whitespace around an optional comma for the next.
 So this is directed. For each compiled pattern it takes the characters the pattern itself uses -
 literals, the members of every class and range, one representative of each category (``\\s``,
 ``\\d``, ``\\w``) - and builds strings out of them that make a backtracking engine work hardest: one
-character repeated, two alternated, a short prefix or suffix around a long run. Each string is run
+character repeated, two alternated, a short prefix or suffix around a long run. And it takes the
+pattern's own words - the runs of literal characters in it, "გვერდი" in a page footer's pattern -
+and sets a long run of a separator after each: a pattern that only backtracks once its word has
+matched is reached no other way (security review: a footer pattern took minutes on "გვერდი"
+followed by blanks). Each string is run
 at two sizes under a time budget (a signal timer interrupts a runaway match, which CPython's engine
 honours); a pattern is reported when it blows the budget outright, or when doubling the input more
 than triples the time.
@@ -203,6 +207,43 @@ def _chars_of(parsed: object, out: set[str], depth: int = 0) -> None:
                     _chars_of(branch, out, depth + 1)
 
 
+def _literal_words(parsed: object, out: set[str], depth: int = 0) -> None:
+    """The runs of two or more literal characters in a parsed pattern: its own words."""
+    if depth > 12:
+        return
+    run: list[str] = []
+
+    def flush() -> None:
+        if len(run) >= 2:
+            out.add("".join(run))
+        run.clear()
+
+    for op, arg in parsed:  # type: ignore[attr-defined]
+        if op is sre_parse.LITERAL:
+            run.append(chr(arg))
+            continue
+        flush()
+        if op in (sre_parse.MAX_REPEAT, sre_parse.MIN_REPEAT, sre_parse.POSSESSIVE_REPEAT):
+            _literal_words(arg[2], out, depth + 1)
+        elif op in (sre_parse.SUBPATTERN, sre_parse.ATOMIC_GROUP):
+            _literal_words(arg[-1], out, depth + 1)
+        elif op is sre_parse.BRANCH:
+            for branch in arg[1]:
+                _literal_words(branch, out, depth + 1)
+        elif op in (sre_parse.ASSERT, sre_parse.ASSERT_NOT):
+            _literal_words(arg[1], out, depth + 1)
+    flush()
+
+
+def words_of(pattern: re.Pattern[str]) -> list[str]:
+    """A pattern's longest words first (``_literal_words``), at most four."""
+    out: set[str] = set()
+    with contextlib.suppress(Exception):
+        _literal_words(sre_parse.parse(pattern.pattern, pattern.flags), out)
+    words = [w for w in out if w.isprintable() and w.strip()]
+    return sorted(words, key=lambda w: (-len(w), w))[:4]
+
+
 def _rank(c: str) -> tuple[int, str]:
     """Whitespace, then separators, then digits, then letters: the pairs that make a pattern
     backtrack are a separator beside a digit or a letter (``1/1/1/``), so those have to be among
@@ -269,6 +310,14 @@ def candidates(pattern: re.Pattern[str]) -> Iterator[tuple[str, Callable[[int], 
             yield (
                 f"({c!r}{space!r}...)*n",
                 lambda n, c=c, sp=space: (c + sp + sp) * (n // 3) + "!",
+            )
+    separators = [*spaces, *(c for c in own if not c.isalnum() and not c.isspace())][:4]
+    for word in words_of(pattern):
+        for c in separators:
+            yield f"{word!r}+{c!r}*n+'x'", lambda n, w=word, c=c: w + c * n + "x"
+            yield (
+                f"({word!r}+{c!r}*k)*n",
+                lambda n, w=word, c=c: (w + c * 40) * max(1, n // (len(w) + 40)),
             )
 
 

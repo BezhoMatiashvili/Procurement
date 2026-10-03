@@ -8,6 +8,7 @@ import os
 import shutil
 import tempfile
 import threading
+from bisect import bisect_left, bisect_right
 from importlib.metadata import PackageNotFoundError, version
 from itertools import pairwise
 from pathlib import Path
@@ -82,6 +83,35 @@ def _lines_of(cells: list[Any]) -> list[list[int]]:
 
 #: How wide a gap between two words, against the line's height, is a space between them.
 _SPACE_GAP = 0.15
+#: A page with more text cells, or more words, than this is left as Docling read it: far more
+#: than any page of a document holds, and each mended clump costs a search of the words.
+MEND_MAX_CELLS = 5000
+MEND_MAX_WORDS = 30000
+
+
+class _Words:
+    """A page's words that have text, each with its box, by the height of its centre: the words
+    inside a box are found by bisection, not by reading every word of the page for every clump
+    of cells (security review: a page of many clumps took minutes)."""
+
+    def __init__(self, words: list[Any]) -> None:
+        entries = []
+        for n, word in enumerate(words):
+            text = word.text.strip()
+            if text:
+                b = word.rect.to_bounding_box()
+                entries.append(((b.t + b.b) / 2, (b.l + b.r) / 2, n, b, text))
+        entries.sort(key=lambda e: e[0])
+        self.entries = entries
+        self.heights = [e[0] for e in entries]
+
+    def inside(self, left: float, right: float, top: float, bottom: float) -> list[Any]:
+        """The words whose centres lie in the box, left to right - two at the same left in the
+        order the page lists them."""
+        lo, hi = bisect_left(self.heights, top), bisect_right(self.heights, bottom)
+        found = [(b, n, text) for _, x, n, b, text in self.entries[lo:hi] if left <= x <= right]
+        found.sort(key=lambda w: (w[0].l, w[1]))
+        return [(b, text) for b, _, text in found]
 
 
 def mend_interleaved(textlines: list[Any], words: list[Any]) -> list[Any]:
@@ -95,9 +125,11 @@ def mend_interleaved(textlines: list[Any], words: list[Any]) -> list[Any]:
     broken over a line - "01.07.2026-" and "დან" became "01.07.2026დან". Cells of one line that
     overlap or touch are made one cell, its text the line's words there (``words``, which lie
     each where it stands) left to right, a space between two words that are apart. A page
-    whose cells are apart - a page written one font to a line - is returned as it was."""
-    if len(textlines) < 2:
+    whose cells are apart - a page written one font to a line - is returned as it was, and so is
+    a page past ``MEND_MAX_CELLS`` or ``MEND_MAX_WORDS``."""
+    if len(textlines) < 2 or len(textlines) > MEND_MAX_CELLS or len(words) > MEND_MAX_WORDS:
         return textlines
+    index: _Words | None = None  # the words, indexed when the first clump needs them
     merged: dict[int, Any] = {}
     gone: set[int] = set()
     for line in _lines_of(textlines):
@@ -117,7 +149,8 @@ def mend_interleaved(textlines: list[Any], words: list[Any]) -> list[Any]:
                 continue
             if len(clump) > 1:
                 first = min(clump, key=lambda k: textlines[k].index)
-                merged[first] = _rebuilt(textlines, clump, first, words)
+                index = index or _Words(words)
+                merged[first] = _rebuilt(textlines, clump, first, index)
                 gone.update(k for k in clump if k != first)
             if i is not None:
                 clump, right = [i], boxes[i].r
@@ -126,18 +159,12 @@ def mend_interleaved(textlines: list[Any], words: list[Any]) -> list[Any]:
     return [merged.get(i, cell) for i, cell in enumerate(textlines) if i not in gone]
 
 
-def _rebuilt(textlines: list[Any], clump: list[int], first: int, words: list[Any]) -> Any:
+def _rebuilt(textlines: list[Any], clump: list[int], first: int, words: _Words) -> Any:
     """The one cell the overlapping cells ``clump`` of a line stand for (``mend_interleaved``)."""
     boxes = [textlines[k].rect.to_bounding_box() for k in clump]
     left, right = min(b.l for b in boxes), max(b.r for b in boxes)
     top, bottom = min(min(b.t, b.b) for b in boxes), max(max(b.t, b.b) for b in boxes)
-    inside = []
-    for word in words:
-        b = word.rect.to_bounding_box()
-        x, y = (b.l + b.r) / 2, (b.t + b.b) / 2
-        if left <= x <= right and top <= y <= bottom and word.text.strip():
-            inside.append((b, word.text.strip()))
-    inside.sort(key=lambda w: w[0].l)
+    inside = words.inside(left, right, top, bottom)
     if inside:
         text = inside[0][1]
         for (before, _), (after, word) in pairwise(inside):

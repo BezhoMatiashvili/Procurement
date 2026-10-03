@@ -168,7 +168,7 @@ def _read_extracts(
             entries.append(read_extract(upload_path(settings, doc.id, doc.kind), doc.kind))
         except NotAnExtractError as e:
             refused.append(RefusedExtract(doc.display_name, str(e)))
-        except (OSError, RuntimeError, ValueError):
+        except (OSError, RuntimeError, ValueError, SyntaxError):  # SyntaxError: lxml's
             refused.append(RefusedExtract(doc.display_name, "the file could not be read"))
     return entries, refused
 

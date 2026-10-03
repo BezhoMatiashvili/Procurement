@@ -21,6 +21,7 @@ from __future__ import annotations
 import copy
 import re
 import zipfile
+from bisect import bisect_left, bisect_right
 from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -31,7 +32,7 @@ from docx.comments import Comment
 from docx.document import Document as DocumentType
 from docx.opc.exceptions import PackageNotFoundError
 from docx.oxml.ns import qn
-from docx.table import Table
+from docx.table import Table, _Cell
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
@@ -60,7 +61,20 @@ class UnsupportedDocumentError(ContentFree, RuntimeError):
 
 #: Characters XML 1.0 cannot carry. A finding quotes the checked document, and text that came
 #: through OCR or a PDF can hold a stray vertical tab; lxml refuses the whole comment for it.
-_XML_ILLEGAL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+#: A lone surrogate (half of a character, from a broken text layer or model output) cannot be
+#: written in UTF-8 at all, and U+FFFE and U+FFFF are no characters (security review).
+_XML_ILLEGAL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
+
+#: The most places one finding is marked in, and the most places marked in one file. An act
+#: writes a value a handful of times; a file that repeats it thousands of times would make every
+#: comment cost more than the last (python-docx numbers each against all before it). The places
+#: past either limit are counted in the note at the top, and a finding cut short gets no tracked
+#: change: accepting every change must not leave the act half corrected (security review).
+MAX_PLACES_PER_FINDING = 50
+MAX_PLACES = 300
+#: The most places of one needle a search reads. Past it the search stops: the finding is cut
+#: short (``MAX_PLACES_PER_FINDING``), and none of its places is taken for surely its own.
+MAX_SEARCHED = 1000
 
 
 def comment_text(finding: Finding) -> str:
@@ -151,6 +165,22 @@ def _split_run(run: Run, offset: int) -> Run:
     return head_run
 
 
+def _split_run_at(run: Run, offsets: Sequence[int], text: str) -> None:
+    """Split a run at every one of ``offsets`` (ascending, each inside its text) in one go, as
+    ``_split_run`` at each in turn would: the leading pieces become runs of their own before it,
+    the run keeps the last. One copy of the run's formatting serves every piece - a copy of the
+    run itself would copy the whole of its text once a piece. ``text`` is the run's text."""
+    template = copy.deepcopy(run._r)
+    Run(template, run._parent).text = ""
+    at = 0
+    for offset in offsets:
+        head = copy.deepcopy(template)
+        run._r.addprevious(head)
+        Run(head, run._parent).text = text[at:offset]
+        at = offset
+    run.text = text[at:]
+
+
 def _normalised_index(text: str) -> tuple[str, list[int]]:
     """Text with quotes dropped and runs of whitespace collapsed, plus a map back to offsets.
 
@@ -188,21 +218,44 @@ def _bounded(text: str, start: int, end: int, needle: str) -> bool:
     return not (needle[-1:].isalnum() and end < len(text) and text[end].isalnum())
 
 
+class _Folded:
+    """A text's folded form (``_normalised_index``), made when a search first needs it and kept
+    for the searches after it - a paragraph's every place, a quote's every place in the checked
+    text - by the caller that searches, and gone with it: no document's text outlives a call."""
+
+    __slots__ = ("_text", "_value")
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self._value: tuple[str, list[int]] | None = None
+
+    def get(self) -> tuple[str, list[int]]:
+        if self._value is None:
+            self._value = _normalised_index(self._text)
+        return self._value
+
+
 def _locate(
-    text: str, needle: str, start: int = 0, *, whole: bool = False
+    text: str,
+    needle: str,
+    start: int = 0,
+    *,
+    whole: bool = False,
+    folded: _Folded | None = None,
 ) -> tuple[int, int] | None:
     """Offsets of ``needle`` in ``text`` at or after ``start``, tolerating quoting and spacing
-    differences. With ``whole``, only where it stands as whole words (``_bounded``)."""
+    differences. With ``whole``, only where it stands as whole words (``_bounded``). ``folded``
+    is ``text`` folded, when the caller searches it more than once."""
     at = text.find(needle, start)
     while at >= 0:
         if not whole or _bounded(text, at, at + len(needle), needle):
             return at, at + len(needle)
         at = text.find(needle, at + 1)
-    flat, index = _normalised_index(text)
+    flat, index = (folded or _Folded(text)).get()
     flat_needle, _ = _normalised_index(needle)
     if not flat_needle:
         return None
-    flat_start = next((i for i, orig in enumerate(index) if orig >= start), len(flat))
+    flat_start = bisect_left(index, start)  # the first folded character at or after ``start``
     at = flat.find(flat_needle, flat_start)
     while at >= 0:
         found = index[at], index[at + len(flat_needle) - 1] + 1
@@ -219,86 +272,114 @@ def whole_word_spans(text: str, needle: str) -> list[tuple[int, int]]:
     needle = needle.strip()
     out: list[tuple[int, int]] = []
     at = 0
-    while needle and (found := _locate(text, needle, at, whole=True)) is not None:
+    folded = _Folded(text)
+    while needle and (found := _locate(text, needle, at, whole=True, folded=folded)) is not None:
         out.append(found)
         at = found[1]
     return out
 
 
-def _runs_covering(paragraph: Paragraph, needle: str, start_at: int = 0) -> list[Run] | None:
-    """Split runs as needed so ``needle`` is covered by a whole number of runs."""
-    found = _cover_next(paragraph, needle, start_at, whole=True) or _cover_next(
-        paragraph, needle, start_at
-    )
-    return found[0] if found else None
+def _cover_all(
+    paragraph: Paragraph, needle: str, *, whole: bool = False, first: bool = False, limit: int = 0
+) -> list[tuple[list[Run], int, int]]:
+    """The runs covering each occurrence of ``needle`` in a paragraph (with ``whole``, each
+    standing as whole words; with ``first``, the first only), split so they cover it exactly,
+    and its offsets. Splitting leaves the paragraph's text unchanged, so offsets stay valid
+    between findings.
 
-
-def _cover_next(
-    paragraph: Paragraph, needle: str, start_at: int, *, whole: bool = False
-) -> tuple[list[Run], int, int] | None:
-    """The runs covering the first occurrence of ``needle`` at or after ``start_at`` (with
-    ``whole``, the first standing as whole words), split so they cover it exactly, and its
-    offsets. Splitting leaves the paragraph's text unchanged, so offsets stay valid from one
-    occurrence to the next and between findings."""
+    Every occurrence is found in the text first, the runs are split at all of them in one pass,
+    and each occurrence's runs are then read off: the cost is the paragraph's length, however
+    many times the words stand in it - not that length once an occurrence (security review).
+    With ``limit``, no more than that many occurrences are read."""
     needle = needle.strip()
     if not needle:
-        return None
-    text = "".join(r.text for r in _text_runs(paragraph))
-    located = _locate(text, needle, start_at, whole=whole)
-    while located is not None and _in_simple_field(paragraph, *located):
-        # a simple field holds its result inside itself: no comment can mark it there
-        located = _locate(text, needle, located[1], whole=whole)
-    if located is None:
-        return None
-    start, end = located
+        return []
+    runs = _text_runs(paragraph)
+    texts = [r.text for r in runs]  # python-docx reads a run's text by a query: once each
+    text = "".join(texts)
+    in_fields = _simple_field_spans(runs, texts)
+    field_ends = [b for _, b in in_fields]
+    spans: list[tuple[int, int]] = []
+    folded = _Folded(text)
+    located = _locate(text, needle, 0, whole=whole, folded=folded)
+    while located is not None:
+        if _overlaps(in_fields, field_ends, *located):
+            # a simple field holds its result inside itself: no comment can mark it there
+            located = _locate(text, needle, located[1], whole=whole, folded=folded)
+            continue
+        spans.append(located)
+        if first or len(spans) == limit:
+            break
+        located = _locate(text, needle, located[1], whole=whole, folded=folded)
+    if not spans:
+        return []
 
-    # walk runs, splitting the one that contains the start and the one containing the end;
-    # a run that is more than text is left whole and marked as a whole (see the module docs)
-    for boundary in (start, end):
-        pos = 0
-        for run in _text_runs(paragraph):
-            length = len(run.text)
-            if pos < boundary < pos + length:
-                if _splittable(run):
-                    _split_run(run, boundary - pos)
-                break
-            pos += length
+    # split the runs that contain a start or an end; a run that is more than text is left whole
+    # and marked as a whole (see the module docs)
+    cuts = sorted({b for span in spans for b in span})
+    k = pos = 0
+    for run, run_text in zip(runs, texts, strict=True):
+        length = len(run_text)
+        while k < len(cuts) and cuts[k] <= pos:
+            k += 1
+        inside: list[int] = []
+        while k < len(cuts) and cuts[k] < pos + length:
+            inside.append(cuts[k] - pos)
+            k += 1
+        if inside and _splittable(run):
+            _split_run_at(run, inside, run_text)
+        pos += length
 
-    covered: list[Run] = []
+    runs = _text_runs(paragraph)
+    texts = [r.text for r in runs]
+    starts: list[int] = []
+    ends: list[int] = []
     pos = 0
-    for run in _text_runs(paragraph):
-        run_end = pos + len(run.text)
-        if pos < end and run_end > start and run.text:
-            covered.append(run)
-        pos = run_end
-    _drop_empty_runs(paragraph)
-    if covered:
-        covered = _whole_fields(paragraph, covered)
-    return (covered, start, end) if covered else None
+    for run_text in texts:
+        starts.append(pos)
+        pos += len(run_text)
+        ends.append(pos)
+    found: list[tuple[list[Run], int, int]] = []
+    for start, end in spans:
+        covered: list[Run] = []
+        i = bisect_right(ends, start)  # the first run that ends after ``start``
+        while i < len(runs) and starts[i] < end:
+            if ends[i] > starts[i]:
+                covered.append(runs[i])
+            i += 1
+        found.append((covered, start, end))
+    _drop_empty_runs(runs, texts)
+    widen = _field_widener(paragraph)
+    return [(widen(covered), start, end) for covered, start, end in found if covered]
 
 
-def _in_simple_field(paragraph: Paragraph, start: int, end: int) -> bool:
+def _simple_field_spans(runs: Sequence[Run], texts: Sequence[str]) -> list[tuple[int, int]]:
+    """Where the paragraph's text is a simple field's result: the runs of it, in order."""
+    out: list[tuple[int, int]] = []
     pos = 0
-    for run in _text_runs(paragraph):
-        run_end = pos + len(run.text)
-        if (
-            pos < end
-            and run_end > start
-            and run.text
-            and any(a.tag == qn("w:fldSimple") for a in run._r.iterancestors())
-        ):
-            return True
+    for run, run_text in zip(runs, texts, strict=True):
+        run_end = pos + len(run_text)
+        if run_text and any(a.tag == qn("w:fldSimple") for a in run._r.iterancestors()):
+            out.append((pos, run_end))
         pos = run_end
-    return False
+    return out
 
 
-def _whole_fields(paragraph: Paragraph, covered: list[Run]) -> list[Run]:
-    """``covered``, widened to the whole of any complex field it reaches into: a comment marks
-    a field from its ``begin`` to its ``end``, never inside the result Word computes - Word
-    and LibreOffice show markers there as text, and an update of the field drops them."""
+def _overlaps(spans: Sequence[tuple[int, int]], ends: list[int], start: int, end: int) -> bool:
+    """Whether ``start:end`` overlaps any of ``spans`` (in order, apart; ``ends`` their ends)."""
+    i = bisect_right(ends, start)
+    return i < len(spans) and spans[i][0] < end
+
+
+def _field_widener(paragraph: Paragraph) -> Any:
+    """A function widening a paragraph's covered runs to the whole of any complex field they
+    reach into: a comment marks a field from its ``begin`` to its ``end``, never inside the
+    result Word computes - Word and LibreOffice show markers there as text, and an update of the
+    field drops them. The paragraph's fields are read once, for all its places."""
     runs = _text_runs(paragraph)
     elements = [r._r for r in runs]
     groups: list[list[int]] = []
+    group_of: dict[Any, int] = {}
     depth = 0
     for i, r in enumerate(elements):
         kinds = [c.get(qn("w:fldCharType")) for c in r.findall(qn("w:fldChar"))]
@@ -308,31 +389,37 @@ def _whole_fields(paragraph: Paragraph, covered: list[Run]) -> list[Run]:
             depth += 1
         if depth > 0:
             groups[-1].append(i)
+            group_of[r] = len(groups) - 1
         if "end" in kinds and depth > 0:
             depth -= 1
-    mine = {i for i, r in enumerate(elements) if any(r is c._r for c in covered)}
-    wanted = set(mine)
-    for group in groups:
-        if mine & set(group):
-            wanted |= set(group)
-    if wanted == mine:
-        return covered
-    return [runs[i] for i in sorted(wanted)]
+    position = {r: i for i, r in enumerate(elements)}
+
+    def widen(covered: list[Run]) -> list[Run]:
+        mine = {position[c._r] for c in covered if c._r in position}
+        wanted = set(mine)
+        for c in covered:
+            if (g := group_of.get(c._r)) is not None:
+                wanted.update(groups[g])
+        if wanted == mine:
+            return covered
+        return [runs[i] for i in sorted(wanted)]
+
+    return widen
 
 
 #: Children a run may have and still count as "empty text with nothing else in it".
 _INERT_RUN_CHILDREN = frozenset({"rPr", "t"})
 
 
-def _drop_empty_runs(paragraph: Paragraph) -> None:
-    """Remove zero-length runs left behind by splitting.
+def _drop_empty_runs(runs: Sequence[Run], texts: Sequence[str]) -> None:
+    """Remove the zero-length runs among a paragraph's ``runs`` (``texts``, their texts).
 
     A run holding a ``commentReference`` also has no text, and deleting it would detach a
     comment that is already anchored in this paragraph - so a run is only removed when it
     carries nothing but formatting and empty text.
     """
-    for run in _text_runs(paragraph):
-        if run.text:
+    for run, run_text in zip(runs, texts, strict=True):
+        if run_text:
             continue
         tags = {child.tag.split("}")[-1] for child in run._r}
         if tags - _INERT_RUN_CHILDREN:
@@ -430,10 +517,20 @@ def _with_text_boxes(block: Any, parent: Any) -> Iterator[Paragraph]:
             if inner.tag == qn("w:p"):
                 yield from _with_text_boxes(inner, parent)
                 continue
-            for row in Table(inner, parent).rows:
-                for cell in row.cells:
-                    yield from all_paragraphs(cell)
+            for cell in _cells(inner, parent):
+                yield from all_paragraphs(cell)
     yield Paragraph(block, parent)
+
+
+def _cells(table: Any, parent: Any) -> Iterator[_Cell]:
+    """A table's cells, each once, as the file writes them, row by row. ``Row.cells`` repeats a
+    cell for every grid column it spans - a number the file states, and may state as two
+    billion (security review) - and reads a vertically merged cell's continuation as the cell
+    above, failing when there is none; a text reader reads each cell once."""
+    tbl = Table(table, parent)
+    for tr in tbl._tbl.tr_lst:
+        for tc in tr.tc_lst:
+            yield _Cell(tc, tbl)
 
 
 def all_paragraphs(container: object) -> Iterator[Paragraph]:
@@ -454,25 +551,53 @@ def all_paragraphs(container: object) -> Iterator[Paragraph]:
             yield from _with_text_boxes(block, body)
     for block in blocks:
         if block.tag == qn("w:tbl"):
-            for row in Table(block, body).rows:
-                for cell in row.cells:
-                    yield from all_paragraphs(cell)
+            for cell in _cells(block, body):
+                yield from all_paragraphs(cell)
 
 
 #: One place a comment goes: the paragraph, the offsets in its text, and the runs covering them.
 _Place = tuple[Paragraph, int, int, list[Run]]
 
 
-def _anchor_for(
-    document: DocumentType, finding: Finding, text: str | None = None
-) -> list[Run] | None:
-    """Find the runs a finding should be attached to, most specific candidate first."""
-    places, _trusted = _places_for(document, finding, text)
-    return places[0][3] if places else None
+class _Paragraphs:
+    """A document's paragraphs (``all_paragraphs``, and ``paragraphs_in_order``), each with its
+    text and its text folded for search (``_normalised_index``), read once for every finding:
+    marking leaves a paragraph's text as it was - splitting runs and anchoring a comment change
+    none of it. A needle the whole document does not hold is no paragraph's, and a paragraph that
+    holds neither the needle nor its folded form is passed over without reading its runs."""
+
+    def __init__(self, document: DocumentType) -> None:
+        texts: dict[Any, tuple[str, str]] = {}
+
+        def read(paragraphs: Iterator[Paragraph]) -> list[Paragraph]:
+            out = list(paragraphs)
+            for paragraph in out:
+                if paragraph._p not in texts:
+                    own = "".join(r.text for r in _text_runs(paragraph))
+                    texts[paragraph._p] = (own, _normalised_index(own)[0])
+            return out
+
+        self.listed = read(all_paragraphs(document))
+        self.ordered = read(paragraphs_in_order(document))
+        self.texts = texts
+        self.raw = "\n".join(own for own, _ in texts.values())
+        self.flat = "\n".join(flat for _, flat in texts.values())
+
+    def holding(self, needle: str, *, ordered: bool = False) -> Iterator[Paragraph]:
+        """The paragraphs (in ``paragraphs_in_order`` order, or ``all_paragraphs``) that may hold
+        ``needle``: those holding it as written or folded."""
+        needle = needle.strip()
+        flat_needle = _normalised_index(needle)[0]
+        if needle not in self.raw and not (flat_needle and flat_needle in self.flat):
+            return
+        for paragraph in self.ordered if ordered else self.listed:
+            own, flat = self.texts[paragraph._p]
+            if needle in own or (flat_needle and flat_needle in flat):
+                yield paragraph
 
 
 def _places_for(
-    document: DocumentType, finding: Finding, text: str | None = None
+    document: DocumentType | _Paragraphs, finding: Finding, text: str | None = None
 ) -> tuple[list[_Place], bool]:
     """Every place a finding should be marked, and whether they are surely its own words - the
     places a tracked change may rewrite (``_chosen_places``).
@@ -482,21 +607,25 @@ def _places_for(
     place leaves the rest. So the finding's own words are marked wherever they occur. The value
     it *should* have been (``expected``), searched only as a last resort, marks one place: its
     other occurrences are correct.
+
+    No more than ``MAX_SEARCHED`` places are read, and one more to tell that there are more: then
+    none is surely the finding's own.
     """
+    paragraphs = document if isinstance(document, _Paragraphs) else _Paragraphs(document)
     offending = _offending(finding, text)
     if finding.places is not None and finding.quote and finding.quote.strip():
-        chosen, trusted = _chosen_places(document, finding.quote.strip(), finding.places, text)
+        chosen, trusted = _chosen_places(paragraphs, finding.quote.strip(), finding.places, text)
         if chosen:
-            return chosen, trusted
+            return chosen, trusted and len(chosen) <= MAX_SEARCHED
     for needle in _candidates(finding, text):
         # where the words stand as words first: a typo "ივნის" is not inside "ივნისიდან", and
         # the nominative of a name is not inside its genitive. A needle found only inside
         # longer words - a stem the act writes with an ending - is marked there.
-        found = _places_of(document, needle, whole=True, every=needle in offending)
+        found = _places_of(paragraphs, needle, whole=True, every=needle in offending)
         if not found:
-            found = _places_of(document, needle, whole=False, every=needle in offending)
+            found = _places_of(paragraphs, needle, whole=False, every=needle in offending)
         if found:
-            return found, needle in offending
+            return found, needle in offending and len(found) <= MAX_SEARCHED
     return [], False
 
 
@@ -504,12 +633,33 @@ def _places_for(
 _CONTEXT_WORDS = 3
 
 
-def _context(text: str, start: int, end: int) -> tuple[tuple[str, ...], tuple[str, ...]]:
+#: How far from a place its context words are looked for: three words and the separators
+#: between them fit in it, at the lengths the text limits allow (``bound_text``), so a long
+#: line costs no more than a short one for each place on it.
+_CONTEXT_REACH = 2000
+
+
+def _line_breaks(text: str) -> list[int]:
+    return [m.start() for m in re.finditer("\n", text)]
+
+
+def _line_of(text: str, start: int, end: int, breaks: list[int]) -> tuple[int, int]:
+    """Where the line holding ``text[start:end]`` starts and ends, found by bisection in the
+    text's line breaks (``_line_breaks``): the text is searched for every place in it."""
+    k = bisect_left(breaks, start)
+    j = bisect_left(breaks, end)
+    return (breaks[k - 1] + 1 if k else 0), (breaks[j] if j < len(breaks) else len(text))
+
+
+def _context(
+    text: str, start: int, end: int, breaks: list[int]
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """The words before and after ``text[start:end]`` on its own line, look-alike letters
-    folded: the lines around it are what a file may order otherwise than the check read them."""
-    line_start = text.rfind("\n", 0, start) + 1
-    line_end = text.find("\n", end)
-    line_end = len(text) if line_end < 0 else line_end
+    folded: the lines around it are what a file may order otherwise than the check read them.
+    ``breaks``: the text's line breaks (``_line_breaks``)."""
+    line_start, line_end = _line_of(text, start, end, breaks)
+    line_start = max(line_start, start - _CONTEXT_REACH)
+    line_end = min(line_end, end + _CONTEXT_REACH)
     before = _TOKEN.findall(text[line_start:start])[-_CONTEXT_WORDS:]
     after = _TOKEN.findall(text[end:line_end])[:_CONTEXT_WORDS]
     return tuple(fold_look_alikes(w) for w in before), tuple(fold_look_alikes(w) for w in after)
@@ -519,13 +669,13 @@ def _context(text: str, start: int, end: int) -> tuple[tuple[str, ...], tuple[st
 _AROUND_CHARS = 300
 
 
-def _around(text: str, start: int, end: int) -> tuple[tuple[str, ...], tuple[str, ...]]:
+def _around(
+    text: str, start: int, end: int, breaks: list[int]
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """The last words before the line that holds ``text[start:end]`` and the first after it,
     as many as ``_context`` takes, look-alike letters folded: what tells two places apart whose
     lines say the same - a name alone on a signature line under each party's role."""
-    line_start = text.rfind("\n", 0, start) + 1
-    line_end = text.find("\n", end)
-    line_end = len(text) if line_end < 0 else line_end
+    line_start, line_end = _line_of(text, start, end, breaks)
     before = _TOKEN.findall(text[max(0, line_start - _AROUND_CHARS) : line_start])
     after = _TOKEN.findall(text[line_end : line_end + _AROUND_CHARS])[:_CONTEXT_WORDS]
     return (
@@ -535,7 +685,7 @@ def _around(text: str, start: int, end: int) -> tuple[tuple[str, ...], tuple[str
 
 
 def _chosen_places(
-    document: DocumentType,
+    paragraphs: _Paragraphs,
     quote: str,
     places: tuple[tuple[int, ...], int],
     text: str | None = None,
@@ -556,29 +706,35 @@ def _chosen_places(
     bounds: list[tuple[int, int]] = []  # each place in the file's text, its paragraphs joined
     texts: list[str] = []
     base = 0
-    for paragraph in paragraphs_in_order(document):
-        at = 0
-        while (hit := _cover_next(paragraph, quote, at, whole=True)) is not None:
-            runs, start, end = hit
-            found.append((paragraph, start, end, runs))
-            bounds.append((base + start, base + end))
-            at = end
-        own = "".join(r.text for r in _text_runs(paragraph))
+    holding = set(map(id, paragraphs.holding(quote, ordered=True)))
+    for paragraph in paragraphs.ordered:
+        if id(paragraph) in holding and len(found) <= MAX_SEARCHED:
+            room = MAX_SEARCHED + 1 - len(found)
+            for runs, start, end in _cover_all(paragraph, quote, whole=True, limit=room):
+                found.append((paragraph, start, end, runs))
+                bounds.append((base + start, base + end))
+        own = paragraphs.texts[paragraph._p][0]
         texts.append(own)
         base += len(own) + 1
+    if len(found) > MAX_SEARCHED:
+        return found, False  # past the search's limit: no place is told apart from the rest
     if text is not None:
         file_text = "\n".join(texts)
         occurrences = whole_word_spans(text, quote)
-        contexts = [_context(file_text, *b) for b in bounds]
+        file_breaks, breaks = _line_breaks(file_text), _line_breaks(text)
+        places_by_context: dict[object, list[int]] = {}
+        for k, b in enumerate(bounds):
+            places_by_context.setdefault(_context(file_text, *b, file_breaks), []).append(k)
         chosen: list[_Place] = []
         for i in wanted:
             if not 0 <= i < len(occurrences):
                 break
-            want = _context(text, *occurrences[i])
-            matches = [k for k, c in enumerate(contexts) if c == want]
+            matches = places_by_context.get(_context(text, *occurrences[i], breaks), [])
             if len(matches) > 1:
-                wide = _around(text, *occurrences[i])
-                matches = [k for k in matches if _around(file_text, *bounds[k]) == wide]
+                wide = _around(text, *occurrences[i], breaks)
+                matches = [
+                    k for k in matches if _around(file_text, *bounds[k], file_breaks) == wide
+                ]
             if len(matches) != 1:
                 break
             chosen.append(found[matches[0]])
@@ -593,9 +749,7 @@ def _chosen_places(
 def paragraphs_in_order(container: object) -> Iterator[Paragraph]:
     """Every paragraph in reading order - a table's between the paragraphs around it, a content
     control's where it stands, a text box's before the paragraph that anchors it - each once: a
-    merged cell, which python-docx returns for every grid column it spans, is read once, as a
-    text reader reads it."""
-    seen: set[object] = set()  # the cells' elements, held so that each keeps its identity
+    merged cell is read once, as a text reader reads it (``_cells``)."""
 
     def walk(element: Any, parent: Any) -> Iterator[Paragraph]:
         for block in _blocks(element):
@@ -604,28 +758,25 @@ def paragraphs_in_order(container: object) -> Iterator[Paragraph]:
                     yield from walk(box, parent)
                 yield Paragraph(block, parent)
                 continue
-            for row in Table(block, parent).rows:
-                for cell in row.cells:
-                    if cell._tc in seen:
-                        continue
-                    seen.add(cell._tc)
-                    yield from walk(cell._tc, cell)
+            for cell in _cells(block, parent):
+                yield from walk(cell._tc, cell)
 
     body: Any = getattr(container, "_body", container)
     yield from walk(body._element, body)
 
 
-def _places_of(document: DocumentType, needle: str, *, whole: bool, every: bool) -> list[_Place]:
-    """The places ``needle`` stands: every one, or only the first when not ``every``."""
+def _places_of(paragraphs: _Paragraphs, needle: str, *, whole: bool, every: bool) -> list[_Place]:
+    """The places ``needle`` stands: every one (up to ``MAX_SEARCHED`` and one more), or only the
+    first when not ``every``."""
     found: list[_Place] = []
-    for paragraph in all_paragraphs(document):
-        at = 0
-        while (hit := _cover_next(paragraph, needle, at, whole=whole)) is not None:
-            runs, start, end = hit
+    for paragraph in paragraphs.holding(needle):
+        room = MAX_SEARCHED + 1 - len(found)
+        for runs, start, end in _cover_all(
+            paragraph, needle, whole=whole, first=not every, limit=room
+        ):
             found.append((paragraph, start, end, runs))
-            if not every:
+            if not every or len(found) > MAX_SEARCHED:
                 return found
-            at = end
     return found
 
 
@@ -697,11 +848,21 @@ def tracked_edits(written: str, replacement: str) -> list[tuple[int, int, str]] 
 _Edit = tuple[Paragraph, int, int, str]
 
 
-def _plan_edits(edits: list[_Edit], paragraph: Paragraph, start: int, end: int, new: str) -> None:
+def _plan_edits(
+    edits: list[_Edit],
+    paragraph: Paragraph,
+    start: int,
+    end: int,
+    new: str,
+    own: str | None = None,
+) -> None:
     """Plan the tracked change that puts ``new`` in place of the words at ``start:end``, unless
     the words cannot be lined up with it or another finding's change already holds any of them:
-    the first finding to claim words writes them, the others keep their comments."""
-    written = "".join(r.text for r in _text_runs(paragraph))[start:end]
+    the first finding to claim words writes them, the others keep their comments. ``own`` is
+    the paragraph's text, when the caller has it."""
+    if own is None:
+        own = "".join(r.text for r in _text_runs(paragraph))
+    written = own[start:end]
     # what XML cannot carry is dropped before the words are lined up, not after
     planned = tracked_edits(written, _XML_ILLEGAL.sub("", new))
     if not planned:
@@ -713,33 +874,67 @@ def _plan_edits(edits: list[_Edit], paragraph: Paragraph, start: int, end: int, 
     edits.extend(mine)
 
 
-def _runs_between(paragraph: Paragraph, start: int, end: int) -> list[Run] | None:
-    """The runs that hold exactly ``start:end`` of the paragraph's text, split where needed;
-    None when a boundary falls inside a run that is more than text (``_splittable``)."""
-    for boundary in (start, end):
+class _RunIndex:
+    """A paragraph's text runs and where each starts and ends, kept as runs are split."""
+
+    def __init__(self, paragraph: Paragraph) -> None:
+        self.runs = _text_runs(paragraph)
+        self.starts: list[int] = []
+        self.ends: list[int] = []
         pos = 0
-        for run in _text_runs(paragraph):
-            length = len(run.text)
-            if pos < boundary < pos + length:
-                if not _splittable(run):
-                    return None
-                _split_run(run, boundary - pos)
-                break
-            pos += length
-    covered: list[Run] = []
-    pos = 0
-    for run in _text_runs(paragraph):
-        run_end = pos + len(run.text)
-        if pos >= start and run_end <= end and run.text:
-            covered.append(run)
-        pos = run_end
-    whole = "".join(r.text for r in _text_runs(paragraph))[start:end]
-    if not covered or "".join(r.text for r in covered) != whole:
+        for run in self.runs:
+            self.starts.append(pos)
+            pos += len(run.text)
+            self.ends.append(pos)
+
+    def split_at(self, boundary: int) -> bool:
+        """Split the run ``boundary`` falls inside, if any; False when it is a run that is more
+        than text (``_splittable``), which is never split."""
+        i = bisect_right(self.ends, boundary)  # the first run that ends after ``boundary``
+        if i >= len(self.runs) or self.starts[i] >= boundary:
+            return True  # between two runs already
+        run = self.runs[i]
+        if not _splittable(run):
+            return False
+        self.runs.insert(i, _split_run(run, boundary - self.starts[i]))
+        self.starts.insert(i + 1, boundary)
+        self.ends.insert(i, boundary)
+        return True
+
+
+def _edit_runs(paragraph: Paragraph, spans: Sequence[tuple[int, int]]) -> list[list[Run] | None]:
+    """For each ``start:end`` of a paragraph's planned changes, in order, the runs that hold
+    exactly those words, split where needed; None when a boundary falls inside a run that is
+    more than text (``_splittable``), or the words cannot be rewritten where they stand. The
+    paragraph's runs are indexed once for all its changes."""
+    index = _RunIndex(paragraph)
+    splits = [index.split_at(start) and index.split_at(end) for start, end in spans]
+    runs, starts, ends = index.runs, index.starts, index.ends
+    text = "".join(r.text for r in runs)
+    fields = set(_field_runs(runs))
+    out: list[list[Run] | None] = []
+    for (start, end), split in zip(spans, splits, strict=True):
+        if not split:
+            out.append(None)
+            continue
+        covered: list[Run] = []
+        i = bisect_left(starts, start)
+        while i < len(runs) and starts[i] < end:
+            if ends[i] <= end and ends[i] > starts[i]:
+                covered.append(runs[i])
+            i += 1
+        out.append(_rewritable(covered, text[start:end], fields))
+    return out
+
+
+def _rewritable(covered: list[Run], words: str, fields: set[Any]) -> list[Run] | None:
+    """``covered``, when a tracked change can move them into a deletion: they hold ``words``
+    exactly, are text only, are no field's, and nothing stands between them."""
+    if not covered or "".join(r.text for r in covered) != words:
         return None
     if not all(_splittable(r) for r in covered):
         return None
-    fields = _field_runs(_text_runs(paragraph))
-    if any(any(r._r is f for f in fields) for r in covered):
+    if any(r._r in fields for r in covered):
         return None  # what a field shows is Word's to compute (red team R6)
     first, last = covered[0]._r, covered[-1]._r
     parent = first.getparent()
@@ -819,11 +1014,15 @@ def _track(document: DocumentType, edits: Sequence[_Edit], author: str, when: da
     used = [int(v) for v in document.element.xpath("//@w:id") if _REVISION_ID.fullmatch(str(v))]
     revision = max(used, default=0) + 1
     stamp = when.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    targets = [
-        (runs, new)
-        for paragraph, start, end, new in edits
-        if (runs := _runs_between(paragraph, start, end)) is not None
-    ]
+    by_paragraph: dict[Any, list[int]] = {}
+    for n, (paragraph, _, _, _) in enumerate(edits):
+        by_paragraph.setdefault(paragraph._p, []).append(n)
+    found: list[list[Run] | None] = [None] * len(edits)
+    for numbers in by_paragraph.values():
+        spans = [(edits[n][1], edits[n][2]) for n in numbers]
+        for n, runs in zip(numbers, _edit_runs(edits[numbers[0]][0], spans), strict=True):
+            found[n] = runs
+    targets = [(runs, edit[3]) for edit, runs in zip(edits, found, strict=True) if runs]
     for runs, new in targets:
         revision = _wrap(runs, new, author, stamp, revision)
     return len(targets)
@@ -858,6 +1057,20 @@ def summary_comment(report: CheckReport) -> str | None:
     return _XML_ILLEGAL.sub("", "\n".join(lines)) if len(lines) > 1 else None
 
 
+def _cut_short_note(finding: Finding, marked: int, places: int) -> str:
+    """The note for a finding whose places ran past the limits (``MAX_PLACES_PER_FINDING``,
+    ``MAX_PLACES``, ``MAX_SEARCHED``): how many are marked, and that the rest are not, nor
+    changed."""
+    total = f"{MAX_SEARCHED}-ზე მეტი" if places > MAX_SEARCHED else str(places)
+    total_en = f"more than {MAX_SEARCHED}" if places > MAX_SEARCHED else str(places)
+    return _XML_ILLEGAL.sub(
+        "",
+        f"{finding.rule_id}: მონიშნულია {marked} ადგილი ({total}-დან); დანარჩენი არ არის "
+        f"მონიშნული და არც შესწორებული / marked at {marked} of its {total_en} places; the others "
+        "are neither marked nor changed",
+    )
+
+
 def _add_note(document: DocumentType, text: str, author: str) -> None:
     """A comment on the document's first word: the summary and the findings no words of the
     document stand for. The body's text is left as it was; a document with no text at all gets
@@ -866,9 +1079,9 @@ def _add_note(document: DocumentType, text: str, author: str) -> None:
         first = _TOKEN.search("".join(r.text for r in _text_runs(paragraph)))
         if first is None:
             continue
-        found = _cover_next(paragraph, first.group(), 0)
-        if found is not None:
-            document.add_comment(found[0], text=text, author=author, initials=INITIALS)
+        found = _cover_all(paragraph, first.group(), first=True)
+        if found:
+            document.add_comment(found[0][0], text=text, author=author, initials=INITIALS)
             return
     run = document.add_paragraph().add_run("—")
     document.add_comment(run, text=text, author=author, initials=INITIALS)
@@ -922,14 +1135,25 @@ def annotate_docx(
     # later findings never changes.
     comments: dict[tuple[object, int, int], Comment] = {}
     edits: list[_Edit] = []
+    own: dict[object, str] = {}  # each paragraph's text, read once
+    cut_short: list[str] = []
+    marked = 0
+    paragraphs = _Paragraphs(document)
     for finding in findings:
-        places, trusted = _places_for(document, finding, text)
+        places, trusted = _places_for(paragraphs, finding, text)
+        room = max(0, min(MAX_PLACES_PER_FINDING, MAX_PLACES - marked))
+        if len(places) > room:
+            cut_short.append(_cut_short_note(finding, room, len(places)))
+            places, trusted = places[:room], False
         if not places:
             unanchored.append(finding)
             continue
+        marked += len(places)
         for paragraph, start, end, runs in places:
             if finding.replacement and trusted:
-                _plan_edits(edits, paragraph, start, end, finding.replacement)
+                if paragraph._p not in own:
+                    own[paragraph._p] = "".join(r.text for r in _text_runs(paragraph))
+                _plan_edits(edits, paragraph, start, end, finding.replacement, own[paragraph._p])
             key = (paragraph._p, start, end)
             if (existing := comments.get(key)) is not None:
                 existing.add_paragraph(comment_text(finding))
@@ -938,7 +1162,7 @@ def annotate_docx(
                 runs, text=comment_text(finding), author=author, initials=INITIALS
             )
 
-    notes = [*([summary] if summary else []), *(comment_text(f) for f in unanchored)]
+    notes = [*([summary] if summary else []), *cut_short, *(comment_text(f) for f in unanchored)]
     if notes:
         _add_note(document, "\n\n".join(notes), author)
     # last: a tracked change moves runs out of the paragraph's direct children, where the

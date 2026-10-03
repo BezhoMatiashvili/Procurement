@@ -13,15 +13,17 @@ preserved an external image relationship, an external hyperlink, an ``attachedTe
 What is removed: every external relationship that is not an ``http``, ``https`` or ``mailto``
 hyperlink; embedded objects, controls, ``altChunk`` and ``subDoc``; the settings that attach a
 template, a mail-merge source, or ask Word to update fields on open; and fields whose instruction
-includes or links other content (they are replaced by the text they last showed). What is kept:
-text, styles, comments, tables, embedded pictures and ordinary hyperlinks - the reviewer's view of
-the document is the same.
+includes or links other content, sends codes to the printer, or links to anything a relationship
+could not (a ``HYPERLINK`` field to ``file:``, a share or a program's scheme) - they are replaced
+by the text they last showed. What is kept: text, styles, comments, tables, embedded pictures and
+ordinary hyperlinks - the reviewer's view of the document is the same.
 
 Counts, never content, are reported.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
@@ -65,8 +67,9 @@ _DROPPED_ELEMENTS = frozenset(
 _DROPPED_SETTINGS = frozenset({"attachedTemplate", "mailMerge", "updateFields"})
 #: Attributes that point at an external target rather than at a part we keep.
 _EXTERNAL_REF_ATTRS = (f"{_R}link", f"{_R}href")
-#: Field instructions that pull in other content, start a conversation with another program, or
-#: run a command. Compared case-insensitively against the first word of the instruction.
+#: Field instructions that pull in other content, start a conversation with another program, run
+#: a command, or send codes to the printer. Compared case-insensitively against the first word of
+#: the instruction, quoted or not.
 _RISKY_FIELDS = frozenset(
     {
         "INCLUDEPICTURE",
@@ -78,8 +81,15 @@ _RISKY_FIELDS = frozenset(
         "IMPORT",
         "DATABASE",
         "MACROBUTTON",
+        "RD",
+        "EMBED",
+        "PRINT",
     }
 )
+#: A ``HYPERLINK`` field's own arguments: its target, quoted or not, and its switches, ``\l``,
+#: ``\m``, ``\n``, ``\o`` and ``\t`` (some with an argument of their own).
+_FIELD_WORDS = re.compile(r'"([^"]*)"|(\\[A-Za-z])(?![^\s"])|(\S+)')
+_SWITCHES_WITH_AN_ARGUMENT = frozenset({"\\l", "\\o", "\\t"})
 
 
 @dataclass
@@ -112,9 +122,14 @@ def _should_drop(rel: object) -> bool:
         return False
     if tail != "hyperlink":
         return True
-    scheme = urlparse(str(getattr(rel, "target_ref", ""))).scheme.lower()
+    return not _safe_link(str(getattr(rel, "target_ref", "")))
+
+
+def _safe_link(target: str) -> bool:
+    """Whether a link's target is one a reviewer may follow (``_SAFE_LINK_SCHEMES``)."""
+    scheme = urlparse(target.strip()).scheme.lower()
     # a one-letter "scheme" is a Windows drive (C:\...); empty is a relative or UNC path
-    return scheme not in _SAFE_LINK_SCHEMES
+    return scheme in _SAFE_LINK_SCHEMES
 
 
 def _drop_relationships(owner: object) -> set[str]:
@@ -165,8 +180,30 @@ def _strip_settings(root: etree._Element) -> int:
 
 
 def _is_risky(instruction: str) -> bool:
-    words = instruction.strip().lstrip('"').split(None, 1)
-    return bool(words) and words[0].upper() in _RISKY_FIELDS
+    words = instruction.strip().split(None, 1)
+    if not words:
+        return False
+    kind = words[0].strip('"').upper()
+    if kind == "HYPERLINK":
+        return not _safe_field_link(words[1] if len(words) > 1 else "")
+    return kind in _RISKY_FIELDS
+
+
+def _safe_field_link(arguments: str) -> bool:
+    """Whether a ``HYPERLINK`` field links where a hyperlink relationship may (``_safe_link``):
+    its target, or none - a link to a place in the document itself (``\\l``) goes nowhere."""
+    expect_argument = False
+    for quoted, switch, bare in _FIELD_WORDS.findall(arguments):
+        if switch:
+            expect_argument = switch.lower() in _SWITCHES_WITH_AN_ARGUMENT
+            continue
+        if expect_argument:
+            expect_argument = False
+            continue
+        target = quoted if quoted or not bare else bare
+        # a field writes a backslash twice: "\\\\host\\share" is \\host\share
+        return _safe_link(target.replace("\\\\", "\\"))
+    return True
 
 
 def _unwrap_fields(root: etree._Element) -> int:

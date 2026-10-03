@@ -177,6 +177,8 @@ ContractorType = Literal[
 #: Rules whose value is a name, which the act may write in any case: a correction is given in
 #: the case the act used (``georgian.in_case_of``).
 _NAME_RULES = frozenset({"AOA.PARTY_NAME", "AOA.REGISTRY_NAME"})
+#: How many of the registry's authorised persons a finding names.
+_LISTED_DIRECTORS = 20
 
 #: Rules comparing a value the act writes with the one the contract (or the registry) writes.
 #: On a scan, a difference scanning explains is a misreading to check, not a mistake.
@@ -4881,8 +4883,10 @@ class AoaChecker:
             )
             return
         positions = list(entry.positions) + [""] * (len(theirs) - len(entry.positions))
-        listed = ", ".join(
-            f"{n} ({pos})" if pos else n for n, pos in zip(theirs, positions, strict=False)
+        named = [f"{n} ({pos})" if pos else n for n, pos in zip(theirs, positions, strict=False)]
+        # a message names a company's signatories, not an extract's every line
+        listed = ", ".join(named[:_LISTED_DIRECTORS]) + (
+            ", …" if len(named) > _LISTED_DIRECTORS else ""
         )
         for d in p.directors:
             forms = self._person_forms(d)
