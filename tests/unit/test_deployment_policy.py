@@ -390,6 +390,17 @@ def test_the_parser_socket_directory_exists_for_the_app_user_and_is_closed_to_th
     assert re.search(r"chmod 0?750 [^&]*/run/parser", text), "the volume inherits this mode"
 
 
+def test_the_image_declares_no_volume_so_the_parser_gets_no_data_mount_of_its_own() -> None:
+    """``VOLUME /data`` in the Dockerfile made Docker create an anonymous volume at ``/data`` in
+    every container of the image that did not mount something there - the parser's among them (found
+    with ``docker inspect`` on a running stack). Empty, but a writable ``/data`` is exactly what
+    the parser must not have; compose mounts the app's volume explicitly, and a named volume takes
+    its owner and mode from the directory in the image whether or not it is declared."""
+    assert not re.search(r"^\s*VOLUME\b", DOCKERFILE, re.M)
+    assert not any(m.split(":")[1] == "/data" for m in _volumes(PARSER))
+    assert not any(t.split(":")[0] == "/data" for t in PARSER["tmpfs"])
+
+
 def test_the_environment_example_documents_the_parser_settings() -> None:
     example = (ROOT / ".env.example").read_text(encoding="utf-8")
     for name in (

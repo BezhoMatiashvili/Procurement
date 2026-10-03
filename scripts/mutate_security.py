@@ -111,6 +111,14 @@ MUTATIONS = [
         ("tests/unit/test_deployment_policy.py",),
     ),
     Mutation(
+        "image_declares_a_data_volume",
+        "Dockerfile",
+        "EXPOSE 8000\n",
+        "VOLUME /data\nEXPOSE 8000\n",
+        "every container of the image, the parser's included, gets a writable /data of its own",
+        ("tests/unit/test_deployment_policy.py",),
+    ),
+    Mutation(
         "parser_without_init",
         "docker-compose.yml",
         '    init: true\n    command: ["python", "-m", "procurement_agent.parser_service"]\n',

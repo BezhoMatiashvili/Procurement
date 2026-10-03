@@ -89,7 +89,10 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PA_SPELLING_DICTIONARY_PATH=/app/dictionaries/hunspell \
     OMP_NUM_THREADS=12
 USER app
-VOLUME /data
+# No `VOLUME /data` here: it made Docker create an anonymous volume at /data in every container of
+# this image that did not mount something there, and the parser container (same image, no data of the
+# application's) must not have a /data at all. docker-compose.yml mounts `app-data` explicitly, and a
+# named volume takes its owner and mode from the directory above whether or not it is declared.
 EXPOSE 8000
 # Readiness, not liveness: /ready fails when the database or the job worker is not healthy, so
 # `docker ps` shows "unhealthy" for an instance that accepts uploads it will never process.
