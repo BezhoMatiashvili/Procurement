@@ -137,14 +137,33 @@ def _models_manifest(action: str, settings: Settings) -> int:
         print("PA_DOCLING_ARTIFACTS_PATH must point at the models directory", file=sys.stderr)
         return 2
     if action == "write":
-        count = models_manifest.write(root)
+        try:
+            count = models_manifest.write(root)
+        except ValueError as refused:
+            print(f"refused, no manifest written - {refused}", file=sys.stderr)
+            return 1
         audit_now(actor=CLI_ACTOR, action="models.manifest", detail=f"wrote {count} file(s)")
         print(f"wrote {models_manifest.MANIFEST_NAME}: {count} file(s) in {root}")
+        closed = models_manifest.not_world_readable(root)
+        if closed:
+            more = f" and {len(closed) - 3} more" if len(closed) > 3 else ""
+            print(
+                f"warning: {len(closed)} path(s) are not readable by other users "
+                f"({', '.join(closed[:3])}{more}). The app container runs as uid 999 and will "
+                "refuse to start on them: run chmod -R a+rX on the models directory, or make the "
+                "app user its owner.",
+                file=sys.stderr,
+            )
         return 0
     checked = models_manifest.verify(root)
     for problem in checked.problems:
         print(problem)
     print(f"{checked.checked} file(s) checked, {len(checked.problems)} problem(s)")
+    if checked.unreadable:
+        print(
+            "the models tree must be readable by the app user (uid 999 in the container image): "
+            "chmod -R a+rX on the models directory"
+        )
     return 0 if checked.ok else 1
 
 

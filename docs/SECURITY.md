@@ -31,7 +31,20 @@ Three independent layers, then a proof. Each has a test (§11).
   fails in the kernel. The relay cannot reach Ollama and Ollama cannot reach the relay.
 * No container publishes a port except the small relay (`proxy`, Caddy, plain HTTP, no state),
   bound to `127.0.0.1:8000`; the company's TLS reverse proxy sits in front of that. The relay's
-  second network (`edge`) has outbound NAT disabled, so it cannot reach the internet either.
+  second network (`edge`) has outbound NAT disabled, so its TCP connections to the outside time
+  out (measured: `nc 1.1.1.1:80` fails after the 4 s allowed).
+* The relay cannot resolve public names either. Docker's embedded resolver answers the names of
+  other containers itself and forwards the rest to the host's resolvers, and on `edge`, which is
+  routable, that worked: `nslookup example.com` answered from the relay while every TCP
+  connection timed out. A lookup can carry data out in the name it asks for, so the relay has
+  `dns: [127.0.0.1]` - an upstream where nothing listens. Measured on Docker 29.7: from the
+  relay, `app` still resolves and a public name ends in SERVFAIL in 0.1 s; from the app and from
+  Ollama, which sit on internal networks only, a public name gives `Temporary failure in name
+  resolution`, as before. `tests/unit/test_relay_policy.py` checks the setting. Docker refuses
+  `gateway_mode_ipv4=isolated` (no route at all) on a network that is not internal, and a
+  published port needs one, so the relay keeps a default route; what stops it is the missing NAT.
+* The relay's own logs hold no header and no query string (§5): Caddy would otherwise have
+  written the caller's `X-Api-Key` in clear into its error log.
 * Ollama runs with `OLLAMA_NO_CLOUD=1`: its hosted-model features (remote inference, web search)
   are off, so a `...-cloud` model cannot forward a prompt to ollama.com through the local server.
 * The app answers only to the host names in `PA_ALLOWED_HOSTS` (production refuses to start
@@ -55,7 +68,9 @@ Three independent layers, then a proof. Each has a test (§11).
 * Docling runs with remote services disabled and Tesseract as the only OCR engine (the other
   engines would try to download models). Model files must be pre-downloaded (production requires
   `PA_DOCLING_ARTIFACTS_PATH`) and are verified against `MANIFEST.sha256` at every production
-  start (`cli models-manifest write|verify`); a changed, missing or extra file stops the start.
+  start (`cli models-manifest write|verify`); a changed, missing or extra file stops the start, and
+  so does one the app user cannot read (named by its path under the models directory, with the
+  `chmod -R a+rX` that fixes it).
 
 **The model server is the only thing the application talks to.**
 
@@ -83,7 +98,9 @@ bill of quantities, reports, UI, delete, plus live-socket checks of the refusals
 Linux network namespace that has loopback and nothing else, where an attempt to leave the machine
 fails in the kernel whatever opened the socket. It runs in CI. On a deployed stack:
 `docker compose exec app python -c "import urllib.request; urllib.request.urlopen('https://example.com', timeout=3)"`
-must fail with a network error (measured: `Temporary failure in name resolution`).
+must fail with a network error (measured: `Temporary failure in name resolution`), and so
+must the relay's resolver: `docker compose exec proxy nslookup example.com` answers SERVFAIL
+(measured), not an address.
 
 ## 3. Untrusted input
 
@@ -216,6 +233,19 @@ This is kept at three levels:
   error, and asserts the marker is in no log line and no database column.
   A library's own message text cannot be inspected; the test is what notices when one leaks.
 
+The relay (Caddy) has logs of its own, and they are held to the same rule. Caddy redacts
+`Authorization` and `Cookie` by itself and writes every other header as it came, so an error it
+logged - an app that is down, a connection reset - put the caller's `X-Api-Key` on stdout in
+clear (measured: the key in one line per failed request). Both its loggers, the default one
+(the error log) and the site's access log, now pass through a `filter` encoder that drops every
+request and response header, and the whole query string (the report pages carry document and job
+ids, amounts and dates there). What stays is time, client address, method, host, path, status,
+size and duration. The container's health probes are not logged. Measured on the stack with a
+marker in `X-Api-Key`, `Cookie`, `Authorization`, `Proxy-Authorization`, a made-up
+`X-Auth-Token` and the query string, on requests the app answered, refused, and could not be
+reached for: no marker in the relay's, the app's or Ollama's log. `tests/unit/test_relay_policy.py`
+fails when a log loses the filter or the filter loses a field.
+
 ## 6. The LLM is a tool, not an agent
 
 * The model receives document text **only as data**, inside `<document>` delimiters, with a
@@ -257,10 +287,16 @@ thread included - can run to notice, and Docker restarts on exit, not on a faile
 The compose command is therefore `scripts/supervise.py`: a small standard-library process that
 probes `/ready` over loopback every 15 s, and after three consecutive failures (once the
 180 s model-loading start-up is over) sends SIGTERM, then SIGKILL after 50 s, and starts the
-server again; after five restarts in ten minutes it exits non-zero rather than loop. A restart
-fails the job that was running and loses nothing else.
+server again; after five restarts in ten minutes it exits non-zero, and Docker's restart policy
+then starts the container again, as after any exit (the log shows `giving_up`). A restart fails
+the job that was running and loses nothing else. Every wait of the supervisor is on an event that
+the SIGTERM handler sets, so `docker compose stop` reaches the server at once (measured: 0.7 s
+on an idle app); a probe to a server that does not answer is abandoned when the stop arrives.
 `tests/integration/test_supervisor_real_app.py` freezes the real server (`SIGSTOP`, which is what
-a wedged interpreter looks like from outside) and checks it is killed and comes back.
+a wedged interpreter looks like from outside) and checks it is killed and comes back; on the
+three-container stack the same drill measured one restart, 107.6 s after the stop, the relay
+answering again at 124.2 s. A restart is Docker's only on an exit by itself: a container stopped
+by hand (`docker kill`, `docker compose stop`) stays stopped until `docker compose start` or `up`.
 The supervisor cannot tell a hang from any other reason `/ready` does not answer 200: a
 `database` or `worker_stalled` answer restarts the server too, and so would a thread pool held
 for a minute by other requests (`/ready` runs on it), which also fails the running job. The

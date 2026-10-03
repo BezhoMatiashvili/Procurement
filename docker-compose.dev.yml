@@ -51,6 +51,9 @@ services:
     image: caddy:2.11.4-alpine@sha256:de23def33b17fb5d1290b0f6c2add1d70780e52341896c00a4c8a2a2fe9d355e
     restart: unless-stopped
     user: "65534:65534"
+    # No upstream resolver: Docker still answers `ollama` itself, but a lookup of a public name
+    # (a way to send data out through the host's DNS) ends in SERVFAIL. See docker-compose.yml.
+    dns: ["127.0.0.1"]
     entrypoint: ["/bin/sh", "-c"]
     command:
       - printf '%s' "$$CADDYFILE" > /config/Caddyfile && exec caddy run --adapter caddyfile --config /config/Caddyfile

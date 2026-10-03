@@ -51,6 +51,24 @@ def _service(doc: dict[str, Any], *names: str) -> dict[str, Any]:
     raise AssertionError(f"none of {names} in {list(doc['services'])}")
 
 
+# --- the project name ------------------------------------------------------------------------
+
+
+def test_the_compose_project_has_a_fixed_name_so_the_volumes_do_not_depend_on_the_folder() -> None:
+    """Without a top-level ``name`` Compose names the project after the directory it is started
+    from, and the volumes ``app-data`` (documents, API keys, audit trail) and ``ollama`` (the
+    models) after the project. A release unpacked into a new folder would then start with empty
+    volumes and no error. ``-p`` and ``COMPOSE_PROJECT_NAME`` still override it on purpose."""
+    name = PROD.get("name")
+    assert name == "procurement-agent"
+    assert re.fullmatch(r"[a-z0-9][a-z0-9_-]*", name)
+    assert DEV["name"] != name, "the development stack must never share volumes with this one"
+    for volume in PROD["volumes"].values():
+        assert not volume or "name" not in volume, (
+            "a volume pinned by name would escape the project"
+        )
+
+
 # --- what a container may do -----------------------------------------------------------------
 
 

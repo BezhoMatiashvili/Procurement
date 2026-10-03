@@ -21,18 +21,20 @@ deployer duty or an open item.
 | Per-user cap on queued + running jobs | [x] | `PA_MAX_ACTIVE_JOBS_PER_USER` |
 | Upload validation: extension allow-list, magic bytes, zip-bomb limits, macro/VBA refusal, page limit, encrypted PDFs refused | [x] | `security/upload_guard.py` |
 | Request-body cap per route, counted on streamed bytes (chunked bodies included): 1 MiB on every route that takes no file, 2 × `PA_MAX_FILE_MB` + 1 MB on the upload routes, where the caller is authenticated *before* the body is read | [x] | `security/body_limit.py`, `security/preauth.py`; live-socket check in `scripts/offline_smoke.py` |
+| The relay applies the same table first and answers the same 413 itself, from the announced length (a chunked body is cut off by `request_body`); the oversize body is never forwarded. Without it the app's early 413 and close showed through the relay as 502 (measured on the three-container stack: 29 of 30 requests with a 1.2 MB body; with it, 30 of 30 are 413) | [x] | `docker-compose.yml` (`proxy`), `tests/unit/test_relay_policy.py` fails when the two tables drift |
 | Hostile-input bounds: no exponential or quadratic reading of document text (patterns fixed, runs and tokens bounded, text/cell budgets), bounded rendering, workbook cell count refused before load, one lock around the app's own pdfium use | [x] | `ingestion/text_limits.py`, `ingestion/xlsx_size.py`, `ingestion/render.py`, `ingestion/pdfium_lock.py`; `tests/regex_budget.py`, `scripts/audit_resources.py` |
 | Bounded report work: at most `PA_MAX_CONCURRENT_REPORTS` computed at once - the checks and the Word/PDF files written from them - the rest 503 + `Retry-After` | [x] | `security/capacity.py`, `api/checks.py` (`reported`) |
 | Annotated Word output drops external relationships, embedded objects, risky fields | [x] | `report/docx_sanitize.py` |
 | Formula-injection escaping in every generated workbook | [x] | `report/xlsx_safe.py`, used by all four writers: BOQ merged workbook, comparison export, extraction export, `scripts/boq_compare.py` |
 | Append-only audit trail (DB table with triggers that abort UPDATE/DELETE + JSON log line); reads, key operations, denied probes and refused outbound attempts included | [x] | `db.py`, `security/audit.py`, `cli audit`, `cli audit-prune`; see SECURITY.md §4 for the actions |
 | Content-free logs and stored errors, proven by a canary test through every input path | [x] | `security/safe_errors.py`, `security/logscrub.py`, `tests/integration/test_log_canary.py` |
+| The relay's logs carry no credential and no query string: every header and the query are dropped from both its error log and its access log (Caddy writes `X-Api-Key` in clear by default) | [x] | `docker-compose.yml` (`proxy`, `logfilter`), `tests/unit/test_relay_policy.py`; marker check on the stack, SECURITY.md §5 |
 | Retention: row first, files second, a reconciler that retries what failed, derived outputs and caches removed, overwrite + fsync, SQLite `secure_delete` | [x] | `jobs/retention.py`, `jobs/worker.py` sweep every 10 min, `cli sweep`, `PA_RETENTION_DAYS` |
 | Versioned schema: the version lives in the database (`PRAGMA user_version`); a start applies pending migrations in order, each in its own transaction, after a consistent copy of a database that holds rows, with file names and typed text blanked and removed after `PA_DB_BACKUP_KEEP_DAYS`; a database newer than the release is refused; the upgrade is audited (`db.migrate`) | [x] | `migrations.py`, `cli db-status`, `tests/unit/test_migrations.py`; 5.6 |
 | Files created owner-only (umask 077, data dir 0700), no core dumps | [x] | `security/hardening.py`, `db.py`, `config.py`, compose `ulimits` |
 | Air-gap, four layers: internal Docker networks (no route out), offline flags force-set before any ML import, an in-process egress guard, Ollama URL = this machine / the compose service (LAN only by opt-in), cloud models refused, only two model-server requests possible, `trust_env=False`, no redirects | [x] | `docker-compose.yml`, `procurement_agent/__init__.py`, `security/egress.py`, `config.py`, `llm/ollama_client.py` |
 | Proof of the air-gap: the whole product flow in a loopback-only network namespace | [x] | `scripts/verify_offline.sh` (CI job `offline`) |
-| Model files verified against `MANIFEST.sha256` at every prod start | [x] | `security/models_manifest.py`, `cli models-manifest` |
+| Model files verified against `MANIFEST.sha256` at every prod start; a file the app user cannot read is a named refusal, not a traceback | [x] | `security/models_manifest.py`, `cli models-manifest` |
 | Container hardening: non-root, read-only rootfs, `cap_drop: ALL`, `no-new-privileges`, tmpfs `/tmp` (noexec), memory/PID/CPU limits, no core dumps, init | [x] | `Dockerfile`, `docker-compose.yml`; `tests/unit/test_deployment_policy.py` |
 | Trusted-proxy handling for `X-Forwarded-For` (never `*`) | [x] | `FORWARDED_ALLOW_IPS` (image default loopback; compose trusts only its relay) |
 | Prod start-up refuses: a dev key, missing or unverified Docling models, the egress guard off, no host allow-list, `FORWARDED_ALLOW_IPS=*` | [x] | `Settings.validate_for_prod` |
@@ -50,8 +52,24 @@ deployer duty or an open item.
   queued jobs are re-queued; a document stuck in `parsing` is released.
 - [x] **Graceful shutdown.** The worker gets `PA_WORKER_STOP_TIMEOUT_S` (30 s) to finish its
   job; compose gives the container `stop_grace_period: 60s` and runs an init process, so
-  SIGTERM reaches uvicorn. Measured: `docker compose stop app` completes in about 0.5 s when
-  idle, with a clean "Application shutdown complete".
+  SIGTERM reaches the supervisor and, at once, uvicorn (the supervisor waits on an event, not in
+  a sleep, which Python resumes after a signal handler returns). Measured on the three-container
+  stack: `docker compose stop app` on an idle app takes 0.7 s (0.66, 0.68 and 0.73 s), exit
+  code 0, with a clean "Application shutdown complete". Before the wait was made interruptible
+  the same command took 7.9 to 11.0 s (9.8 to 15.2 s in an earlier run): whatever was left of the
+  15 s probe interval.
+- [x] **What Docker restarts, and what it does not.** `restart: unless-stopped` restarts the
+  container when its main process exits by itself: a crash, an out-of-memory kill, the
+  supervisor giving up. Measured: SIGKILL of the supervisor inside the container, and the
+  container was running again after 0.8 s and reported healthy after 17.3 s; the API key made
+  before and the uploaded document were still there (they are on the volume). It does **not**
+  restart a container that was stopped by hand: `docker stop`, `docker compose stop` and
+  `docker kill` all count as a manual stop, Docker's semantics, not a fault of this product
+  (measured: after `docker kill` the app stayed `exited (137)`, RestartCount unchanged, for
+  60 s, until `docker compose start app`). Docker's documentation adds that such a container
+  also stays stopped across a restart of the Docker daemon or a reboot of the host (not
+  measured here), so after any maintenance stop run `docker compose up -d` and look at
+  `docker compose ps`.
 - [x] **Upgrades fail safe.** A schema change runs one migration at a time, in a transaction that
   also records the new version (SQLite rolls DDL back with it), under the database's write lock:
   a failed upgrade leaves the last version that worked, a process killed in the middle leaves the
@@ -64,8 +82,12 @@ deployer duty or an open item.
   it, and a request that spins in a regular expression or a native parser freezes the process
   from inside. The compose command is `scripts/supervise.py`, a standard-library process that
   probes `/ready` over loopback and restarts the server after three failed probes in a row (see
-  SECURITY.md §7). The running job is failed; nothing else is lost. Still wire `/ready` into
-  whatever monitoring the client runs, so a restart loop is noticed.
+  SECURITY.md §7). The running job is failed; nothing else is lost. Measured hang drill
+  (SIGSTOP of uvicorn once it was past its 180 s start-up): the three failed probes at 17.5,
+  37.5 and 57.5 s, SIGKILL at 107.6 s (a stopped process cannot act on SIGTERM, so the full
+  50 s wait is spent), the new server started at once and the relay answered `/ready` again
+  124.2 s after the stop: one restart, none after it. Still wire `/ready` into whatever
+  monitoring the client runs, so a restart loop is noticed.
 
 ## 3. Observability
 
@@ -104,6 +126,17 @@ one message at a time in `pyproject.toml`, never by category.
 
 ## 5. Deployment
 
+**The compose project name is fixed**: `name: procurement-agent` at the top of
+`docker-compose.yml`. Compose names the volumes after the project, and without a `name:` it names
+the project after the folder it is started from; a release unpacked into a new folder
+(`procurement-agent-0.2.0-abc1234/`) would then start on empty volumes - no documents, no API
+keys, no audit trail - and say nothing. The volumes are now always `procurement-agent_app-data`
+and `procurement-agent_ollama`, whatever the folder is called (checked: `docker compose config`
+from two differently named folders prints the same volume and network names). `-p <name>` and
+`COMPOSE_PROJECT_NAME` still override it (checked), which is what a second, separate stack needs
+and what 5.6 uses for a host that ran an earlier release. Never start the same installation
+under two names: each name has its own volumes.
+
 ### 5.1 Topology
 
 ```
@@ -117,7 +150,9 @@ Docker does not publish ports of a container whose only network is `internal: tr
 on Docker 29.7: the mapping is dropped without an error). That is why the relay exists: it is
 the only container on a second network (`edge`), holds no state, and forwards to the app.
 `edge` has outbound NAT disabled, so the published port answers but the relay cannot reach the
-internet (measured: outbound `wget` times out). The app and Ollama have no route at all, and
+internet (measured: outbound `wget` times out), and the relay's resolver has no upstream
+(`dns: [127.0.0.1]`; measured: `nslookup example.com` from the relay is SERVFAIL, `app` still
+resolves). The app and Ollama have no route at all, and
 they sit on two different internal networks (`internal` with the relay, `llm` with each other) so
 the relay cannot reach Ollama; verify with the command in SECURITY.md §2.
 
@@ -137,12 +172,15 @@ the relay cannot reach Ollama; verify with the command in SECURITY.md §2.
   `Host`, and a rewritten `Host` would refuse every UI form post. The relay passes `Host`
   through unchanged.
 - [ ] Allow request bodies of at least 2 × `PA_MAX_FILE_MB` + 1 MB (101 MB at the default) and
-  keep read timeouts long enough for a 100 MB upload on the slowest client link.
+  keep read timeouts long enough for a 100 MB upload on the slowest client link. (The relay
+  behind your proxy refuses anything larger with the app's 413; it reads `PA_MAX_FILE_MB` from
+  the same `.env` and will not start on a value that is not a whole number.)
 - [ ] Do not cache `/api/` responses (the app already sends `Cache-Control: no-store`).
 
 ### 5.3 Host and volumes
 
-- [ ] `/data` (the `app-data` volume) on an encrypted disk (LUKS or equivalent).
+- [ ] `/data` (the `app-data` volume, `procurement-agent_app-data`) on an encrypted disk (LUKS or
+  equivalent).
 - [ ] `.env` readable only by the operator (`chmod 600`); `PA_ENV=prod`, `PA_DEV_API_KEY`
   empty, `PA_ALLOWED_HOSTS` set. `PA_APP_CPUS` / `PA_OLLAMA_CPUS` below the host's core count keep
   one runaway parse from starving the host (no default: Docker refuses a number above the cores).
@@ -153,6 +191,18 @@ the relay cannot reach Ollama; verify with the command in SECURITY.md §2.
   (`python -m procurement_agent.cli models-manifest write`): production verifies it at every
   start and refuses to run on a changed, missing or extra model file. The spelling dictionary is not among them: the image carries
   it, fetched and hash-checked by `docker compose build`, which needs the network anyway.
+- [ ] **Copied models must be readable by the app user** (uid 999 in the image): after the copy
+  run `chmod -R a+rX models` (or own the tree as uid 999). `cp -a` keeps the owner and mode of
+  the source, and the huggingface cache files in it (`.cache/huggingface/trees/*.json`) are mode
+  600: the host user reads them, the container does not. Measured with such a copy (three files):
+  before, a production start died with a raw `PermissionError` traceback (exit 3); now it
+  refuses with one cause and the fix, `Refusing to start: 3 model file(s) cannot be read by this
+  process (<the paths, relative to the models directory>); the models tree must be readable by
+  the app user (uid 999 in the container image) - on the host run: chmod -R a+rX models`.
+  `models-manifest write` warns about every path another user cannot read, and
+  `docker compose run --rm --no-deps --entrypoint python app -m procurement_agent.cli
+  models-manifest verify` checks the tree as the app user (66 files, 0 problems on the checked
+  copy after the `chmod`).
 - [ ] Reference data, loaded the same way - prepared on a connected machine, copied in, imported,
   the copy removed:
   - NBG exchange rates (rule 9): `python3 scripts/fetch_nbg_rates.py --from <first day needed>
@@ -220,7 +270,7 @@ this backup.
    migrations still pending, from a read-only look that changes nothing and prints no row. Exit
    status 1 means the database is **newer** than this image (a later release wrote it: do not start
    this one) or damaged.
-4. `docker compose up -d` - the worker stops within its timeout, the new process recovers
+4. `docker compose up -d` (from any folder: the project name is fixed, §5) - the worker stops within its timeout, the new process recovers
    interrupted jobs and brings the database to the image's schema version (below).
 5. `docker compose ps` shows all three services healthy; sign in once. `db-status` now says
    `up to date`, and `cli audit --action db.migrate` shows what ran.
@@ -291,6 +341,41 @@ docker compose run --rm --no-deps -T --entrypoint sh app -c \
   'rm -f /data/app.db-wal /data/app.db-shm && cp /data/db-backups/app-v<N>-<time>.db /data/app.db && chmod 600 /data/app.db'
 docker compose up -d                  # with the older image loaded
 ```
+
+**A host that ran the stack before the project name was fixed** has volumes named after the
+folder it was started from: `<folder>_app-data` and `<folder>_ollama` (the folder name in lower
+case; `docker volume ls` shows them). The first start of a release with the fixed name would use
+new, empty `procurement-agent_*` volumes and leave the old ones untouched and unused. Neither of
+these deletes anything:
+
+- *Keep the old name.* Put `COMPOSE_PROJECT_NAME=<folder>` in `.env` (or give every `docker
+  compose` command `-p <folder>`). Nothing is copied and the stack keeps its volumes.
+- *Move to the fixed name.* Copy the two volumes; the old ones stay as the fallback.
+
+  ```bash
+  OLD=<folder>                      # as in `docker volume ls`, without the _app-data suffix
+  IMAGE=procurement-agent:<tag>     # the image you run, already loaded on this host
+  docker compose -p "$OLD" down     # stops the old stack; no -v, that would delete the volumes
+  for v in app-data ollama; do
+    docker volume create --label com.docker.compose.project=procurement-agent \
+      --label com.docker.compose.volume=$v procurement-agent_$v
+    docker run --rm --user 0 --entrypoint cp -v "${OLD}_$v:/from:ro" \
+      -v procurement-agent_$v:/to "$IMAGE" -a /from/. /to/
+  done
+  docker compose up -d
+  ```
+
+  Then sign in with an existing key (`docker compose exec -T app python -m procurement_agent.cli
+  list-keys` lists them). The `ollama` volume holds the models, several GB, so the copy needs
+  that much free space on the same disk. Once the new stack is confirmed, remove the old
+  volumes yourself (`docker volume rm "${OLD}_app-data" "${OLD}_ollama"`): the old `app-data`
+  still holds a copy of the documents and would outlive their retention period.
+
+  Exercised on a running stack with `pa-stackfix_*` as the old volumes and `pa-stackfix-copy_*`
+  as the new: the copy keeps the owner (uid 999) and the modes (700 and 600), and an API key made
+  before the copy is accepted after it and the uploaded document is listed. The `--label` options
+  keep Compose quiet: without them it still uses the volume but warns that it "was not created
+  by Docker Compose".
 
 **Upgrading to the release with server-side sessions signs every UI user out once**: the old
 cookie held the API key itself and is no longer accepted. API clients using `X-API-Key` are

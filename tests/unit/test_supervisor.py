@@ -261,6 +261,141 @@ def test_the_log_lines_carry_no_free_text() -> None:
         )
 
 
+# --- stopping ----------------------------------------------------------------------------------
+# `docker compose stop app` measured 9.8, 10.9 and 15.2 s on an idle app. The signal handler only
+# sets an Event, and the loop sat in `time.sleep(15)`, which Python resumes after a handler returns
+# (PEP 475): the server got its SIGTERM up to a whole probe interval late.
+
+#: far longer than any test waits: a stop that is not heard at once is a failure, not a slow pass
+SLOW = Policy(interval_s=60.0, failures=3, grace_s=0.0, stop_s=5.0, probe_timeout_s=0.5)
+
+
+def _stop_and_time(sup: object, thread: threading.Thread, limit: float = 10.0) -> float:
+    began = time.monotonic()
+    sup.stop()  # type: ignore[attr-defined]
+    thread.join(limit)
+    return time.monotonic() - began
+
+
+def test_a_stop_is_heard_at_once_between_probes(ready_server: tuple[int, type[_Ready]]) -> None:
+    port, _ = ready_server
+    out = io.StringIO()
+    sup = Supervisor(SLEEPER, port, SLOW, out=out)
+    thread, result = _run_in_thread(sup)
+    assert _wait(lambda: any(e["event"] == "server_started" for e in _events(out)))
+    time.sleep(0.3)  # the loop is now in its wait for the next probe
+    took = _stop_and_time(sup, thread)
+    assert not thread.is_alive(), "the supervisor slept through the stop request"
+    assert took < 3.0, took
+    assert result[0] in (0, -15, 143)
+
+
+def test_a_stop_during_the_start_up_grace_is_heard_at_once() -> None:
+    out = io.StringIO()
+    grace = Policy(interval_s=60.0, failures=1, grace_s=3600.0, stop_s=5.0)
+    sup = Supervisor(SLEEPER, 1, grace, check=lambda *_: False, out=out)
+    thread, _ = _run_in_thread(sup)
+    assert _wait(lambda: any(e["event"] == "server_started" for e in _events(out)))
+    time.sleep(0.3)
+    assert _stop_and_time(sup, thread) < 3.0
+    assert not thread.is_alive()
+    assert "not_ready" not in [e["event"] for e in _events(out)]
+
+
+def test_a_stop_while_the_server_ignores_sigterm_ends_with_the_kill_not_the_interval() -> None:
+    out = io.StringIO()
+    policy = Policy(interval_s=60.0, failures=3, grace_s=0.0, stop_s=0.5, probe_timeout_s=0.5)
+    sup = Supervisor(STUBBORN, 1, policy, check=lambda *_: True, out=out)
+    thread, result = _run_in_thread(sup)
+    assert _wait(lambda: any(e["event"] == "server_started" for e in _events(out)))
+    time.sleep(0.3)
+    took = _stop_and_time(sup, thread)
+    assert not thread.is_alive()
+    assert 0.4 < took < 4.0, took  # the stop_s wait, then SIGKILL, then out
+    assert [e["event"] for e in _events(out)].count("killed") == 1
+    assert result[0] != 0  # a server that had to be killed is not a clean stop
+
+
+def test_a_stop_while_a_probe_is_in_flight_is_not_held_up_by_the_probe() -> None:
+    released = threading.Event()
+    out = io.StringIO()
+    policy = Policy(interval_s=0.05, failures=3, grace_s=0.0, stop_s=5.0, probe_timeout_s=60.0)
+
+    def hanging_probe(*_: object) -> bool:
+        released.wait(30)  # a /ready that does not answer, as a wedged server's does not
+        return False
+
+    sup = Supervisor(SLEEPER, 1, policy, check=hanging_probe, out=out)
+    thread, _ = _run_in_thread(sup)
+    try:
+        assert _wait(lambda: any(e["event"] == "server_started" for e in _events(out)))
+        time.sleep(0.3)  # the loop is inside the probe
+        assert _stop_and_time(sup, thread) < 3.0
+        assert not thread.is_alive()
+        assert "not_ready" not in [e["event"] for e in _events(out)]  # a stop is not a failure
+    finally:
+        released.set()
+
+
+def test_a_server_that_exits_while_a_stop_is_pending_is_not_started_again() -> None:
+    out = io.StringIO()
+    quick = [sys.executable, "-c", "import time; time.sleep(0.2)"]
+    policy = Policy(interval_s=60.0, grace_s=60, stop_s=0.5, max_restarts=50)
+    sup = Supervisor(quick, 1, policy, check=lambda *_: True, out=out)
+    thread, _ = _run_in_thread(sup)
+    assert _wait(lambda: any(e["event"] == "server_started" for e in _events(out)))
+    sup.stop()
+    thread.join(10)
+    assert not thread.is_alive()
+    assert [e["event"] for e in _events(out)].count("server_started") == 1
+
+
+@pytest.mark.parametrize("grace", [0.0, 3600.0], ids=["after-grace", "in-grace"])
+def test_sigterm_to_the_supervisor_process_stops_it_within_seconds(grace: float) -> None:
+    """The real signal path: the script's own handler, in a process of its own."""
+    import os
+    import signal
+    import subprocess
+
+    runner = (
+        "import importlib.util, sys\n"
+        "spec = importlib.util.spec_from_file_location('supervise', sys.argv[1])\n"
+        "m = importlib.util.module_from_spec(spec); sys.modules['supervise'] = m\n"
+        "spec.loader.exec_module(m)\n"
+        "sys.exit(m.main(command=[sys.executable, '-c', sys.argv[2]]))\n"
+    )
+    env = {
+        **os.environ,
+        "PA_SUPERVISOR_INTERVAL_S": "60",
+        "PA_SUPERVISOR_GRACE_S": str(grace or 1e-9),
+        "PA_SUPERVISOR_STOP_S": "5",
+    }
+    # ends by itself, so a supervisor that failed this test cannot leave it running
+    child = "import time\nend = time.time() + 60\nwhile time.time() < end: time.sleep(0.05)"
+    script = str(ROOT / "scripts" / "supervise.py")
+    proc = subprocess.Popen(
+        [sys.executable, "-c", runner, script, child], env=env, stdout=subprocess.PIPE, text=True
+    )
+    try:
+        assert proc.stdout is not None
+        assert "server_started" in proc.stdout.readline()
+        time.sleep(0.5)  # into the wait between probes
+        began = time.monotonic()
+        proc.send_signal(signal.SIGTERM)
+        try:
+            code = proc.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            pytest.fail("SIGTERM was not heard until the probe interval ran out")
+        assert time.monotonic() - began < 3.0
+        assert code == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        if proc.stdout:
+            proc.stdout.close()
+
+
 # --- configuration -----------------------------------------------------------------------------
 
 
