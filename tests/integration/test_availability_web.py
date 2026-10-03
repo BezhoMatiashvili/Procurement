@@ -5,7 +5,8 @@ from __future__ import annotations
 import io
 import json
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -15,12 +16,14 @@ from docx import Document as WordDocument
 from fastapi.testclient import TestClient
 
 import procurement_agent.db as dbmod
+from procurement_agent.api import checks as checks_api
 from procurement_agent.config import Settings, get_settings
 from procurement_agent.db import session_scope
 from procurement_agent.main import create_app
 from procurement_agent.models import Job, JobStatus
 from procurement_agent.security.auth import create_api_key
 from procurement_agent.security.capacity import report_capacity
+from procurement_agent.ui import routes as ui_routes
 
 DEV_KEY = "pa_devkey_for_tests_only"
 H = {"X-API-Key": DEV_KEY}
@@ -139,6 +142,70 @@ def test_a_report_that_fails_gives_its_slot_back(one_slot: TestClient) -> None:
     left, right = _upload(one_slot, "100"), _upload(one_slot, "200")
     body = {"left_document_id": left, "right_document_id": right}
     assert one_slot.post("/api/v1/checks/compare", headers=H, json=body).status_code == 200
+
+
+@contextmanager
+def _another_report_starts_after(name: str, module: Any = checks_api) -> Iterator[None]:
+    """For the requests made inside: every slot is taken at the moment a request has its check
+    and wants to write the file - the check ran and gave its slot back, then somebody else's
+    report took it. The slot is given back, and the check restored, on leaving."""
+    real: Callable[..., Any] = getattr(module, name)
+    with ExitStack() as stack, pytest.MonkeyPatch.context() as patch:
+
+        def run_then_fill(*args: Any, **kwargs: Any) -> Any:
+            result = real(*args, **kwargs)
+            stack.enter_context(report_capacity(1, 0.05).slot())
+            return result
+
+        patch.setattr(module, name, run_then_fill)
+        yield
+
+
+def test_the_act_with_notes_is_refused_503_while_every_slot_is_taken_and_served_after(
+    one_slot: TestClient,
+) -> None:
+    act, contract = _upload(one_slot, "100"), _upload(one_slot, "200")
+    body = {"aoa_document_id": act, "contract_document_id": contract}
+    url = "/api/v1/checks/aoa"
+    # one slot, and the check inside the request uses it: the file must not wait for itself
+    free = one_slot.post(url, headers=H, params={"format": "docx"}, json=body)
+    assert free.status_code == 200, free.text
+    assert free.headers["content-disposition"].endswith('.docx"')
+    with _another_report_starts_after("run_aoa"):
+        r = one_slot.post(url, headers=H, params={"format": "docx"}, json=body)
+        assert r.status_code == 503
+        assert r.headers["retry-after"] == "5"
+    assert one_slot.post(url, headers=H, params={"format": "docx"}, json=body).status_code == 200
+
+
+def test_the_comparison_with_notes_is_refused_503_while_every_slot_is_taken_and_served_after(
+    one_slot: TestClient,
+) -> None:
+    left, right = _upload(one_slot, "100"), _upload(one_slot, "200")
+    body = {"left_document_id": left, "right_document_id": right}
+    url = "/api/v1/checks/compare"
+    free = one_slot.post(url, headers=H, params={"format": "docx"}, json=body)
+    assert free.status_code == 200, free.text
+    with _another_report_starts_after("run_compare"):
+        r = one_slot.post(url, headers=H, params={"format": "docx"}, json=body)
+        assert r.status_code == 503
+        assert r.headers["retry-after"] == "5"
+    assert one_slot.post(url, headers=H, params={"format": "docx"}, json=body).status_code == 200
+
+
+def test_the_browser_links_to_the_files_obey_the_same_limit(one_slot: TestClient) -> None:
+    act, contract = _upload(one_slot, "100"), _upload(one_slot, "200")
+    one_slot.post(
+        "/ui/login", data={"api_key": DEV_KEY}, headers=SAME_ORIGIN, follow_redirects=False
+    )
+    link = "/ui/checks/aoa/annotated.docx"
+    assert one_slot.get(link, params={"act": act, "contract": contract}).status_code == 200
+    with _another_report_starts_after("run_aoa", ui_routes):  # the page's own import of it
+        r = one_slot.get(link, params={"act": act, "contract": contract})
+    # a page that says so, not the file and not a stack trace
+    assert r.headers["content-type"].startswith("text/html")
+    assert "busy with other reports" in r.text
+    assert "Traceback" not in r.text and "Internal Server Error" not in r.text
 
 
 def test_the_limits_are_configurable_and_bounded() -> None:

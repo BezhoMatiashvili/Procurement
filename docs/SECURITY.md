@@ -166,7 +166,10 @@ pixels, and the application's own uses of pdfium are serialised by one lock.
 * Each user may hold at most `PA_MAX_ACTIVE_JOBS_PER_USER` (default 20) queued or running
   jobs, and at most `PA_MAX_CONCURRENT_REPORTS` (default 4) reports are computed at once: a fifth
   caller is answered 503 with `Retry-After` after `PA_REPORT_WAIT_S` seconds instead of queuing
-  - reports are recomputed on request, on a thread pool every other request shares.
+  - reports are recomputed on request, on a thread pool every other request shares. Writing a
+  report into the act's Word or PDF file, or into the later version of a comparison, is bounded
+  by the same slots; a request takes one for the check and, once it has given that back, one for
+  the file.
   `/api/v1/status` shows a caller only their own jobs.
 * Audit trail: an append-only table plus a JSON log line for upload (accepted/denied),
   extraction start, a result read (API and UI), a document's content shown as text or as a page

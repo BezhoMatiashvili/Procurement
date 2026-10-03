@@ -185,8 +185,12 @@ def reported[**P, R](
 ) -> Callable[Concatenate[Settings, P], R]:
     """Run a report computation inside one of ``max_concurrent_reports`` slots (503 when full).
 
-    Applied to the three functions the API, the downloads and the UI all call, so no route can
-    recompute a report outside the limit. ``settings`` is their first argument by convention.
+    Applied to the three functions the API, the downloads and the UI all call, and to the three
+    that write a report into a Word or PDF file, so no route can recompute a report or rewrite a
+    document outside the limit. ``settings`` is their first argument by convention.
+
+    A slot is not reentrant, so a function under it must not call another: a route runs the check
+    and then writes the file, one after the other, and the file takes the slot the check gave back.
     """
 
     @functools.wraps(fn)
@@ -454,6 +458,7 @@ def check_acceptance_act(
     return annotated_docx(settings, aoa, report)
 
 
+@reported
 def annotated_docx(settings: Settings, aoa: Document, report: CheckReport) -> Response:
     """A copy of the act with one Word comment per finding and the corrections that replace words
     as tracked changes, which is what the client asked for; a note on its first word says what
@@ -484,6 +489,7 @@ def annotated_docx(settings: Settings, aoa: Document, report: CheckReport) -> Re
     )
 
 
+@reported
 def annotated_pdf(settings: Settings, aoa: Document, report: CheckReport) -> Response:
     """A copy of a PDF act with a highlight and a note for each finding, and a note on its first
     page saying what could not be checked. A scanned act is marked by the lines Docling read."""
@@ -668,6 +674,7 @@ def compare_xlsx(report: ComparisonReport) -> Response:
     )
 
 
+@reported
 def compare_annotated_docx(
     settings: Settings, right: Document, report: ComparisonReport
 ) -> Response:
