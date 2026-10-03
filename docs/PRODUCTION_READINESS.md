@@ -84,6 +84,7 @@ deployer duty or an open item.
 | Docling integration | `pytest -m docling` with `PA_DOCLING_ARTIFACTS_PATH` set | locally (needs the models) |
 | End-to-end against a live Ollama | `scripts/check.sh --e2e` | locally / on the server |
 | Dependency vulnerabilities | `pip-audit --strict` over `uv export` of the lock | CI; `scripts/check.sh` without `--offline` |
+| SBOM and licence inventory match `uv.lock` | `tests/unit/test_sbom.py`, `tests/unit/test_third_party.py` (fix: `scripts/sbom.py --out docs/sbom.cdx.json`, `scripts/third_party.py --out docs/THIRD_PARTY.md`) | `scripts/check.sh`, CI |
 | Secrets in history | gitleaks (full history) | CI; pre-commit on staged changes |
 | Real documents never committed | `block-documents` pre-commit hook (pdf/doc(x)/xls(x)/archives outside `tests/fixtures/`) | pre-commit |
 | Accuracy regression | `scripts/evaluate.py --set all` (synthetic gold committed; client gold git-ignored) | locally, before any extraction/check change |
@@ -227,6 +228,48 @@ the headless build (no Qt or window-system libraries); `rapidocr`'s request for 
 overridden in `pyproject.toml`. The re-lock moved torch and torchvision one patch release (2.14.0 →
 2.14.1, 0.29.0 → 0.29.1) and nothing else. Docling was run again over every evaluated document in
 that environment; the comparison is in `docs/SECURITY.md` §11.
+
+### 5.8 Release bundle
+
+```bash
+scripts/make_release_bundle.sh --image procurement-agent:0.1.0 \
+  --image ollama/ollama:0.34.2 --image caddy:2.11.4-alpine     # or --no-image
+```
+
+writes `dist/procurement-agent-<version>-<shortsha>/` (`dist/` is git-ignored) from the commit at
+`HEAD`, which must be clean (`--commit <sha>` also refuses a `HEAD` that is not that commit). It
+holds the image archive (`docker save` of the tags given, gzipped; `--no-image` says in
+`RELEASE.txt` and `INSTALL.md` that there is none), `docker-compose.yml`, `.env.example`, the
+README, `docs/SECURITY.md`, `docs/PRODUCTION_READINESS.md`, `docs/THIRD_PARTY.md`,
+`docs/sbom.cdx.json`, `INSTALL.md`, `RELEASE.txt` (version, commit, tag, UTC date, image id,
+digests and size, the SHA-256 of `uv.lock` and of the SBOM) and `SHA256SUMS` over every other file.
+The files come from the commit through `git archive`, from a list written in the script
+(`--list-allow` prints it); samples, data, `.env`, `eval_runs`, `.eval_cache`, `.claude`, tests,
+other scripts and history cannot get in, and `tests/unit/test_release_bundle.py` plants tracked
+files at those paths to prove it. The script also refuses an SBOM or licence inventory made from a
+different `uv.lock`, an image docker does not have, and a bundle directory that exists.
+
+`INSTALL.md` is the checklist of 5.2-5.6 for the air-gapped server: verify the sums, `docker load`,
+copy `models/` and the Ollama volume, write `.env`, `docker compose up -d --no-build --pull never`,
+create the first key, load the rates and the registry, the proxy's duties, backups, upgrade. Two
+points it makes that the rest of this page did not:
+
+- **Compose project name.** `docker-compose.yml` sets no `name:`, so compose names the volumes
+  (`<project>_app-data`, `<project>_ollama`) after the directory, and the bundle directory carries
+  the version and commit. Unpacked as is, every release would start with empty volumes. `.env` gets
+  `COMPOSE_PROJECT_NAME=procurement-agent`, and the upgrade steps carry `.env` and `models/` into
+  the new directory after a `docker compose down` without `--volumes`.
+- **Three images.** The compose file needs the Ollama and Caddy images as well as the application's,
+  each pinned by digest. `--image` can be repeated; `INSTALL.md` lists the three references and
+  which of them the archive holds. Whether a loaded image satisfies a digest reference depends on
+  the Docker version and image store of the target server: check it there before the day.
+
+The bundle does not hold the models or the Ollama volume (made on a connected machine, 5.3), the
+reference data, or a reverse proxy. The script's tests run it against a stub `docker` and a fake
+archive: no real `docker save`, `docker load` or `docker compose up` from a bundle has been run.
+The SBOM and the licence inventory are regenerated with `scripts/sbom.py --out docs/sbom.cdx.json`
+and `scripts/third_party.py --out docs/THIRD_PARTY.md` whenever `uv.lock` moves; the unit tests
+fail until they are.
 
 ## 6. Known limitations
 

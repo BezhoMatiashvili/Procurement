@@ -309,6 +309,11 @@ reach every copy of the data, which is why the volume belongs on an encrypted di
   packages of `uv.lock`, and when a copyleft or unknown licence appears that nobody has read;
   the fix is `uv run python scripts/third_party.py --out docs/THIRD_PARTY.md` plus, for a new
   licence, a reviewed entry in the script.
+* A release leaves the repository as a bundle (`scripts/make_release_bundle.sh`,
+  docs/PRODUCTION_READINESS.md 5.8): built from a clean commit, from a fixed list of files, with
+  `SHA256SUMS` over every file and a `RELEASE.txt` that records the commit and the hashes of
+  `uv.lock` and of the SBOM. The checksums show the bundle arrived as built; they do not show who
+  built it, so hand over the hash of `RELEASE.txt` or of the bundle by another route.
 * Documents cannot reach the repository: `scripts/check_no_documents.sh` blocks any document,
   archive, database, key, `.env` or client directory (a link to one included, which is how a git
   worktree holds them) outside `tests/fixtures/` - as a CI job (`repo-guard`, which runs after a

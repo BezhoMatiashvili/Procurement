@@ -297,6 +297,16 @@ encrypted disk. `/health` is liveness, `/ready` readiness (database + job worker
 checklist — proxy duties, backups, key rotation, upgrades — is in
 [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md).
 
+A release goes to an air-gapped server as a bundle: `scripts/make_release_bundle.sh --image
+procurement-agent:<version> [--image ...]` (or `--no-image`) writes
+`dist/procurement-agent-<version>-<commit>/` from a clean commit: the image archive, the compose
+file, `.env.example`, the documents a deployer needs, `INSTALL.md` (the offline steps in order),
+`RELEASE.txt` and `SHA256SUMS`, and nothing outside a fixed allow-list. What is inside is listed in
+`docs/sbom.cdx.json` (CycloneDX 1.5: every locked production package with the hashes of its files and
+its licence; `scripts/sbom.py`) and `docs/THIRD_PARTY.md` (the licences, with copyleft and unknown ones
+flagged, the components outside Python and the models; `scripts/third_party.py`). Tests fail when either
+no longer matches `uv.lock`. See [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md) 5.8.
+
 The app runs under `scripts/supervise.py`, which restarts the server when `/ready` stops
 answering (a request that wedges the process cannot be caught from inside it). CI
 (`.github/workflows/ci.yml`) runs the same gate as `scripts/check.sh` plus pip-audit, a gitleaks
