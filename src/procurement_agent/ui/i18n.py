@@ -57,6 +57,24 @@ STRINGS: dict[str, tuple[str, str]] = {
         "No model is connected on this server, so the review cannot run.",
         "ამ სერვერზე მოდელი არ არის დაკავშირებული, ამიტომ გადამოწმება ვერ შესრულდება.",
     ),
+    # what a document that was not (fully) read says, and what a refusal because of it says; the
+    # codes are the API's (docs/SECURITY.md, "Degraded input")
+    "error.NO_TEXT": (
+        "No text could be read from this file, so no check can be run on it.",
+        "ფაილიდან ტექსტი ვერ წაიკითხა, ამიტომ მასზე შემოწმება ვერ ჩატარდება.",
+    ),
+    "error.hint.OCR_UNAVAILABLE": (
+        "It looks like a scan, and text recognition (OCR) is not available on this server.",
+        "როგორც ჩანს, ეს სკანია, ხოლო ამ სერვერზე ტექსტის ამოცნობა (OCR) ხელმისაწვდომი არ არის.",
+    ),
+    "error.hint.IMAGE_ONLY": (
+        "The pages are pictures, and text recognition found no text in them.",
+        "გვერდები გამოსახულებებია და ტექსტის ამოცნობამ მათში ტექსტი ვერ იპოვა.",
+    ),
+    "error.DOCUMENT_UNREADABLE": (
+        "What was read from this document is missing or damaged; upload it again.",
+        "ამ დოკუმენტიდან წაკითხული მასალა დაკარგულია ან დაზიანებულია; ატვირთეთ თავიდან.",
+    ),
     # --- picker ---
     "picker.title": ("What do you want to do?", "რისი გაკეთება გსურთ?"),
     "picker.lead": (

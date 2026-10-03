@@ -30,16 +30,19 @@ from pathlib import Path
 from typing import Protocol
 
 import pypdfium2
+from docling.datamodel.base_models import ConversionStatus
+from docling.datamodel.document import ConversionResult
 from docling_core.types.doc.common.content_layer import ContentLayer
 from docling_core.types.doc.document import DoclingDocument
 
 from procurement_agent.checks.findings import SkipNote
 from procurement_agent.config import Settings
+from procurement_agent.ingestion import docling_service
 from procurement_agent.ingestion.chunker import Chunk
 from procurement_agent.ingestion.docling_service import load_document
 from procurement_agent.ingestion.excel_reader import read_workbook, sheet_chunks
 from procurement_agent.ingestion.pdfium_lock import PDFIUM_LOCK
-from procurement_agent.security.safe_errors import ContentFree
+from procurement_agent.security.safe_errors import ContentFree, safe_exc
 
 __all__ = [
     "DOCUMENT_UNREADABLE",
@@ -53,10 +56,12 @@ __all__ = [
     "assess_chunks",
     "assess_docling",
     "compute_quality",
+    "parse_error",
     "partial_note",
     "pdf_page_count",
     "read_quality",
     "read_sidecar",
+    "settle_conversion",
     "settle_parse",
     "settle_workbook",
     "sidecar_path",
@@ -343,6 +348,23 @@ def settle_parse(
     return quality
 
 
+def settle_conversion(
+    settings: Settings, doc_id: str, kind: str, result: ConversionResult, *, upload: Path | None
+) -> ReadQuality:
+    """``settle_parse`` for what the converter returned: its status and error count say whether
+    it finished, and whether OCR could run is read from the host, as the converter did."""
+    return settle_parse(
+        settings,
+        doc_id,
+        kind,
+        result.document,
+        upload=upload,
+        ocr=docling_service.ocr_available(settings) if kind == "pdf" else None,
+        conversion_partial=result.status == ConversionStatus.PARTIAL_SUCCESS,
+        errors=len(result.errors),
+    )
+
+
 def settle_workbook(settings: Settings, doc_id: str, chunks: Sequence[Chunk]) -> ReadQuality:
     """The same for a workbook, read as chunks: one with no cell text is refused."""
     quality = assess_chunks(chunks)
@@ -350,6 +372,15 @@ def settle_workbook(settings: Settings, doc_id: str, chunks: Sequence[Chunk]) ->
     if not quality.has_text:
         raise NoTextError
     return quality
+
+
+def parse_error(e: BaseException) -> str:
+    """What a failed parse leaves in the document's ``error``: the code for one that read nothing
+    (``NO_TEXT`` and its hint), and for any other failure the kind of it - never its message,
+    which may quote the document (``security.safe_errors``)."""
+    if isinstance(e, NoTextError):
+        return str(e)
+    return f"could not be read: {safe_exc(e)}"
 
 
 def split_error(error: str | None) -> tuple[str | None, str | None]:

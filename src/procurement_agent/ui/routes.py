@@ -59,6 +59,7 @@ from procurement_agent.db import get_session
 from procurement_agent.extraction.labels import LABELS
 from procurement_agent.extraction.pipeline import is_scanned_pdf, load_segments, result_dir
 from procurement_agent.extraction.schemas import DEFAULT_TARGETS, ExtractionResult, FactType
+from procurement_agent.ingestion import read_quality
 from procurement_agent.jobs.worker import Worker
 from procurement_agent.models import CheckRun, Document, DocumentStatus, Job, JobStatus
 from procurement_agent.security.audit import audit, audit_now, log
@@ -138,6 +139,22 @@ def _render(request: Request, name: str, **ctx: object) -> Response:
     ctx.setdefault("current_path", _current_path(request))
     resp: Response = templates.TemplateResponse(request, name, ctx)
     return resp
+
+
+def _document_error(error: str | None, lang: Lang) -> str:
+    """A failed document's ``error`` for the page. Our own codes (``NO_TEXT`` and the hint that
+    names the cause) are said in the page's language, the code kept in front so it can be quoted;
+    the free text of any other failure is shown as stored."""
+    code, hint = read_quality.split_error(error)
+    if code is None:
+        return error or ""
+    text = t(f"error.{code}", lang)
+    if hint:
+        text = f"{text} {t(f'error.hint.{hint}', lang)}"
+    return f"{code}: {text}"
+
+
+_env.filters["doc_error"] = _document_error
 
 
 def _current_path(request: Request) -> str:

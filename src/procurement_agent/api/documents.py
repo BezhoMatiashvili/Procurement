@@ -21,6 +21,8 @@ from procurement_agent.api.deps import (
 from procurement_agent.config import Settings, get_settings
 from procurement_agent.db import get_session
 from procurement_agent.extraction.pipeline import upload_path
+from procurement_agent.ingestion import read_quality as rq
+from procurement_agent.ingestion.read_quality import ReadQuality
 from procurement_agent.ingestion.render import MAX_BOXES, PageTooLargeError, render_page
 from procurement_agent.jobs.retention import delete_document_files, remove_file
 from procurement_agent.jobs.worker import (
@@ -44,6 +46,14 @@ class DocumentOut(BaseModel):
     page_count: int | None
     status: DocumentStatus
     error: str | None
+    #: ``NO_TEXT`` or ``DOCUMENT_UNREADABLE`` when the failure is one of ours, else None
+    #: (``error`` is then the free text of an older failure, or None)
+    error_code: str | None = None
+    #: what is known about the cause: ``OCR_UNAVAILABLE`` or ``IMAGE_ONLY`` for ``NO_TEXT``
+    error_hint: str | None = None
+    #: how much of the document was read (``ingestion.read_quality``); None while it is not
+    #: parsed, and for a document parsed before this was recorded
+    read_quality: ReadQuality | None = None
     created_at: datetime
     expires_at: datetime | None
 
@@ -53,7 +63,8 @@ class UploadOut(BaseModel):
     parse_job_id: str
 
 
-def _out(d: Document) -> DocumentOut:
+def _out(d: Document, quality: ReadQuality | None = None) -> DocumentOut:
+    code, hint = rq.split_error(d.error)
     return DocumentOut(
         id=d.id,
         name=d.display_name,
@@ -62,6 +73,9 @@ def _out(d: Document) -> DocumentOut:
         page_count=d.page_count,
         status=d.status,
         error=d.error,
+        error_code=code,
+        error_hint=hint,
+        read_quality=quality,
         created_at=d.created_at,
         expires_at=d.expires_at,
     )
@@ -187,8 +201,13 @@ def get_document(
     doc_id: str,
     principal: Annotated[Principal, Depends(authenticate)],
     session: Annotated[Session, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> DocumentOut:
-    return _out(owned_document(session, principal, doc_id))
+    doc = owned_document(session, principal, doc_id)
+    # the stored sidecar only: a document parsed before it existed is assessed when a report
+    # reads it, not by every poll of this page
+    quality = rq.read_sidecar(settings, doc.id) if doc.status == "ready" else None
+    return _out(doc, quality)
 
 
 @router.delete("/{doc_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -47,8 +47,9 @@ from procurement_agent.extraction.pipeline import (
 )
 from procurement_agent.extraction.schemas import FactType
 from procurement_agent.history import forget_runs
-from procurement_agent.ingestion import docling_service
+from procurement_agent.ingestion import docling_service, read_quality
 from procurement_agent.jobs.retention import delete_document_files, reconcile, remove_file
+from procurement_agent.jobs.stuck import fail_stuck_parses
 from procurement_agent.llm.base import LLMClient
 from procurement_agent.models import Document, DocumentStatus, Job, JobStatus, UiSession
 from procurement_agent.security.audit import audit, log
@@ -77,6 +78,8 @@ class Worker:
         self._stopping = threading.Event()
         self._heartbeat = time.monotonic()
         self._busy_since: float | None = None
+        #: the document whose parse is running now, so a job that cannot be settled fails it too
+        self._parsing_doc: str | None = None
 
     # --- lifecycle -----------------------------------------------------------------------------
 
@@ -192,6 +195,7 @@ class Worker:
             log.error("job_finish_failed", job_id=job_id, error=safe_exc(e))
         finally:
             self._busy_since = None
+            self._parsing_doc = None
             self._beat()
 
     def _set_progress(self, job_id: str, pct: int, msg: str) -> None:
@@ -252,7 +256,21 @@ class Worker:
             return live
 
     def _finish(self, job_id: str, status: JobStatus, msg: str | None) -> None:
-        self._settle(job_id, status, msg)
+        document = self._parsing_doc
+        if status != JobStatus.failed or document is None:
+            self._settle(job_id, status, msg)
+            return
+        # A parse that cannot be settled must not leave its document "parsing" for ever: the
+        # page polls it, and nothing else would ever change it (only a restart's ``_recover``).
+        log.warning("parse_job_failed_unsettled", job_id=job_id, document_id=document)
+
+        def fail_document(s: Session) -> None:
+            doc = s.get(Document, document)
+            if doc is not None and doc.status == DocumentStatus.parsing:
+                doc.status = DocumentStatus.failed
+                doc.error = (msg or "could not be read")[:500]
+
+        self._settle(job_id, status, msg, documents=(document,), apply=fail_document)
 
     def _discard(self, documents: Sequence[tuple[str, str]], output: Path | None = None) -> None:
         """Remove what a job wrote after it lost the race with a deletion.
@@ -303,6 +321,7 @@ class Worker:
                 return
             if kind == "parse":
                 doc.status = DocumentStatus.parsing
+                self._parsing_doc = doc_id
             doc_kind = doc.kind
 
         log.info("job_start", job_id=job_id, kind=kind, document_id=doc_id)
@@ -322,18 +341,22 @@ class Worker:
         try:
             if doc_kind == "xlsx":
                 chunks = load_chunks(self._s, doc_id, doc_kind)  # validates it is readable
+                read_quality.settle_workbook(self._s, doc_id, chunks)  # refuses one with no text
                 page_count = None
                 self._set_progress(job_id, 90, f"{len(chunks)} table chunks")
             else:
                 self._set_progress(job_id, 10, "converting")
                 result = docling_service.convert(path, self._s)
                 docling_service.save_document(result.document, result_dir(self._s, doc_id))
-                page_count = len(result.document.pages) or None
+                quality = read_quality.settle_conversion(
+                    self._s, doc_id, doc_kind, result, upload=path
+                )
+                page_count = quality.pages_total
                 self._set_progress(job_id, 90, "saved")
         except Exception as e:
             # The exception's own text may quote the document; only its kind is kept, in the log
             # and in the rows the user and the audit trail read (see ``security.safe_errors``).
-            error = f"could not be read: {safe_exc(e)}"
+            error = read_quality.parse_error(e)
             log.warning("parse_failed", document_id=doc_id, error=error)
 
             def mark_failed(s: Session) -> None:
@@ -549,6 +572,7 @@ class Worker:
             log.info("retention_sweep", deleted=len(ids), incomplete=incomplete)
         self._beat()
         reconcile(self._s)
+        fail_stuck_parses(self._s, running_too=not self.busy)
         checkpoint()  # a deleted row must not stay readable in the write-ahead log
         return len(ids)
 

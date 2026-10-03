@@ -12,7 +12,7 @@
     {% if doc.expires_at %}<span>{{ icon("clock") }} {{ t("doc.expires") }}: <span class="num">{{ doc.expires_at.strftime("%Y-%m-%d") }}</span></span>{% endif %}
   </p>
 </div>
-{% if doc.error %}<div class="card notice is-error">{{ icon("alert") }}<div><p>{{ doc.error }}</p></div></div>{% endif %}
+{% if doc.error %}<div class="card notice is-error">{{ icon("alert") }}<div><p>{{ doc.error | doc_error(lang) }}</p></div></div>{% endif %}
 
 {# The reports this file went into. Each is recomputed when opened, from the stored files; the
    link carries the same documents and options the person opened it with. #}
