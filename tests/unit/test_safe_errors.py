@@ -156,6 +156,8 @@ def test_the_set_of_classes_that_keep_their_messages_is_this_one() -> None:
         # a code and a hint from our own constants; a stored parse that will not load
         "procurement_agent.ingestion.read_quality.NoTextError",
         "procurement_agent.ingestion.read_quality.StoredParseError",
+        # one fixed sentence: the record of a read could not be stored (security/audit.py)
+        "procurement_agent.security.audit.AuditUnavailableError",
     }
 
 
@@ -220,6 +222,7 @@ def test_the_messages_of_the_marked_classes_only_interpolate_what_is_known_to_be
         "MigrationError",
         "NoTextError",
         "StoredParseError",
+        "AuditUnavailableError",
     }
     interpolated: dict[str, set[str]] = defaultdict(set)
     for path in sorted(src.rglob("*.py")):
