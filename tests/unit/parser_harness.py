@@ -117,9 +117,32 @@ def docling_json(pages: int = 2, extra: str = "") -> bytes:
     return f'{{"schema_name": "DoclingDocument", "name": "x{extra}", "pages": {{{body}}}}}'.encode()
 
 
-def converter_of(pages: int = 2, status: str = "success", extra: str = "") -> srv.Converter:
+def readable_docling_json(pages: int = 2, extra: str = "") -> bytes:
+    """A real Docling document with ``pages`` pages and some body text on the first, which is what
+    the worker accepts: a parse that holds no text is refused (``NO_TEXT``)."""
+    from docling_core.types.doc import BoundingBox, DocItemLabel, Size
+    from docling_core.types.doc.document import DoclingDocument, ProvenanceItem
+
+    doc = DoclingDocument(name=f"x{extra}")
+    for n in range(1, pages + 1):
+        doc.add_page(page_no=n, size=Size(width=100, height=100))
+    # a Word file has no pages, and its text no place on one
+    prov = (
+        ProvenanceItem(page_no=1, bbox=BoundingBox(l=0, t=0, r=10, b=10), charspan=(0, 14))
+        if pages
+        else None
+    )
+    doc.add_text(label=DocItemLabel.TEXT, text=f"readable words {extra}".strip(), prov=prov)
+    return doc.model_dump_json().encode()
+
+
+def converter_of(
+    pages: int = 2, status: str = "success", extra: str = "", *, readable: bool = False
+) -> srv.Converter:
+    make = readable_docling_json if readable else docling_json
+
     def convert(path: Path, kind: str) -> srv.Converted:
-        return srv.Converted(pages=pages, status=status, document=docling_json(pages, extra))
+        return srv.Converted(pages=pages, status=status, document=make(pages, extra))
 
     return convert
 

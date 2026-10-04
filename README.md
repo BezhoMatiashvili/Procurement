@@ -96,6 +96,18 @@ curl -s -H "$K" -X POST localhost:8000/api/v1/checks/compare \
 # ?format=docx returns the newer file with a Word comment per difference; ?format=xlsx a table
 ```
 
+A document, or part of one, that was not read never gives a result that looks like "all clear".
+A file that yields no text at all (a PDF of page images on a host without Tesseract, a workbook
+with no cell text) fails its parse with the code `NO_TEXT` (and `OCR_UNAVAILABLE` or `IMAGE_ONLY`
+when the cause is known) and every check refuses it with 409. A file read only in part stays
+usable, and the act check, the comparison and the extraction say so: `read_quality` in the JSON
+and a `DOC.PARTIAL` note first among what could not be checked ("N of M pages had no readable
+text; findings may be incomplete"); two partly read documents are never called identical. A
+stored reading that is gone or damaged is 409 `DOCUMENT_UNREADABLE`; a model review or comparison
+explanation the model did not answer is `failed` with `LLM_UNAVAILABLE` and asked again, and an
+extraction without the model is `degraded: true`; a report whose audit row cannot be stored is
+503 `AUDIT_UNAVAILABLE`. See `docs/SECURITY.md`, "Input that was not read".
+
 ## Comparing two documents
 
 ```
@@ -302,6 +314,16 @@ host, at `127.0.0.1:8000`. Put the TLS reverse proxy in front of that, have it s
 encrypted disk. `/health` is liveness, `/ready` readiness (database + job worker). The full
 checklist — proxy duties, backups, key rotation, upgrades — is in
 [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md).
+
+A release goes to an air-gapped server as a bundle: `scripts/make_release_bundle.sh --image
+procurement-agent:<version> [--image ...]` (or `--no-image`) writes
+`dist/procurement-agent-<version>-<commit>/` from a clean commit: the image archive, the compose
+file, `.env.example`, the documents a deployer needs, `INSTALL.md` (the offline steps in order),
+`RELEASE.txt` and `SHA256SUMS`, and nothing outside a fixed allow-list. What is inside is listed in
+`docs/sbom.cdx.json` (CycloneDX 1.5: every locked production package with the hashes of its files and
+its licence; `scripts/sbom.py`) and `docs/THIRD_PARTY.md` (the licences, with copyleft and unknown ones
+flagged, the components outside Python and the models; `scripts/third_party.py`). Tests fail when either
+no longer matches `uv.lock`. See [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md) 5.8.
 
 The app runs under `scripts/supervise.py`, which restarts the server when `/ready` stops
 answering (a request that wedges the process cannot be caught from inside it). CI

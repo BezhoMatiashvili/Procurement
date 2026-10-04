@@ -37,6 +37,7 @@ from procurement_agent.config import Settings
 from procurement_agent.ingestion.text_limits import compact_document, text_size
 from procurement_agent.security.audit import log
 from procurement_agent.security.safe_errors import ContentFree
+from procurement_agent.security.secure_delete import remove_file
 
 
 class ConversionError(ContentFree, RuntimeError):
@@ -391,7 +392,7 @@ def _write_atomically(out_dir: Path, write: Callable[[Path], object]) -> Path:
         tmp.replace(target)  # atomic within one directory
     except BaseException:
         with contextlib.suppress(OSError):
-            tmp.unlink()
+            remove_file(tmp)  # a half-written parse is document text: overwritten, then removed
         raise
     return target
 

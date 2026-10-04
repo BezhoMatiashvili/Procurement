@@ -28,6 +28,7 @@ from procurement_agent.api.checks import (
     boq_documents,
     compare_annotated_docx,
     compare_xlsx,
+    explain_answered,
     merged_xlsx,
     owned_explain_job,
     owned_review_job,
@@ -46,6 +47,8 @@ from procurement_agent.api.deps import (
     owned_job,
 )
 from procurement_agent.api.extraction import ExtractRequest, start_extraction
+from procurement_agent.api.refusals import audit_or_503
+from procurement_agent.api.timefmt import stamp
 from procurement_agent.checks.aoa import ContractorType
 from procurement_agent.checks.compare import ComparisonReport, Hunk, ValueDelta
 from procurement_agent.checks.findings import CheckReport, Finding
@@ -58,7 +61,14 @@ from procurement_agent.config import Settings, get_settings
 from procurement_agent.db import get_session
 from procurement_agent.extraction.labels import LABELS
 from procurement_agent.extraction.pipeline import is_scanned_pdf, load_segments, result_dir
-from procurement_agent.extraction.schemas import DEFAULT_TARGETS, ExtractionResult, FactType
+from procurement_agent.extraction.read_status import (
+    LLM_UNAVAILABLE,
+    StoredExtraction,
+    partial_notes,
+)
+from procurement_agent.extraction.schemas import DEFAULT_TARGETS, FactType
+from procurement_agent.ingestion import read_quality
+from procurement_agent.jobs.stuck import fail_unreadable
 from procurement_agent.jobs.worker import Worker
 from procurement_agent.models import CheckRun, Document, DocumentStatus, Job, JobStatus
 from procurement_agent.security.audit import audit, audit_now, log
@@ -122,6 +132,7 @@ def _money(value: float | None) -> str:
 _env.globals["icon"] = _icon
 _env.globals["asset_v"] = _ASSET_V
 _env.filters["money"] = _money
+_env.filters["utc"] = stamp
 
 
 def _render(request: Request, name: str, **ctx: object) -> Response:
@@ -138,6 +149,22 @@ def _render(request: Request, name: str, **ctx: object) -> Response:
     ctx.setdefault("current_path", _current_path(request))
     resp: Response = templates.TemplateResponse(request, name, ctx)
     return resp
+
+
+def _document_error(error: str | None, lang: Lang) -> str:
+    """A failed document's ``error`` for the page. Our own codes (``NO_TEXT`` and the hint that
+    names the cause) are said in the page's language, the code kept in front so it can be quoted;
+    the free text of any other failure is shown as stored."""
+    code, hint = read_quality.split_error(error)
+    if code is None:
+        return error or ""
+    text = t(f"error.{code}", lang)
+    if hint:
+        text = f"{text} {t(f'error.hint.{hint}', lang)}"
+    return f"{code}: {text}"
+
+
+_env.filters["doc_error"] = _document_error
 
 
 def _current_path(request: Request) -> str:
@@ -329,8 +356,12 @@ def document_page(
     doc_id: str,
     principal: Annotated[Principal, Depends(authenticate)],
     session: Annotated[Session, Depends(get_session)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> Response:
     doc = owned_document(session, principal, doc_id)
+    stored = (
+        read_quality.read_sidecar(settings, doc.id) if doc.status == DocumentStatus.ready else None
+    )
     jobs = sorted(doc.jobs, key=lambda j: j.created_at, reverse=True)
     targets = [(t.value, LABELS[t][0], LABELS[t][1]) for t in DEFAULT_TARGETS]
     return _render(
@@ -341,6 +372,7 @@ def document_page(
         jobs=jobs,
         targets=targets,
         checks=_checks_for(session, principal, doc),
+        read_notes=partial_notes({"document": stored}),
     )
 
 
@@ -423,25 +455,28 @@ def job_page(
         )
     if job.kind == "parse":
         return _reading_page(request, principal, session, settings, job, reading.parse_part(part))
-    result: ExtractionResult | None = None
+    result: StoredExtraction | None = None
     gone = False
     if job.kind == "extract" and job.status == JobStatus.done:
         path = result_dir(settings, job.document_id) / "jobs" / f"{job.id}.json"
         try:
-            result = ExtractionResult.model_validate_json(path.read_text())
+            result = StoredExtraction.model_validate_json(path.read_text())
         except (OSError, ValueError):
             gone = True  # swept or damaged: say so, rather than a header and nothing under it
         else:
             # Showing the extracted values is reading the document's content, like the API's
             # ``result.read.*`` and the reading page's ``document.content_view``.
-            audit(
-                session,
-                actor=principal.user,
-                action="result.read.ui",
-                document_id=job.document_id,
-                job_id=job.id,
-                ip=client_ip(request),
-            )
+            if (
+                refused := _audited(
+                    request,
+                    principal,
+                    session,
+                    action="result.read.ui",
+                    document_id=job.document_id,
+                    job_id=job.id,
+                )
+            ) is not None:
+                return refused
     return _render(
         request,
         "job.html",
@@ -449,6 +484,7 @@ def job_page(
         job=job,
         doc=job.document,
         result=result,
+        read_notes=partial_notes(result.read_quality) if result is not None else [],
         gone=gone,
         # the stored label is English; the Georgian page names each field in Georgian
         labels=LABELS,
@@ -474,26 +510,34 @@ def _reading_page(
     view: reading.Reading | None = None
     notes: list[str] = []
     scanned = False
+    ocr: bool | None = None
     if job.status == JobStatus.done and doc.status == DocumentStatus.ready:
         try:
             segments = load_segments(settings, doc.id, doc.kind, notes=notes)
             scanned = is_scanned_pdf(settings, doc.id, doc.kind)
+            stored = read_quality.read_sidecar(settings, doc.id)
+            ocr = stored.ocr if stored is not None else None
             view = reading.build(segments, part, max_items=settings.compare_max_segments)
         except Exception as e:  # a stored parse can be missing or damaged: the page says so
             log.warning(
                 "reading_unavailable", job_id=job.id, document_id=doc.id, error=type(e).__name__
             )
-            view, notes, scanned = None, [], False
+            if isinstance(e, read_quality.StoredParseError):
+                fail_unreadable(doc.id)
+            view, notes, scanned, ocr = None, [], False, None
         else:
-            audit(
-                session,
-                actor=principal.user,
-                action="document.content_view",
-                document_id=doc.id,
-                job_id=job.id,
-                ip=client_ip(request),
-                detail=f"part {view.part} of {view.parts}",
-            )
+            if (
+                refused := _audited(
+                    request,
+                    principal,
+                    session,
+                    action="document.content_view",
+                    document_id=doc.id,
+                    job_id=job.id,
+                    detail=f"part {view.part} of {view.parts}",
+                )
+            ) is not None:
+                return refused
     earlier = sorted(
         (j for j in doc.jobs if j.kind == "extract" and j.status == JobStatus.done),
         key=lambda j: j.created_at,
@@ -508,6 +552,7 @@ def _reading_page(
         view=view,
         notes=notes,
         scanned=scanned,
+        ocr=ocr,
         earlier=earlier,
     )
 
@@ -671,14 +716,17 @@ def aoa_report(
         typed_link,
         extracts,
     )
-    audit(
-        session,
-        actor=principal.user,
-        action="check.aoa.json",
-        document_id=aoa_doc.id,
-        ip=client_ip(request),
-        detail=f"{len(report.errors)} error(s), {len(report.findings)} finding(s)",
-    )
+    if (
+        refused := _audited(
+            request,
+            principal,
+            session,
+            action="check.aoa.json",
+            document_id=aoa_doc.id,
+            detail=f"{len(report.errors)} error(s), {len(report.findings)} finding(s)",
+        )
+    ) is not None:
+        return refused
     review_status = review_row.status.value if review_row is not None else None
     resp = _render(
         request,
@@ -702,6 +750,10 @@ def aoa_report(
         review_status=review_status,
         review_running=review_status in (JobStatus.queued.value, JobStatus.running.value),
         review_state=report.summary.get("review"),
+        # a review that failed because the model did not answer is asked again, not reused
+        review_retry=review_row is not None
+        and review_row.status == JobStatus.failed
+        and (review_row.message or "").startswith(LLM_UNAVAILABLE),
         review_marked=any(f.reviewed_by for f in report.findings),
         review_auto=settings.aoa_llm_auto,
     )
@@ -789,14 +841,17 @@ def _aoa_file(
         resp = writer(settings, aoa_doc, report)
     except HTTPException as e:
         return _http_error(request, principal, e, "/ui/start/aoa")
-    audit(
-        session,
-        actor=principal.user,
-        action=f"check.aoa.{fmt}",
-        document_id=aoa_doc.id,
-        ip=client_ip(request),
-        detail=f"{len(report.errors)} error(s), {len(report.findings)} finding(s)",
-    )
+    if (
+        refused := _audited(
+            request,
+            principal,
+            session,
+            action=f"check.aoa.{fmt}",
+            document_id=aoa_doc.id,
+            detail=f"{len(report.errors)} error(s), {len(report.findings)} finding(s)",
+        )
+    ) is not None:
+        return refused
     return resp
 
 
@@ -871,7 +926,7 @@ def boq_report(
     """Plain ``def``: reading N workbooks is seconds of blocking CPU that belongs on the
     threadpool, not on the event loop."""
     try:
-        template_doc, bid_docs = _boq_inputs(session, principal, template, bids)
+        template_doc, bid_docs = _boq_inputs(session, principal, template, bids, settings)
     except ValidationError:
         return _error(request, principal, t("error.boq_inputs", _lang(request)))
     except HTTPException as e:
@@ -888,14 +943,17 @@ def boq_report(
         documents=[(template_doc.id, "template"), *((d.id, "bid") for d in bid_docs)],
         params={"template": template_doc.id, "bids": [d.id for d in bid_docs]},
     )
-    audit(
-        session,
-        actor=principal.user,
-        action="check.boq.json",
-        document_id=template_doc.id,
-        ip=client_ip(request),
-        detail=f"{len(bid_docs)} bidder(s)",
-    )
+    if (
+        refused := _audited(
+            request,
+            principal,
+            session,
+            action="check.boq.json",
+            document_id=template_doc.id,
+            detail=f"{len(bid_docs)} bidder(s)",
+        )
+    ) is not None:
+        return refused
     # Red and green are decided by ``compare_all`` on the common-scope total - the positions
     # every bidder priced - so a bid that left sections out is still coloured, fairly, and ties
     # share a colour. The page only shows what was decided; it never ranks on its own.
@@ -923,7 +981,7 @@ def boq_merged(
     bids: str,
 ) -> Response:
     try:
-        template_doc, bid_docs = _boq_inputs(session, principal, template, bids)
+        template_doc, bid_docs = _boq_inputs(session, principal, template, bids, settings)
     except ValidationError:
         return _error(request, principal, t("error.boq_inputs", _lang(request)))
     except HTTPException as e:
@@ -933,14 +991,17 @@ def boq_merged(
         report, book, books, comparisons = run_boq(settings, template_doc, bid_docs)
     except HTTPException as e:
         return _http_error(request, principal, e, "/ui/start/boq")
-    audit(
-        session,
-        actor=principal.user,
-        action="check.boq.xlsx",
-        document_id=template_doc.id,
-        ip=client_ip(request),
-        detail=f"{len(bid_docs)} bidder(s)",
-    )
+    if (
+        refused := _audited(
+            request,
+            principal,
+            session,
+            action="check.boq.xlsx",
+            document_id=template_doc.id,
+            detail=f"{len(bid_docs)} bidder(s)",
+        )
+    ) is not None:
+        return refused
     return merged_xlsx(book, books, comparisons, template_doc, report)
 
 
@@ -1135,14 +1196,17 @@ def compare_report(
         params={"left": left_doc.id, "right": right_doc.id, **({"job": job} if job else {})},
         keep=("job",),
     )
-    audit(
-        session,
-        actor=principal.user,
-        action="check.compare.json",
-        document_id=right_doc.id,
-        ip=client_ip(request),
-        detail=f"{report.counts.total_changes} change(s), {len(report.errors)} critical",
-    )
+    if (
+        refused := _audited(
+            request,
+            principal,
+            session,
+            action="check.compare.json",
+            document_id=right_doc.id,
+            detail=f"{report.counts.total_changes} change(s), {len(report.errors)} critical",
+        )
+    ) is not None:
+        return refused
     query = urlencode({"left": left_doc.id, "right": right_doc.id, **({"job": job} if job else {})})
     resp = _render(
         request,
@@ -1160,6 +1224,7 @@ def compare_report(
         unexplained=len(report.unexplained),
         explain_job=job,
         explain_running=running,
+        explain_failed=explain_row is not None and explain_row.status == JobStatus.failed,
         d={
             "t": lambda key, **kw: t(key, lang).format(**kw) if kw else t(key, lang),
             "hunks": {h.id: h for h in report.hunks},
@@ -1212,7 +1277,9 @@ def compare_explain(
             (
                 j
                 for j in same_pair
-                if j.params.get("left") == left_doc.id and j.params.get("right") == right_doc.id
+                if j.params.get("left") == left_doc.id
+                and j.params.get("right") == right_doc.id
+                and explain_answered(settings, right_doc.id, j)
             ),
             None,
         )
@@ -1268,14 +1335,17 @@ def compare_annotated(
         resp = compare_annotated_docx(settings, right_doc, report)
     except HTTPException as e:
         return _http_error(request, principal, e, "/ui/start/compare")
-    audit(
-        session,
-        actor=principal.user,
-        action="check.compare.docx",
-        document_id=right_doc.id,
-        ip=client_ip(request),
-        detail=f"{len(report.findings)} finding(s)",
-    )
+    if (
+        refused := _audited(
+            request,
+            principal,
+            session,
+            action="check.compare.docx",
+            document_id=right_doc.id,
+            detail=f"{len(report.findings)} finding(s)",
+        )
+    ) is not None:
+        return refused
     return resp
 
 
@@ -1297,14 +1367,17 @@ def compare_differences(
         )
     except HTTPException as e:
         return _http_error(request, principal, e, "/ui/start/compare")
-    audit(
-        session,
-        actor=principal.user,
-        action="check.compare.xlsx",
-        document_id=right_doc.id,
-        ip=client_ip(request),
-        detail=f"{report.counts.total_changes} change(s)",
-    )
+    if (
+        refused := _audited(
+            request,
+            principal,
+            session,
+            action="check.compare.xlsx",
+            document_id=right_doc.id,
+            detail=f"{report.counts.total_changes} change(s)",
+        )
+    ) is not None:
+        return refused
     return compare_xlsx(report)
 
 
@@ -1360,12 +1433,12 @@ def _fx_days(report: CheckReport) -> list[dict[str, str]]:
 
 
 def _boq_inputs(
-    session: Session, principal: Principal, template: str, bids: str
+    session: Session, principal: Principal, template: str, bids: str, settings: Settings
 ) -> tuple[Document, list[Document]]:
     """Raises ``ValidationError`` for an empty bid list or an over-long template id - both
     reachable by editing the URL - which the callers turn into a page, not a 500."""
     body = BoqCheckRequest(template_document_id=template, bid_document_ids=_ids(bids, 10))
-    return boq_documents(session, principal, body)
+    return boq_documents(session, principal, body, settings)
 
 
 def _expired(request: Request, principal: Principal, again: str) -> Response:
@@ -1379,15 +1452,57 @@ def _expired(request: Request, principal: Principal, again: str) -> Response:
     return _render(request, "expired.html", user=principal.user, again=again)
 
 
-def _error(request: Request, principal: Principal, message: object) -> Response:
-    return _render(request, "error.html", user=principal.user, message=message)
+def _audited(
+    request: Request,
+    principal: Principal,
+    session: Session,
+    *,
+    action: str,
+    document_id: str | None = None,
+    job_id: str | None = None,
+    detail: str | None = None,
+) -> Response | None:
+    """Record that a report or a read is about to be served, and commit the record first.
+
+    None when it is stored. When it cannot be (a locked database, a full disk) the answer is a
+    503 page instead of the report: a read of client documents that left no trace is not served.
+    """
+    try:
+        audit_or_503(
+            session,
+            actor=principal.user,
+            action=action,
+            document_id=document_id,
+            job_id=job_id,
+            ip=client_ip(request),
+            detail=detail,
+        )
+    except HTTPException as e:
+        return _http_error(request, principal, e, "/ui/")
+    return None
+
+
+def _error(
+    request: Request, principal: Principal, message: object, status_code: int = status.HTTP_200_OK
+) -> Response:
+    resp = _render(request, "error.html", user=principal.user, message=message)
+    resp.status_code = status_code
+    return resp
 
 
 def _http_error(request: Request, principal: Principal, exc: HTTPException, again: str) -> Response:
     """Map an API refusal onto a page: 404 means the documents are gone (or never were the
-    caller's), anything else - not ready yet, wrong file type, too many jobs - says why."""
+    caller's), anything else - not ready yet, wrong file type, too many jobs - says why.
+
+    A refusal with a code (``api.refusals``: a document that holds no text, one that cannot be
+    read again) is said in the page's language, the code kept so it can be quoted, and the page
+    carries the refusal's own status - it is not a success that happens to show a sentence."""
     if exc.status_code == status.HTTP_404_NOT_FOUND:
         return _expired(request, principal, again)
+    detail: object = exc.detail
+    if isinstance(detail, dict):
+        text = detail["message_ka" if _lang(request) == "ka" else "message_en"]
+        return _error(request, principal, f"{detail['code']}: {text}", exc.status_code)
     return _error(request, principal, exc.detail)
 
 

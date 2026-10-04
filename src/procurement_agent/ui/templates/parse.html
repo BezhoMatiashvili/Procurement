@@ -17,7 +17,7 @@
 {% elif job.status.value != "done" %}
 <div class="card notice is-error">{{ icon("alert") }}<div>
   <p><strong>{{ t("reading.failed") }}</strong></p>
-  {% if doc.error or job.message %}<p>{{ doc.error or job.message }}</p>{% endif %}
+  {% if doc.error %}<p>{{ doc.error | doc_error(lang) }}</p>{% elif job.message %}<p>{{ job.message }}</p>{% endif %}
 </div></div>
 {% elif view is none %}
 <div class="card notice is-info">{{ icon("info") }}<div><p>{{ t("reading.unavailable") }}</p></div></div>
@@ -31,7 +31,9 @@
   {% if st.sheets %}<li class="stat"><span class="v">{{ st.sheets }}</span><span class="l">{{ t("reading.stat.sheets") }}</span></li>{% endif %}
 </ul>
 {% endif %}
-{% if scanned %}<p class="card caveat caveat-title">{{ icon("alert") }}<span>{{ t("reading.scanned") }}</span></p>{% endif %}
+{# a PDF with no text layer of its own: said as it is - read by OCR, read without it, or (a document
+   stored before this was recorded) not known - never as OCR when OCR did not run #}
+{% if scanned %}<p class="card caveat caveat-title">{{ icon("alert") }}<span>{{ t("reading.scanned" if ocr else ("reading.scanned.no_ocr" if ocr is false else "reading.scanned.unknown")) }}</span></p>{% endif %}
 {% for n in notes %}<p class="card caveat caveat-title">{{ icon("alert") }}<span>{{ t("reading.truncated", note=n) }}</span></p>{% endfor %}
 {% if view.cut %}<p class="card caveat caveat-title">{{ icon("alert") }}<span>{{ t("reading.cut", n=view.limit) }}</span></p>{% endif %}
 
@@ -45,7 +47,7 @@
 <ul class="recent">
   {% for j in earlier %}
   <li><a href="/ui/jobs/{{ j.id }}">{{ icon("file-search") }}
-    <span class="name">{{ j.created_at.strftime("%Y-%m-%d %H:%M") }}</span>
+    <span class="name">{{ j.created_at | utc }}</span>
     <span class="when">{{ j.message or "" }}</span></a></li>
   {% endfor %}
 </ul>

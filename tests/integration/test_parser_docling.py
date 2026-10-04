@@ -111,13 +111,13 @@ def test_docling_json_through_the_socket_is_byte_identical_to_the_inline_one(
     inline_path = docling_service.save_document(inline.document, tmp_path / "inline")
     inline_pages = len(inline.document.pages) or None
 
-    pages = parser_client.convert_through_parser(
+    reply = parser_client.convert_through_parser(
         upload, kind, tmp_path / "socket", _settings(parser)
     )
 
     through_socket = (tmp_path / "socket" / "docling.json").read_bytes()
     assert through_socket == inline_path.read_bytes()
-    assert pages == inline_pages
+    assert reply.pages == inline_pages
     assert docling_service.load_document(tmp_path / "socket" / "docling.json").texts is not None
 
 

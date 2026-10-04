@@ -4,6 +4,7 @@ uv run python -m procurement_agent.cli create-key alice
 uv run python -m procurement_agent.cli list-keys
 uv run python -m procurement_agent.cli revoke-key <key-id>
 uv run python -m procurement_agent.cli sweep
+uv run python -m procurement_agent.cli db-status
 uv run python -m procurement_agent.cli audit [--last 50] [--action X] [--actor Y] [--since DATE]
 uv run python -m procurement_agent.cli audit-prune --older-than-days 365 --yes
 uv run python -m procurement_agent.cli load-registry registry.csv --as-of 2026-09-01
@@ -23,6 +24,7 @@ from pathlib import Path
 
 from sqlalchemy import select
 
+from procurement_agent import migrations
 from procurement_agent.config import Settings, get_settings
 from procurement_agent.db import init_db, prune_audit, session_scope
 from procurement_agent.models import ApiKey, AuditLog
@@ -95,6 +97,38 @@ def _prune_audit(args: argparse.Namespace) -> int:
     return 0
 
 
+#: What ``db-status`` says about each state a database can be in.
+_DB_STATE_TEXT = {
+    "current": "up to date",
+    "pending": "the next start upgrades it (a copy is taken first if it holds data)",
+    "legacy": "created before schema versions; the next start adopts it as version "
+    f"{migrations.BASELINE_VERSION}",
+    "newer": "newer than this release",
+    "damaged": "damaged",
+}
+
+
+def _db_status(settings: Settings) -> int:
+    """Where the database stands against this release, from a read-only look.
+
+    Runs before ``init_db`` on purpose: opening the database the usual way would upgrade it (or
+    refuse to), when the point is to see what the next start will do. Versions and migration names
+    only; 1 when the database is newer than this release or cannot be used.
+    """
+    status = migrations.inspect_database(settings.db_path)
+    if status.state == "new":
+        print(f"no database yet; the first start creates one at schema version {status.latest}")
+        return 0
+    shown = "unknown" if status.version is None else str(status.version)
+    print(f"schema version: {shown}")
+    print(f"this release:   {status.latest}")
+    print(f"pending:        {', '.join(status.pending) or 'none'}")
+    print(f"status:         {_DB_STATE_TEXT[status.state]}")
+    if status.problem:
+        print(status.problem, file=sys.stderr)
+    return 1 if status.state in ("newer", "damaged") else 0
+
+
 def _models_manifest(action: str, settings: Settings) -> int:
     from procurement_agent.security import models_manifest
 
@@ -103,14 +137,33 @@ def _models_manifest(action: str, settings: Settings) -> int:
         print("PA_DOCLING_ARTIFACTS_PATH must point at the models directory", file=sys.stderr)
         return 2
     if action == "write":
-        count = models_manifest.write(root)
+        try:
+            count = models_manifest.write(root)
+        except ValueError as refused:
+            print(f"refused, no manifest written - {refused}", file=sys.stderr)
+            return 1
         audit_now(actor=CLI_ACTOR, action="models.manifest", detail=f"wrote {count} file(s)")
         print(f"wrote {models_manifest.MANIFEST_NAME}: {count} file(s) in {root}")
+        closed = models_manifest.not_world_readable(root)
+        if closed:
+            more = f" and {len(closed) - 3} more" if len(closed) > 3 else ""
+            print(
+                f"warning: {len(closed)} path(s) are not readable by other users "
+                f"({', '.join(closed[:3])}{more}). The app container runs as uid 999 and will "
+                "refuse to start on them: run chmod -R a+rX on the models directory, or make the "
+                "app user its owner.",
+                file=sys.stderr,
+            )
         return 0
     checked = models_manifest.verify(root)
     for problem in checked.problems:
         print(problem)
     print(f"{checked.checked} file(s) checked, {len(checked.problems)} problem(s)")
+    if checked.unreadable:
+        print(
+            "the models tree must be readable by the app user (uid 999 in the container image): "
+            "chmod -R a+rX on the models directory"
+        )
     return 0 if checked.ok else 1
 
 
@@ -195,11 +248,20 @@ def main(argv: list[str] | None = None) -> int:
         "models-manifest", help="write or verify MANIFEST.sha256 for the model files"
     )
     p_models.add_argument("action", choices=["write", "verify"])
+    sub.add_parser(
+        "db-status", help="show the database's schema version and the migrations still pending"
+    )
     args = parser.parse_args(argv)
 
     settings = get_settings()
+    if args.cmd == "db-status":
+        return _db_status(settings)
     settings.ensure_dirs()
-    init_db(settings.db_path)
+    try:
+        init_db(settings.db_path)
+    except migrations.MigrationError as e:
+        print(f"refused - {e}", file=sys.stderr)
+        return 1
 
     if args.cmd == "create-key":
         with session_scope() as s:

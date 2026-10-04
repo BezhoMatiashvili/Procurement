@@ -43,7 +43,7 @@
     <span class="name">{{ d.display_name }}</span>
     <span class="kind">{{ d.kind }}</span>
     <span class="status {{ d.status.value }}">{{ t("status." ~ d.status.value) }}</span>
-    <span class="when">{{ d.created_at.strftime("%Y-%m-%d %H:%M") }}</span>
+    <span class="when">{{ d.created_at | utc }}</span>
   </a></li>
   {% endfor %}
 </ul>

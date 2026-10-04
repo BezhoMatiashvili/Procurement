@@ -65,10 +65,10 @@ def run(
     **kw: Any,
 ) -> tuple[int | None, Path]:
     out = sock_dir / "results" / DOC_ID
-    pages = parser_client.convert_through_parser(
+    reply = parser_client.convert_through_parser(
         upload(sock_dir, data, kind), kind, out, settings_for(harness.path), **kw
     )
-    return pages, out
+    return reply.pages, out
 
 
 class RawServer:
@@ -447,14 +447,14 @@ def test_the_connect_is_retried_while_the_parser_starts(sock_dir: Path) -> None:
     starter.start()
     beats: list[int] = []
     try:
-        pages = parser_client.convert_through_parser(
+        reply = parser_client.convert_through_parser(
             upload(sock_dir),
             "pdf",
             sock_dir / "r",
             settings_for(harness.path, parser_connect_wait_s=20.0),
             beat=lambda: beats.append(1),
         )
-        assert pages == 2
+        assert reply.pages == 2
         assert beats, "the worker is shown to be alive while it waits for the parser"
     finally:
         starter.cancel()

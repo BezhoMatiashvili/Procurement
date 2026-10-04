@@ -32,13 +32,20 @@ import time
 from collections.abc import Callable
 from enum import StrEnum
 from pathlib import Path
+from typing import NamedTuple
 
 from procurement_agent.config import Settings
 from procurement_agent.ingestion import docling_service
 from procurement_agent.ingestion.docling_service import ConversionError
 from procurement_agent.parser_service import protocol as p
 
-__all__ = ["ParserCode", "ParserError", "convert_through_parser", "default_reply_timeout_s"]
+__all__ = [
+    "ParsedReply",
+    "ParserCode",
+    "ParserError",
+    "convert_through_parser",
+    "default_reply_timeout_s",
+]
 
 #: One attempt to connect waits this long (a parser that is busy converting still accepts into its
 #: backlog, so this is rarely reached).
@@ -186,6 +193,15 @@ def _checked_document(payload: bytes, pages: int | None) -> None:
         raise ParserError(ParserCode.PARSER_PROTOCOL)
 
 
+class ParsedReply(NamedTuple):
+    """What the parser said about a conversion, beside the ``docling.json`` it stored."""
+
+    #: The page count; ``None`` for a document with none, as the worker has it.
+    pages: int | None
+    #: Docling finished only part of the document (its status was ``PARTIAL_SUCCESS``).
+    partial: bool
+
+
 def convert_through_parser(
     path: Path,
     kind: str,
@@ -196,9 +212,10 @@ def convert_through_parser(
     reply_timeout_s: float | None = None,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
-) -> int | None:
+) -> ParsedReply:
     """Convert the upload at ``path`` in the parser container and store ``docling.json`` in
-    ``out_dir``. Returns the page count (``None`` for a document with none, as the worker has it).
+    ``out_dir``. Returns the page count (``None`` for a document with none, as the worker has it)
+    and whether Docling finished only part of it.
 
     ``beat`` is called while this waits - for the connection, for the answer - so a job that is
     legitimately busy for fifteen minutes is not mistaken for a stuck worker. Raises ``ParserError``
@@ -220,4 +237,4 @@ def convert_through_parser(
         raise ParserError(_FROM_PARSER[answer.code or p.ErrorCode.INTERNAL])
     _checked_document(payload, answer.pages)
     docling_service.save_document_bytes(payload, out_dir)
-    return answer.pages or None
+    return ParsedReply(pages=answer.pages or None, partial=answer.status == "partial_success")

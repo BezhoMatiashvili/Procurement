@@ -31,6 +31,7 @@ from procurement_agent.api.deps import (
     owned_document,
 )
 from procurement_agent.api.extraction import JobOut, _job_out
+from procurement_agent.api.refusals import audit_or_503, require_readable, unreadable
 from procurement_agent.checks.aoa import ContractorType, check_aoa, scope_review_items
 from procurement_agent.checks.aoa_llm import ScopeReviewSet, review_digest
 from procurement_agent.checks.aoa_spelling import open_speller
@@ -59,14 +60,22 @@ from procurement_agent.extraction.pipeline import (
     is_scanned_pdf,
     load_document_text,
     result_dir,
+    truncation_notes,
     upload_path,
 )
+from procurement_agent.extraction.read_status import (
+    LLM_UNAVAILABLE,
+    ReadAwareComparison,
+    ReadAwareReport,
+    read_aware_comparison,
+    read_aware_report,
+)
 from procurement_agent.fx.provider import open_rate_provider
-from procurement_agent.ingestion.docling_service import load_document
+from procurement_agent.ingestion.read_quality import StoredParseError, load_stored
 from procurement_agent.ingestion.xlsx_size import WorkbookTooLargeError
 from procurement_agent.jobs.worker import Worker
 from procurement_agent.llm.base import LLMClient
-from procurement_agent.models import Document, DocumentStatus, Job
+from procurement_agent.models import Document, DocumentStatus, Job, JobStatus
 from procurement_agent.registry.extract import NotAnExtractError, read_extract
 from procurement_agent.registry.snapshot import RegistryEntry, open_snapshot
 from procurement_agent.registry.source import RefusedExtract, RegistrySource
@@ -173,11 +182,11 @@ def _read_extracts(
     return entries, refused
 
 
-def _document_text(settings: Settings, doc: Document) -> str:
+def _document_text(settings: Settings, doc: Document, notes: list[str] | None = None) -> str:
     if doc.status != DocumentStatus.ready:
         msg = f"document {doc.id} is {doc.status.value}, not ready"
         raise HTTPException(status.HTTP_409_CONFLICT, msg)
-    return load_document_text(settings, doc.id, doc.kind)
+    return load_document_text(settings, doc.id, doc.kind, notes=notes)
 
 
 def reported[**P, R](
@@ -185,14 +194,21 @@ def reported[**P, R](
 ) -> Callable[Concatenate[Settings, P], R]:
     """Run a report computation inside one of ``max_concurrent_reports`` slots (503 when full).
 
-    Applied to the three functions the API, the downloads and the UI all call, so no route can
-    recompute a report outside the limit. ``settings`` is their first argument by convention.
+    Applied to the three functions the API, the downloads and the UI all call, and to the three
+    that write a report into a Word or PDF file, so no route can recompute a report or rewrite a
+    document outside the limit. ``settings`` is their first argument by convention.
+
+    A slot is not reentrant, so a function under it must not call another: a route runs the check
+    and then writes the file, one after the other, and the file takes the slot the check gave back.
     """
 
     @functools.wraps(fn)
     def limited(settings: Settings, /, *args: P.args, **kwargs: P.kwargs) -> R:
         with report_capacity(settings.max_concurrent_reports, settings.report_wait_s).slot():
-            return fn(settings, *args, **kwargs)
+            try:
+                return fn(settings, *args, **kwargs)
+            except StoredParseError as e:  # a stored reading gone or damaged: 409, not a 500
+                raise unreadable(e) from None
 
     return limited
 
@@ -208,7 +224,7 @@ def run_aoa(
     review_job_id: str | None = None,
     entered_rates: Mapping[tuple[str, date], Decimal] | None = None,
     registry_docs: Sequence[Document] = (),
-) -> CheckReport:
+) -> ReadAwareReport:
     """The whole act check. Shared by the JSON API, the DOCX download and the UI page, so the
     registry snapshot and the exchange-rate source are opened and closed in exactly one place.
 
@@ -216,7 +232,12 @@ def run_aoa(
     ``owned_review_job``; its answers are checked again against the notes this run leaves open.
     ``entered_rates`` are the exchange rates the user typed in, by (currency, day), lari per unit.
     ``registry_docs`` are the parties' uploaded registry extracts, read before the snapshot.
+
+    A document with no readable text is refused (409 ``NO_TEXT``); one that was only partly read
+    is checked, and the report says how much of it was (``DOC.PARTIAL``, ``read_quality``).
     """
+    aoa_quality = require_readable(settings, aoa)
+    contract_quality = require_readable(settings, contract) if contract is not None else None
     review = (
         load_review(settings, aoa.id, review_job_id)
         if review_job_id and contract is not None
@@ -230,11 +251,12 @@ def run_aoa(
     )
     try:
         rates = open_rate_provider(settings, entered_rates)
+        cut: list[str] = []
         try:
-            return check_aoa(
-                aoa_text=_document_text(settings, aoa),
+            report = check_aoa(
+                aoa_text=_document_text(settings, aoa, cut),
                 aoa_id=aoa.id,
-                contract_text=_document_text(settings, contract) if contract else None,
+                contract_text=_document_text(settings, contract, cut) if contract else None,
                 contract_id=contract.id if contract else "contract",
                 registry=registry,
                 contractor_type=contractor_type,
@@ -248,6 +270,8 @@ def run_aoa(
                 ),
                 speller=open_speller(settings),
             )
+            report.skipped.extend(truncation_notes("AOA.TRUNCATED", cut))
+            return read_aware_report(report, {"act": aoa_quality, "contract": contract_quality})
         finally:
             rates.close()
     finally:
@@ -304,6 +328,18 @@ def load_review(settings: Settings, doc_id: str, job_id: str) -> ScopeReviewSet 
         return None  # a job of another kind wrote here; not a review
 
 
+def _answered(settings: Settings, aoa_id: str, job: Job) -> bool:
+    """Whether an earlier review is worth handing back: a failed one is (the same failure would
+    come again), unless the failure was that the model did not answer - then asking again is the
+    point, and so for a review stored by an older version as 'done' with the failure inside."""
+    if job.status == JobStatus.failed:
+        return not (job.message or "").startswith(LLM_UNAVAILABLE)
+    if job.status == JobStatus.done:
+        stored = load_review(settings, aoa_id, job.id)
+        return stored is None or stored.error is None
+    return True
+
+
 @dataclass(frozen=True)
 class QueuedReview:
     """What asking for a review came to: its job - just queued, or the earlier one that asked
@@ -336,6 +372,8 @@ def queue_aoa_review(
         raise HTTPException(status.HTTP_409_CONFLICT, "the model review is disabled on this server")
     if llm is None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "no LLM backend is configured")
+    require_readable(settings, aoa)
+    require_readable(settings, contract)
     items = scope_review_items(
         aoa_text=_document_text(settings, aoa), contract_text=_document_text(settings, contract)
     )
@@ -348,7 +386,11 @@ def queue_aoa_review(
         .order_by(Job.created_at.desc())
     )
     for job in earlier:
-        if job.params.get("contract") == contract.id and job.params.get("digest") == digest:
+        if (
+            job.params.get("contract") == contract.id
+            and job.params.get("digest") == digest
+            and _answered(settings, aoa.id, job)
+        ):
             return QueuedReview(job, len(items))
 
     ensure_job_capacity(session, settings, principal)
@@ -439,7 +481,7 @@ def check_acceptance_act(
         registry_docs=extracts,
     )
 
-    audit(
+    audit_or_503(
         session,
         actor=principal.user,
         action=f"check.aoa.{fmt}",
@@ -454,6 +496,7 @@ def check_acceptance_act(
     return annotated_docx(settings, aoa, report)
 
 
+@reported
 def annotated_docx(settings: Settings, aoa: Document, report: CheckReport) -> Response:
     """A copy of the act with one Word comment per finding and the corrections that replace words
     as tracked changes, which is what the client asked for; a note on its first word says what
@@ -484,6 +527,7 @@ def annotated_docx(settings: Settings, aoa: Document, report: CheckReport) -> Re
     )
 
 
+@reported
 def annotated_pdf(settings: Settings, aoa: Document, report: CheckReport) -> Response:
     """A copy of a PDF act with a highlight and a note for each finding, and a note on its first
     page saying what could not be checked. A scanned act is marked by the lines Docling read."""
@@ -494,10 +538,11 @@ def annotated_pdf(settings: Settings, aoa: Document, report: CheckReport) -> Res
         )
     source = upload_path(settings, aoa.id, aoa.kind)
     items: list[PdfItem] = []
-    if is_scanned_pdf(settings, aoa.id, aoa.kind):
-        stored = result_dir(settings, aoa.id) / "docling.json"
-        if stored.exists():
-            items = docling_items(load_document(stored))
+    if (
+        is_scanned_pdf(settings, aoa.id, aoa.kind)
+        and (result_dir(settings, aoa.id) / "docling.json").exists()
+    ):
+        items = docling_items(load_stored(settings, aoa.id))
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "annotated.pdf"
         try:
@@ -572,6 +617,15 @@ def owned_explain_job(
     return job
 
 
+def explain_answered(settings: Settings, doc_id: str, job: Job) -> bool:
+    """Whether a queued, running or finished explain job stands for the model's answer. A run
+    stored as 'done' by an older version, with the model's failure inside, does not."""
+    if job.status != JobStatus.done:
+        return True
+    stored = load_explanations(settings, doc_id, job.id)
+    return stored is None or stored.error is None
+
+
 def load_explanations(settings: Settings, doc_id: str, job_id: str) -> ExplanationSet | None:
     """A stored explain run, or None when there is nothing readable there.
 
@@ -589,10 +643,7 @@ def load_explanations(settings: Settings, doc_id: str, job_id: str) -> Explanati
         return None  # a job of another kind wrote here; not an explanation set
 
 
-def _ready(doc: Document) -> StoredDocument:
-    if doc.status != DocumentStatus.ready:
-        msg = f"document {doc.id} is {doc.status.value}, not ready"
-        raise HTTPException(status.HTTP_409_CONFLICT, msg)
+def _stored(doc: Document) -> StoredDocument:
     return StoredDocument(id=doc.id, kind=doc.kind, name=doc.display_name)
 
 
@@ -603,7 +654,7 @@ def run_compare(
     right: Document,
     *,
     explain_job_id: str | None = None,
-) -> ComparisonReport:
+) -> ReadAwareComparison:
     """The whole comparison. Shared by the JSON API, both downloads and the UI page.
 
     Deterministic and recomputed on every call — it costs milliseconds on Word documents and a
@@ -615,15 +666,17 @@ def run_compare(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "the two documents are the same; a document compared with itself has no differences",
         )
+    left_quality = require_readable(settings, left)
+    right_quality = require_readable(settings, right)
     try:
-        report = compare_stored(settings, _ready(left), _ready(right))
+        report = compare_stored(settings, _stored(left), _stored(right))
     except DocumentTooLargeError as e:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(e)) from e
     if explain_job_id:
         stored = load_explanations(settings, right.id, explain_job_id)
         if stored is not None:
             report = apply_explanations(report, stored)
-    return report
+    return read_aware_comparison(report, {"left": left_quality, "right": right_quality})
 
 
 @router.post("/compare")
@@ -640,7 +693,7 @@ def compare_documents(
     explain = owned_explain_job(session, principal, body.explain_job_id, left, right)
     report = run_compare(settings, left, right, explain_job_id=explain.id if explain else None)
 
-    audit(
+    audit_or_503(
         session,
         actor=principal.user,
         action=f"check.compare.{fmt}",
@@ -668,6 +721,7 @@ def compare_xlsx(report: ComparisonReport) -> Response:
     )
 
 
+@reported
 def compare_annotated_docx(
     settings: Settings, right: Document, report: ComparisonReport
 ) -> Response:
@@ -882,7 +936,7 @@ def _no_basis_note(comp: BidComparison) -> SkipNote | None:
 
 
 def boq_documents(
-    session: Session, principal: Principal, body: BoqCheckRequest
+    session: Session, principal: Principal, body: BoqCheckRequest, settings: Settings
 ) -> tuple[Document, list[Document]]:
     """Resolve and validate the template plus every bid, before any workbook is opened."""
     if body.template_document_id in body.bid_document_ids:
@@ -899,9 +953,7 @@ def boq_documents(
         if doc.kind != "xlsx":
             msg = f"BOQ comparison needs .xlsx workbooks; {doc.display_name} is a {doc.kind}"
             raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, msg)
-        if doc.status != DocumentStatus.ready:
-            msg = f"document {doc.id} is {doc.status.value}, not ready"
-            raise HTTPException(status.HTTP_409_CONFLICT, msg)
+        require_readable(settings, doc)  # not ready, or ready with no text in it: 409
     return template, docs
 
 
@@ -920,6 +972,9 @@ def _read_book(settings: Settings, doc: Document) -> BoqWorkbook:
         )
     except WorkbookTooLargeError as e:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"template: {e}") from e
+    except Exception as e:  # the upload is gone or is no workbook: one refusal, not a 500
+        msg = f"the stored workbook cannot be read ({type(e).__name__})"
+        raise StoredParseError(msg, doc.id) from e
 
 
 def _read_bid(settings: Settings, doc: Document) -> BoqWorkbook:
@@ -1077,7 +1132,7 @@ def check_boq(
     event loop. It creates no job - a BOQ run spans N+1 documents, and ``Job.document_id`` is a
     single FK, so a job would have to pick one arbitrarily.
     """
-    template_doc, bid_docs = boq_documents(session, principal, body)
+    template_doc, bid_docs = boq_documents(session, principal, body, settings)
     report, template, books, comparisons = run_boq(settings, template_doc, bid_docs)
     errors = sum(
         1
@@ -1085,7 +1140,7 @@ def check_boq(
         if f.severity == "error"
     )
 
-    audit(
+    audit_or_503(
         session,
         actor=principal.user,
         action=f"check.boq.{fmt}",

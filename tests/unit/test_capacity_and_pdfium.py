@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import ClassVar
+from types import SimpleNamespace
+from typing import Any, ClassVar
 
 import pytest
 from fastapi import HTTPException
 
+from procurement_agent.api import checks as checks_api
+from procurement_agent.checks.aoa import check_aoa
+from procurement_agent.config import Settings
 from procurement_agent.ingestion import render, segmenter
 from procurement_agent.ingestion.pdfium_lock import PDFIUM_LOCK
 from procurement_agent.security import upload_guard
@@ -97,6 +102,58 @@ def test_many_threads_never_exceed_the_slots() -> None:
 def test_one_capacity_per_size_in_the_process() -> None:
     assert report_capacity(4, 2.0) is report_capacity(4, 2.0)
     assert report_capacity(4, 2.0) is not report_capacity(5, 2.0)
+
+
+# --- the annotators are reports too --------------------------------------------------------------
+
+
+def _small_house() -> Settings:
+    return Settings(env="dev", max_concurrent_reports=1, report_wait_s=0.01)
+
+
+_ANNOTATORS: list[Callable[..., Any]] = [
+    checks_api.annotated_docx,
+    checks_api.annotated_pdf,
+    checks_api.compare_annotated_docx,
+]
+
+
+@pytest.mark.parametrize("annotate", _ANNOTATORS, ids=lambda f: f.__name__)
+def test_an_annotator_is_refused_with_503_when_every_report_slot_is_taken(
+    annotate: Callable[..., Any],
+) -> None:
+    settings = _small_house()
+    with report_capacity(1, 0.01).slot(), pytest.raises(HTTPException) as refused:
+        annotate(settings, SimpleNamespace(), SimpleNamespace())  # another report is running
+    assert refused.value.status_code == 503
+    assert refused.value.headers == {"Retry-After": "5"}
+
+
+def _the_only_slot_is_free() -> bool:
+    try:
+        with report_capacity(1, 0.01).slot():
+            return True
+    except HTTPException:
+        return False
+
+
+def test_an_annotator_works_under_a_slot_and_gives_it_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    free_during: list[bool] = []
+
+    def annotate(source: Path, findings: object, out: Path, **_: object) -> None:
+        free_during.append(_the_only_slot_is_free())
+        out.write_bytes(b"%PDF-annotated")
+
+    monkeypatch.setattr(checks_api, "annotate_pdf", annotate)
+    monkeypatch.setattr(checks_api, "is_scanned_pdf", lambda *_: False)
+    monkeypatch.setattr(checks_api, "load_document_text", lambda *_: "Act text.")
+    settings = _small_house()
+    act = SimpleNamespace(id="a" * 32, kind="pdf")
+    report = check_aoa(aoa_text="Act text.", aoa_id=act.id)
+    response = checks_api.annotated_pdf(settings, act, report)
+    assert response.body == b"%PDF-annotated"
+    assert free_during == [False], "the annotator ran while the only slot was taken"
+    assert _the_only_slot_is_free(), "and it gave the slot back"
 
 
 # --- the pdfium lock ------------------------------------------------------------------------------

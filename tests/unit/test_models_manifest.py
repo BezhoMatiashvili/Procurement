@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -244,3 +245,263 @@ def test_the_command_needs_a_models_directory(
         dbmod._engine = None
         dbmod._SessionLocal = None
         get_settings.cache_clear()
+
+
+# --- files the app user cannot read ------------------------------------------------------------
+# A models directory copied with `cp -a` keeps the owner and the mode of the source. The
+# huggingface cache files under it are mode 600: the host user reads them, the image's user
+# (uid 999) does not, and a production start died with a raw PermissionError traceback (exit 3)
+# instead of a refusal.
+
+needs_a_normal_user = pytest.mark.skipif(
+    os.geteuid() == 0, reason="root reads files whatever their mode"
+)
+
+
+@pytest.fixture
+def locked(tmp_path: Path) -> Iterator[tuple[Path, Path]]:
+    """A manifest-ed tree with one file no one can read; ``(root, that file)``."""
+    root = _models(tmp_path)
+    mm.write(root)
+    victim = root / "layout" / "config.json"
+    victim.chmod(0)
+    try:
+        yield root, victim
+    finally:
+        victim.chmod(0o644)
+
+
+@needs_a_normal_user
+def test_an_unreadable_file_is_a_named_problem_and_not_a_traceback(
+    locked: tuple[Path, Path],
+) -> None:
+    root, _ = locked
+    result = mm.verify(root)
+    assert result.problems == ["unreadable layout/config.json"]
+    assert result.unreadable == ["layout/config.json"]
+    assert result.checked == 2, "the other files are still checked"
+    assert not result.ok
+
+
+@needs_a_normal_user
+def test_every_unreadable_file_is_named_and_the_readable_ones_are_still_compared(
+    locked: tuple[Path, Path],
+) -> None:
+    root, _ = locked
+    other = root / "layout" / "model.safetensors"
+    other.chmod(0)
+    try:
+        (root / "tableformer" / "fast" / "tm.safetensors").write_bytes(b"swapped")
+        result = mm.verify(root)
+    finally:
+        other.chmod(0o644)
+    assert result.unreadable == ["layout/config.json", "layout/model.safetensors"]
+    assert "changed tableformer/fast/tm.safetensors" in result.problems
+
+
+@needs_a_normal_user
+def test_an_unreadable_directory_is_one_problem_not_a_missing_file_per_entry(
+    tmp_path: Path,
+) -> None:
+    root = _models(tmp_path)
+    mm.write(root)
+    (root / "tableformer").chmod(0)
+    try:
+        result = mm.verify(root)
+    finally:
+        (root / "tableformer").chmod(0o755)
+    assert result.problems == ["unreadable directory tableformer"]
+    assert result.unreadable == ["tableformer"]
+
+
+@needs_a_normal_user
+def test_an_unreadable_manifest_is_a_problem_and_not_a_traceback(tmp_path: Path) -> None:
+    root = _models(tmp_path)
+    mm.write(root)
+    (root / mm.MANIFEST_NAME).chmod(0)
+    try:
+        result = mm.verify(root)
+    finally:
+        (root / mm.MANIFEST_NAME).chmod(0o644)
+    assert result.problems == [f"unreadable {mm.MANIFEST_NAME}"]
+    assert result.unreadable == [mm.MANIFEST_NAME]
+
+
+@needs_a_normal_user
+def test_an_unreadable_models_directory_is_one_problem(tmp_path: Path) -> None:
+    root = _models(tmp_path)
+    mm.write(root)
+    root.chmod(0)
+    try:
+        result = mm.verify(root)
+    finally:
+        root.chmod(0o755)
+    assert result.unreadable == ["the models directory"]
+    assert len(result.problems) == 1
+
+
+def test_a_file_that_vanishes_between_the_listing_and_the_read_is_missing_not_a_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _models(tmp_path)
+    mm.write(root)
+    real = mm._digest
+
+    def vanishing(path: Path) -> str:
+        if path.name == "config.json":
+            raise FileNotFoundError(path)
+        return real(path)
+
+    monkeypatch.setattr(mm, "_digest", vanishing)
+    result = mm.verify(root)
+    assert result.problems == ["missing layout/config.json"]
+    assert result.unreadable == []
+
+
+def test_a_read_error_other_than_permission_is_also_a_named_problem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _models(tmp_path)
+    mm.write(root)
+
+    def failing(path: Path) -> str:
+        raise OSError(5, "Input/output error", str(path))
+
+    monkeypatch.setattr(mm, "_digest", failing)
+    assert mm.verify(root).problems == [
+        "unreadable layout/config.json",
+        "unreadable layout/model.safetensors",
+        "unreadable tableformer/fast/tm.safetensors",
+    ]
+
+
+@needs_a_normal_user
+def test_production_refuses_with_one_clear_cause_when_a_model_file_is_unreadable(
+    locked: tuple[Path, Path],
+) -> None:
+    root, _ = locked
+    with pytest.raises(RuntimeError) as raised:
+        _prod(root).validate_for_prod()
+    message = str(raised.value)
+    assert message.startswith("Refusing to start: ")
+    assert "layout/config.json" in message
+    assert "readable by the app user" in message and "chmod -R a+rX" in message
+    assert "do not match their manifest" not in message, "one cause, and it is not a mismatch"
+    assert str(root) not in message, "relative model paths only"
+
+
+@needs_a_normal_user
+def test_the_refusal_names_a_few_files_and_counts_the_rest(tmp_path: Path) -> None:
+    root = _models(tmp_path)
+    for i in range(10):
+        (root / f"part{i}.bin").write_bytes(b"x")
+    mm.write(root)
+    locked_files = sorted(root.glob("part*.bin"))
+    for f in locked_files:
+        f.chmod(0)
+    try:
+        with pytest.raises(RuntimeError) as raised:
+            _prod(root).validate_for_prod()
+    finally:
+        for f in locked_files:
+            f.chmod(0o644)
+    message = str(raised.value)
+    assert "10 model file(s)" in message and "part0.bin" in message
+    assert "part9.bin" not in message and "and 7 more" in message
+
+
+@needs_a_normal_user
+def test_the_command_prints_the_unreadable_files_and_the_fix(
+    locked: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    root, _ = locked
+    monkeypatch.setenv("PA_DOCLING_ARTIFACTS_PATH", str(root))
+    monkeypatch.setenv("PA_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("PA_OLLAMA_BASE_URL", "http://127.0.0.1:1")
+    get_settings.cache_clear()
+    try:
+        assert cli.main(["models-manifest", "verify"]) == 1
+        out = capsys.readouterr().out
+        assert "unreadable layout/config.json" in out
+        assert "chmod -R a+rX" in out
+        assert "2 file(s) checked, 1 problem(s)" in out
+    finally:
+        _reset_cli_state()
+
+
+# --- writing a manifest for files the app user will not be able to read ---------------------------
+
+
+@needs_a_normal_user
+def test_write_refuses_clearly_when_it_cannot_read_a_file_itself(tmp_path: Path) -> None:
+    root = _models(tmp_path)
+    (root / "layout" / "config.json").chmod(0)
+    try:
+        with pytest.raises(ValueError, match=r"cannot read layout/config\.json"):
+            mm.write(root)
+    finally:
+        (root / "layout" / "config.json").chmod(0o644)
+    assert not (root / mm.MANIFEST_NAME).exists(), "no half-written manifest"
+
+
+def test_files_other_users_cannot_read_are_listed(tmp_path: Path) -> None:
+    root = _models(tmp_path)
+    assert mm.not_world_readable(root) == []
+    (root / "layout" / "config.json").chmod(0o600)  # what a huggingface cache file is
+    (root / "tableformer").chmod(0o700)
+    try:
+        assert mm.not_world_readable(root) == ["layout/config.json", "tableformer"]
+    finally:
+        (root / "tableformer").chmod(0o755)
+        (root / "layout" / "config.json").chmod(0o644)
+
+
+def test_the_write_command_warns_about_files_the_app_user_cannot_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _models(tmp_path)
+    (root / "layout" / "config.json").chmod(0o600)
+    monkeypatch.setenv("PA_DOCLING_ARTIFACTS_PATH", str(root))
+    monkeypatch.setenv("PA_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("PA_OLLAMA_BASE_URL", "http://127.0.0.1:1")
+    get_settings.cache_clear()
+    try:
+        assert cli.main(["models-manifest", "write"]) == 0, "a warning, not a failure"
+        captured = capsys.readouterr()
+        assert "3 file(s)" in captured.out
+        assert "warning" in captured.err and "layout/config.json" in captured.err
+        assert "chmod -R a+rX" in captured.err and "uid 999" in captured.err
+        (root / "layout" / "config.json").chmod(0o644)
+        assert cli.main(["models-manifest", "write"]) == 0
+        assert "warning" not in capsys.readouterr().err
+    finally:
+        _reset_cli_state()
+
+
+@needs_a_normal_user
+def test_the_write_command_says_why_it_could_not_write_instead_of_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _models(tmp_path)
+    (root / "layout" / "config.json").chmod(0)
+    monkeypatch.setenv("PA_DOCLING_ARTIFACTS_PATH", str(root))
+    monkeypatch.setenv("PA_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("PA_OLLAMA_BASE_URL", "http://127.0.0.1:1")
+    get_settings.cache_clear()
+    try:
+        assert cli.main(["models-manifest", "write"]) == 1
+        assert "cannot read layout/config.json" in capsys.readouterr().err
+    finally:
+        (root / "layout" / "config.json").chmod(0o644)
+        _reset_cli_state()
+
+
+def _reset_cli_state() -> None:
+    import procurement_agent.db as dbmod
+
+    dbmod._engine = None
+    dbmod._SessionLocal = None
+    get_settings.cache_clear()

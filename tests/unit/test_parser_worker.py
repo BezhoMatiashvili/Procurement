@@ -16,6 +16,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from docling.datamodel.base_models import ConversionStatus
+from docling_core.types.doc.document import DoclingDocument
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -23,7 +25,7 @@ import procurement_agent.db as dbmod
 from procurement_agent.config import Settings, get_settings
 from procurement_agent.db import init_db, session_scope
 from procurement_agent.extraction.pipeline import result_dir, upload_path
-from procurement_agent.ingestion import docling_service, parser_client
+from procurement_agent.ingestion import docling_service, parser_client, read_quality
 from procurement_agent.jobs import worker as worker_mod
 from procurement_agent.jobs.worker import Worker
 from procurement_agent.main import create_app
@@ -35,6 +37,7 @@ from tests.unit.parser_harness import (
     LogRecorder,
     converter_of,
     docling_json,
+    readable_docling_json,
 )
 
 CANARY = "CONFIDENTIAL-CLIENT-TEXT-ბარამიძე"
@@ -115,7 +118,9 @@ def test_a_parse_job_is_done_through_the_parser_and_stores_the_parsers_document(
         raise AssertionError("Docling ran in the web process")
 
     monkeypatch.setattr(docling_service, "convert", forbidden)
-    with Harness(sock_dir, converter_of(4, "partial_success", extra="ბარამიძე")) as h:
+    with Harness(
+        sock_dir, converter_of(4, "partial_success", extra="ბარამიძე", readable=True)
+    ) as h:
         settings = make_settings(worker_env, h.path)
         w = worker_for(settings)
         doc_id, job_id = make_job(settings)
@@ -124,11 +129,13 @@ def test_a_parse_job_is_done_through_the_parser_and_stores_the_parsers_document(
     assert (job.status, job.message, job.progress) == (JobStatus.done, "ready", 100)
     assert (doc.status, doc.page_count, doc.error) == (DocumentStatus.ready, 4, None)
     stored = (result_dir(settings, doc_id) / "docling.json").read_bytes()
-    assert stored == docling_json(4, extra="ბარამიძე")
+    assert stored == readable_docling_json(4, extra="ბარამიძე")
+    quality = read_quality.read_sidecar(settings, doc_id)
+    assert quality is not None and quality.partial, "the parser's partial_success is carried over"
 
 
 def test_a_docx_has_no_page_count_and_is_stored(worker_env: Path, sock_dir: Path) -> None:
-    with Harness(sock_dir, converter_of(0)) as h:
+    with Harness(sock_dir, converter_of(0, readable=True)) as h:
         settings = make_settings(worker_env, h.path)
         w = worker_for(settings)
         doc_id, job_id = make_job(settings, "docx")
@@ -145,9 +152,12 @@ def test_the_worker_shows_it_is_alive_while_the_parser_works(
     w = worker_for(settings)
     seen: dict[str, Any] = {}
 
-    def fake(path: Path, kind: str, out_dir: Path, s: Settings, **kw: Any) -> int:
+    def fake(
+        path: Path, kind: str, out_dir: Path, s: Settings, **kw: Any
+    ) -> parser_client.ParsedReply:
         seen.update(kw, path=path, kind=kind, out_dir=out_dir)
-        return 3
+        docling_service.save_document_bytes(readable_docling_json(3), out_dir)
+        return parser_client.ParsedReply(pages=3, partial=False)
 
     monkeypatch.setattr(parser_client, "convert_through_parser", fake)
     doc_id, job_id = make_job(settings)
@@ -176,7 +186,7 @@ def test_a_parser_that_fails_fails_that_job_with_a_code_and_the_next_job_is_serv
         calls[0] += 1
         if calls[0] == 1:
             raise RuntimeError(f"cannot read {CANARY}")
-        return srv.Converted(1, "success", docling_json(1))
+        return srv.Converted(1, "success", readable_docling_json(1))
 
     recorder = LogRecorder()
     monkeypatch.setattr(worker_mod, "log", recorder)
@@ -318,8 +328,9 @@ def test_inline_mode_makes_the_two_calls_it_always_made(
 ) -> None:
     saved: list[Path] = []
 
-    doc = SimpleNamespace(pages={1: object(), 2: object()})
-    monkeypatch.setattr(docling_service, "convert", lambda path, s: SimpleNamespace(document=doc))
+    doc = DoclingDocument.model_validate_json(readable_docling_json(2))
+    converted = SimpleNamespace(document=doc, status=ConversionStatus.SUCCESS, errors=[])
+    monkeypatch.setattr(docling_service, "convert", lambda path, s: converted)
     monkeypatch.setattr(
         docling_service, "save_document", lambda doc, out: saved.append(out) or out / "docling.json"
     )

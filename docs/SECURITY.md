@@ -12,6 +12,7 @@ either a mechanism with a test that fails when it is removed, or is listed as a 
 | Uploaded documents | `/data/uploads/<uuid>.<ext>`, mode `0600`, owned by the unprivileged `app` user | **Never** |
 | Parsed structure (Docling JSON), extraction results, and the outputs of explain/review jobs | `/data/results/<uuid>/`, mode `0600` | **Never** |
 | Metadata (owner, size, SHA-256, status, timestamps), the audit trail, and the list of checks run (which check, over which document ids, with which options — never document content; removed with the documents) | SQLite `/data/app.db` (and its `-wal`/`-shm` files), mode `0600`; the directory is `0700` | **Never** |
+| Copies of the database taken before a schema upgrade, with file names, typed questions and options and document hashes blanked (§8) | `/data/db-backups/`, files `0600`, directory `0700`; removed `PA_DB_BACKUP_KEEP_DAYS` (default 3) days after they were made | **Never** |
 | LLM prompts | HTTP to the Ollama container over a Docker **internal** network (no route to the internet) | **Never** |
 | Logs | stdout of the container (JSON), content-free — see §5 | Only if the operator ships them |
 
@@ -38,7 +39,20 @@ Three independent layers, then a proof. Each has a test (§11).
   exactly what it does and does not cover.
 * No container publishes a port except the small relay (`proxy`, Caddy, plain HTTP, no state),
   bound to `127.0.0.1:8000`; the company's TLS reverse proxy sits in front of that. The relay's
-  second network (`edge`) has outbound NAT disabled, so it cannot reach the internet either.
+  second network (`edge`) has outbound NAT disabled, so its TCP connections to the outside time
+  out (measured: `nc 1.1.1.1:80` fails after the 4 s allowed).
+* The relay cannot resolve public names either. Docker's embedded resolver answers the names of
+  other containers itself and forwards the rest to the host's resolvers, and on `edge`, which is
+  routable, that worked: `nslookup example.com` answered from the relay while every TCP
+  connection timed out. A lookup can carry data out in the name it asks for, so the relay has
+  `dns: [127.0.0.1]` - an upstream where nothing listens. Measured on Docker 29.7: from the
+  relay, `app` still resolves and a public name ends in SERVFAIL in 0.1 s; from the app and from
+  Ollama, which sit on internal networks only, a public name gives `Temporary failure in name
+  resolution`, as before. `tests/unit/test_relay_policy.py` checks the setting. Docker refuses
+  `gateway_mode_ipv4=isolated` (no route at all) on a network that is not internal, and a
+  published port needs one, so the relay keeps a default route; what stops it is the missing NAT.
+* The relay's own logs hold no header and no query string (§5): Caddy would otherwise have
+  written the caller's `X-Api-Key` in clear into its error log.
 * Ollama runs with `OLLAMA_NO_CLOUD=1`: its hosted-model features (remote inference, web search)
   are off, so a `...-cloud` model cannot forward a prompt to ollama.com through the local server.
 * The app answers only to the host names in `PA_ALLOWED_HOSTS` (production refuses to start
@@ -81,7 +95,9 @@ Three independent layers, then a proof. Each has a test (§11).
 * Docling runs with remote services disabled and Tesseract as the only OCR engine (the other
   engines would try to download models). Model files must be pre-downloaded (production requires
   `PA_DOCLING_ARTIFACTS_PATH`) and are verified against `MANIFEST.sha256` at every production
-  start (`cli models-manifest write|verify`); a changed, missing or extra file stops the start.
+  start (`cli models-manifest write|verify`); a changed, missing or extra file stops the start, and
+  so does one the app user cannot read (named by its path under the models directory, with the
+  `chmod -R a+rX` that fixes it).
 
 **The model server is the only thing the application talks to.**
 
@@ -109,7 +125,9 @@ bill of quantities, reports, UI, delete, plus live-socket checks of the refusals
 Linux network namespace that has loopback and nothing else, where an attempt to leave the machine
 fails in the kernel whatever opened the socket. It runs in CI. On a deployed stack:
 `docker compose exec app python -c "import urllib.request; urllib.request.urlopen('https://example.com', timeout=3)"`
-must fail with a network error (measured: `Temporary failure in name resolution`).
+must fail with a network error (measured: `Temporary failure in name resolution`), and so
+must the relay's resolver: `docker compose exec proxy nslookup example.com` answers SERVFAIL
+(measured), not an address.
 
 ## 3. Untrusted input
 
@@ -129,6 +147,12 @@ Every upload is treated as hostile (`security/upload_guard.py`):
   those routes first and answers 401/403 itself. Measured over a real socket: an anonymous
   upload declaring 90 MB is answered 401 and the connection closed while its body is still
   unsent; a 5 MB JSON post to a route that takes 1 MiB is answered 413 the same way;
+* **where an upload's bytes are while it is handled.** Starlette keeps a file part in memory up
+  to 1 MiB and moves anything larger to an unnamed temporary file in `/tmp` - the container's
+  2 GB `noexec` tmpfs (§7), so those pages count against its memory - which the request closes
+  when it ends, accepted or refused (`tests/integration/test_hardening_web.py`). The route
+  then copies the part into memory (up to the file limit plus a 1 MiB chunk, and once more as
+  `bytes`), and only an accepted upload is written to the data directory;
 * OOXML archives: at most 10,000 entries, 512 MiB inflated in total and 256 MiB per entry, a
   200:1 compression ratio, `[Content_Types].xml` at most 1 MiB; duplicate and overlapping
   entries, path-traversal names, encrypted entries, any VBA part or macro content type, and any
@@ -158,6 +182,50 @@ characters, and a bill-of-quantities workbook is counted without being loaded an
 contract-number reader froze the whole process on a 62-character string).
 A page image is rendered with finite, clamped highlight boxes (at most 20) and at most 25 M
 pixels, and the application's own uses of pdfium are serialised by one lock.
+
+### Input that was not read
+
+Untrusted input also fails quietly: a scan with no OCR, a conversion that ran out of time, a
+database that would not commit. The rule is that **a document, or part of one, that was not read
+never yields a result that looks like "all clear", and the user always sees what was not read.**
+
+* Every parse is assessed once (`ingestion/read_quality.py`) and the answer is stored beside the
+  parse as `results/<id>/read_quality.json`: the file kind, pages in the file, pages with
+  readable text, characters of text, whether the conversion reported errors or only part of the
+  work, and whether OCR could run. Numbers and flags only; it goes with the document when the
+  document is deleted or expires. A document stored before this existed gets the same answer
+  worked out from its parse.
+* A document with **no readable text at all** - a PDF of page images on a host without
+  Tesseract, a workbook with no cell text - does not become `ready`. The parse job and the
+  document are `failed` with the code **`NO_TEXT`**, and with **`OCR_UNAVAILABLE`** or
+  **`IMAGE_ONLY`** when the cause is known; the API returns them as `error_code` and
+  `error_hint`, the pages say them in Georgian and English. Every check and extraction refuses a
+  document that is not ready with 409.
+* A document with **some pages unread** (the conversion ended partial, reported errors, or pages
+  carry no text - a picture among text pages, a timeout that cut the page table) stays `ready`
+  and is **partial**. The act check, the comparison and the extraction then carry
+  `read_quality` and a **`DOC.PARTIAL`** note first among what could not be checked: "N of M
+  pages had no readable text (a scan without OCR, or a page the reader could not process);
+  findings may be incomplete". The pages put it at the top; a comparison of two documents that
+  match in what could be read is not called identical.
+* An act checked against a contract that holds no text says so (`AOA.CONTRACT_UNREADABLE`); it
+  is not reported as "no contract supplied". A workbook cut at the reader's caps adds an
+  `AOA.TRUNCATED` note to the act report, as `CMP.TRUNCATED` does to a comparison.
+* A stored parse that is missing or damaged is **409 `DOCUMENT_UNREADABLE`** ("upload it again"),
+  and the document becomes `failed`; it is never a bare 500 with the document still `ready`.
+* A job that exists to get the model's answer (the act review, the comparison explanation) ends
+  `failed` with **`LLM_UNAVAILABLE`** when the model does not answer, and is asked again rather
+  than reused. An extraction keeps the rules' and labels' facts but is `done` with
+  `degraded: true`, a warning, and a banner on the page.
+* A database failure while a parse is settled fails the document as well as the job, and the
+  periodic sweep fails a document left `parsing` with no job to account for it for longer than
+  `PA_DOCLING_TIMEOUT_S` plus five minutes.
+* The audit row of a report or a read is committed **before** the body is returned. If it
+  cannot be stored the answer is **503 `AUDIT_UNAVAILABLE`** (bilingual, with `Retry-After`,
+  nothing of the report in it) and the log says the row was lost; no log line says it was
+  recorded.
+* A write-ahead-log checkpoint that fails or is blocked is logged (`checkpoint_failed`,
+  `checkpoint_busy`); it never stops the caller.
 
 ## 4. Authentication, authorisation, audit
 
@@ -193,14 +261,18 @@ pixels, and the application's own uses of pdfium are serialised by one lock.
 * Each user may hold at most `PA_MAX_ACTIVE_JOBS_PER_USER` (default 20) queued or running
   jobs, and at most `PA_MAX_CONCURRENT_REPORTS` (default 4) reports are computed at once: a fifth
   caller is answered 503 with `Retry-After` after `PA_REPORT_WAIT_S` seconds instead of queuing
-  - reports are recomputed on request, on a thread pool every other request shares.
+  - reports are recomputed on request, on a thread pool every other request shares. Writing a
+  report into the act's Word or PDF file, or into the later version of a comparison, is bounded
+  by the same slots; a request takes one for the check and, once it has given that back, one for
+  the file.
   `/api/v1/status` shows a caller only their own jobs.
 * Audit trail: an append-only table plus a JSON log line for upload (accepted/denied),
   extraction start, a result read (API and UI), a document's content shown as text or as a page
-  image, check results and exports, delete and retention delete, sign-in (ok/denied) and logout,
+  image (these are committed before the body is returned), check results and exports, delete and retention delete, sign-in (ok/denied) and logout,
   refused cross-origin requests, probes of other users' ids, key creation and revocation, the
-  retention sweep, the model-manifest write, outbound attempts the egress guard refused, and
-  shortening the trail itself. Fields: actor, action, outcome, document id, job id, client IP,
+  retention sweep, the model-manifest write, outbound attempts the egress guard refused, a schema
+  upgrade of the database (`db.migrate`: the versions and the migrations' names), and shortening
+  the trail itself. Fields: actor, action, outcome, document id, job id, client IP,
   timestamp, and a content-free detail. Read it with `python -m procurement_agent.cli audit`.
   The table is append-only **in the database**: triggers abort any `UPDATE` or `DELETE`, so a bug
   or an injection through the application cannot rewrite history; the one deliberate way to
@@ -232,6 +304,19 @@ This is kept at three levels:
   error, and asserts the marker is in no log line and no database column.
   A library's own message text cannot be inspected; the test is what notices when one leaks.
 
+The relay (Caddy) has logs of its own, and they are held to the same rule. Caddy redacts
+`Authorization` and `Cookie` by itself and writes every other header as it came, so an error it
+logged - an app that is down, a connection reset - put the caller's `X-Api-Key` on stdout in
+clear (measured: the key in one line per failed request). Both its loggers, the default one
+(the error log) and the site's access log, now pass through a `filter` encoder that drops every
+request and response header, and the whole query string (the report pages carry document and job
+ids, amounts and dates there). What stays is time, client address, method, host, path, status,
+size and duration. The container's health probes are not logged. Measured on the stack with a
+marker in `X-Api-Key`, `Cookie`, `Authorization`, `Proxy-Authorization`, a made-up
+`X-Auth-Token` and the query string, on requests the app answered, refused, and could not be
+reached for: no marker in the relay's, the app's or Ollama's log. `tests/unit/test_relay_policy.py`
+fails when a log loses the filter or the filter loses a field.
+
 ## 6. The LLM is a tool, not an agent
 
 * The model receives document text **only as data**, inside `<document>` delimiters, with a
@@ -255,7 +340,9 @@ memory, PID and (`PA_APP_CPUS`) CPU limits, `ulimits.core: 0`, an init process. 
 `nobody` with the same restrictions (it keeps only `NET_BIND_SERVICE`, which its binary's file
 capability needs to execute at all). The process itself sets `umask(0o077)` and `RLIMIT_CORE=0`
 (a crash in a native parser must not leave a core file of document text), creates `/data` as
-`0700`, and opens SQLite with `secure_delete`, `trusted_schema=OFF` and `cell_size_check`.
+`0700`, and opens SQLite with `secure_delete`, `trusted_schema=OFF` and `cell_size_check`. The
+database's schema version is checked at start: one written by a newer release is refused, not
+opened (`migrations.py`, PRODUCTION_READINESS.md 5.6).
 One worker thread processes jobs, so a malicious document cannot fan out CPU/memory consumption.
 Docling conversion has a timeout.
 
@@ -316,10 +403,16 @@ thread included - can run to notice, and Docker restarts on exit, not on a faile
 The compose command is therefore `scripts/supervise.py`: a small standard-library process that
 probes `/ready` over loopback every 15 s, and after three consecutive failures (once the
 180 s model-loading start-up is over) sends SIGTERM, then SIGKILL after 50 s, and starts the
-server again; after five restarts in ten minutes it exits non-zero rather than loop. A restart
-fails the job that was running and loses nothing else.
+server again; after five restarts in ten minutes it exits non-zero, and Docker's restart policy
+then starts the container again, as after any exit (the log shows `giving_up`). A restart fails
+the job that was running and loses nothing else. Every wait of the supervisor is on an event that
+the SIGTERM handler sets, so `docker compose stop` reaches the server at once (measured: 0.7 s
+on an idle app); a probe to a server that does not answer is abandoned when the stop arrives.
 `tests/integration/test_supervisor_real_app.py` freezes the real server (`SIGSTOP`, which is what
-a wedged interpreter looks like from outside) and checks it is killed and comes back.
+a wedged interpreter looks like from outside) and checks it is killed and comes back; on the
+three-container stack the same drill measured one restart, 107.6 s after the stop, the relay
+answering again at 124.2 s. A restart is Docker's only on an exit by itself: a container stopped
+by hand (`docker kill`, `docker compose stop`) stays stopped until `docker compose start` or `up`.
 The supervisor cannot tell a hang from any other reason `/ready` does not answer 200: a
 `database` or `worker_stalled` answer restarts the server too, and so would a thread pool held
 for a minute by other requests (`/ready` runs on it), which also fails the running job. The
@@ -341,13 +434,37 @@ and on `python -m procurement_agent.cli sweep`. Users can delete immediately fro
   forgotten;
 * removes what is *derived* from the document: explain/review outputs that live in another
   document's directory and quote it, the record of the checks it took part in, the question a
-  user typed (a job's parameters), and the in-process caches that hold document text;
-* overwrites a file and syncs it before unlinking it, and SQLite zeroes deleted cells
-  (`secure_delete`) and the write-ahead log is truncated after every sweep.
+  user typed (a job's parameters), and the in-process caches that hold document text (the
+  acceptance-act check's two text-keyed caches and the words the spelling dictionary was asked
+  about; the dictionary itself stays loaded);
+* overwrites a file and syncs it before unlinking it - every file of the document, and every
+  document-derived file the application drops under the data directory (the output of a job
+  that lost the race with a deletion, an upload whose database commit failed, a half-written
+  parse) - and SQLite zeroes deleted cells (`secure_delete`) and the write-ahead log is
+  truncated after every sweep. The annotated and merged files built for a download live in
+  `/tmp` (a tmpfs, §7) and are only unlinked.
 
 The metadata row is kept (name replaced by `[deleted]`) so the audit trail stays consistent.
-The overwrite is best-effort: on a journaling or copy-on-write filesystem or an SSD it does not
-reach every copy of the data, which is why the volume belongs on an encrypted disk (§10).
+**Copies of the database follow the same promise.** Before a schema upgrade changes a database that
+holds rows, the release copies it into `/data/db-backups/` (`0600`, directory `0700`). The copy is read
+into memory and blanked there, and only the blanked database is written, so the text never reaches
+the directory - a process killed half-way leaves nothing that retention would have removed. Blanked:
+`documents.display_name` (the file name; set to `[scrubbed]`), `documents.sha256` (a hash of the
+document), `documents.error`, `jobs.params` (the question and the options a person typed),
+`jobs.message` and `check_runs.params` (the options of a check). A test fails until every column of
+every table is either on that list or on the test's own list of columns that are kept, so a column
+added later gets a decision. Kept, because a copy is useless for going back without them: key and
+session-token hashes, account names, ids, statuses, sizes and times, the audit trail.
+
+The lifetime of what is kept is bounded by age, like documents: the retention sweep (every 10 minutes,
+and `cli sweep`) overwrites and removes a copy taken more than `PA_DB_BACKUP_KEEP_DAYS` days ago
+(default 3; 0 removes it at the first sweep after the upgrade, at the cost of having nothing to go
+back to but the operator's own backup), and at most the three newest are kept. Worst case, then: a
+file name, a typed question, an option or a document hash is in a copy for **0 days**; an audit row
+that `audit-prune` has removed, or a key that has been revoked, is in a copy for at most
+`PA_DB_BACKUP_KEEP_DAYS` days plus a sweep interval (and, while the stack is stopped, until its first
+sweep after it starts). The same sweep removes a half-written copy a crash left, once it is an
+hour old. A copy is not a backup (PRODUCTION_READINESS.md 5.5).
 
 ## 9. Supply chain
 
@@ -362,6 +479,30 @@ reach every copy of the data, which is why the volume belongs on an encrypted di
   `torch` and `torchvision` come from the PyTorch CPU index and OpenCV is the headless build, so
   the lock holds no CUDA wheels and no GUI libraries - 19 fewer packages that would be unpacked
   into the image and could not be used on a server without a GPU.
+* What ships is listed in `docs/sbom.cdx.json`, a CycloneDX 1.5 SBOM of the production closure of
+  `uv.lock` (for linux/x86_64: no dev group, no extras; each package with its purl, the
+  SHA-256 of every file the lock records, its licence and its place in the dependency graph).
+  `scripts/sbom.py` writes it without timestamps or random ids, so two runs give the same bytes;
+  `tests/unit/test_sbom.py` fails when it no longer matches `uv.lock`, and the fix is
+  `uv run python scripts/sbom.py --out docs/sbom.cdx.json`. It lists what the lock pins; it does
+  not see the Debian packages in the image (Tesseract and its libraries) or the native libraries
+  bundled inside wheels (OpenSSL 1.1.1k inside `opencv-python-headless`, for one), which
+  `pip-audit` cannot see either.
+* The licences of those packages, of the components outside Python (base images, Tesseract, the
+  spelling dictionary, Caddy, Ollama) and of the models are in `docs/THIRD_PARTY.md`, written by
+  `scripts/third_party.py` from the lock and the installed metadata. It lists what it cannot
+  classify as unknown instead of guessing, names the copyleft libraries bundled inside wheels
+  (GEOS in `shapely`, FFmpeg in `opencv-python-headless`, `libquadmath` and `libgfortran` in
+  `numpy` and `scipy`, for example) and says what each licence asks of someone shipping the
+  product. `tests/unit/test_third_party.py` fails when it no longer lists exactly the production
+  packages of `uv.lock`, and when a copyleft or unknown licence appears that nobody has read;
+  the fix is `uv run python scripts/third_party.py --out docs/THIRD_PARTY.md` plus, for a new
+  licence, a reviewed entry in the script.
+* A release leaves the repository as a bundle (`scripts/make_release_bundle.sh`,
+  docs/PRODUCTION_READINESS.md 5.8): built from a clean commit, from a fixed list of files, with
+  `SHA256SUMS` over every file and a `RELEASE.txt` that records the commit and the hashes of
+  `uv.lock` and of the SBOM. The checksums show the bundle arrived as built; they do not show who
+  built it, so hand over the hash of `RELEASE.txt` or of the bundle by another route.
 * Documents cannot reach the repository: `scripts/check_no_documents.sh` blocks any document,
   archive, database, key, `.env` or client directory (a link to one included, which is how a git
   worktree holds them) outside `tests/fixtures/` - as a CI job (`repo-guard`, which runs after a
@@ -461,14 +602,19 @@ What this does not do, so nobody has to discover it:
 * **The input limits are a bound, not a proof.** They stop the long-run shapes that made
   patterns quadratic (and the fixed patterns were exponential); the regular-expression scan
   (`tests/regex_budget.py`) searches for super-linear patterns with strings built from each
-  pattern's own pieces, and finds none after the limits. A search that finds nothing has not
-  covered every input.
+  pattern's own pieces, and finds none after the limits. A string that looks slow is timed
+  again (three times in all) and judged on its shortest times, so a loaded machine does not
+  report a linear pattern; a quadratic one is slow on every run. A search that finds nothing has
+  not covered every input.
 * **No application-level encryption at rest**: files, the database and the audit trail are
   plaintext to anyone with the disk; rely on disk encryption (LUKS), and keep `/data` and backups
   on it.
 * **Secure deletion is best-effort** (§8): journaling, copy-on-write, snapshots and SSD wear
   levelling can keep old copies; encryption at rest is the control.
 * **The audit trail is protected against the application, not the disk's owner** (§4).
+* **Pre-upgrade database copies stay on the data volume** for `PA_DB_BACKUP_KEEP_DAYS` days. They
+  hold no file name, typed text or document hash (§8), but they do hold key hashes, ids and the
+  audit trail as they were, and a copy restored later brings a revoked key back.
 * **AI coding tools can read whatever they are allowed to.** On a developer machine, an
   assistant that reads client files sends them to its provider. On the machine this was
   developed on, `.claude/settings.json` deny rules and a `.cursorignore` name the client's
@@ -480,8 +626,10 @@ What this does not do, so nobody has to discover it:
   one uvicorn worker by design; running several would multiply the effective limit.
 * GET requests write bookkeeping rows (check history); `SameSite=Strict` is what keeps another
   site from causing them.
-* OCR (Tesseract) runs only inside the container image; scanned PDFs processed on a host
-  without Tesseract yield no text and the API reports that in the document status.
+* OCR (Tesseract) runs only inside the container image. On a host without it a PDF of page
+  images yields no text, and the document is `failed` with `NO_TEXT` and the hint
+  `OCR_UNAVAILABLE`; a PDF with some text pages and some pictures is `ready` but partial
+  (`DOC.PARTIAL`, "Input that was not read" above).
 * Git history: see `PRODUCTION_READINESS.md` §7.
 
 ## 11. Verification and measured results
@@ -497,7 +645,7 @@ at the end; it is never counted as a pass.
 | `repo_*`, `machine_*` | no document/database/key/`.env` in git; no credential-shaped string in any commit or the tree (a small stand-in for gitleaks, which CI runs); the client-identifier canary over the tree; hooks installed; client directories not readable by group/others; the AI-tool deny rules |
 | `egress_policy` | the single outbound-capable code path is pinned; the guard, URL, model and Host policies |
 | `offline_kernel` | the whole product flow with only loopback up (`unshare --net`) |
-| `security_suite` | authz/IDOR/CSRF/header/cookie matrix over every route, hostile ids and hostile request bodies (19 kinds, on every route that reads one: always a 4xx, never a 500); pre-auth; hostile uploads; retention; hardening; the XML, DOCX, manifest, text-limit and capacity tests |
+| `security_suite` | authz/IDOR/CSRF/header/cookie matrix over every route, hostile ids and hostile request bodies (19 kinds, on every route that reads one: always a 4xx, never a 500); pre-auth; hostile uploads; retention; schema upgrades (the copies' modes, the refusal of a newer database); hardening; the XML, DOCX, manifest, text-limit and capacity tests |
 | `log_canary` | a marker planted in every input reaches 0 log lines and 0 database columns |
 | `deploy_policy` | compose, Dockerfile, build context and supervisor; the supervisor restarts a hung real server; the parser container has no network, no `/data` or app data, no `env_file`, one shared volume, and the limits of the app |
 | `parser_sandbox` | (in `security_suite`) the wire format and its caps, the service, the client and the worker on a fake converter; the kill switch in a real process; the egress guard's one Unix path |

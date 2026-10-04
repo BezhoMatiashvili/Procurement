@@ -17,7 +17,11 @@ matched is reached no other way (security review: a footer pattern took minutes 
 followed by blanks). Each string is run
 at two sizes under a time budget (a signal timer interrupts a runaway match, which CPython's engine
 honours); a pattern is reported when it blows the budget outright, or when doubling the input more
-than triples the time.
+than triples the time. A busy machine only ever makes a timing longer, so before a string is
+reported both sizes are timed again, up to three times in all, and the shortest time of each size
+is the one that counts: a linear pattern read at 0.012 s and then 0.043 s while the machine was
+loaded (it doubles from 1.5k to 24k characters when it is quiet) is not a finding, and a truly
+quadratic one is slow on every run.
 
 What this does not prove: it is a search, not a proof. A pattern that passes has resisted these
 families, not every input. ``tests/unit/test_regex_budget.py`` runs it over the whole package, and
@@ -29,6 +33,7 @@ from __future__ import annotations
 import contextlib
 import importlib
 import itertools
+import math
 import pkgutil
 import re
 import signal
@@ -49,6 +54,8 @@ _FLOOR_S = 0.004
 #: Doubling the input may cost at most this much more (a linear pattern costs about 2x).
 _RATIO = 3.3
 SMALL, LARGE = 1500, 3000
+#: A suspicious string is timed this many times in all (both sizes each time) before it is reported.
+_ATTEMPTS = 3
 
 _GENERIC = [
     " ",
@@ -343,6 +350,61 @@ def _time(
     return time.perf_counter() - started
 
 
+def _timed(pattern: re.Pattern[str], text: str, budget_s: float, mode: str) -> float:
+    """``_time`` with an interrupted run as infinity, so that the shortest of several is a min."""
+    seconds = _time(pattern, text, budget_s, mode)
+    return math.inf if seconds is None else seconds
+
+
+def _verdict(small_s: float, large_s: float, budget_s: float) -> str | None:
+    """What a pair of timings shows (``inf`` is an interrupted run): ``"over budget"``,
+    ``"superlinear"`` or None."""
+    if math.isinf(small_s) or large_s > budget_s:
+        return "over budget"
+    if large_s > _FLOOR_S and large_s / max(small_s, 1e-6) > _RATIO:
+        return "superlinear"
+    return None
+
+
+def _finding_of(
+    where: str,
+    pattern: re.Pattern[str],
+    tag: str,
+    text_of: Callable[[int], str],
+    sizes: tuple[int, int],
+    budget_s: float,
+    mode: str,
+) -> Finding | None:
+    """The finding one string shows, if it still shows it after being timed again.
+
+    The first timing of each size is the only one for a string that passes. One that does not is
+    timed again - both sizes, up to ``_ATTEMPTS`` times in all - and the shortest time of each size
+    is judged: load on the machine lengthens a run, never shortens it, so a verdict that the
+    shortest times still bear out is the pattern's, not the machine's. ``text_of(n)`` builds the
+    string of about ``n`` characters; the larger one only when the smaller one is not quick."""
+    small_text = text_of(sizes[0])
+    large_text: str | None = None
+    best_small = best_large = math.inf
+    kind: str | None = None
+    for attempt in range(_ATTEMPTS):
+        small_s = _timed(pattern, small_text, budget_s, mode)
+        if attempt == 0 and small_s < _FLOOR_S / 4:
+            return None  # nowhere near: not worth a second run
+        best_small = min(best_small, small_s)
+        if not math.isinf(small_s):  # an interrupted small run says the large one is no better
+            large_text = text_of(sizes[1]) if large_text is None else large_text
+            best_large = min(best_large, _timed(pattern, large_text, budget_s, mode))
+        kind = _verdict(best_small, best_large, budget_s)
+        if kind is None:
+            return None
+    if kind is None:  # pragma: no cover - the loop ran and returned on a clean verdict
+        return None
+    if math.isinf(best_small):
+        return Finding(where, pattern.pattern, tag, kind, budget_s, None)
+    large_s = None if math.isinf(best_large) else best_large
+    return Finding(where, pattern.pattern, tag, kind, best_small, large_s)
+
+
 def check_pattern(
     where: str,
     pattern: re.Pattern[str],
@@ -368,17 +430,17 @@ def check_pattern(
             if trials is not None:
                 trials[0] += 1
             tag = label if mode == "search" else f"{mode}: {label}"
-            first = _time(pattern, admit(make(small)), budget_s, mode)
-            if first is None:
-                findings.append(Finding(where, pattern.pattern, tag, "over budget", budget_s, None))
-                continue
-            if first < _FLOOR_S / 4:
-                continue  # nowhere near: not worth a second run
-            second = _time(pattern, admit(make(large)), budget_s, mode)
-            if second is None or second > budget_s:
-                findings.append(Finding(where, pattern.pattern, tag, "over budget", first, second))
-            elif second > _FLOOR_S and second / max(first, 1e-6) > _RATIO:
-                findings.append(Finding(where, pattern.pattern, tag, "superlinear", first, second))
+            found = _finding_of(
+                where,
+                pattern,
+                tag,
+                lambda n, make=make: admit(make(n)),
+                (small, large),
+                budget_s,
+                mode,
+            )
+            if found is not None:
+                findings.append(found)
     findings.sort(key=lambda f: -(f.large_s or 1e9))
     return findings[:keep]
 

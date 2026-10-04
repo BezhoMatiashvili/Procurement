@@ -154,6 +154,12 @@ def test_the_set_of_classes_that_keep_their_messages_is_this_one() -> None:
         "procurement_agent.ingestion.render.PageTooLargeError",
         "procurement_agent.security.upload_guard.UploadRejectedError",
         "procurement_agent.report.docx_annotate.UnsupportedDocumentError",
+        "procurement_agent.migrations.MigrationError",
+        # a code and a hint from our own constants; a stored parse that will not load
+        "procurement_agent.ingestion.read_quality.NoTextError",
+        "procurement_agent.ingestion.read_quality.StoredParseError",
+        # one fixed sentence: the record of a read could not be stored (security/audit.py)
+        "procurement_agent.security.audit.AuditUnavailableError",
     }
 
 
@@ -186,6 +192,14 @@ SAFE_INTERPOLATIONS = {
     "max_pages",  # a configured limit
     "n",  # a page count
     "other",  # "docx" or "xlsx"
+    "found",  # a schema version read from the database header: an integer
+    "latest",  # the newest schema version this release knows: an integer
+    "problem",  # one of OUR tables or columns the file lacks, or a count of the extra ones it has
+    "version",  # a registered migration's number
+    "step",  # a registered migration's name: an identifier ``check_registry`` has checked
+    "error_kind",  # the class name of the exception a migration or a backup raised
+    "before",  # the schema version the database stood at: an integer
+    "count",  # a number of rows
 }
 
 
@@ -208,6 +222,10 @@ def test_the_messages_of_the_marked_classes_only_interpolate_what_is_known_to_be
         "PageTooLargeError",
         "UploadRejectedError",
         "UnsupportedDocumentError",
+        "MigrationError",
+        "NoTextError",
+        "StoredParseError",
+        "AuditUnavailableError",
     }
     interpolated: dict[str, set[str]] = defaultdict(set)
     for path in sorted(src.rglob("*.py")):

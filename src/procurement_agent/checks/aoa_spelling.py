@@ -31,7 +31,9 @@ from __future__ import annotations
 
 import bisect
 import re
+import threading
 import warnings
+import weakref
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
@@ -180,6 +182,8 @@ class Speller:
         )
         self._known: dict[str, bool] = {}
         self._near: dict[str, tuple[str, ...]] = {}
+        with _LIVE_LOCK:
+            _LIVE.add(self)
 
     @classmethod
     def from_directory(cls, directory: Path) -> Speller:
@@ -202,6 +206,14 @@ class Speller:
             hit = tuple(c for c in dict.fromkeys(self._edits(word)) if self._suggestable(c))
             _remember(self._near, word, hit)
         return hit
+
+    def forget_words(self) -> int:
+        """Drop the memos of the words that were asked about, which are a document's words;
+        the dictionary stays loaded. Returns how many entries went."""
+        dropped = len(self._known) + len(self._near)
+        self._known.clear()
+        self._near.clear()
+        return dropped
 
     def agrees_with_spylls(self, candidates: Iterable[str]) -> list[str]:
         """The strings on which this fast path and plain spylls disagree, as a word or as a
@@ -246,6 +258,20 @@ class Speller:
 
     def _could_be(self, word: str) -> bool:
         return not self._prefilter or any(s in self._dic.index for s in self._stems.of(word))
+
+
+#: Every speller alive, held weakly. A speller outlives the document it was asked about (it is
+#: loaded once per process), and its memos hold that document's words, so a deletion has to
+#: reach them: ``forget_words``, called by ``security.caches.forget_cached_text``.
+_LIVE: weakref.WeakSet[Speller] = weakref.WeakSet()
+_LIVE_LOCK = threading.Lock()
+
+
+def forget_words() -> int:
+    """Empty the word memos of every speller in the process; 0 when none was ever loaded."""
+    with _LIVE_LOCK:
+        spellers = list(_LIVE)
+    return sum(speller.forget_words() for speller in spellers)
 
 
 def _remember(cache: dict[str, Any], key: str, value: Any) -> None:

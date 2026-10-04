@@ -57,6 +57,47 @@ STRINGS: dict[str, tuple[str, str]] = {
         "No model is connected on this server, so the review cannot run.",
         "ამ სერვერზე მოდელი არ არის დაკავშირებული, ამიტომ გადამოწმება ვერ შესრულდება.",
     ),
+    # what a document that was not (fully) read says, and what a refusal because of it says; the
+    # codes are the API's (docs/SECURITY.md, "Degraded input")
+    "error.NO_TEXT": (
+        "No text could be read from this file, so no check can be run on it.",
+        "ფაილიდან ტექსტი ვერ წაიკითხა, ამიტომ მასზე შემოწმება ვერ ჩატარდება.",
+    ),
+    "error.hint.OCR_UNAVAILABLE": (
+        "It looks like a scan, and text recognition (OCR) is not available on this server.",
+        "როგორც ჩანს, ეს სკანია, ხოლო ამ სერვერზე ტექსტის ამოცნობა (OCR) ხელმისაწვდომი არ არის.",
+    ),
+    "error.hint.IMAGE_ONLY": (
+        "The pages are pictures, and text recognition found no text in them.",
+        "გვერდები გამოსახულებებია და ტექსტის ამოცნობამ მათში ტექსტი ვერ იპოვა.",
+    ),
+    "error.DOCUMENT_UNREADABLE": (
+        "What was read from this document is missing or damaged; upload it again.",
+        "ამ დოკუმენტიდან წაკითხული მასალა დაკარგულია ან დაზიანებულია; ატვირთეთ თავიდან.",
+    ),
+    "error.AUDIT_UNAVAILABLE": (
+        "The record that this was read could not be stored, so it is not shown. Try again in a "
+        "moment.",
+        "ჩანაწერი იმის შესახებ, რომ ეს წაიკითხეს, ვერ შეინახა, ამიტომ ის არ ნაჩვენებია. "
+        "სცადეთ ცოტა ხანში.",
+    ),
+    "readq.title": ("Part of a document was not read", "დოკუმენტის ნაწილი არ წაკითხულა"),
+    "aoa.verdict.partial": (
+        "No findings in what could be read",
+        "წაკითხულ ნაწილში შენიშვნა არ არის",
+    ),
+    "aoa.verdict.partial.lead": (
+        "Part of a document could not be read (see above); the unread part has not been checked.",
+        "დოკუმენტის ნაწილი ვერ წაიკითხა (იხ. ზემოთ), ამიტომ წაუკითხავი ნაწილი არ შემოწმებულა.",
+    ),
+    "compare.unconfirmed": (
+        "No differences in what could be read; this cannot confirm the two documents are the same.",
+        "წაკითხულ ნაწილში სხვაობა არ არის; ეს ვერ ადასტურებს, რომ ორივე დოკუმენტი ერთნაირია.",
+    ),
+    "compare.unconfirmed.lead": (
+        "Part of a document could not be read (see above), and the unread part may differ.",
+        "დოკუმენტის ნაწილი ვერ წაიკითხა (იხ. ზემოთ) და წაუკითხავ ნაწილში სხვაობა შეიძლება იყოს.",
+    ),
     # --- picker ---
     "picker.title": ("What do you want to do?", "რისი გაკეთება გსურთ?"),
     "picker.lead": (
@@ -700,6 +741,18 @@ STRINGS: dict[str, tuple[str, str]] = {
         "The model review did not finish; the notes above are the rules' alone.",
         "მოდელით გადამოწმება ვერ დასრულდა; ზემოთ მხოლოდ წესების შენიშვნებია.",
     ),
+    "aoa.review.again": ("Ask the model again", "მოდელისთვის თავიდან კითხვა"),
+    "extract.degraded": (
+        "The model was unavailable, so this result holds only what the rules and labels found. "
+        "Run the extraction again when the model is back.",
+        "მოდელი მიუწვდომელი იყო, ამიტომ შედეგში მხოლოდ ის არის, რაც წესებმა და ველების "
+        "წარწერებმა იპოვა. მოდელის დაბრუნების შემდეგ ამოღება თავიდან გაუშვით.",
+    ),
+    "compare.explain.failed": (
+        "The model did not answer, so the changes above are the rules' alone. You can ask again.",
+        "მოდელმა არ უპასუხა, ამიტომ ზემოთ მხოლოდ წესებით ნაპოვნი ცვლილებებია. შეგიძლიათ "
+        "თავიდან ჰკითხოთ.",
+    ),
     "docs.lead": (
         "Everything you have uploaded. Open a document to see what was read from it, the checks "
         "it took part in, or to extract fields from it.",
@@ -762,6 +815,17 @@ STRINGS: dict[str, tuple[str, str]] = {
         "(OCR). Check figures and codes against the page.",
         "ამ PDF-ს საკუთარი ტექსტი არ აქვს; ქვემოთ მოცემული ტექსტი გვერდების გამოსახულებიდან "
         "არის ამოცნობილი (OCR). ციფრები და კოდები გადაამოწმეთ გვერდზე.",
+    ),
+    "reading.scanned.no_ocr": (
+        "This PDF has no text of its own, and OCR was not available when it was read: only the "
+        "text the file itself carries is shown, and the pages without any were not read.",
+        "ამ PDF-ს საკუთარი ტექსტი არ აქვს, წაკითხვისას კი ტექსტის ამოცნობა (OCR) ხელმისაწვდომი "
+        "არ იყო: ნაჩვენებია მხოლოდ ტექსტი, რომელიც თავად ფაილშია; ტექსტის გარეშე გვერდები არ "
+        "წაკითხულა.",
+    ),
+    "reading.scanned.unknown": (
+        "This PDF has no text of its own. Check figures and codes against the page.",
+        "ამ PDF-ს საკუთარი ტექსტი არ აქვს. ციფრები და კოდები გადაამოწმეთ გვერდზე.",
     ),
     "reading.truncated": (
         "Not read (size limit): {note}",

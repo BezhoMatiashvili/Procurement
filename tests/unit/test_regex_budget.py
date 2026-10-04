@@ -9,6 +9,8 @@ patterns that really did freeze this server, and must stay quiet about linear on
 from __future__ import annotations
 
 import re
+from collections import Counter
+from collections.abc import Sequence
 
 import pytest
 
@@ -89,6 +91,76 @@ def test_a_runaway_match_is_interrupted_not_waited_for() -> None:
     started = time.perf_counter()
     assert rb._time(re.compile(r"(a+)+b"), "a" * 60, 0.2) is None
     assert time.perf_counter() - started < 2.0
+
+
+# --- a busy machine is not a slow pattern ----------------------------------------------------
+
+
+class _Readings:
+    """Stands in for ``rb._time``: each string gets the readings given for its size, one per call,
+    and the last one for every call after. ``None`` is a run that was interrupted at the budget."""
+
+    def __init__(self, small: Sequence[float | None], large: Sequence[float | None]) -> None:
+        self.small, self.large = small, large
+        self.calls: Counter[str] = Counter()
+
+    def __call__(
+        self, pattern: re.Pattern[str], text: str, budget_s: float, mode: str = "search"
+    ) -> float | None:
+        readings = self.large if len(text) > 2250 else self.small
+        n = self.calls[text]
+        self.calls[text] += 1
+        return readings[min(n, len(readings) - 1)]
+
+    def most_timings_of_one_string(self) -> int:
+        return max(self.calls.values())
+
+
+def _check(monkeypatch: pytest.MonkeyPatch, readings: _Readings) -> list[rb.Finding]:
+    monkeypatch.setattr(rb, "_time", readings)
+    return rb.check_pattern("a busy machine", re.compile(r"\d+"), budget_s=0.25)
+
+
+@pytest.mark.parametrize(
+    ("small", "large"),
+    [
+        ([0.012], [0.043, 0.026, 0.025]),  # the audit run: 0.012 s -> 0.043 s, linear when quiet
+        ([0.012], [0.043, 0.043, 0.025]),  # two busy readings in a row, the third quiet
+        ([0.012], [None, 0.030, 0.025]),  # interrupted at the budget once, then well inside it
+        ([None, 0.012], [0.030]),  # the small size interrupted once
+        ([0.020, 0.012], [0.080, 0.024]),  # both sizes busy at first, the large one more
+    ],
+)
+def test_a_reading_inflated_by_a_busy_machine_is_not_a_finding(
+    monkeypatch: pytest.MonkeyPatch, small: list[float | None], large: list[float | None]
+) -> None:
+    assert _check(monkeypatch, _Readings(small, large)) == []
+
+
+def test_a_slowdown_that_every_timing_shows_is_a_finding_with_the_best_timings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    readings = _Readings([0.012, 0.015, 0.013], [0.090, 0.070, 0.080])
+    findings = _check(monkeypatch, readings)
+    assert findings
+    assert {f.kind for f in findings} == {"superlinear"}
+    assert (findings[0].small_s, findings[0].large_s) == (0.012, 0.070)
+    assert readings.most_timings_of_one_string() == 3, "re-timed up to three times, no more"
+
+
+def test_a_pattern_interrupted_every_time_is_over_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    readings = _Readings([0.012], [None])
+    findings = _check(monkeypatch, readings)
+    assert findings
+    assert {f.kind for f in findings} == {"over budget"}
+    assert findings[0].large_s is None
+    assert readings.most_timings_of_one_string() == 3
+
+
+def test_a_pattern_that_is_fast_is_timed_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    readings = _Readings([0.0001], [0.0002])
+    assert _check(monkeypatch, readings) == []
+    assert readings.most_timings_of_one_string() == 1
 
 
 # --- how it works ------------------------------------------------------------------------------

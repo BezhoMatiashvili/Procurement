@@ -17,7 +17,6 @@ its file after the row is flushed and before the commit, and must not lose it to
 
 from __future__ import annotations
 
-import os
 import re
 import shutil
 import time
@@ -32,15 +31,23 @@ from procurement_agent.extraction.pipeline import result_dir, upload_path
 from procurement_agent.models import Document, DocumentStatus, Job, JobStatus
 from procurement_agent.security.audit import log
 from procurement_agent.security.safe_errors import safe_exc
+from procurement_agent.security.secure_delete import overwrite, remove_file
 
-__all__ = ["GRACE_S", "Reconciled", "delete_document_files", "overwrite", "reconcile"]
+__all__ = [
+    "GRACE_S",
+    "Reconciled",
+    "delete_document_files",
+    "overwrite",
+    "reconcile",
+    "remove_file",
+]
 
 #: A file whose document is not in the database is an orphan only after this long.
 GRACE_S = 15 * 60
 #: Half-written parse output (``docling_service.save_document``) older than this is debris.
 STALE_TMP_S = 60 * 60
-#: Overwritten in blocks this size, so a large file is not read into memory.
-_BLOCK = 1024 * 1024
+#: What a crash mid-write leaves in a document's results: the parse and its read-quality sidecar.
+_DEBRIS = ("*/.docling.*.json.tmp", "*/.read_quality.*.json.tmp")
 #: What this application names its files: a document id, with the kind for an upload. Anything
 #: else in the data directory is not ours to remove.
 _UPLOAD_NAME = re.compile(r"([0-9a-f]{32})\.(?:pdf|docx|xlsx)")
@@ -50,30 +57,6 @@ _DERIVED = {"compare_explain": "left", "aoa_review": "contract"}
 #: Only a job that has finished may be scrubbed: a queued or running one still needs its parameters
 #: to notice that its document is gone, and cancels itself (``Worker._compare_explain``).
 _FINISHED = (JobStatus.done, JobStatus.failed, JobStatus.cancelled)
-
-
-def overwrite(path: Path) -> None:
-    """Zero a file's blocks, flush them to the device, before it is unlinked.
-
-    Best effort, and said so: on a copy-on-write filesystem or an SSD the old blocks may survive,
-    which is why the deployment's protection is an encrypted disk (docs/SECURITY.md). It costs a
-    few milliseconds and removes the plain read of an undeleted-file tool on an ordinary one.
-    """
-    try:
-        remaining = path.stat().st_size
-        with path.open("r+b") as fh:
-            while remaining > 0:
-                fh.write(b"\0" * min(remaining, _BLOCK))
-                remaining -= _BLOCK
-            fh.flush()
-            os.fsync(fh.fileno())
-    except OSError:
-        pass
-
-
-def _remove_file(path: Path) -> None:
-    overwrite(path)
-    path.unlink(missing_ok=True)
 
 
 def _remove_tree(directory: Path) -> None:
@@ -88,7 +71,7 @@ def delete_document_files(settings: Settings, doc_id: str, kind: str) -> bool:
     quote it. Keeps going past a failure; returns True only when nothing is left."""
     complete = True
     for action in (
-        lambda: _remove_file(upload_path(settings, doc_id, kind)),
+        lambda: remove_file(upload_path(settings, doc_id, kind)),
         lambda: (
             _remove_tree(result_dir(settings, doc_id))
             if result_dir(settings, doc_id).exists()
@@ -115,7 +98,7 @@ def forget_derived_outputs(settings: Settings, doc_id: str) -> int:
                 continue
             output = result_dir(settings, job.document_id) / "jobs" / f"{job.id}.json"
             if output.exists():
-                _remove_file(output)
+                remove_file(output)
                 removed += 1
             job.params = {}
     return removed
@@ -182,7 +165,7 @@ def reconcile(
         for path in settings.upload_dir.iterdir():
             named = _UPLOAD_NAME.fullmatch(path.name)
             if named and path.is_file() and not path.is_symlink() and orphan(named.group(1), path):
-                found.files += attempt(path, _remove_file)
+                found.files += attempt(path, remove_file)
     if settings.results_dir.is_dir():
         for path in settings.results_dir.iterdir():
             if (
@@ -197,11 +180,12 @@ def reconcile(
             continue
         output = result_dir(settings, document_id) / "jobs" / f"{job_id}.json"
         if output.exists():
-            found.derived += attempt(output, _remove_file)
+            found.derived += attempt(output, remove_file)
     if settings.results_dir.is_dir():
-        for tmp in settings.results_dir.glob("*/.docling.*.json.tmp"):
-            if _age(tmp, now) > STALE_TMP_S:
-                found.debris += attempt(tmp, _remove_file)
+        for pattern in _DEBRIS:
+            for tmp in settings.results_dir.glob(pattern):
+                if _age(tmp, now) > STALE_TMP_S:
+                    found.debris += attempt(tmp, remove_file)
     if found.total or found.failed:
         log.info(
             "retention_reconciled",
