@@ -514,10 +514,11 @@ def test_install_md_says_there_is_no_image_when_there_is_none(install: str) -> N
     assert "--no-image" in install
 
 
-def test_install_md_pins_the_compose_project_name_and_carries_state_through_an_upgrade(
+def test_install_md_says_the_project_name_is_fixed_and_carries_state_through_an_upgrade(
     install: str,
 ) -> None:
-    assert "COMPOSE_PROJECT_NAME=procurement-agent" in install
+    assert "name: procurement-agent" in install
+    assert "COMPOSE_PROJECT_NAME=procurement-agent" not in install, "the compose file fixes it"
     upgrade = install.split("## 10. Upgrade")[1]
     assert ".env" in upgrade and "models" in upgrade
     assert "docker compose down" in upgrade

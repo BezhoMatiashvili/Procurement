@@ -294,7 +294,9 @@ def test_no_service_names_a_resolver_outside_this_machine(doc: dict[str, Any]) -
         for server in svc.get("dns", []):
             assert ipaddress.ip_address(str(server)).is_loopback, (name, server)
         assert "dns_search" not in svc and "extra_hosts" not in svc, name
-        assert svc.get("network_mode") is None, name
+        # "none" is no network at all (the parser container): no resolver to name, nothing to
+        # forward to. Any other mode (host, container:...) would step round the networks above.
+        assert svc.get("network_mode") in (None, "none"), name
 
 
 def test_the_relay_still_finds_the_app_by_the_name_the_embedded_resolver_serves() -> None:

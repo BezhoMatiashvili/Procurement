@@ -133,7 +133,7 @@ fi
 
 compose_images=()
 while IFS= read -r ref; do compose_images+=("$ref"); done \
-  < <(grep -E '^[[:space:]]+image:' "$stage/docker-compose.yml" | awk '{print $2}')
+  < <(grep -E '^[[:space:]]+image:' "$stage/docker-compose.yml" | awk '!seen[$2]++ {print $2}')
 in_archive=()
 not_in_archive=()
 for ref in "${compose_images[@]}"; do
@@ -288,12 +288,12 @@ chmod 600 .env
 
 Edit `.env`:
 
-* Add `COMPOSE_PROJECT_NAME=procurement-agent`. Compose names the volumes `<project>_app-data` and
-  `<project>_ollama` after the project, and takes the project name from this directory's name,
-  which carries the version and commit and changes with every release. Without the line each
-  release starts with empty volumes: no API keys, no audit trail, no models. If an earlier
-  release was started from a differently named directory, use its project name instead
-  (`docker compose ls`, `docker volume ls`).
+* Nothing to add for the project name: `docker-compose.yml` fixes it (`name: procurement-agent`),
+  so the volumes are `procurement-agent_app-data` and `procurement-agent_ollama` whichever
+  directory this release is unpacked in, and each release finds the keys, the audit trail and the
+  models of the one before. If an earlier release was started from a directory with another name,
+  its volumes carry that name instead: keep it once or copy them (docs/PRODUCTION_READINESS.md 5.6;
+  `docker compose ls`, `docker volume ls`).
 EOF
   for line in "${env_settings[@]+"${env_settings[@]}"}"; do
     key="${line%%=*}"
@@ -318,7 +318,7 @@ Retention, upload limits and the rest are described in `.env.example`.
 
 ```bash
 docker compose up -d --no-build --pull never
-docker compose ps                     # app, ollama and proxy should all turn "healthy"
+docker compose ps                     # app, parser, ollama and proxy should all turn "healthy"
 ```
 
 `--no-build --pull never` keep compose from reaching for a Dockerfile or a registry: an image that
@@ -411,15 +411,15 @@ docker compose up -d --no-build --pull never
 
    Do not add the `--volumes` option: it deletes the volumes, and with them the keys, the audit
    trail and the models.
-4. Bring `.env` (with its `COMPOSE_PROJECT_NAME`) and `models/` into the new directory: copy or move
-   them. The volumes keep their names because the project name is the same.
+4. Bring `.env` and `models/` into the new directory: copy or move them. The volumes keep their
+   names because the compose file fixes the project name.
 5. In the new directory: `docker compose up -d --no-build --pull never`, then
-   `docker compose ps` until all three services are healthy, and sign in once.
+   `docker compose ps` until all four services are healthy, and sign in once.
 
-The worker stops within its timeout, the new process recovers interrupted jobs and `create_all`
-adds new tables. There is no migration framework: a release that changes an existing table ships
-its own migration step (none has so far). If Ollama, Docling or the models changed, run
-`scripts/evaluate.py` from a checkout (docs/PRODUCTION_READINESS.md 5.6).
+The worker stops within its timeout, the new process recovers interrupted jobs and brings the
+database to the new release's schema version, after a copy of it (docs/PRODUCTION_READINESS.md 5.6
+says how to look first with `db-status`, and how to go back). If Ollama, Docling or the models
+changed, run `scripts/evaluate.py` from a checkout.
 EOF
 } > "$stage/INSTALL.md"
 

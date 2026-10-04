@@ -309,7 +309,7 @@ this backup.
    this one) or damaged.
 4. `docker compose up -d` (from any folder: the project name is fixed, §5) - the worker stops within its timeout, the new process recovers
    interrupted jobs and brings the database to the image's schema version (below).
-5. `docker compose ps` shows all three services healthy; sign in once. `db-status` now says
+5. `docker compose ps` shows all four services healthy; sign in once. `db-status` now says
    `up to date`, and `cli audit --action db.migrate` shows what ran.
 6. Re-run `scripts/evaluate.py` if Ollama, Docling or the models changed.
 
@@ -496,11 +496,11 @@ copy `models/` and the Ollama volume, write `.env`, `docker compose up -d --no-b
 create the first key, load the rates and the registry, the proxy's duties, backups, upgrade. Two
 points it makes that the rest of this page did not:
 
-- **Compose project name.** `docker-compose.yml` sets no `name:`, so compose names the volumes
-  (`<project>_app-data`, `<project>_ollama`) after the directory, and the bundle directory carries
-  the version and commit. Unpacked as is, every release would start with empty volumes. `.env` gets
-  `COMPOSE_PROJECT_NAME=procurement-agent`, and the upgrade steps carry `.env` and `models/` into
-  the new directory after a `docker compose down` without `--volumes`.
+- **Compose project name.** `docker-compose.yml` fixes it (`name: procurement-agent`), so the
+  volumes (`procurement-agent_app-data`, `procurement-agent_ollama`) are the same whichever
+  directory a release is unpacked in, though the bundle directory carries the version and commit.
+  The upgrade steps carry `.env` and `models/` into the new directory after a `docker compose down`
+  without `--volumes`.
 - **Three images.** The compose file needs the Ollama and Caddy images as well as the application's,
   each pinned by digest. `--image` can be repeated; `INSTALL.md` lists the three references and
   which of them the archive holds. Whether a loaded image satisfies a digest reference depends on
