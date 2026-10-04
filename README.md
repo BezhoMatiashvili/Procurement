@@ -361,7 +361,7 @@ places its Word comment marks). Rules and anchors only; the LLM plays no part.
 | BOQ against an independent reference reader (`scripts/evaluate_boq.py`) | 106/106, 106/106, 132/132 checks: totals to the cent, common scope, colours, merged workbook |
 | BOQ mutation harness (17 classes, 7 seeds, the last 25 a class) | 100% of valid mutants |
 | scanned acts (OCR in the image) against the Word contract | every planted mistake reported, no false error; 41 of 45 findings marked on the line OCR read them in |
-| five adversarial red-team rounds, a sixth on the acceptance-act work, a security review | 285 + 16 confirmed defects fixed test-first; the security review's 9 findings and the re-check's fixed, 64 mutations of the security controls all caught |
+| five adversarial red-team rounds, a sixth on the acceptance-act work, a security review | 285 + 16 confirmed defects fixed test-first; the security review's 9 findings and the re-check's fixed, 88 mutations of the security controls all caught |
 
 **The sets above were looked at while fixing, so these are tuned numbers.** The honest ones are
 the first runs on unseen data (Test Set 3: extraction precision 88.8% / recall 87.6% before any

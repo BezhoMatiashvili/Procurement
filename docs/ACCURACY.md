@@ -495,21 +495,26 @@ report on every run.
 
 ### Tests
 
-5,730 unit and integration tests, 94.3% line coverage (`scripts/check.sh --offline`: ruff,
-format, mypy strict, bandit, pytest), on the final code.
+6,520 unit and integration tests, 94.8% line coverage (`scripts/check.sh --offline`: ruff,
+format, mypy strict, bandit, pytest), on the final code of the release candidate; the strict
+evaluations and the output snapshot of every module over every set are unchanged against the
+candidate before the hardening work (0 differences), and `scripts/security_audit.sh` breaks 88
+security controls one at a time and a test fails for every one (docs/SECURITY.md section 11).
 
 ### The deployable image
 
-`docker build` of this branch, run as compose runs it (read-only root, tmpfs, every capability
-dropped, models mounted read-only, no extra mounts): `/health` and `/ready` 200; the client's
-acts checked against the Word contract give the same findings as the dev box, prose spelling
-from the dictionary baked into the image; scan 4174 parsed through the image's OCR in about 18
-s, its planted fee and amount-in-words errors reported, no false error, and its OCR misreads
-(`მოედაწი` for `მოედანი`) reported as "possibly misread from the scan - check the paper
-original" warnings. The image still carries CUDA wheels, as `main`'s did: `uv.lock` resolves torch
-2.14.0 from PyPI (the CUDA build, which pulls the `nvidia-*` packages) although `pyproject.toml`
-names the CPU-only index for it. Re-locking against that index should drop several GB - an
-image-size issue, not an accuracy one, left for its own change.
+`docker build` of the release candidate, run as compose runs it - four containers (the app, the
+parser that does Docling's conversion with no network and none of the app's data, Ollama, the
+relay), read-only roots, tmpfs, every capability dropped, models mounted read-only. The image is
+2.92 GB on disk (682 MB of content), down from 10.5 GB: `uv.lock` now takes the CPU build of
+torch, so there are no `nvidia-*` packages (0 found in the image), and OpenCV is the headless
+build. All four services are healthy 50 s after `up`. Through the relay, a Word act with planted
+mistakes gives `AOA.AMOUNT_WORDS`, `AOA.BANK` and `AOA.FEE`; the same act as a text PDF and as a
+scan (OCR in the parser container) gives the same three; a 1-page scan parses in 3.1-3.6 s, a
+7-page scan in 32 s, a 7-page text PDF in 9.8 s, and the socket to the parser adds 0.02-0.04 s.
+The parser peaks at 3.7 GiB (of its 10 GiB) on a single 5,906 x 5,906 pixel page; the app stays
+under 0.7 GiB. What was and was not checked on the final image is in
+docs/PRODUCTION_READINESS.md section 5.9. The language-model paths were not run in it.
 
 ### Known limits
 

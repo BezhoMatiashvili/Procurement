@@ -125,7 +125,7 @@ deployer duty or an open item.
 | Lint + format | `ruff check .`, `ruff format --check .` | pre-commit, `scripts/check.sh`, CI |
 | Types | `mypy` (strict) | pre-commit, `scripts/check.sh`, CI |
 | Static security | `bandit -c pyproject.toml -r src` | pre-commit, `scripts/check.sh`, CI |
-| Unit + integration | `pytest -m "not e2e and not docling"` with a branch-coverage floor (`fail_under` in `pyproject.toml`, currently 85 against 88 measured) | `scripts/check.sh`, CI |
+| Unit + integration | `pytest -m "not e2e and not docling"` with a branch-coverage floor (`fail_under` in `pyproject.toml`, currently 85 against 94.8 measured) | `scripts/check.sh`, CI |
 | Docling integration | `pytest -m docling` with `PA_DOCLING_ARTIFACTS_PATH` set | locally (needs the models) |
 | End-to-end against a live Ollama | `scripts/check.sh --e2e` | locally / on the server |
 | Dependency vulnerabilities | `pip-audit --strict` over `uv export` of the lock | CI; `scripts/check.sh` without `--offline` |
@@ -511,6 +511,32 @@ The SBOM and the licence inventory are regenerated with `scripts/sbom.py --out d
 and `scripts/third_party.py --out docs/THIRD_PARTY.md` whenever `uv.lock` moves; the unit tests
 fail until they are.
 
+### 5.9 What was checked on the final image
+
+The release candidate was built (`docker build`, 2.5 minutes with a warm cache) and brought up as
+four containers - app, parser, Ollama, relay - in a separate compose project, on this host, with
+synthetic documents only, then taken down again. Results, so a deployer knows what is verified:
+
+| Area | Result |
+|---|---|
+| Image | 2.92 GB (682 MB of content); no `nvidia-*` packages; torch 2.14.1 CPU; headless OpenCV; Tesseract `kat` + `eng`; runs as uid 999; no `VOLUME /data` |
+| Models | 66 files, `models-manifest verify` as uid 999: 0 problems; `MANIFEST.sha256` mode 0644 under umask 077 |
+| Bring-up | all four services healthy 50 s after `up` (Ollama 6 s, parser 19 s, app 36 s, relay 50 s) |
+| Refusals | six bad configurations - no host list, a dev key, parser mode unset, a tampered model file, an unreadable model file (the app, exit status 3), and tampered models for the parser (exit status 1) - each stop with one cause on the last line (see §6 for what precedes it); the control starts |
+| Parser isolation | `network_mode: none` (only `lo`; no route; DNS fails), read-only root, `cap_drop: ALL`, no-new-privileges, 10 GiB / 256 PIDs, two mounts (models read-only, the socket volume), no `.env`, no keys; during a 7-page scan `tesseract` ran only in the parser, never in the app |
+| Documents | Word, text PDF and scanned PDF (OCR in the parser) through the relay: AOA (JSON, Word, PDF), BOQ, compare, extraction without the model, the UI; a 1-page scan parses in 3.1-3.6 s, a 7-page scan in 32 s, a 7-page text PDF in 9.8 s; the socket adds 0.02-0.04 s |
+| Unreadable input | three blank PDFs end `failed` with `NO_TEXT` and every check answers 409; a PDF with a page OCR cannot read is `ready` and every report carries `DOC.PARTIAL`; a deleted or truncated stored parse gives 409 `DOCUMENT_UNREADABLE` |
+| Relay and headers | 30 of 30 oversize JSON bodies get 413 (they were 502); all security headers present, no `Server` or `Via`; `Host: evil.example` gives 400; cross-site posts give 403 |
+| Egress | TCP to a public address and DNS for a public name fail from all four containers; none of six marker credentials (key, cookie, `Authorization`, ...) or a query string appears in any container's log |
+| Restarts | the parser's process killed mid-parse: running again after 0.5 s, healthy after 12.5 s, the job fails with `PARSER_CRASHED` and is not retried, a job sent right after finishes when it is back, `/ready` stays 200; the deadline alarm ended a conversion at 11.4 s of an 11 s deadline (exit 142); the supervisor's child killed or frozen: one restart, no loop (a frozen server back after 115 s); `docker compose stop app` 0.6 s |
+| Data | backup and documented restore with `integrity_check ok`; `db-status` says up to date, schema version 1 |
+| Memory | idle: app 0.4 GiB, parser 1.9 GiB; peak during the largest parse (one 5,906 x 5,906 pixel page, 42 s): parser 3.7 GiB of its 10 GiB, app 0.6 GiB |
+
+**Not checked:** any path that calls the language model (the throwaway Ollama held no model); a
+build without the layer cache; the UI in a browser (HTTP only); what a Docker daemon restart or a
+host reboot does to `restart: unless-stopped` containers; the in-process egress guard separately
+from the kernel-level checks above.
+
 ## 6. Known limitations
 
 - API keys only; no directory (LDAP/AD/OIDC) integration yet.
@@ -518,7 +544,7 @@ fail until they are.
 - **A refused start-up is printed as a traceback.** The production checks (§1: no dev key, host
   list, models, parser mode...) raise one sentence from the application's start-up, and uvicorn
   prints that as a 14-frame lifespan traceback; the **last line is the cause** (`RuntimeError:
-  Refusing to start: ...`, exit status 3, checked on the final image for seven different causes).
+  Refusing to start: ...`, exit status 3, checked on the final image for five different causes).
   The supervisor restarts the server five times in ten minutes and then exits, and Docker restarts
   the container: `docker compose logs --tail 20 app` shows the cause every time. A refusal before
   uvicorn starts, with a single line, was not built.
