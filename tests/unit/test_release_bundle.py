@@ -382,7 +382,8 @@ def test_install_md_says_which_compose_images_the_archive_holds_and_which_it_doe
     assert _make(repo, env, "--image", "procurement-agent:0.1.0").returncode == 0
     install = (_bundle(repo) / "INSTALL.md").read_text(encoding="utf-8")
     compose = (repo / "docker-compose.yml").read_text(encoding="utf-8")
-    refs = re.findall(r"^\s+image:\s*(\S+)", compose, re.M)
+    # the parser container runs the application's own image: three images, four services
+    refs = list(dict.fromkeys(re.findall(r"^\s+image:\s*(\S+)", compose, re.M)))
     assert len(refs) == 3
     for ref in refs:
         assert ref in install
