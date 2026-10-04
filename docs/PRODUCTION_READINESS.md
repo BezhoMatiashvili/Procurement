@@ -38,7 +38,7 @@ deployer duty or an open item.
 | Container hardening: non-root, read-only rootfs, `cap_drop: ALL`, `no-new-privileges`, tmpfs `/tmp` (noexec), memory/PID/CPU limits, no core dumps, init | [x] | `Dockerfile`, `docker-compose.yml`; `tests/unit/test_deployment_policy.py` |
 | Trusted-proxy handling for `X-Forwarded-For` (never `*`) | [x] | `FORWARDED_ALLOW_IPS` (image default loopback; compose trusts only its relay) |
 | Prod start-up refuses: a dev key, missing or unverified Docling models, the egress guard off, no host allow-list, `FORWARDED_ALLOW_IPS=*`, `PA_PARSER_MODE` unset (set `socket`, or `inline` knowing it is degraded) | [x] | `Settings.validate_for_prod` |
-| Docling's PDF/DOCX conversion in its own container: no network (`network_mode: none`), no `/data`, no database, no secrets or `env_file`, read-only root, `cap_drop: ALL`, own memory (10 GB) and PID limits, reached over a Unix socket only the two containers share; a conversion that does not return is ended by the kernel (`SIGALRM` at its default action, `init: true`), Docker restarts the container, the waiting job fails with a code. **Only Docling is moved**: pdfium, the annotators, the registry reader and the workbook/Word readers stay in the web process (SECURITY.md §10) | [x] | `parser_service/`, `ingestion/parser_client.py`, compose service `parser`; `tests/unit/test_parser_*.py`, `test_deployment_policy.py`; `tests/integration/test_parser_docling.py` (byte-identical to inline, with the models) |
+| Docling's PDF/DOCX conversion in its own container: no network (`network_mode: none`), no `/data` mount, no database, no secrets or `env_file`, read-only root, `cap_drop: ALL`, own memory (10 GB) and PID limits, reached over a Unix socket only the two containers share; a conversion that does not return is ended by the kernel (`SIGALRM` at its default action, `init: true`), Docker restarts the container, the waiting job fails with a code. **Only Docling is moved**: pdfium, the annotators, the registry reader and the workbook/Word readers stay in the web process (SECURITY.md §10) | [x] | `parser_service/`, `ingestion/parser_client.py`, compose service `parser`; `tests/unit/test_parser_*.py`, `test_deployment_policy.py`; `tests/integration/test_parser_docling.py` (byte-identical to inline, with the models) |
 | The egress guard allows one Unix socket path, compared as the exact canonical string | [x] | `security/egress.py` (`allow_unix`), `tests/unit/test_egress_guard.py` |
 | Authorisation matrix over every route (401 / 404-for-others / CSRF / headers / cookie flags), and a harness that breaks each guard to prove a test fails | [x] | `tests/integration/test_security_matrix.py`, `scripts/mutate_security.py` (CI job `mutation`) |
 | Client documents kept out of the repository (generic block in the hook and CI) and the client's identifiers out of commits (salted-hash canary, local hook) | [x] | `scripts/check_no_documents.sh`, `scripts/client_canary.py` |
@@ -164,7 +164,7 @@ browser ──TLS──► company reverse proxy (host) ──► 127.0.0.1:8000
                                                              │ Unix socket (volume parser-sock)
                                                              ▼
                                                           parser  (network_mode: none; Docling's
-                                                                   PDF/DOCX conversion only; no /data)
+                                                                   PDF/DOCX conversion only; no /data mount)
 ```
 
 Docker does not publish ports of a container whose only network is `internal: true` (checked
@@ -180,7 +180,7 @@ on no network at all (`network_mode: none`: loopback only); it talks to the app 
 Unix socket on the `parser-sock` volume, which only those two containers mount. Measured on the
 running stack: the parser's only interface is `lo`, a connection to a public address fails with
 `Network is unreachable`, and `docker inspect` lists two mounts - the models (read-only) and the
-socket volume - and no `/data`.
+socket volume - and no `/data` mount (the empty directory of that name is in the image).
 
 ### 5.2 Reverse proxy duties (deployer)
 
@@ -515,6 +515,13 @@ fail until they are.
 
 - API keys only; no directory (LDAP/AD/OIDC) integration yet.
 - No application-level encryption at rest; relies on disk encryption.
+- **A refused start-up is printed as a traceback.** The production checks (§1: no dev key, host
+  list, models, parser mode...) raise one sentence from the application's start-up, and uvicorn
+  prints that as a 14-frame lifespan traceback; the **last line is the cause** (`RuntimeError:
+  Refusing to start: ...`, exit status 3, checked on the final image for seven different causes).
+  The supervisor restarts the server five times in ten minutes and then exits, and Docker restarts
+  the container: `docker compose logs --tail 20 app` shows the cause every time. A refusal before
+  uvicorn starts, with a single line, was not built.
 - Docling's conversion runs in its own container; **everything else that parses an upload still
   runs inside the web process** (the pdfium upload guard, page renderer and text-layer probe, the
   registry extract reader, both annotators, the workbook and Word readers, XLSX validation), so a

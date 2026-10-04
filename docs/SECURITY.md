@@ -34,7 +34,7 @@ Three independent layers, then a proof. Each has a test (§11).
   `python -m procurement_agent.parser_service`, and it converts PDF and DOCX with Docling for the
   app over a **Unix socket** on a volume (`parser-sock`) that only those two containers mount. It
   gets no `env_file` (only the handful of settings listed in the compose file, the app's limits
-  among them), **no `/data` and no database**, the models read-only, and no published port. The
+  among them), **no `/data` mount and no database** (the image's `/data` is an empty directory and its root is read-only), the models read-only, and no published port. The
   one thing the two share is that socket. See §7 for how it is limited and killed and §10 for
   exactly what it does and does not cover.
 * No container publishes a port except the small relay (`proxy`, Caddy, plain HTTP, no state),
@@ -350,8 +350,9 @@ Docling conversion has a timeout.
 listed in §10) has the same restrictions as the app - non-root, read-only root filesystem,
 `cap_drop: ALL`, `no-new-privileges`, `noexec` tmpfs `/tmp` (2 GB, where the document being converted
 is written, mode `0600` in a `0700` directory, removed afterwards), `ulimits.core: 0`, `init: true`
-- plus no network, its own memory limit (10 GB) and PID limit (256), and **no `/data`**: the image
-declares no `VOLUME`, so Docker does not give it an anonymous one either. It is one service
+- plus no network, its own memory limit (10 GB) and PID limit (256), and **no `/data` mount**: the image
+declares no `VOLUME`, so Docker does not give it an anonymous one either (the empty `/data` directory
+the app's volume copies its owner from is in the image, and nothing can be written to it). It is one service
 (`python -m procurement_agent.parser_service`), single-threaded, **one request at a time**, and
 checks everything it is sent: the frame (`parser_service/protocol.py`: a 17-byte prefix, a JSON
 header of at most 4 KiB with a fixed set of keys and types, a raw payload) is judged from its prefix
@@ -647,7 +648,7 @@ at the end; it is never counted as a pass.
 | `offline_kernel` | the whole product flow with only loopback up (`unshare --net`) |
 | `security_suite` | authz/IDOR/CSRF/header/cookie matrix over every route, hostile ids and hostile request bodies (19 kinds, on every route that reads one: always a 4xx, never a 500); pre-auth; hostile uploads; retention; schema upgrades (the copies' modes, the refusal of a newer database); hardening; the XML, DOCX, manifest, text-limit and capacity tests |
 | `log_canary` | a marker planted in every input reaches 0 log lines and 0 database columns |
-| `deploy_policy` | compose, Dockerfile, build context and supervisor; the supervisor restarts a hung real server; the parser container has no network, no `/data` or app data, no `env_file`, one shared volume, and the limits of the app |
+| `deploy_policy` | compose, Dockerfile, build context and supervisor; the supervisor restarts a hung real server; the parser container has no network, no `/data` mount or app data, no `env_file`, one shared volume, and the limits of the app |
 | `parser_sandbox` | (in `security_suite`) the wire format and its caps, the service, the client and the worker on a fake converter; the kill switch in a real process; the egress guard's one Unix path |
 | `regex_budget`, `regex_controls` | directed search for super-linear patterns through the input limits; the same search still finds the pre-fix pattern |
 | `resources` | worst-case inputs (bounding boxes, page-size and zip bombs, 20 MB of separators, a 54,000-character paragraph, 400,000-cell workbooks) finish inside time and memory ceilings, each in a fresh process |
