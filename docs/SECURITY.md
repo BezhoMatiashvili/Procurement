@@ -691,6 +691,39 @@ steps passed, 0 failed, 0 skipped.
 | Worst-case inputs inside their time and memory ceilings | - | 13 of 13 |
 | Development Ollama container | default network, internet reachable, all capabilities | prepared, **not switched**: `scripts/switch_dev_ollama.sh --yes` |
 
+### Re-audit of the release candidate (2026-10-04)
+
+`scripts/security_audit.sh` (offline) on the tree that holds everything above plus the parser
+container, the migrations, the unreadable-input rules and the relay fixes, on an otherwise idle
+machine: **16 steps passed, 2 skipped** (`machine_ai_tools`: the local settings file is not in a
+worktree; `deps_audit`: it sends package names to PyPI/OSV, and `uv.lock` has not changed since the
+2026-10-02 run), and the mutation step reported **85 of 88** caught.
+
+| Step | Measured |
+|---|---|
+| `static_*` | ruff 0 findings; mypy strict, 111 source files, no issues; bandit 0 issues over 39,142 lines, 0 `nosec` |
+| `security_suite` | 1,448 passed |
+| `log_canary` | 56 passed: a marker in every input reaches 0 log lines and 0 database columns |
+| `egress_policy` / `offline_kernel` | 260 passed / the whole product flow with only loopback up, 18 steps |
+| `regex_budget` | 555 patterns, 116,064 strings, 0 findings (an earlier run on a busy machine reported one that did not repeat: the harness now times a slow-looking string up to three times and judges on the best) |
+| `resources` | 13 of 13 worst-case inputs inside their ceilings |
+
+The three mutations that were not caught were each the harness doing its job:
+
+* two (`model_tampering_unnoticed`, `sweep_strands_files`) named lines that had since changed, so
+  the broken copy was not broken at all - the harness reports that as not caught; they were
+  rewritten against the current code;
+* one (`parser_work_file_world_readable`) asked for a world-readable work file, and the audit's own
+  `umask 077` turned the mode back into a private one, so no test could tell. The test now runs
+  under umask 0, so the mode the code asks for is the mode it checks.
+
+All three were then run on their own and are caught (88 of 88; the other 85 come from the full run
+on the commit before, which differs from the final one in that test and the harness only). The same
+umask made two tests of the models manifest fail inside the audit and pass outside it, which found
+a real edge: `models-manifest write` produced a `MANIFEST.sha256` that took the host's umask, and a
+host with umask 077 would have given the app container a checksum file it cannot read. It is now
+written world-readable, with a test.
+
 ### The accuracy gate
 
 The extraction and checking code is held to the accuracy gate of `docs/ACCURACY.md`, and every
