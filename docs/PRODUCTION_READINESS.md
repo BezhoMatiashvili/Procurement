@@ -181,6 +181,9 @@ the relay cannot reach Ollama; verify with the command in SECURITY.md §2.
 
 - [ ] `/data` (the `app-data` volume, `procurement-agent_app-data`) on an encrypted disk (LUKS or
   equivalent).
+- [ ] The host clock is NTP-synchronised: retention expiry and session lifetimes trust it, so a
+  clock set forward deletes documents early and one set back keeps them (and sessions) past their
+  limits.
 - [ ] `.env` readable only by the operator (`chmod 600`); `PA_ENV=prod`, `PA_DEV_API_KEY`
   empty, `PA_ALLOWED_HOSTS` set. `PA_APP_CPUS` / `PA_OLLAMA_CPUS` below the host's core count keep
   one runaway parse from starving the host (no default: Docker refuses a number above the cores).

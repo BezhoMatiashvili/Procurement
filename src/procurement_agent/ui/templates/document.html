@@ -9,10 +9,17 @@
     <span class="num">{{ (doc.size_bytes / 1024) | round(0) | int }} KB</span>
     {% if doc.page_count %}<span>· <span class="num">{{ doc.page_count }}</span> {{ t("doc.pages") }}</span>{% endif %}
     <span class="status {{ doc.status.value }}" id="doc-status">{{ t("status." ~ doc.status.value) }}</span>
-    {% if doc.expires_at %}<span>{{ icon("clock") }} {{ t("doc.expires") }}: <span class="num">{{ doc.expires_at.strftime("%Y-%m-%d") }}</span></span>{% endif %}
+    {% if doc.expires_at %}<span>{{ icon("clock") }} {{ t("doc.expires") }}: <span class="num">{{ doc.expires_at | utc }}</span></span>{% endif %}
   </p>
 </div>
-{% if doc.error %}<div class="card notice is-error">{{ icon("alert") }}<div><p>{{ doc.error }}</p></div></div>{% endif %}
+{% if doc.error %}<div class="card notice is-error">{{ icon("alert") }}<div><p>{{ doc.error | doc_error(lang) }}</p></div></div>{% endif %}
+
+{% if read_notes %}
+<section class="card caveat" id="read-quality" role="alert">
+  <p class="caveat-title">{{ icon("alert") }}<span><strong>{{ t("readq.title") }}</strong></span></p>
+  <ul class="small">{% for n in read_notes %}<li>{{ why(n) }}</li>{% endfor %}</ul>
+</section>
+{% endif %}
 
 {# The reports this file went into. Each is recomputed when opened, from the stored files; the
    link carries the same documents and options the person opened it with. #}
@@ -28,7 +35,7 @@
     <td class="primary"><a href="{{ c.url }}">{{ t("task." ~ c.kind ~ ".title") }}</a></td>
     <td data-label="{{ t('checks.col.as') }}">{{ t("checks.role." ~ c.role) }}</td>
     <td data-label="{{ t('checks.col.with') }}">{%- if c.others -%}{{ c.others | join(", ") }}{%- if c.more %} +{{ c.more }}{% endif -%}{%- endif -%}</td>
-    <td data-label="{{ t('checks.col.opened') }}" class="num">{{ c.opened.strftime("%Y-%m-%d %H:%M") }}</td>
+    <td data-label="{{ t('checks.col.opened') }}" class="num">{{ c.opened | utc }}</td>
     <td data-label="{{ t('job.result') }}" class="go"><a href="{{ c.url }}">{{ t("checks.open") }}{{ icon("arrow-right") }}</a></td>
   </tr>
   {% endfor %}

@@ -29,6 +29,19 @@
 {% endfor %}
 {% endmacro %}
 
+{# Part of a document was not read: said at the top of the report, before anything that could be
+   taken for a clean result. ``notes`` are the report's DOC.PARTIAL entries. #}
+{% macro read_banner(notes, t, why) %}
+{% if notes %}
+<section class="card caveat" id="read-quality" role="alert">
+  <p class="caveat-title">{{ icon("alert") }}<span><strong>{{ t("readq.title") }}</strong></span></p>
+  <ul class="small">
+    {% for n in notes %}<li>{{ why(n) }}</li>{% endfor %}
+  </ul>
+</section>
+{% endif %}
+{% endmacro %}
+
 {% macro skipped(items, t, why) %}
 {% if items %}
 <h2 id="skipped">{{ t("report.skipped.title") }} <span class="count">{{ items | length }}</span></h2>

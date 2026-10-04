@@ -28,8 +28,8 @@
     <td data-label="{{ t('doc.kind') }}"><span class="kind">{{ d.kind }}</span></td>
     <td data-label="{{ t('doc.pages') }}" class="num">{{ d.page_count or "" }}</td>
     <td data-label="{{ t('doc.status') }}"><span class="status {{ d.status.value }}">{{ t("status." ~ d.status.value) }}</span></td>
-    <td data-label="{{ t('doc.uploaded') }}" class="num">{{ d.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
-    <td data-label="{{ t('doc.expires') }}" class="num">{{ d.expires_at.strftime("%Y-%m-%d") if d.expires_at else t("doc.never") }}</td>
+    <td data-label="{{ t('doc.uploaded') }}" class="num">{{ d.created_at | utc }}</td>
+    <td data-label="{{ t('doc.expires') }}" class="num">{{ (d.expires_at | utc) if d.expires_at else t("doc.never") }}</td>
   </tr>
   {% endfor %}
   </tbody>

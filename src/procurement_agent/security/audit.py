@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 from procurement_agent.db import session_scope
 from procurement_agent.models import AuditLog
 from procurement_agent.security.logscrub import content_free, install_stdlib_scrub
+from procurement_agent.security.safe_errors import ContentFree, safe_exc
 
 _SECRET_KEYS = {"api_key", "x-api-key", "authorization", "key", "password", "token", "secret"}
 #: API keys (``pa_``) and UI session tokens (``ps_``) - neither may ever reach a log line.
@@ -86,6 +87,70 @@ def audit(
             detail=detail,
         )
     )
+    log.info(
+        "audit",
+        actor=actor,
+        action=action,
+        outcome=outcome,
+        document_id=document_id,
+        job_id=job_id,
+        ip=ip,
+        detail=detail,
+    )
+
+
+class AuditUnavailableError(ContentFree, RuntimeError):
+    """The record that something was read could not be stored."""
+
+
+def audit_committed(
+    session: Session,
+    *,
+    actor: str,
+    action: str,
+    outcome: str = "ok",
+    document_id: str | None = None,
+    job_id: str | None = None,
+    ip: str | None = None,
+    detail: str | None = None,
+) -> None:
+    """Store one audit row and commit it, before the caller goes on to serve what it records.
+
+    ``audit`` adds its row to the request's session, and that session commits when the request
+    has finished - after the report has been built and handed back. A commit that fails then
+    ("database is locked", "disk is full") loses the row of a read that already happened, and
+    the log line written at the time said ``ok``. Here the commit comes first: when it fails the
+    caller gets ``AuditUnavailableError`` and serves nothing, the log says the row was lost, and
+    no line says it was stored. The session's other pending changes commit - or are lost -
+    with it.
+    """
+    detail = detail[:255] if detail else None
+    session.add(
+        AuditLog(
+            actor=actor,
+            action=action,
+            outcome=outcome,
+            document_id=document_id,
+            job_id=job_id,
+            ip=ip,
+            detail=detail,
+        )
+    )
+    try:
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        log.error(
+            "audit_commit_failed",
+            actor=actor,
+            action=action,
+            document_id=document_id,
+            job_id=job_id,
+            ip=ip,
+            error=safe_exc(e),
+        )
+        msg = "the record that this was read could not be stored"
+        raise AuditUnavailableError(msg) from e
     log.info(
         "audit",
         actor=actor,

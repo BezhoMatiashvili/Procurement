@@ -81,6 +81,8 @@ class ExplanationSet(BaseModel):
     left_document_id: str | None = None
     right_document_id: str | None = None
     hunks_digest: str | None = None
+    #: the model's failure, when it gave no answer at all (its note is in ``notes``)
+    error: str | None = None
 
 
 def hunks_digest(report: ComparisonReport) -> str:
@@ -214,7 +216,7 @@ def request_explanations(
                 reason_en=f"the model did not answer: {type(e).__name__}",
             )
         )
-        return ExplanationSet(model=model, notes=notes, **_identity(report))
+        return ExplanationSet(model=model, notes=notes, error=type(e).__name__, **_identity(report))
 
     log.info(
         "compare_explain_done",

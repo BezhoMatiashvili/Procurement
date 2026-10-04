@@ -96,6 +96,18 @@ curl -s -H "$K" -X POST localhost:8000/api/v1/checks/compare \
 # ?format=docx returns the newer file with a Word comment per difference; ?format=xlsx a table
 ```
 
+A document, or part of one, that was not read never gives a result that looks like "all clear".
+A file that yields no text at all (a PDF of page images on a host without Tesseract, a workbook
+with no cell text) fails its parse with the code `NO_TEXT` (and `OCR_UNAVAILABLE` or `IMAGE_ONLY`
+when the cause is known) and every check refuses it with 409. A file read only in part stays
+usable, and the act check, the comparison and the extraction say so: `read_quality` in the JSON
+and a `DOC.PARTIAL` note first among what could not be checked ("N of M pages had no readable
+text; findings may be incomplete"); two partly read documents are never called identical. A
+stored reading that is gone or damaged is 409 `DOCUMENT_UNREADABLE`; a model review or comparison
+explanation the model did not answer is `failed` with `LLM_UNAVAILABLE` and asked again, and an
+extraction without the model is `degraded: true`; a report whose audit row cannot be stored is
+503 `AUDIT_UNAVAILABLE`. See `docs/SECURITY.md`, "Input that was not read".
+
 ## Comparing two documents
 
 ```

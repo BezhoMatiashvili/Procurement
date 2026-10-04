@@ -45,10 +45,12 @@ from procurement_agent.extraction.pipeline import (
     run_extraction,
     upload_path,
 )
+from procurement_agent.extraction.read_status import LLM_UNAVAILABLE, stored_extraction
 from procurement_agent.extraction.schemas import FactType
 from procurement_agent.history import forget_runs
-from procurement_agent.ingestion import docling_service
+from procurement_agent.ingestion import docling_service, read_quality
 from procurement_agent.jobs.retention import delete_document_files, reconcile, remove_file
+from procurement_agent.jobs.stuck import fail_stuck_parses, fail_unreadable
 from procurement_agent.llm.base import LLMClient
 from procurement_agent.migrations import expire_backups
 from procurement_agent.models import Document, DocumentStatus, Job, JobStatus, UiSession
@@ -66,6 +68,8 @@ _LLM_CALLS_PER_BEAT = 3
 _STOP = object()
 _ACTIVE = (JobStatus.queued, JobStatus.running)
 _DELETED_MESSAGE = "document was deleted while the job ran"
+#: How a job whose whole purpose is the model's answer ends when there was none.
+_NO_ANSWER = f"{LLM_UNAVAILABLE}: the model did not answer"
 
 
 class Worker:
@@ -78,6 +82,8 @@ class Worker:
         self._stopping = threading.Event()
         self._heartbeat = time.monotonic()
         self._busy_since: float | None = None
+        #: the document whose parse is running now, so a job that cannot be settled fails it too
+        self._parsing_doc: str | None = None
 
     # --- lifecycle -----------------------------------------------------------------------------
 
@@ -193,6 +199,7 @@ class Worker:
             log.error("job_finish_failed", job_id=job_id, error=safe_exc(e))
         finally:
             self._busy_since = None
+            self._parsing_doc = None
             self._beat()
 
     def _set_progress(self, job_id: str, pct: int, msg: str) -> None:
@@ -253,7 +260,21 @@ class Worker:
             return live
 
     def _finish(self, job_id: str, status: JobStatus, msg: str | None) -> None:
-        self._settle(job_id, status, msg)
+        document = self._parsing_doc
+        if status != JobStatus.failed or document is None:
+            self._settle(job_id, status, msg)
+            return
+        # A parse that cannot be settled must not leave its document "parsing" for ever: the
+        # page polls it, and nothing else would ever change it (only a restart's ``_recover``).
+        log.warning("parse_job_failed_unsettled", job_id=job_id, document_id=document)
+
+        def fail_document(s: Session) -> None:
+            doc = s.get(Document, document)
+            if doc is not None and doc.status == DocumentStatus.parsing:
+                doc.status = DocumentStatus.failed
+                doc.error = (msg or "could not be read")[:500]
+
+        self._settle(job_id, status, msg, documents=(document,), apply=fail_document)
 
     def _discard(self, documents: Sequence[tuple[str, str]], output: Path | None = None) -> None:
         """Remove what a job wrote after it lost the race with a deletion.
@@ -304,6 +325,7 @@ class Worker:
                 return
             if kind == "parse":
                 doc.status = DocumentStatus.parsing
+                self._parsing_doc = doc_id
             doc_kind = doc.kind
 
         log.info("job_start", job_id=job_id, kind=kind, document_id=doc_id)
@@ -323,18 +345,22 @@ class Worker:
         try:
             if doc_kind == "xlsx":
                 chunks = load_chunks(self._s, doc_id, doc_kind)  # validates it is readable
+                read_quality.settle_workbook(self._s, doc_id, chunks)  # refuses one with no text
                 page_count = None
                 self._set_progress(job_id, 90, f"{len(chunks)} table chunks")
             else:
                 self._set_progress(job_id, 10, "converting")
                 result = docling_service.convert(path, self._s)
                 docling_service.save_document(result.document, result_dir(self._s, doc_id))
-                page_count = len(result.document.pages) or None
+                quality = read_quality.settle_conversion(
+                    self._s, doc_id, doc_kind, result, upload=path
+                )
+                page_count = quality.pages_total
                 self._set_progress(job_id, 90, "saved")
         except Exception as e:
             # The exception's own text may quote the document; only its kind is kept, in the log
             # and in the rows the user and the audit trail read (see ``security.safe_errors``).
-            error = f"could not be read: {safe_exc(e)}"
+            error = read_quality.parse_error(e)
             log.warning("parse_failed", document_id=doc_id, error=error)
 
             def mark_failed(s: Session) -> None:
@@ -372,9 +398,14 @@ class Worker:
         notes: list[str] = []
         try:
             chunks = load_chunks(self._s, doc_id, doc_kind, notes=notes)
+            quality = read_quality.read_quality(
+                self._s, StoredDocument(id=doc_id, kind=doc_kind, name="")
+            )
         except Exception as e:  # reported to the user, never swallowed
             failure = safe_exc(e)
             log.warning("chunking_failed", job=job_id, document=doc_id, error=failure)
+            if isinstance(e, read_quality.StoredParseError):
+                fail_unreadable(doc_id)  # its reading is gone: the document is not 'ready' any more
             self._finish(job_id, JobStatus.failed, f"could not read the document: {failure}"[:200])
             return
         result = run_extraction(
@@ -389,9 +420,26 @@ class Worker:
         )
         # What the workbook reader left out belongs in front of the user, not only in the log.
         result.warnings[:0] = [f"not read (size limit): {n}" for n in notes]
-        out = self._write_output(doc_id, job_id, result.model_dump_json())
+        # Each passage sent to the model is one call; one that raised is not counted. A model
+        # that was asked and did not answer leaves the rules' facts - kept, and said to be so.
+        unanswered = result.chunks_selected - result.llm_calls if result.model is not None else 0
+        out = self._write_output(
+            doc_id,
+            job_id,
+            stored_extraction(result, quality, unanswered=max(unanswered, 0)).model_dump_json(),
+        )
         msg = f"{len(result.facts)} facts, {result.llm_calls} LLM calls"
-        if not self._settle(job_id, JobStatus.done, msg, documents=(doc_id,)):
+        apply: Callable[[Session], None] | None = None
+        if unanswered > 0:
+            msg += f"; {LLM_UNAVAILABLE}: the model was unavailable for {unanswered} passage(s)"
+
+            def mark_degraded(s: Session) -> None:
+                job = s.get(Job, job_id)
+                if job is not None:
+                    job.params = {**job.params, "degraded": True}
+
+            apply = mark_degraded
+        if not self._settle(job_id, JobStatus.done, msg, documents=(doc_id,), apply=apply):
             self._discard([(doc_id, doc_kind)], out)
 
     def _compare_explain(self, job_id: str, doc_id: str, params: dict[str, object]) -> None:
@@ -450,6 +498,10 @@ class Worker:
             model=self._s.llm_fast_model,
             max_hunks=self._s.compare_llm_max_hunks,
         )
+        if stored.error is not None:  # the model's answer was the whole job, and it did not come
+            log.warning("compare_explain_unanswered", job=job_id, error=stored.error)
+            self._finish(job_id, JobStatus.failed, _NO_ANSWER)
+            return
         out = self._write_output(doc_id, job_id, stored.model_dump_json())
         msg = f"{len(stored.items)} change(s) described"
         if not self._settle(job_id, JobStatus.done, msg, documents=(pair[0][0], pair[1][0])):
@@ -508,6 +560,10 @@ class Worker:
             max_items=self._s.aoa_llm_max_items,
             max_chars=self._s.aoa_llm_max_chars,
         )
+        if stored.error is not None:  # the model's answer was the whole job, and it did not come
+            log.warning("aoa_review_unanswered", job=job_id, error=stored.error)
+            self._finish(job_id, JobStatus.failed, _NO_ANSWER)
+            return
         out = self._write_output(doc_id, job_id, stored.model_dump_json())
         msg = f"{len(stored.items)} answer(s) about {len(stored.asked)} note(s)"
         if not self._settle(job_id, JobStatus.done, msg, documents=(pair[0][0], pair[1][0])):
@@ -553,6 +609,7 @@ class Worker:
         if gone:
             log.info("db_backups_expired", count=gone)
         reconcile(self._s)
+        fail_stuck_parses(self._s, running_too=not self.busy)
         checkpoint()  # a deleted row must not stay readable in the write-ahead log
         return len(ids)
 

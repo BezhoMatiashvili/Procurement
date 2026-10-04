@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -15,6 +14,8 @@ from procurement_agent.api.deps import (
     owned_document,
     owned_job,
 )
+from procurement_agent.api.refusals import audit_or_503, require_readable
+from procurement_agent.api.timefmt import UtcTime
 from procurement_agent.config import Settings, get_settings
 from procurement_agent.db import get_session
 from procurement_agent.extraction.export import to_xlsx
@@ -46,9 +47,12 @@ class JobOut(BaseModel):
     status: JobStatus
     progress: int
     message: str | None
-    created_at: datetime
-    started_at: datetime | None
-    finished_at: datetime | None
+    created_at: UtcTime
+    started_at: UtcTime | None
+    finished_at: UtcTime | None
+    #: the job is done, but the model that was asked did not answer: the result is the rules'
+    #: alone (``LLM_UNAVAILABLE`` in its message and its warnings)
+    degraded: bool = False
 
 
 def _job_out(j: Job) -> JobOut:
@@ -62,6 +66,7 @@ def _job_out(j: Job) -> JobOut:
         created_at=j.created_at,
         started_at=j.started_at,
         finished_at=j.finished_at,
+        degraded=bool(j.params.get("degraded")),
     )
 
 
@@ -81,6 +86,7 @@ def start_extraction(
     if doc.status != DocumentStatus.ready:
         msg = f"document is not ready (status: {doc.status.value})"
         raise HTTPException(status.HTTP_409_CONFLICT, msg)
+    require_readable(settings, doc)  # ready, but holding no text: 409 NO_TEXT
     ensure_job_capacity(session, settings, principal)
     params: dict[str, object] = {"fast": body.fast, "use_llm": body.use_llm or bool(body.question)}
     if body.targets:
@@ -131,7 +137,7 @@ def get_result(
     if not path.exists():
         raise HTTPException(status.HTTP_404_NOT_FOUND, "result no longer available")
     raw = path.read_text()
-    audit(
+    audit_or_503(
         session,
         actor=principal.user,
         action=f"result.read.{fmt}",

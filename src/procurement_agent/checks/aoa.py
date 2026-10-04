@@ -987,6 +987,7 @@ class AoaChecker:
         *,
         aoa: DocumentView,
         contract: DocumentView | None = None,
+        unreadable_contract_id: str | None = None,
         registry: object | None = None,
         contractor_type: ContractorType | None = None,
         rates: RateProvider | None = None,
@@ -997,6 +998,10 @@ class AoaChecker:
     ) -> None:
         self.aoa = aoa
         self.contract = contract
+        #: A contract was supplied but holds no readable text: ``contract`` is None (the rules
+        #: that compare the act with it cannot run on nothing) and the report says so, in words
+        #: of its own - never "no contract supplied".
+        self.unreadable_contract_id = unreadable_contract_id
         #: either document was read from a scan: a difference scanning explains is reported as a
         #: misreading to check against the paper, not as a mistake (``_misread``)
         self.ocr = ocr
@@ -1511,7 +1516,15 @@ class AoaChecker:
         self.rule_bank_code_format()
         self.rule_tax_wording()
         self.rule_fx_invoice()
-        if self.contract is None:
+        if self.unreadable_contract_id is not None:
+            self._skip(
+                "AOA.CONTRACT_UNREADABLE",
+                "ხელშეკრულებაში წაკითხვადი ტექსტი არ არის, ამიტომ აქტი მასთან შედარებით ვერ "
+                "შემოწმდა; აქტი შემოწმდა დამოუკიდებლად",
+                "the contract has no readable text, so the act could not be checked against it; "
+                "act checked on its own",
+            )
+        elif self.contract is None:
             self._skip(
                 "AOA.CONTRACT_*",
                 "ხელშეკრულება არ არის ატვირთული; აქტი შემოწმდა დამოუკიდებლად",
@@ -1534,7 +1547,9 @@ class AoaChecker:
         self.rule_registry()
         return CheckReport(
             document_id=self.aoa.doc_id,
-            reference_document_id=self.contract.doc_id if self.contract else None,
+            reference_document_id=(
+                self.contract.doc_id if self.contract else self.unreadable_contract_id
+            ),
             findings=self.findings,
             skipped=self.skipped,
             summary=self._summary(),
@@ -4678,6 +4693,14 @@ class AoaChecker:
                     "no business-registry snapshot loaded; party details were compared against "
                     "the contract only",
                 )
+            elif self.unreadable_contract_id is not None:
+                self._skip(
+                    "AOA.REGISTRY",
+                    "სამეწარმეო რეესტრის ამონაწერი ჩატვირთული არ არის და ხელშეკრულებაში "
+                    "წაკითხვადი ტექსტი არ არის; მხარეების მონაცემები არ შემოწმებულა",
+                    "no business-registry snapshot loaded and the contract has no readable text; "
+                    "party details were not verified",
+                )
             else:
                 self._skip(
                     "AOA.REGISTRY",
@@ -5728,13 +5751,22 @@ def check_aoa(
     contract_ocr: bool = False,
     speller: Lexicon | SpellingUnavailable | None = None,
 ) -> CheckReport:
-    """``aoa_ocr`` / ``contract_ocr`` say a document's text came from a scan (OCR)."""
+    """``aoa_ocr`` / ``contract_ocr`` say a document's text came from a scan (OCR).
+
+    ``contract_text`` None is no contract. A contract with no text in it (empty, or only white
+    space) is not that: it was supplied and could not be read, and the report says so
+    (``AOA.CONTRACT_UNREADABLE``) instead of reading as an act checked on its own.
+    """
+    contract_readable = contract_text is not None and bool(contract_text.strip())
     return AoaChecker(
         aoa=DocumentView.build(aoa_id, aoa_text, ocr=aoa_ocr),
         contract=(
             DocumentView.build(contract_id, contract_text, ocr=contract_ocr)
-            if contract_text
+            if contract_text is not None and contract_readable
             else None
+        ),
+        unreadable_contract_id=(
+            contract_id if contract_text is not None and not contract_readable else None
         ),
         registry=registry,
         contractor_type=contractor_type,
