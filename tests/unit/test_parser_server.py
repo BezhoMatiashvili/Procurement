@@ -10,6 +10,7 @@ is proved for real, in a subprocess, by ``test_parser_kill.py``.
 from __future__ import annotations
 
 import contextlib
+import os
 import socket
 import stat
 import threading
@@ -68,8 +69,15 @@ def test_the_document_is_given_to_the_converter_as_a_private_file_and_removed_af
         seen["kind"] = kind
         return good_converter(path, kind)
 
-    with Harness(sock_dir, converter) as h:
-        h.convert(b"%PDF-1.7 the bytes", "pdf", stem="0123abcd")
+    # umask 0: the modes asked for in the code are the modes the files get. Under the umask the
+    # application sets (077), a file created world-readable would still come out private, and this
+    # test could not tell (the security mutation harness runs under it).
+    previous = os.umask(0)
+    try:
+        with Harness(sock_dir, converter) as h:
+            h.convert(b"%PDF-1.7 the bytes", "pdf", stem="0123abcd")
+    finally:
+        os.umask(previous)
     assert seen["name"] == "0123abcd.pdf"
     assert seen["bytes"] == b"%PDF-1.7 the bytes"
     assert seen["kind"] == "pdf"

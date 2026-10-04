@@ -655,8 +655,8 @@ MUTATIONS = [
     Mutation(
         "model_tampering_unnoticed",
         "src/procurement_agent/security/models_manifest.py",
-        "if _digest(path) != want:",
-        "if False:",
+        "        if digest != want:",
+        "        if False:",
         "a model file that was changed on disk is still loaded",
         ("tests/unit/test_models_manifest.py",),
     ),
@@ -671,8 +671,8 @@ MUTATIONS = [
     Mutation(
         "sweep_strands_files",
         "src/procurement_agent/jobs/worker.py",
-        "        reconcile(self._s)\n        checkpoint()",
-        "        checkpoint()",
+        "        reconcile(self._s)\n        fail_stuck_parses(",
+        "        fail_stuck_parses(",
         "files of a document whose deletion was interrupted stay on disk for good",
         ("tests/unit/test_retention.py",),
     ),
