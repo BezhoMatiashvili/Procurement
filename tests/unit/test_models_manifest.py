@@ -21,6 +21,10 @@ def _models(tmp_path: Path) -> Path:
     (root / "layout" / "model.safetensors").write_bytes(os.urandom(5000))
     (root / "layout" / "config.json").write_text('{"a": 1}')
     (root / "tableformer" / "fast" / "tm.safetensors").write_bytes(os.urandom(3 * 1024 * 1024 + 7))
+    # Explicit modes: the application sets umask 077 for its whole process, and a test that ran
+    # earlier in the same process may have done that, which would make every file here private.
+    for path in [root, *root.rglob("*")]:
+        path.chmod(0o755 if path.is_dir() else 0o644)
     return root
 
 
@@ -445,6 +449,22 @@ def test_write_refuses_clearly_when_it_cannot_read_a_file_itself(tmp_path: Path)
     finally:
         (root / "layout" / "config.json").chmod(0o644)
     assert not (root / mm.MANIFEST_NAME).exists(), "no half-written manifest"
+
+
+def test_the_manifest_is_written_readable_by_the_app_user_whatever_the_umask(
+    tmp_path: Path,
+) -> None:
+    """A host that hardens its umask (077) would otherwise give the app container a manifest it
+    cannot read, and the production start would refuse on its own checksum file."""
+    root = _models(tmp_path)
+    previous = os.umask(0o077)
+    try:
+        assert mm.write(root) == 3
+    finally:
+        os.umask(previous)
+    mode = (root / mm.MANIFEST_NAME).stat().st_mode & 0o777
+    assert mode == 0o644, oct(mode)
+    assert mm.not_world_readable(root) == []
 
 
 def test_files_other_users_cannot_read_are_listed(tmp_path: Path) -> None:

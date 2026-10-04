@@ -219,17 +219,15 @@ socket volume - and no `/data`.
   it the cores a Docling run should use (`PA_DOCLING_NUM_THREADS`). Its memory limit (10 GB) is not
   a tuning knob: measured peaks were 1.5 GiB for the fixtures (OCR included) and 3.2 GiB for an
   invented 80-page document, with 88 of the 256 processes allowed.
-- [ ] The model files must be **readable by the container's unprivileged user** (`chmod -R a+rX
-  models`): a copy that kept mode `0600` on some of Hugging Face's cache files made the manifest
-  check fail at start-up with `Permission denied` - in the parser, and it would be the same in the
-  app. Both containers mount `./models` read-only.
 - [ ] Copy `./models` and the `ollama` volume from the connected machine that ran
   `scripts/prefetch_models.sh`, after writing the checksum manifest there
   (`python -m procurement_agent.cli models-manifest write`): production verifies it at every
   start and refuses to run on a changed, missing or extra model file. The spelling dictionary is not among them: the image carries
   it, fetched and hash-checked by `docker compose build`, which needs the network anyway.
-- [ ] **Copied models must be readable by the app user** (uid 999 in the image): after the copy
-  run `chmod -R a+rX models` (or own the tree as uid 999). `cp -a` keeps the owner and mode of
+- [ ] **Copied models must be readable by the app user** (uid 999 in the image) - by the parser
+  container as much as by the app, which both mount `./models` read-only and check it at start:
+  after the copy run `chmod -R a+rX models` (or own the tree as uid 999). `models-manifest write`
+  itself writes `MANIFEST.sha256` world-readable whatever the umask of the host. `cp -a` keeps the owner and mode of
   the source, and the huggingface cache files in it (`.cache/huggingface/trees/*.json`) are mode
   600: the host user reads them, the container does not. Measured with such a copy (three files):
   before, a production start died with a raw `PermissionError` traceback (exit 3); now it

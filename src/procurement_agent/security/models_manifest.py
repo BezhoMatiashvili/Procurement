@@ -91,7 +91,11 @@ def write(root: Path) -> int:
     if unreadable:
         more = f" and {len(unreadable) - 1} more" if len(unreadable) > 1 else ""
         raise ValueError(f"cannot read {unreadable[0]}{more}")
-    (root / MANIFEST_NAME).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    manifest = root / MANIFEST_NAME
+    manifest.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # Hashes of files the app must read, and the app reads this one too: not the process umask's
+    # business (a host with umask 077 would otherwise leave the app container unable to start).
+    manifest.chmod(0o644)
     return len(lines)
 
 
